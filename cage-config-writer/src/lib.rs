@@ -230,16 +230,19 @@ pub fn decide_startup(state: &BlockState, expected_hash: Option<&str>) -> Startu
     }
 }
 
-/// CAGE's hardcoded safe-state cage.txt body (§7.2): a safe attenuation and a
-/// mute, applied to all devices. Written by the watchdog on a fail-safe (§7.1)
-/// and recognised by the startup check. One canonical definition so the writer
-/// and the detector can't drift apart.
+/// CAGE's hardcoded safe-state cage.txt body (§7.2): effective silence on all
+/// devices. Written by the watchdog on a fail-safe (§7.1) and recognised by the
+/// startup check. One canonical definition so the writer and the detector can't
+/// drift apart.
 ///
-/// NOTE (flagged for separate verification): `Mute: On` is not listed in the
-/// EqAPO configuration reference — its validity as an EqAPO command should be
-/// confirmed against source, independently of this file's architecture.
+/// Silence is a large *negative preamp*, NOT a `Mute` command: EqAPO has no
+/// `Mute` command — verified against source (it is not among the registered
+/// filter factories in FilterEngine.cpp, nor in the config reference). An earlier
+/// `Mute: On` would have been silently ignored, leaving only the -20 dB
+/// attenuation (audible). -120 dB (linear ~1e-6) is inaudible on any pipeline;
+/// the exact value is a tunable safety parameter.
 pub fn safe_state_body() -> String {
-    format!("Device: all{NL}Preamp: -20.0 dB{NL}Mute: On{NL}")
+    format!("Device: all{NL}Preamp: -120.0 dB{NL}")
 }
 
 // ---------------------------------------------------------------------------
