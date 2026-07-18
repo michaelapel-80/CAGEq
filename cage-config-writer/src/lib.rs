@@ -121,6 +121,29 @@ pub enum BlockState {
     },
 }
 
+/// The verdict of the startup integrity check for the active device (§3.0) —
+/// tells the caller how far to trust the resume state remembered in settings.json.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StartupDecision {
+    /// No CAGE block for this device yet (or one without a hash marker). Normal
+    /// first-run state — start clean, nothing to resume.
+    FirstRun,
+    /// The on-disk block is byte-identical to what CAGE last wrote (its hash
+    /// agrees with settings.json). The remembered resume state is trustworthy
+    /// and can be shown as-is.
+    ResumeTrusted,
+    /// The on-disk block is CAGE's hardcoded safe-state config (§7.2): the safety
+    /// shutdown was still active at the last exit/crash. Offer to restore the
+    /// last known state (still held in settings.json).
+    SafeStateStillActive,
+    /// The on-disk block differs from what CAGE last wrote and isn't the
+    /// safe-state config — changed by the user or another tool between sessions.
+    /// Do NOT keep asserting a specific preset/slot is active; surface a neutral
+    /// "changed externally" notice (fail-early: an unverifiable assumption is not
+    /// treated as fact).
+    ExternallyModified,
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -186,6 +209,50 @@ pub fn read_block_state(config_path: &Path, device: &str) -> Result<BlockState, 
         stored_hash: parse_begin_hash(block),
         actual_hash: content_hash(block_body(block)),
     })
+}
+
+/// CAGE's hardcoded safe-state block body (§7.2): full filter bypass plus a safe
+/// attenuation and a mute. The watchdog writes this on a fail-safe (§7.1) and the
+/// startup check recognises it here. Kept as one canonical definition so the
+/// (future) safe-state writer and this detector can never drift apart — whatever
+/// the writer emits between the markers must be exactly this, or detection breaks.
+pub fn safe_state_body() -> String {
+    format!("Preamp: -20.0 dB{NL}Mute: On{NL}")
+}
+
+/// Decide, from the current on-disk block state and the hash CAGE recorded in
+/// settings.json, how much of the remembered resume state to trust at startup
+/// (§3.0). Pure — no I/O — so the whole decision table is unit-testable.
+///
+/// `state` comes from [`read_block_state`]; `expected_hash` is this device's
+/// `last_written_hash` from settings.json, or `None` if settings holds no resume
+/// record for it yet. The trust signal is `actual_hash == expected_hash`: settings
+/// can't be forged by hand-editing config.txt's own marker, so it's the stronger
+/// of the two hashes. (`stored_hash` — the value in the BEGIN line — is redundant
+/// here; its role is letting the file be checked in isolation, which this decision
+/// doesn't need.)
+pub fn decide_startup(state: &BlockState, expected_hash: Option<&str>) -> StartupDecision {
+    let actual_hash = match state {
+        // No block, or a block predating the hash feature: nothing to resume.
+        BlockState::Absent | BlockState::Present { stored_hash: None, .. } => {
+            return StartupDecision::FirstRun;
+        }
+        BlockState::Present { actual_hash, .. } => actual_hash,
+    };
+
+    // Happy path: the file is exactly what CAGE remembers writing.
+    if expected_hash == Some(actual_hash.as_str()) {
+        return StartupDecision::ResumeTrusted;
+    }
+
+    // Mismatch (or no settings record). Is the current block the safe-state config?
+    // A real config's hash never equals the safe-state's (the safe-state writer
+    // doesn't update settings' resume hash), so this can't shadow ResumeTrusted.
+    if *actual_hash == content_hash(&safe_state_body()) {
+        StartupDecision::SafeStateStillActive
+    } else {
+        StartupDecision::ExternallyModified
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -441,5 +508,52 @@ mod tests {
         let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
         let wrapped = WriteError::from(io); // uses the From impl -> WriteError::Io
         assert!(wrapped.source().is_some());
+    }
+
+    // ---- startup decision table (§3.0) ----
+
+    fn present(actual: &str, stored: Option<&str>) -> BlockState {
+        BlockState::Present {
+            stored_hash: stored.map(str::to_string),
+            actual_hash: actual.to_string(),
+        }
+    }
+
+    #[test]
+    fn startup_no_block_is_first_run() {
+        assert_eq!(decide_startup(&BlockState::Absent, Some("abc")), StartupDecision::FirstRun);
+    }
+
+    #[test]
+    fn startup_block_without_hash_marker_is_first_run() {
+        // A block predating the hash feature (no `hash=` in BEGIN) -> start clean,
+        // even if settings happens to hold some expected hash.
+        let s = present("deadbeef", None);
+        assert_eq!(decide_startup(&s, Some("deadbeef")), StartupDecision::FirstRun);
+    }
+
+    #[test]
+    fn startup_matching_hash_is_trusted() {
+        let s = present("cafe1234", Some("cafe1234"));
+        assert_eq!(decide_startup(&s, Some("cafe1234")), StartupDecision::ResumeTrusted);
+    }
+
+    #[test]
+    fn startup_recognises_the_safe_state_block() {
+        // The on-disk block is exactly the safe-state config, while settings still
+        // remembers a *different* real-config hash -> "shutdown was still active".
+        let ss = content_hash(&safe_state_body());
+        let s = present(&ss, Some(&ss));
+        assert_eq!(decide_startup(&s, Some("11111111")), StartupDecision::SafeStateStillActive);
+    }
+
+    #[test]
+    fn startup_unknown_change_is_externally_modified() {
+        let s = present("99999999", Some("99999999"));
+        // Doesn't match settings and isn't the safe-state block.
+        assert_eq!(decide_startup(&s, Some("11111111")), StartupDecision::ExternallyModified);
+        // No settings record at all, and still not the safe-state -> same verdict:
+        // a block exists but we have no memory of its meaning, so don't trust it.
+        assert_eq!(decide_startup(&s, None), StartupDecision::ExternallyModified);
     }
 }
