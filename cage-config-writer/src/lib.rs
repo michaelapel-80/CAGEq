@@ -1,22 +1,33 @@
-//! EqAPO `config.txt` writer — device-scoped, marker-delimited, atomic, with a
-//! content-hash fingerprint for restart integrity (see filter.md §3.0 / §7.4).
+//! Equalizer APO config writer — two-file `Include` architecture (filter.md §3.0/§7.4).
 //!
-//! This is CAGE's first component. It retires the load-bearing risk (write a
-//! block → EqAPO applies it, click-free) and is the one piece §7.4 requires the
-//! Rust core to own outright, independent of the Python sidecar (redundant
-//! safe-state writes). It depends on nothing else in the stack.
+//! Verified against how the reference tool (AQUA) and EqAPO itself work:
+//!   * CAGE writes all its filters into its **own** file, `cage.txt`, and puts a
+//!     single `Include: cage.txt` line into EqAPO's `config.txt`. This is the
+//!     pattern EqAPO's config reference explicitly recommends, and AQUA uses it
+//!     (`aqua.txt` + `Include: aqua.txt`, verified in its `flush.ts`).
+//!   * EqAPO watches its **whole config directory** for changes
+//!     (`FindFirstChangeNotificationW(configPath, bWatchSubtree=true, ...)` in
+//!     FilterEngine.cpp) and reloads on any file change — so writing `cage.txt`
+//!     triggers a reload + the native 10 ms crossfade exactly like editing
+//!     config.txt would.
 //!
-//! Design note for the learning goal: everything except `write_managed_block` /
-//! `read_block_state` is a *pure* function (string in, string out, no I/O). That
-//! is what makes the fiddly parsing testable in the `#[cfg(test)]` block below
-//! without a temp directory — worth internalising as a Rust habit.
+//! Why this shape is simpler than splicing filters into config.txt directly:
+//!   * `cage.txt` is entirely ours -> wholesale atomic overwrite, no read-modify-
+//!     write, no foreign content to preserve, no UTF-8/ANSI concern for filters.
+//!   * `config.txt` only ever needs one pure-ASCII `Include:` line, wrapped in a
+//!     `#CAGE:BEGIN`/`#CAGE:END` comment block so we can add/verify/replace just
+//!     that block and leave everything else byte-for-byte intact.
 //!
-//! Deliberately OUT of scope for this first slice — each flagged inline `TODO`:
-//!   * more than one CAGE-managed Device: block per file
-//!   * preserving a foreign block's exact CRLF style (we emit LF)
-//!   * non-UTF-8 (legacy ANSI) config.txt: EqAPO tolerates it via a per-line
-//!     CP_ACP fallback, but we support UTF-8 only and fail loudly with
-//!     WriteError::NotUtf8 rather than add byte-level transcoding (see §7.4)
+//! Design habit (worth internalising): the pure functions — rendering, hashing,
+//! and the config.txt splice/parse — take strings and return strings with no I/O,
+//! so the tricky logic is unit-testable without a temp directory. The thin public
+//! functions add the fs::read/write/rename around them.
+//!
+//! Deliberately OUT of scope, flagged inline where relevant:
+//!   * preserving a foreign config.txt block's exact CRLF style (we emit LF; only
+//!     ever relevant to the one Include block, since cage.txt is fully ours)
+//!   * non-UTF-8 (legacy ANSI) config.txt: we support UTF-8 only and fail loudly
+//!     with WriteError::NotUtf8 rather than transcode (a scope decision, §7.4)
 //!
 //! Add to Cargo.toml:  sha2 = "0.10"  thiserror = "2"
 
@@ -27,12 +38,17 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-// Line ending CAGE emits for its OWN block. EqAPO parses LF fine; a real build
-// would likely match the surrounding file's style (see foreign-content TODO).
-// The parsing below is newline-agnostic, so this is a safe one-line change.
+// Line ending CAGE emits. EqAPO parses LF fine (it strips a trailing \r itself).
 const NL: &str = "\n";
-const BEGIN_PREFIX: &str = "#CAGE:BEGIN";
-const END_MARKER: &str = "#CAGE:END";
+// Comment markers around the Include line in config.txt. A leading '#' makes each
+// a comment EqAPO ignores; only the `Include:` line between them is a real command.
+const INCLUDE_BEGIN: &str = "#CAGE:BEGIN";
+const INCLUDE_END: &str = "#CAGE:END";
+// First line of cage.txt: a comment (no ':', starts with '#', so EqAPO ignores it)
+// that carries the integrity hash of everything below it.
+const CAGE_HEADER_PREFIX: &str = "# CAGE managed file - generated, do not edit. hash=";
+/// The filename CAGE writes its filters into, alongside config.txt.
+pub const CAGE_FILENAME: &str = "cage.txt";
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -48,12 +64,9 @@ pub enum FilterType {
 impl FilterType {
     /// EqAPO's token for this filter type. VERIFIED against AutoEq's own
     /// EqualizerAPO exporter (`frequency_response.py::write_eqapo_parametric_eq`,
-    /// `types = {Peaking: 'PK', LowShelf: 'LSC', HighShelf: 'HSC'}`) and the
-    /// official config reference: `LSC`/`HSC` are the center-frequency shelves
-    /// that take an Fc/Gain/Q triple (the RBJ-biquad-with-Q form AutoEq emits),
-    /// as opposed to `LS`/`HS` or the slope-based `LSC x dB` variants. Since
-    /// CAGE's filters mirror AutoEq's model, matching its exporter is both
-    /// correct and guaranteed EqAPO-compatible.
+    /// `types = {Peaking: 'PK', LowShelf: 'LSC', HighShelf: 'HSC'}`): `LSC`/`HSC`
+    /// are the center-frequency shelves taking an Fc/Gain/Q triple (the RBJ-biquad-
+    /// with-Q form AutoEq emits), not `LS`/`HS` or the slope-based `LSC x dB`.
     fn eqapo_token(self) -> &'static str {
         match self {
             FilterType::Peaking => "PK",
@@ -71,76 +84,59 @@ pub struct Filter {
     pub q: f64,
 }
 
-// `thiserror::Error` derives everything we previously hand-wrote — the entire
-// `impl Display`, the `impl std::error::Error`, and the `impl From<io::Error>` all
-// collapse into the attributes below. What each attribute generates:
-//   * #[derive(thiserror::Error)] — the Display + std::error::Error impls.
-//   * #[error("…")] on a variant   — that variant's Display message; `{0}` is its
-//                                    first field, so the Io message interpolates
-//                                    the wrapped io::Error's own Display.
-//   * #[from] on the Io field       — generates `From<io::Error> for WriteError`
-//                                    (so `?` still auto-converts) AND registers
-//                                    that field as `Error::source()`, keeping the
-//                                    cause chain intact. `#[from]` implies `#[source]`.
-// `Debug` still has to be derived by hand — Error requires it as a supertrait,
-// and thiserror doesn't provide it.
+/// One device's managed configuration — becomes one `Device:` block in cage.txt.
+#[derive(Debug, Clone)]
+pub struct DeviceConfig {
+    pub device: String,
+    pub preamp_db: f64,
+    pub filters: Vec<Filter>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
-    /// config.txt or its directory couldn't be read/written.
-    #[error("config.txt I/O error: {0}")]
+    #[error("config.txt/cage.txt I/O error: {0}")]
     Io(#[from] io::Error),
-
-    /// The config path had no parent directory — can't place the temp file on
-    /// the same volume, which the atomic rename requires (§7.4).
-    #[error("config.txt path has no parent directory for the temp file")]
+    #[error("config path has no parent directory for the temp file")]
     NoParentDir,
-
-    /// config.txt exists but isn't valid UTF-8 — almost always a legacy file
-    /// saved in the system ANSI code page. EqAPO itself tolerates this via a
-    /// per-line CP_ACP fallback (verified in FilterEngine.cpp), but CAGE
-    /// deliberately supports UTF-8 only and fails loudly here rather than
-    /// transcode (a considered scope decision, see filter.md §7.4). The fix for
-    /// the user is to re-save config.txt as UTF-8.
+    /// config.txt exists but isn't valid UTF-8 — almost always a legacy ANSI
+    /// file. EqAPO tolerates it via a per-line CP_ACP fallback (FilterEngine.cpp),
+    /// but CAGE supports UTF-8 only and fails loudly here rather than transcode
+    /// (§7.4). The fix for the user is to re-save config.txt as UTF-8.
     #[error("config.txt is not valid UTF-8 (CAGE requires UTF-8; re-save it as UTF-8)")]
     NotUtf8,
 }
 
-/// What the config currently says about CAGE's block for a device — consumed at
-/// startup (§3.0) to decide whether settings.json's resume state is trustworthy.
+/// What cage.txt currently says — consumed at startup (§3.0) to decide whether
+/// settings.json's remembered resume state is still trustworthy.
 #[derive(Debug)]
 pub enum BlockState {
-    /// No Device: section, or one with no CAGE block: CAGE has never written
-    /// this device. Normal first-run state, not an error.
+    /// No cage.txt, or one without a hash header: CAGE has never written it (or it
+    /// was wiped). Normal first-run state, not an error.
     Absent,
-    /// A CAGE block exists. `stored_hash` is what its BEGIN line claims;
-    /// `actual_hash` is recomputed from the body right now. They match iff the
-    /// block is byte-unchanged since CAGE last wrote it.
+    /// A CAGE-written cage.txt exists. `stored_hash` is what its header claims;
+    /// `actual_hash` is recomputed from the body now. (`decide_startup` trusts the
+    /// settings.json hash over `stored_hash`, which a hand-edit could forge.)
     Present {
         stored_hash: Option<String>,
         actual_hash: String,
     },
 }
 
-/// The verdict of the startup integrity check for the active device (§3.0) —
-/// tells the caller how far to trust the resume state remembered in settings.json.
+/// The verdict of the startup integrity check (§3.0) — how far to trust the
+/// resume state remembered in settings.json.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StartupDecision {
-    /// No CAGE block for this device yet (or one without a hash marker). Normal
-    /// first-run state — start clean, nothing to resume.
+    /// No cage.txt yet (or one without a hash header). Start clean.
     FirstRun,
-    /// The on-disk block is byte-identical to what CAGE last wrote (its hash
-    /// agrees with settings.json). The remembered resume state is trustworthy
-    /// and can be shown as-is.
+    /// cage.txt is byte-identical to what CAGE last wrote (hash matches
+    /// settings.json). The remembered resume state is trustworthy.
     ResumeTrusted,
-    /// The on-disk block is CAGE's hardcoded safe-state config (§7.2): the safety
-    /// shutdown was still active at the last exit/crash. Offer to restore the
-    /// last known state (still held in settings.json).
+    /// cage.txt is CAGE's hardcoded safe-state config (§7.2): the safety shutdown
+    /// was still active at the last exit/crash. Offer to restore the last state.
     SafeStateStillActive,
-    /// The on-disk block differs from what CAGE last wrote and isn't the
-    /// safe-state config — changed by the user or another tool between sessions.
-    /// Do NOT keep asserting a specific preset/slot is active; surface a neutral
-    /// "changed externally" notice (fail-early: an unverifiable assumption is not
-    /// treated as fact).
+    /// cage.txt differs from what CAGE last wrote and isn't the safe-state config —
+    /// changed by the user or another tool. Surface a neutral notice; don't keep
+    /// asserting a specific preset/slot is active (fail-early).
     ExternallyModified,
 }
 
@@ -148,104 +144,83 @@ pub enum StartupDecision {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Atomically set CAGE's managed block for `device`, preserving every other
-/// Device: block and all foreign content byte-for-byte. Returns the fingerprint
-/// now living in the BEGIN line — persist it next to the device's resume state
-/// in settings.json (§3.0) for the next-startup integrity check.
+/// Apply `configs` to Equalizer APO: ensure config.txt includes cage.txt, then
+/// (atomically) write cage.txt with the given per-device blocks. `config_dir` is
+/// EqAPO's config directory (where config.txt lives). Returns cage.txt's content
+/// hash — persist it in settings.json for the next-startup integrity check (§3.0).
 ///
-/// Atomicity (§7.4): the full new text is written to a temp file *in the same
-/// directory*, then `fs::rename`d over the target. On Windows that is
-/// MoveFileExW with replace semantics — atomic on one volume, which is exactly
-/// why the temp file must be a sibling of config.txt, not in %TEMP%.
-pub fn write_managed_block(
-    config_path: &Path,
-    device: &str,
-    preamp_db: f64,
-    filters: &[Filter],
-) -> Result<String, WriteError> {
-    config_path.parent().ok_or(WriteError::NoParentDir)?;
+/// The `ensure_include` step is a cheap no-op after the first run (it only rewrites
+/// config.txt when the Include block is missing/wrong), so the steady-state cost of
+/// a change is a single cage.txt write -> one EqAPO reload -> one native crossfade.
+pub fn apply(config_dir: &Path, configs: &[DeviceConfig]) -> Result<String, WriteError> {
+    ensure_include(&config_dir.join("config.txt"), CAGE_FILENAME)?;
+    write_cage_txt(&config_dir.join(CAGE_FILENAME), configs)
+}
 
-    // "File doesn't exist yet" is a normal first run, not an error. A non-UTF-8
-    // file (InvalidData is read_to_string's documented signal for exactly that)
-    // is turned into the distinct NotUtf8 error rather than a generic Io error.
-    let current = match fs::read_to_string(config_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(e) if e.kind() == io::ErrorKind::InvalidData => return Err(WriteError::NotUtf8),
-        Err(e) => return Err(e.into()),
-    };
-
-    let (block, hash) = render_cage_block(preamp_db, filters);
-    let new_text = splice_cage_block(&current, device, &block);
-
-    let tmp = temp_sibling(config_path);
-    fs::write(&tmp, new_text.as_bytes())?;
-    if let Err(e) = fs::rename(&tmp, config_path) {
-        let _ = fs::remove_file(&tmp); // best-effort cleanup; ignore failure
-        return Err(e.into());
-    }
+/// Atomically overwrite cage.txt with the rendered device blocks. Returns the
+/// content hash written into the header. cage.txt is fully CAGE-owned, so this is
+/// a plain wholesale write — no splicing, no foreign content.
+pub fn write_cage_txt(cage_path: &Path, configs: &[DeviceConfig]) -> Result<String, WriteError> {
+    let (text, hash) = render_cage_txt(configs);
+    atomic_write(cage_path, text.as_bytes())?;
     Ok(hash)
 }
 
-/// Read the current block's stored vs. recomputed hash for the startup check.
-pub fn read_block_state(config_path: &Path, device: &str) -> Result<BlockState, WriteError> {
-    let current = match fs::read_to_string(config_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(BlockState::Absent),
-        Err(e) if e.kind() == io::ErrorKind::InvalidData => return Err(WriteError::NotUtf8),
-        Err(e) => return Err(e.into()),
-    };
-
-    let Some((body_start, body_end)) = find_device_section(&current, device) else {
-        return Ok(BlockState::Absent);
-    };
-    let body = &current[body_start..body_end];
-    let Some((mb_start, mb_end)) = find_marker_range(body) else {
-        return Ok(BlockState::Absent);
-    };
-
-    let block = &body[mb_start..mb_end];
-    Ok(BlockState::Present {
-        stored_hash: parse_begin_hash(block),
-        actual_hash: content_hash(block_body(block)),
-    })
+/// Ensure config.txt contains the `#CAGE:BEGIN`/`Include: <cage_filename>`/
+/// `#CAGE:END` block, preserving all other content byte-for-byte. Idempotent:
+/// returns `Ok(false)` and writes nothing when the block is already exactly right,
+/// `Ok(true)` when it added or fixed it. Appends at EOF when absent — placing it
+/// last means cage.txt's own leading `Device:` line controls scope and nothing
+/// after it is affected (the AQUA-proven placement).
+pub fn ensure_include(config_txt_path: &Path, cage_filename: &str) -> Result<bool, WriteError> {
+    let current = read_utf8_or_empty(config_txt_path)?;
+    match splice_include(&current, cage_filename) {
+        Some(new_text) => {
+            atomic_write(config_txt_path, new_text.as_bytes())?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
-/// CAGE's hardcoded safe-state block body (§7.2): full filter bypass plus a safe
-/// attenuation and a mute. The watchdog writes this on a fail-safe (§7.1) and the
-/// startup check recognises it here. Kept as one canonical definition so the
-/// (future) safe-state writer and this detector can never drift apart — whatever
-/// the writer emits between the markers must be exactly this, or detection breaks.
-pub fn safe_state_body() -> String {
-    format!("Preamp: -20.0 dB{NL}Mute: On{NL}")
+/// Atomically write CAGE's hardcoded safe-state (§7.1/7.2) to cage.txt, using the
+/// same header+body format as a normal write so [`read_cage_state`] +
+/// [`decide_startup`] recognise it as [`StartupDecision::SafeStateStillActive`].
+pub fn write_safe_state(cage_path: &Path) -> Result<(), WriteError> {
+    let (text, _) = wrap_with_hash_header(&safe_state_body());
+    atomic_write(cage_path, text.as_bytes())
 }
 
-/// Decide, from the current on-disk block state and the hash CAGE recorded in
+/// Read cage.txt's integrity state for the startup check (§3.0).
+pub fn read_cage_state(cage_path: &Path) -> Result<BlockState, WriteError> {
+    match fs::read_to_string(cage_path) {
+        Ok(s) => Ok(cage_state_from_text(&s)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BlockState::Absent),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => Err(WriteError::NotUtf8),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Decide, from cage.txt's on-disk state and the hash CAGE recorded in
 /// settings.json, how much of the remembered resume state to trust at startup
 /// (§3.0). Pure — no I/O — so the whole decision table is unit-testable.
 ///
-/// `state` comes from [`read_block_state`]; `expected_hash` is this device's
-/// `last_written_hash` from settings.json, or `None` if settings holds no resume
-/// record for it yet. The trust signal is `actual_hash == expected_hash`: settings
-/// can't be forged by hand-editing config.txt's own marker, so it's the stronger
-/// of the two hashes. (`stored_hash` — the value in the BEGIN line — is redundant
-/// here; its role is letting the file be checked in isolation, which this decision
-/// doesn't need.)
+/// `state` comes from [`read_cage_state`]; `expected_hash` is the device's
+/// `last_written_hash` from settings.json, or `None` if there's no record yet.
+/// The trust signal is `actual_hash == expected_hash`: settings can't be forged by
+/// hand-editing cage.txt's own header, so it's the stronger of the two hashes.
 pub fn decide_startup(state: &BlockState, expected_hash: Option<&str>) -> StartupDecision {
     let actual_hash = match state {
-        // No block, or a block predating the hash feature: nothing to resume.
         BlockState::Absent | BlockState::Present { stored_hash: None, .. } => {
             return StartupDecision::FirstRun;
         }
         BlockState::Present { actual_hash, .. } => actual_hash,
     };
 
-    // Happy path: the file is exactly what CAGE remembers writing.
     if expected_hash == Some(actual_hash.as_str()) {
         return StartupDecision::ResumeTrusted;
     }
 
-    // Mismatch (or no settings record). Is the current block the safe-state config?
     // A real config's hash never equals the safe-state's (the safe-state writer
     // doesn't update settings' resume hash), so this can't shadow ResumeTrusted.
     if *actual_hash == content_hash(&safe_state_body()) {
@@ -255,26 +230,33 @@ pub fn decide_startup(state: &BlockState, expected_hash: Option<&str>) -> Startu
     }
 }
 
+/// CAGE's hardcoded safe-state cage.txt body (§7.2): a safe attenuation and a
+/// mute, applied to all devices. Written by the watchdog on a fail-safe (§7.1)
+/// and recognised by the startup check. One canonical definition so the writer
+/// and the detector can't drift apart.
+///
+/// NOTE (flagged for separate verification): `Mute: On` is not listed in the
+/// EqAPO configuration reference — its validity as an EqAPO command should be
+/// confirmed against source, independently of this file's architecture.
+pub fn safe_state_body() -> String {
+    format!("Device: all{NL}Preamp: -20.0 dB{NL}Mute: On{NL}")
+}
+
 // ---------------------------------------------------------------------------
-// Pure helpers — rendering
+// Pure helpers — rendering cage.txt
 // ---------------------------------------------------------------------------
 
-/// The EqAPO lines CAGE manages for one device: a Preamp line plus one Filter
-/// line per band. This exact text is what the content hash is taken over and
-/// what lands between the markers, so `block_body` must reproduce it precisely.
-fn render_managed_body(preamp_db: f64, filters: &[Filter]) -> String {
-    let mut body = String::new();
-    // Writing to a String is infallible, so discarding the Result is fine.
-    let _ = write!(body, "Preamp: {:.1} dB{NL}", preamp_db);
-    // Line format verified byte-for-byte against AutoEq's own exporter
-    // (frequency_response.py::write_eqapo_parametric_eq, line 213): a 1-based
-    // filter number, then `ON <type> Fc <fc:.0> Hz Gain <gain:.1> dB Q <q:.2>`.
-    // EqAPO ignores the number (config reference: "not interpreted and can be
-    // omitted"), but including it keeps our output identical to the format the
-    // AutoEq/REW ecosystem emits and users recognise.
-    for (i, f) in filters.iter().enumerate() {
+/// One `Device:` block: the device line, a Preamp line, then one Filter line per
+/// band. Line format verified byte-for-byte against AutoEq's exporter
+/// (frequency_response.py, line 213): 1-based filter number (EqAPO ignores it but
+/// AutoEq/REW emit it), then `ON <type> Fc <fc:.0> Hz Gain <gain:.1> dB Q <q:.2>`.
+fn render_device_block(cfg: &DeviceConfig) -> String {
+    let mut s = String::new();
+    let _ = write!(s, "Device: {}{NL}", cfg.device);
+    let _ = write!(s, "Preamp: {:.1} dB{NL}", cfg.preamp_db);
+    for (i, f) in cfg.filters.iter().enumerate() {
         let _ = write!(
-            body,
+            s,
             "Filter {}: ON {} Fc {:.0} Hz Gain {:.1} dB Q {:.2}{NL}",
             i + 1,
             f.kind.eqapo_token(),
@@ -283,15 +265,46 @@ fn render_managed_body(preamp_db: f64, filters: &[Filter]) -> String {
             f.q,
         );
     }
-    body
+    s
 }
 
-/// Short content fingerprint over the managed body (§3.0). SHA-256 (not the std
-/// `DefaultHasher`) is deliberate: this value is written to disk and re-read by
-/// a possibly *newer* build after an app update, so the algorithm must be stable
-/// across builds and platforms — `DefaultHasher`'s is not guaranteed to be.
-/// Only 4 bytes (8 hex chars) are kept: this is a change-detector, not a
-/// security hash, so collision resistance isn't a requirement.
+/// The full cage.txt text (hash header + all device blocks) and its content hash.
+fn render_cage_txt(configs: &[DeviceConfig]) -> (String, String) {
+    let mut body = String::new();
+    for cfg in configs {
+        body.push_str(&render_device_block(cfg));
+    }
+    wrap_with_hash_header(&body)
+}
+
+/// Prefix `body` with the `# … hash=<h>` header line. Returns (full text, hash).
+/// The hash is over `body` only (not the header — that would be circular).
+fn wrap_with_hash_header(body: &str) -> (String, String) {
+    let hash = content_hash(body);
+    (format!("{CAGE_HEADER_PREFIX}{hash}{NL}{body}"), hash)
+}
+
+/// Parse cage.txt text into a [`BlockState`]: pull the hash out of the header line
+/// and recompute it over the body. Must mirror `wrap_with_hash_header` exactly, or
+/// the startup check would false-positive forever (guarded by a round-trip test).
+fn cage_state_from_text(text: &str) -> BlockState {
+    let Some((header, body)) = text.split_once('\n') else {
+        return BlockState::Absent;
+    };
+    match header.split_once("hash=") {
+        Some((_, hash)) => BlockState::Present {
+            stored_hash: Some(hash.trim().to_string()),
+            actual_hash: content_hash(body),
+        },
+        None => BlockState::Absent,
+    }
+}
+
+/// Short content fingerprint (§3.0). SHA-256 (not the std `DefaultHasher`) is
+/// deliberate: this value is written to disk and re-read by a possibly newer build
+/// after an app update, so the algorithm must be stable across builds/platforms —
+/// `DefaultHasher`'s is not. Only 4 bytes (8 hex chars) are kept: a change
+/// detector, not a security hash.
 fn content_hash(body: &str) -> String {
     let digest = Sha256::digest(body.as_bytes());
     let mut s = String::with_capacity(8);
@@ -301,141 +314,102 @@ fn content_hash(body: &str) -> String {
     s
 }
 
-/// Full CAGE block including markers, ready to splice into a device section.
-/// Returns the block and its hash so the caller needn't re-parse it back out.
-fn render_cage_block(preamp_db: f64, filters: &[Filter]) -> (String, String) {
-    let body = render_managed_body(preamp_db, filters);
-    let hash = content_hash(&body);
-    // body already ends in NL, so END sits on its own line directly after it.
-    let block = format!("{BEGIN_PREFIX} hash={hash}{NL}{body}{END_MARKER}{NL}");
-    (block, hash)
+// ---------------------------------------------------------------------------
+// Pure helpers — the Include block in config.txt
+// ---------------------------------------------------------------------------
+
+/// The canonical Include block, markers included and trailing newline.
+fn render_include_block(cage_filename: &str) -> String {
+    format!("{INCLUDE_BEGIN}{NL}Include: {cage_filename}{NL}{INCLUDE_END}{NL}")
 }
 
-// ---------------------------------------------------------------------------
-// Pure helpers — locating & splicing
-// ---------------------------------------------------------------------------
-
-/// Insert/replace CAGE's block for `device` in `current`, leaving everything
-/// else byte-for-byte intact. Three cases: replace an existing block, insert
-/// into an existing device with no block yet, or append a fresh device section.
-fn splice_cage_block(current: &str, device: &str, new_block: &str) -> String {
-    match find_device_section(current, device) {
-        Some((dev_start, dev_end)) => {
-            let section = &current[dev_start..dev_end];
-            match find_marker_range(section) {
-                // Existing CAGE block -> replace it in place.
-                Some((mb_start, mb_end)) => {
-                    let (abs_start, abs_end) = (dev_start + mb_start, dev_start + mb_end);
-                    let mut out = String::with_capacity(current.len() + new_block.len());
-                    out.push_str(&current[..abs_start]);
-                    out.push_str(new_block);
-                    out.push_str(&current[abs_end..]);
-                    out
-                }
-                // Device present, no block yet -> insert at the top of its body,
-                // i.e. right after the `Device:` line (= dev_start).
-                None => {
-                    let mut out = String::with_capacity(current.len() + new_block.len());
-                    out.push_str(&current[..dev_start]);
-                    out.push_str(new_block);
-                    out.push_str(&current[dev_start..]);
-                    out
-                }
+/// Compute the new config.txt content that ensures the Include block is present
+/// and correct, or `None` if it's already exactly right (so no write is needed).
+/// Everything outside the block is preserved byte-for-byte.
+fn splice_include(current: &str, cage_filename: &str) -> Option<String> {
+    let block = render_include_block(cage_filename);
+    match find_marker_range(current) {
+        Some((start, end)) => {
+            if &current[start..end] == block.as_str() {
+                None // already exactly right
+            } else {
+                let mut out = String::with_capacity(current.len() + block.len());
+                out.push_str(&current[..start]);
+                out.push_str(&block);
+                out.push_str(&current[end..]);
+                Some(out)
             }
         }
-        // Device absent -> append a fresh section at EOF.
         None => {
-            let mut out = String::with_capacity(current.len() + device.len() + new_block.len() + 16);
+            let mut out = String::with_capacity(current.len() + block.len() + 1);
             out.push_str(current);
-            if !current.is_empty() && !current.ends_with('\n') {
+            if !out.is_empty() && !out.ends_with('\n') {
                 out.push_str(NL);
             }
-            let _ = write!(out, "Device: {device}{NL}");
-            out.push_str(new_block);
-            out
+            out.push_str(&block);
+            Some(out)
         }
     }
 }
 
-/// Byte range of the *body* of `device`'s section: the region immediately after
-/// the matching `Device: <name>` line, up to the next `Device:` line or EOF.
-/// `None` if the device isn't present. TODO: takes the first match on a
-/// duplicate device line; also does not handle EqAPO's device-name wildcards.
-fn find_device_section(text: &str, device: &str) -> Option<(usize, usize)> {
-    let mut body_start: Option<usize> = None;
-    let mut offset = 0usize;
-
-    // split_inclusive keeps the trailing '\n', so byte offsets stay exact.
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        let is_target = trimmed
-            .strip_prefix("Device:")
-            .map(|rest| rest.trim() == device)
-            .unwrap_or(false);
-        let is_any_device = trimmed.trim_start().starts_with("Device:");
-
-        match body_start {
-            None if is_target => body_start = Some(offset + line.len()),
-            Some(start) if is_any_device => return Some((start, offset)),
-            _ => {}
-        }
-        offset += line.len();
-    }
-    body_start.map(|start| (start, text.len()))
-}
-
-/// Within a device body, the inclusive byte range of an existing CAGE block:
-/// from the start of the BEGIN line to just past the END line's newline.
-fn find_marker_range(body: &str) -> Option<(usize, usize)> {
-    let begin = body
-        .match_indices(BEGIN_PREFIX)
+/// Inclusive byte range of an existing CAGE marker block: from the start of the
+/// BEGIN line to just past the END line's newline. Guards against a marker string
+/// appearing mid-line rather than as an actual marker.
+fn find_marker_range(text: &str) -> Option<(usize, usize)> {
+    let begin = text
+        .match_indices(INCLUDE_BEGIN)
         .map(|(i, _)| i)
-        .find(|&i| is_line_start(body, i))?;
+        .find(|&i| is_line_start(text, i))?;
 
-    let end = body[begin..]
-        .match_indices(END_MARKER)
+    let end = text[begin..]
+        .match_indices(INCLUDE_END)
         .map(|(i, _)| begin + i)
-        .find(|&i| is_line_start(body, i))?;
+        .find(|&i| is_line_start(text, i))?;
 
-    // Extend past the END line's own newline (or to EOF if it's the last line).
-    let end_line_end = body[end..].find('\n').map_or(body.len(), |nl| end + nl + 1);
+    let end_line_end = text[end..].find('\n').map_or(text.len(), |nl| end + nl + 1);
     Some((begin, end_line_end))
 }
 
-/// True if byte `idx` begins a line — guards against matching a marker string
-/// that happens to appear mid-line rather than as an actual marker.
 fn is_line_start(text: &str, idx: usize) -> bool {
     idx == 0 || text.as_bytes()[idx - 1] == b'\n'
 }
 
-/// Pull `hash=XXXXXXXX` off the BEGIN line, if present.
-fn parse_begin_hash(block: &str) -> Option<String> {
-    block
-        .lines()
-        .next()?
-        .split_whitespace()
-        .find_map(|tok| tok.strip_prefix("hash="))
-        .map(str::to_string)
-}
+// ---------------------------------------------------------------------------
+// Pure helpers — I/O plumbing
+// ---------------------------------------------------------------------------
 
-/// The body a hash is taken over: everything between the BEGIN line and the END
-/// marker. Must reproduce `render_managed_body`'s output exactly (round-tripped
-/// in the tests) or the startup integrity check would false-positive forever.
-fn block_body(block: &str) -> &str {
-    let after_begin = match block.find('\n') {
-        Some(i) => &block[i + 1..],
-        None => return "",
-    };
-    match after_begin.rfind(END_MARKER) {
-        Some(i) => &after_begin[..i],
-        None => after_begin,
+/// Read a text file as UTF-8, mapping "not found" to empty (a normal first run)
+/// and "not valid UTF-8" (read_to_string's documented `InvalidData`) to the
+/// distinct NotUtf8 error rather than a generic I/O error.
+fn read_utf8_or_empty(path: &Path) -> Result<String, WriteError> {
+    match fs::read_to_string(path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => Err(WriteError::NotUtf8),
+        Err(e) => Err(e.into()),
     }
 }
 
+/// Write `bytes` to `target` atomically (§7.4): to a sibling temp file, then
+/// `fs::rename` over the target. On Windows that is MoveFileExW with replace
+/// semantics — atomic on one volume, which is why the temp must be a sibling. The
+/// rename into EqAPO's config dir also fires its directory watcher, triggering the
+/// reload + native crossfade.
+fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), WriteError> {
+    target.parent().ok_or(WriteError::NoParentDir)?;
+    let tmp = temp_sibling(target);
+    fs::write(&tmp, bytes)?;
+    if let Err(e) = fs::rename(&tmp, target) {
+        let _ = fs::remove_file(&tmp); // best-effort cleanup
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 /// A temp path next to the target so the rename stays on one volume. The PID
-/// suffix is enough here — §2's single-instance lock already precludes a second
-/// concurrent CAGE writer. TODO: a crash between write and rename can leave a
-/// stale `.cage-tmp-*`; a real impl would sweep these on startup.
+/// suffix suffices — §2's single-instance lock precludes a second concurrent
+/// writer. TODO: a crash between write and rename can leave a stale `.cage-tmp-*`;
+/// a real impl would sweep these on startup.
 fn temp_sibling(target: &Path) -> PathBuf {
     let mut name = target.file_name().map(|n| n.to_os_string()).unwrap_or_default();
     name.push(format!(".cage-tmp-{}", std::process::id()));
@@ -450,73 +424,76 @@ fn temp_sibling(target: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn sample() -> Vec<Filter> {
-        vec![
-            Filter { kind: FilterType::LowShelf, freq_hz: 105.0, gain_db: 3.0, q: 0.7 },
-            Filter { kind: FilterType::Peaking, freq_hz: 2500.0, gain_db: -2.4, q: 1.4 },
-        ]
+    fn sample() -> Vec<DeviceConfig> {
+        vec![DeviceConfig {
+            device: "USB DAC".to_string(),
+            preamp_db: -9.0,
+            filters: vec![
+                Filter { kind: FilterType::LowShelf, freq_hz: 105.0, gain_db: 3.0, q: 0.7 },
+                Filter { kind: FilterType::Peaking, freq_hz: 2500.0, gain_db: -2.4, q: 1.4 },
+            ],
+        }]
     }
 
     #[test]
-    fn hash_round_trips_through_a_rendered_block() {
-        // The invariant the whole restart check leans on: the hash recomputed
-        // from a block's extracted body equals the hash stored when writing it.
-        let (block, stored) = render_cage_block(-9.0, &sample());
-        assert_eq!(content_hash(block_body(&block)), stored);
+    fn renders_autoeq_verified_lines() {
+        let block = render_device_block(&sample()[0]);
+        assert!(block.contains("Device: USB DAC"));
+        assert!(block.contains("Preamp: -9.0 dB"));
+        assert!(block.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"));
+        assert!(block.contains("Filter 2: ON PK Fc 2500 Hz Gain -2.4 dB Q 1.40"));
     }
 
     #[test]
-    fn creates_a_section_in_an_empty_file() {
-        let (block, _) = render_cage_block(-9.0, &sample());
-        let out = splice_cage_block("", "USB DAC", &block);
-        assert!(out.contains("Device: USB DAC"));
-        assert!(out.contains(BEGIN_PREFIX) && out.contains(END_MARKER));
+    fn cage_text_hash_round_trips() {
+        // The invariant the whole restart check leans on: the hash recomputed from
+        // a written cage.txt equals the hash returned when writing it.
+        let (text, stored) = render_cage_txt(&sample());
+        match cage_state_from_text(&text) {
+            BlockState::Present { stored_hash, actual_hash } => {
+                assert_eq!(stored_hash.as_deref(), Some(stored.as_str()));
+                assert_eq!(actual_hash, stored);
+            }
+            BlockState::Absent => panic!("freshly rendered cage.txt must parse as Present"),
+        }
     }
 
     #[test]
-    fn leaves_a_foreign_device_block_untouched() {
-        let foreign = "Device: Other Speakers\nPreamp: -3.0 dB\nFilter: ON PK Fc 1000 Hz Gain 2 dB Q 1\n";
-        let (block, _) = render_cage_block(-9.0, &sample());
-        let out = splice_cage_block(foreign, "USB DAC", &block);
-        // The foreign section must survive verbatim as a substring.
+    fn include_block_appended_when_absent() {
+        let out = splice_include("", CAGE_FILENAME).expect("empty file needs the block added");
+        assert!(out.contains(INCLUDE_BEGIN));
+        assert!(out.contains("Include: cage.txt"));
+        assert!(out.contains(INCLUDE_END));
+    }
+
+    #[test]
+    fn include_block_is_noop_when_already_correct() {
+        let existing = render_include_block(CAGE_FILENAME);
+        assert!(splice_include(&existing, CAGE_FILENAME).is_none());
+    }
+
+    #[test]
+    fn include_preserves_foreign_config_content() {
+        let foreign = "Device: Other\nFilter: ON PK Fc 1000 Hz Gain 2 dB Q 1\n";
+        let out = splice_include(foreign, CAGE_FILENAME).expect("block must be appended");
         assert!(out.contains(foreign), "foreign content was altered");
-    }
-
-    #[test]
-    fn replaces_in_place_rather_than_duplicating() {
-        let (b1, _) = render_cage_block(-9.0, &sample());
-        let once = splice_cage_block("", "USB DAC", &b1);
-        // A second write with different values must yield exactly one block.
-        let (b2, _) = render_cage_block(-6.0, &sample());
-        let twice = splice_cage_block(&once, "USB DAC", &b2);
-        assert_eq!(twice.matches(BEGIN_PREFIX).count(), 1);
-        assert!(twice.contains("Preamp: -6.0 dB"));
-        assert!(!twice.contains("Preamp: -9.0 dB"));
+        assert!(out.contains("Include: cage.txt"));
     }
 
     #[test]
     fn error_displays_a_message_and_chains_its_cause() {
-        use std::error::Error; // brings the `source()` method into scope for the test
-
-        // `.to_string()` is provided for free by the Display impl (via the ToString
-        // blanket impl), so this exercises Display without naming it directly.
+        use std::error::Error;
         let e = WriteError::NotUtf8;
         assert!(e.to_string().contains("UTF-8"));
-        assert!(e.source().is_none()); // originates here, no underlying cause
-
-        // The Io variant should expose its wrapped io::Error as the chain source.
+        assert!(e.source().is_none());
         let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
-        let wrapped = WriteError::from(io); // uses the From impl -> WriteError::Io
-        assert!(wrapped.source().is_some());
+        assert!(WriteError::from(io).source().is_some());
     }
 
     // ---- startup decision table (§3.0) ----
 
-    fn present(actual: &str, stored: Option<&str>) -> BlockState {
-        BlockState::Present {
-            stored_hash: stored.map(str::to_string),
-            actual_hash: actual.to_string(),
-        }
+    fn present(actual: &str) -> BlockState {
+        BlockState::Present { stored_hash: Some(actual.to_string()), actual_hash: actual.to_string() }
     }
 
     #[test]
@@ -525,35 +502,26 @@ mod tests {
     }
 
     #[test]
-    fn startup_block_without_hash_marker_is_first_run() {
-        // A block predating the hash feature (no `hash=` in BEGIN) -> start clean,
-        // even if settings happens to hold some expected hash.
-        let s = present("deadbeef", None);
+    fn startup_block_without_hash_is_first_run() {
+        let s = BlockState::Present { stored_hash: None, actual_hash: "deadbeef".to_string() };
         assert_eq!(decide_startup(&s, Some("deadbeef")), StartupDecision::FirstRun);
     }
 
     #[test]
     fn startup_matching_hash_is_trusted() {
-        let s = present("cafe1234", Some("cafe1234"));
-        assert_eq!(decide_startup(&s, Some("cafe1234")), StartupDecision::ResumeTrusted);
+        assert_eq!(decide_startup(&present("cafe1234"), Some("cafe1234")), StartupDecision::ResumeTrusted);
     }
 
     #[test]
     fn startup_recognises_the_safe_state_block() {
-        // The on-disk block is exactly the safe-state config, while settings still
-        // remembers a *different* real-config hash -> "shutdown was still active".
         let ss = content_hash(&safe_state_body());
-        let s = present(&ss, Some(&ss));
-        assert_eq!(decide_startup(&s, Some("11111111")), StartupDecision::SafeStateStillActive);
+        assert_eq!(decide_startup(&present(&ss), Some("11111111")), StartupDecision::SafeStateStillActive);
     }
 
     #[test]
     fn startup_unknown_change_is_externally_modified() {
-        let s = present("99999999", Some("99999999"));
-        // Doesn't match settings and isn't the safe-state block.
+        let s = present("99999999");
         assert_eq!(decide_startup(&s, Some("11111111")), StartupDecision::ExternallyModified);
-        // No settings record at all, and still not the safe-state -> same verdict:
-        // a block exists but we have no memory of its meaning, so don't trust it.
         assert_eq!(decide_startup(&s, None), StartupDecision::ExternallyModified);
     }
 }

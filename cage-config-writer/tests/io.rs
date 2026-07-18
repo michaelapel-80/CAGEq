@@ -1,115 +1,131 @@
 //! Integration tests for the on-disk paths of `cage-config-writer`.
 //!
-//! Unlike the in-crate `#[cfg(test)] mod tests` (which drive the pure string
-//! helpers with no I/O), a file under `tests/` is compiled as a *separate crate*
-//! that sees only the public API — exactly how the real consumer (the Tauri
-//! core) will use it. So these exercise `write_managed_block` / `read_block_state`
-//! against real files, covering the fs::read/write/rename glue the unit tests
-//! can't reach.
+//! A file under `tests/` is compiled as a separate crate seeing only the public
+//! API — exactly how the Tauri core will use it. These drive `apply` /
+//! `write_cage_txt` / `ensure_include` / `read_cage_state` / `write_safe_state`
+//! against real files in a temp directory (which stands in for EqAPO's config dir).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use cage_config_writer::{
-    read_block_state, write_managed_block, BlockState, Filter, FilterType, WriteError,
+    apply, decide_startup, read_cage_state, write_safe_state, BlockState, DeviceConfig, Filter,
+    FilterType, StartupDecision, WriteError, CAGE_FILENAME,
 };
 
-/// RAII temp path: a unique file in the OS temp dir that deletes itself — and any
-/// leftover sibling temp file — when it goes out of scope. Demonstrates Rust's
-/// `Drop`: the destructor runs automatically at end of scope, even on panic, so
-/// a failing test can't leave junk behind. Each test uses a distinct `tag`
+/// RAII temp directory (a unique dir under the OS temp dir) that deletes itself —
+/// contents and all — when it goes out of scope. Demonstrates `Drop`: the
+/// destructor runs at end of scope even on panic. Each test uses a distinct `tag`
 /// because `cargo test` runs tests in parallel threads.
-struct TempPath(PathBuf);
+struct TempDir(PathBuf);
 
-impl TempPath {
+impl TempDir {
     fn new(tag: &str) -> Self {
-        let p = std::env::temp_dir().join(format!("cage-it-{}-{tag}.txt", std::process::id()));
-        let _ = fs::remove_file(&p); // clear any stale leftover from a prior run
-        TempPath(p)
+        let p = std::env::temp_dir().join(format!("cage-it-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        TempDir(p)
     }
-    fn path(&self) -> &Path {
+    fn dir(&self) -> &Path {
         &self.0
     }
-}
-
-impl Drop for TempPath {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+    fn read(&self, name: &str) -> String {
+        fs::read_to_string(self.0.join(name)).unwrap()
     }
 }
 
-fn sample() -> Vec<Filter> {
-    vec![
-        Filter { kind: FilterType::LowShelf, freq_hz: 105.0, gain_db: 3.0, q: 0.7 },
-        Filter { kind: FilterType::Peaking, freq_hz: 2500.0, gain_db: -2.4, q: 1.4 },
-    ]
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn sample() -> Vec<DeviceConfig> {
+    vec![DeviceConfig {
+        device: "USB DAC".to_string(),
+        preamp_db: -9.0,
+        filters: vec![
+            Filter { kind: FilterType::LowShelf, freq_hz: 105.0, gain_db: 3.0, q: 0.7 },
+            Filter { kind: FilterType::Peaking, freq_hz: 2500.0, gain_db: -2.4, q: 1.4 },
+        ],
+    }]
 }
 
 #[test]
-fn writes_a_fresh_file_then_reads_back_a_matching_hash() {
-    let tmp = TempPath::new("roundtrip");
-    // The file does not exist yet: the write must create it (NotFound path).
-    let hash = write_managed_block(tmp.path(), "USB DAC", -9.0, &sample()).unwrap();
+fn apply_creates_both_files_and_state_round_trips() {
+    let tmp = TempDir::new("apply");
+    // Fresh config dir: apply must create config.txt (with the Include block) and
+    // cage.txt (with the filters).
+    let hash = apply(tmp.dir(), &sample()).unwrap();
 
-    let text = fs::read_to_string(tmp.path()).unwrap();
-    assert!(text.contains("Device: USB DAC"));
-    assert!(text.contains("#CAGE:BEGIN"));
-    // Exercises the AutoEq-verified line format end-to-end (number, token, units).
-    assert!(text.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"));
-    assert!(text.contains("Filter 2: ON PK Fc 2500 Hz Gain -2.4 dB Q 1.40"));
+    let config = tmp.read("config.txt");
+    assert!(config.contains("#CAGE:BEGIN"));
+    assert!(config.contains("Include: cage.txt"));
 
-    // read_block_state must recompute the exact hash the write returned.
-    match read_block_state(tmp.path(), "USB DAC").unwrap() {
+    let cage = tmp.read(CAGE_FILENAME);
+    assert!(cage.contains("Device: USB DAC"));
+    assert!(cage.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"));
+
+    // read_cage_state must recompute the exact hash apply returned.
+    match read_cage_state(&tmp.dir().join(CAGE_FILENAME)).unwrap() {
         BlockState::Present { stored_hash, actual_hash } => {
             assert_eq!(stored_hash.as_deref(), Some(hash.as_str()));
             assert_eq!(actual_hash, hash);
         }
-        BlockState::Absent => panic!("expected a present block right after writing it"),
+        BlockState::Absent => panic!("expected a present cage.txt right after writing it"),
     }
 }
 
 #[test]
-fn a_foreign_device_block_survives_a_real_write() {
-    let tmp = TempPath::new("foreign");
+fn apply_preserves_foreign_config_txt_and_is_idempotent() {
+    let tmp = TempDir::new("foreign");
     let foreign = "Device: Other\nFilter: ON PK Fc 1000 Hz Gain 2 dB Q 1\n";
-    fs::write(tmp.path(), foreign).unwrap();
+    fs::write(tmp.dir().join("config.txt"), foreign).unwrap();
 
-    write_managed_block(tmp.path(), "USB DAC", -9.0, &sample()).unwrap();
+    apply(tmp.dir(), &sample()).unwrap();
+    let after_first = tmp.read("config.txt");
+    assert!(after_first.contains(foreign), "foreign content was not preserved");
+    assert!(after_first.contains("Include: cage.txt"));
 
-    let text = fs::read_to_string(tmp.path()).unwrap();
-    assert!(text.contains(foreign), "foreign device block was not preserved verbatim");
-    assert!(text.contains("Device: USB DAC"));
+    // A second apply must not add a duplicate Include block.
+    apply(tmp.dir(), &sample()).unwrap();
+    let after_second = tmp.read("config.txt");
+    assert_eq!(after_second.matches("#CAGE:BEGIN").count(), 1, "Include block was duplicated");
+    // config.txt is unchanged the second time (Include already correct).
+    assert_eq!(after_first, after_second);
 }
 
 #[test]
-fn a_second_write_replaces_in_place_on_disk() {
-    let tmp = TempPath::new("replace");
-    write_managed_block(tmp.path(), "USB DAC", -9.0, &sample()).unwrap();
-    write_managed_block(tmp.path(), "USB DAC", -6.0, &sample()).unwrap();
+fn a_second_apply_rewrites_only_cage_txt() {
+    let tmp = TempDir::new("rewrite");
+    apply(tmp.dir(), &sample()).unwrap();
 
-    let text = fs::read_to_string(tmp.path()).unwrap();
-    assert_eq!(text.matches("#CAGE:BEGIN").count(), 1, "must not accumulate blocks");
-    assert!(text.contains("Preamp: -6.0 dB"));
-    assert!(!text.contains("Preamp: -9.0 dB"));
+    let mut changed = sample();
+    changed[0].preamp_db = -6.0;
+    apply(tmp.dir(), &changed).unwrap();
+
+    let cage = tmp.read(CAGE_FILENAME);
+    assert!(cage.contains("Preamp: -6.0 dB"));
+    assert!(!cage.contains("Preamp: -9.0 dB"));
 }
 
 #[test]
-fn state_is_absent_for_a_device_never_written() {
-    let tmp = TempPath::new("absent");
-    fs::write(tmp.path(), "Device: Someone Else\nPreamp: -3.0 dB\n").unwrap();
-    assert!(matches!(
-        read_block_state(tmp.path(), "USB DAC").unwrap(),
-        BlockState::Absent
-    ));
-}
+fn a_non_utf8_config_txt_fails_loudly_with_notutf8() {
+    let tmp = TempDir::new("ansi");
+    let bytes: [u8; 5] = [b'D', b'e', b'v', 0xFF, b'\n']; // 0xFF is not valid UTF-8
+    fs::write(tmp.dir().join("config.txt"), bytes).unwrap();
 
-#[test]
-fn a_non_utf8_config_fails_loudly_with_notutf8() {
-    let tmp = TempPath::new("ansi");
-    // 0xFF is not a valid UTF-8 byte — stands in for a legacy ANSI-saved config.
-    let bytes: [u8; 5] = [b'D', b'e', b'v', 0xFF, b'\n'];
-    fs::write(tmp.path(), bytes).unwrap();
-
-    let err = write_managed_block(tmp.path(), "USB DAC", -9.0, &sample()).unwrap_err();
+    let err = apply(tmp.dir(), &sample()).unwrap_err();
     assert!(matches!(err, WriteError::NotUtf8), "expected NotUtf8, got {err:?}");
+}
+
+#[test]
+fn safe_state_is_written_and_recognised_at_startup() {
+    let tmp = TempDir::new("safestate");
+    let cage_path = tmp.dir().join(CAGE_FILENAME);
+    write_safe_state(&cage_path).unwrap();
+
+    let state = read_cage_state(&cage_path).unwrap();
+    // settings.json still remembers some earlier real-config hash.
+    assert_eq!(decide_startup(&state, Some("deadbeef")), StartupDecision::SafeStateStillActive);
 }
