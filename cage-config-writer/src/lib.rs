@@ -14,7 +14,6 @@
 //! Deliberately OUT of scope for this first slice — each flagged inline `TODO`:
 //!   * more than one CAGE-managed Device: block per file
 //!   * preserving a foreign block's exact CRLF style (we emit LF)
-//!   * the exact EqAPO filter-token spelling (verify vs. the config reference)
 //!   * non-UTF-8 (legacy ANSI) config.txt: EqAPO tolerates it via a per-line
 //!     CP_ACP fallback, but we support UTF-8 only and fail loudly with
 //!     WriteError::NotUtf8 rather than add byte-level transcoding (see §7.4)
@@ -47,10 +46,14 @@ pub enum FilterType {
 }
 
 impl FilterType {
-    /// EqAPO's token for this filter type.
-    /// TODO(verify): confirm LSC/HSC (shelf-with-Q) vs. LS/HS against the
-    /// official EqAPO configuration reference before trusting these strings —
-    /// same verify-don't-guess rule the rest of filter.md follows.
+    /// EqAPO's token for this filter type. VERIFIED against AutoEq's own
+    /// EqualizerAPO exporter (`frequency_response.py::write_eqapo_parametric_eq`,
+    /// `types = {Peaking: 'PK', LowShelf: 'LSC', HighShelf: 'HSC'}`) and the
+    /// official config reference: `LSC`/`HSC` are the center-frequency shelves
+    /// that take an Fc/Gain/Q triple (the RBJ-biquad-with-Q form AutoEq emits),
+    /// as opposed to `LS`/`HS` or the slope-based `LSC x dB` variants. Since
+    /// CAGE's filters mirror AutoEq's model, matching its exporter is both
+    /// correct and guaranteed EqAPO-compatible.
     fn eqapo_token(self) -> &'static str {
         match self {
             FilterType::Peaking => "PK",
@@ -196,10 +199,17 @@ fn render_managed_body(preamp_db: f64, filters: &[Filter]) -> String {
     let mut body = String::new();
     // Writing to a String is infallible, so discarding the Result is fine.
     let _ = write!(body, "Preamp: {:.1} dB{NL}", preamp_db);
-    for f in filters {
+    // Line format verified byte-for-byte against AutoEq's own exporter
+    // (frequency_response.py::write_eqapo_parametric_eq, line 213): a 1-based
+    // filter number, then `ON <type> Fc <fc:.0> Hz Gain <gain:.1> dB Q <q:.2>`.
+    // EqAPO ignores the number (config reference: "not interpreted and can be
+    // omitted"), but including it keeps our output identical to the format the
+    // AutoEq/REW ecosystem emits and users recognise.
+    for (i, f) in filters.iter().enumerate() {
         let _ = write!(
             body,
-            "Filter: ON {} Fc {:.0} Hz Gain {:.1} dB Q {:.2}{NL}",
+            "Filter {}: ON {} Fc {:.0} Hz Gain {:.1} dB Q {:.2}{NL}",
+            i + 1,
             f.kind.eqapo_token(),
             f.freq_hz,
             f.gain_db,
