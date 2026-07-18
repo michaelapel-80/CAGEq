@@ -1,0 +1,11 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# IDE / editor state (per-user, machine-specific)
+.vs/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

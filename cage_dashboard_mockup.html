@@ -1,0 +1,1637 @@
+<title>CAGE — Dashboard Mockup</title>
+<style>
+  :root {
+    --bg: #10141a;
+    --panel: #171d26;
+    --panel-raised: #1e2530;
+    --border: #2a3340;
+    --text: #e7ecf2;
+    --text-muted: #8b96a5;
+    --accent: #9d7fd6;
+    --accent-a: #cda43a;
+    --accent-b: #4f8fe0;
+    --dry: #7a8290;
+    --measured: #9c9186;
+    --target: #6ea8a3;
+    --good: #5fbf77;
+    --warning: #e0743a;
+    --critical: #e0554f;
+    --grid-line: rgba(255,255,255,0.07);
+    --shadow: 0 8px 24px rgba(0,0,0,0.35);
+    --font-ui: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+    --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace;
+  }
+  :root[data-theme="light"] {
+    --bg: #f3f5f7;
+    --panel: #ffffff;
+    --panel-raised: #eef1f4;
+    --border: #d8dee4;
+    --text: #1b2430;
+    --text-muted: #5b6675;
+    --accent: #6f4fae;
+    --accent-a: #96751f;
+    --accent-b: #1f5fa8;
+    --dry: #8a93a1;
+    --measured: #7d7264;
+    --target: #3f7a74;
+    --good: #2e8f49;
+    --warning: #b8551f;
+    --critical: #c23b35;
+    --grid-line: rgba(20,30,40,0.08);
+    --shadow: 0 8px 24px rgba(20,30,45,0.10);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f3f5f7;
+      --panel: #ffffff;
+      --panel-raised: #eef1f4;
+      --border: #d8dee4;
+      --text: #1b2430;
+      --text-muted: #5b6675;
+      --accent: #6f4fae;
+      --accent-a: #96751f;
+      --accent-b: #1f5fa8;
+      --dry: #8a93a1;
+      --measured: #7d7264;
+      --target: #3f7a74;
+      --good: #2e8f49;
+      --warning: #b8551f;
+      --critical: #c23b35;
+      --grid-line: rgba(20,30,40,0.08);
+      --shadow: 0 8px 24px rgba(20,30,45,0.10);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  .cage-app {
+    font-family: var(--font-ui);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 16px;
+  }
+  .cage-app :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+  /* ---- status strip ---- */
+  .statusbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .wordmark { display: flex; align-items: baseline; gap: 8px; }
+  .wordmark b { font-size: 17px; letter-spacing: 0.02em; }
+  .wordmark span { font-size: 11px; color: var(--text-muted); }
+  .status-chip {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-muted);
+    background: var(--panel-raised);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); box-shadow: 0 0 6px var(--good); }
+  .statusbar-spacer { flex: 1; }
+
+  .safe-banner {
+    display: none;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 16px;
+    background: color-mix(in srgb, var(--critical) 16%, var(--panel));
+    border: 1px solid var(--critical);
+    border-radius: 10px;
+    color: var(--text);
+  }
+  .safe-banner.visible { display: flex; }
+  .safe-banner .icon {
+    width: 20px; height: 20px; flex: none;
+    border-radius: 50%;
+    background: var(--critical);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; color: #fff;
+  }
+  .safe-banner .msg { flex: 1; font-size: 13.5px; }
+  .safe-banner .msg b { font-weight: 600; }
+  .safe-banner .cause { color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; }
+  .btn-ghost-critical {
+    background: transparent; border: 1px solid var(--critical); color: var(--critical);
+    border-radius: 6px; padding: 6px 10px; font-size: 12.5px; cursor: pointer; font-family: var(--font-ui);
+  }
+  .btn-ghost-critical:hover { background: color-mix(in srgb, var(--critical) 14%, transparent); }
+
+  /* ---- compact source bar (device + headphone/measurement, set once per session) ---- */
+  .source-bar {
+    display: flex;
+    align-items: flex-end;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .source-field { display: flex; flex-direction: column; min-width: 210px; flex: 1; }
+  .source-field .select { min-width: 0; }
+  .source-sep { color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding-bottom: 9px; }
+  .btn-import {
+    background: var(--panel-raised); border: 1.5px dashed var(--border); color: var(--text-muted);
+    border-radius: 8px; padding: 8px 14px; font-size: 12.5px; cursor: pointer; font-family: var(--font-ui);
+    white-space: nowrap; align-self: stretch; margin-bottom: 0;
+  }
+  .btn-import:hover { border-color: var(--accent); color: var(--text); }
+  .measurement-chip {
+    position: relative;
+    font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted);
+    background: var(--panel-raised); border: 1px solid var(--border); border-radius: 7px;
+    padding: 8px 10px; white-space: nowrap; cursor: default; align-self: stretch; display: flex; align-items: center;
+  }
+  /* :focus-within zusätzlich zu :hover (löst Abschnitt 8, Nutzer-Feedback): reine
+     :hover-Trigger sind für Tastatur-/Touch-Nutzer komplett unerreichbar – dieselbe Information
+     muss auch per Tab-Fokus sichtbar werden, nicht nur per Maus-Hover. Container zusätzlich mit
+     tabindex="0" fokussierbar gemacht (s. HTML). */
+  .measurement-chip:hover .tooltip-pop, .measurement-chip:focus-within .tooltip-pop { display: block; }
+  .measurement-chip .tooltip-pop { left: auto; right: 0; bottom: calc(100% + 6px); width: 260px; }
+
+  .format-row { display: flex; gap: 6px; margin-top: 6px; }
+  .btn-format {
+    flex: none; background: var(--panel-raised); border: 1px solid var(--border); color: var(--text-muted);
+    border-radius: 7px; padding: 0 10px; font-size: 14px; cursor: pointer; line-height: 1;
+  }
+  .btn-format:hover { border-color: var(--accent); color: var(--text); }
+
+  /* ---- main grid ---- */
+  .board {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: 14px;
+    flex: 1;
+    min-height: 0;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+  }
+  .eyebrow {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .field-label { font-size: 12.5px; color: var(--text-muted); margin-bottom: 5px; display: block; }
+
+  .select, .text-input {
+    width: 100%;
+    background: var(--panel-raised);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 7px;
+    padding: 8px 10px;
+    font-size: 13.5px;
+    font-family: var(--font-ui);
+  }
+
+
+  /* macro sliders */
+  .macro-row { display: flex; flex-direction: column; gap: 4px; }
+  .macro-row .top { display: flex; justify-content: space-between; font-size: 12.5px; }
+  .macro-row .top .val { color: var(--accent); font-family: var(--font-mono); }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 4px; border-radius: 2px; background: var(--border); outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 15px; height: 15px; border-radius: 50%;
+    background: var(--accent); border: 2px solid var(--panel); cursor: pointer;
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  /* Bearbeitung gesperrt, solange Dry das Vergleichsziel ist (löst Abschnitt 8) – ändert man
+     Slot-Parameter, während gerade das unbearbeitete Dry-Signal angehört wird, hört man den
+     Effekt der Änderung nicht, bis man manuell zurück zu A/B wechselt. Das war zuvor über
+     Zahlenfelder/Fader/Macro-Regler weiterhin möglich – eine "blinde" Bearbeitung ohne
+     unmittelbares akustisches Feedback, die verwirrender ist als sie Komfort bringt. */
+  input[type="range"]:disabled { opacity: 0.35; cursor: not-allowed; }
+  input[type="range"]:disabled::-webkit-slider-thumb { cursor: not-allowed; }
+  .caption { font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+  /* Beschreibungstext liegt in einem position:absolute-Tooltip (wie clip-warn/measurement-chip),
+     nicht im normalen Textfluss – dadurch kann eine beliebig lange, beliebig sprachige Übersetzung
+     nie die Höhe des umgebenden Layouts verändern. Größenschätzungen (min-height o.ä.) waren
+     strukturell die falsche Lösung für variable/lokalisierte Textlängen. */
+  .mode-info {
+    display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted);
+    position: relative; cursor: default; width: fit-content;
+  }
+  .mode-info .icon {
+    width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--text-muted);
+    font-size: 10px; display: flex; align-items: center; justify-content: center; flex: none; line-height: 1;
+  }
+  .mode-info:hover .icon, .mode-info:focus-within .icon { color: var(--text); border-color: var(--text); }
+  .mode-info:hover .tooltip-pop, .mode-info:focus-within .tooltip-pop { display: block; }
+
+
+  /* chart */
+  .chart-wrap { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 340px; }
+  .chart-panel {
+    flex: 1; background: var(--panel-raised); border: 1px solid var(--border); border-radius: 10px;
+    position: relative; min-height: 0;
+  }
+  /* user-select:none behebt ein intermittierendes Drag-Problem (löst Abschnitt 8): ohne dies
+     lässt der Browser das Chart-Diagramm markierbar/selektierbar, und ein Drag-Gestus auf einem
+     Node kann – je nach genauer Mausbewegung – von der nativen Text-/Element-Selektion des
+     Browsers "gewonnen" werden statt ausschließlich vom eigenen pointermove-Handler verarbeitet
+     zu werden. touch-action:none deckt nur Touch-Scroll ab, nicht diese Maus-Selektion. */
+  svg#chart { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; }
+  .axis-label { font-family: var(--font-mono); font-size: 10px; fill: var(--text-muted); }
+  .grid-line { stroke: var(--grid-line); stroke-width: 1; }
+  .zero-line { stroke: var(--border); stroke-width: 1.2; }
+  .curve-dry { fill: none; stroke: var(--dry); stroke-width: 1.6; stroke-dasharray: 4 4; }
+  .curve-a { fill: none; stroke: var(--accent-a); stroke-width: 2.4; }
+  .curve-b { fill: none; stroke: var(--accent-b); stroke-width: 2.4; }
+  .curve-measured { fill: none; stroke: var(--measured); stroke-width: 1.6; stroke-dasharray: 1 4; stroke-linecap: round; }
+  /* Zielkurve als eigene, nicht-draggable Overlay-Ebene (löst Abschnitt 8, Nutzer-Vorschlag) –
+     zeigt die absolute Kontur der gewählten Zielkurve (3.2) selbst, nicht nur die daraus
+     abgeleitete Korrekturkurve (Dry/A/B). Langgestrichelte Linie in einer dritten, neutralen
+     Farbe (Teal) statt der gepunkteten Messkurve oder der kurz gestrichelten Dry-Linie – bleibt
+     unterscheidbar, auch wenn alle drei gleichzeitig eingeblendet sind. */
+  .curve-target { fill: none; stroke: var(--target); stroke-width: 1.6; stroke-dasharray: 9 5; stroke-linecap: round; }
+  .curve-dim { opacity: 0.35; }
+  .node { cursor: grab; }
+  .node:active { cursor: grabbing; }
+  .node-a { fill: var(--accent-a); stroke: var(--bg); stroke-width: 2; }
+  .node-b { fill: var(--accent-b); stroke: var(--bg); stroke-width: 2; }
+  .node-q-ring { fill: none; stroke-width: 1; opacity: 0.35; }
+  .autoeq-marker { fill: var(--text-muted); opacity: 0.75; }
+  .node-tip {
+    position: absolute; pointer-events: none; font-family: var(--font-mono); font-size: 11px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 4px 7px;
+    color: var(--text); box-shadow: var(--shadow); display: none; white-space: nowrap; z-index: 5;
+  }
+  .legend { display: flex; gap: 6px; font-size: 11.5px; color: var(--text-muted); padding: 0 4px; flex-wrap: wrap; }
+  .legend .item {
+    display: flex; align-items: center; gap: 6px;
+    background: none; border: none; font-family: var(--font-ui); font-size: 11.5px; color: var(--text-muted);
+    padding: 3px 7px; border-radius: 6px; cursor: pointer; transition: opacity .15s, background .15s;
+  }
+  .legend button.item:hover { background: var(--panel-raised); }
+  .legend .item.off { opacity: 0.4; }
+  .swatch { width: 14px; height: 2.5px; border-radius: 2px; flex: none; }
+  .swatch.dashed { background: repeating-linear-gradient(90deg, var(--dry) 0 4px, transparent 4px 8px); }
+  .swatch.dotted { background: repeating-linear-gradient(90deg, var(--measured) 0 2px, transparent 2px 5px); }
+  .swatch.longdash { background: repeating-linear-gradient(90deg, var(--target) 0 6px, transparent 6px 9px); }
+  .swatch.dot { width: 8px; height: 8px; border-radius: 50%; }
+
+  /* Custom-Filter-Liste: ergänzt die Chart-Interaktion um Präzision/Reproduzierbarkeit/
+     Tastaturzugänglichkeit (siehe 5.2) – bidirektional mit Drag/Mausrad im Diagramm synchron.
+     Zeilen/Spalten transponiert (ein Filter = eine vertikale Spalte, an der fc-Position
+     sortiert) für eine Optik nahe an einem grafischen Equalizer, statt einer klassischen Tabelle. */
+  .filter-list { display: flex; flex-direction: column; gap: 6px; }
+  .filter-list-head { display: flex; align-items: center; justify-content: space-between; }
+  .btn-add-filter {
+    background: var(--panel-raised); border: 1px solid var(--accent); color: var(--accent);
+    border-radius: 6px; padding: 4px 10px; font-size: 11.5px; cursor: pointer; font-family: var(--font-ui);
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .btn-add-filter .btn-icon { width: 13px; height: 13px; stroke: currentColor; flex: none; }
+  .btn-add-filter:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  .btn-add-filter:disabled { opacity: 0.4; cursor: not-allowed; border-color: var(--border); color: var(--text-muted); background: var(--panel-raised); }
+  .filter-rows { display: flex; flex-direction: row; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+  /* Platzhalter statt Filter-Spalten, solange Dry das Vergleichsziel ist (löst Abschnitt 8) –
+     bewusst eine erklärende Nachricht statt eines leeren oder nur gedimmten Bereichs, damit
+     sofort klar ist, WARUM gerade nichts editierbar ist. */
+  .filter-list-empty { font-size: 12px; color: var(--text-muted); padding: 14px 8px; text-align: center; width: 100%; }
+  .eq-band {
+    display: flex; flex-direction: column; align-items: center; gap: 4px; flex: none;
+    background: var(--panel-raised); border: 1px solid var(--border); border-radius: 6px; padding: 6px 4px;
+    width: 58px;
+  }
+  .eq-type-btn {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    width: 100%; height: 22px; display: flex; align-items: center; justify-content: center;
+    cursor: pointer; padding: 0;
+  }
+  .eq-type-btn:hover { border-color: var(--accent); }
+  .eq-type-btn svg { stroke: var(--text-muted); width: 20px; height: 14px; }
+  /* Fader deutlich länger als zuvor (84px) – bei -12..+12dB über nur 84px Weglänge war jede
+     Mausbewegung überproportional empfindlich (~3.5px pro dB). 150px senkt das auf ~6px pro dB. */
+  .eq-fader-wrap { width: 24px; height: 150px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  /* .eq-fader-wrap .eq-fader (statt nur .eq-fader): die generische input[type="range"]-Regel
+     oben (width:100%, height:4px) hat höhere Selektor-Spezifität (Typ+Attribut) als eine einzelne
+     Klasse – sie hat width/height hier bisher unbemerkt überschrieben, der Fader blieb dadurch
+     bei ~4px Höhe/100% (= Wrap-Breite von nur 24px) hängen, obwohl der Wrap selbst schon auf
+     150px vergrößert war. Der zusätzliche Vorfahren-Selektor hebt die Spezifität eindeutig an.
+     flex-shrink:0 zusätzlich nötig: .eq-fader-wrap ist ein Flex-Container in Row-Richtung, der
+     Fader (vor der Rotation 150px "breit") wurde trotz expliziter Breite durch das Flexbox-
+     Standardverhalten (flex-shrink:1) in den nur 24px breiten Wrap hineingequetscht. */
+  .eq-fader-wrap .eq-fader { width: 150px; height: 20px; transform: rotate(-90deg); margin: 0; flex-shrink: 0; }
+  .eq-num {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 5px;
+    font-size: 10.5px; padding: 2px 5px 2px 3px; width: 100%; min-width: 0; text-align: right; font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums; -moz-appearance: textfield;
+  }
+  /* Native Spinner-Pfeile entfernt: bei so schmalen, rechtsbündigen Feldern verdecken sie
+     teilweise die letzte Ziffer und sind wegen ihrer geringen Größe schwer präzise zu treffen.
+     Pfeiltasten-Bedienung am fokussierten Feld bleibt davon unberührt, nur die visuellen
+     Spinner-Buttons verschwinden. */
+  .eq-num::-webkit-inner-spin-button, .eq-num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  /* Sichtbare Rückmeldung, solange eine getippte fc über einen Nachbarn hinausgeht (s.
+     clampFreqNoReorder/liveUpdateFilterField) – ohne dieses Signal wirkte die Live-Klemmung
+     wie ein wirkungsloses Eingabefeld. Verschwindet automatisch beim Commit (change), da
+     der volle Listen-Neuaufbau alle Klassen zurücksetzt. */
+  .eq-num--clamped { border-color: var(--warning); color: var(--warning); }
+  .eq-num-label { font-size: 8.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+  .eq-del-btn {
+    background: none; border: none; color: var(--text-muted); cursor: pointer; line-height: 1;
+    padding: 0; min-width: 0; margin-top: 2px; display: flex; align-items: center; justify-content: center;
+  }
+  .eq-del-btn svg { width: 15px; height: 15px; stroke: currentColor; }
+  .eq-del-btn:hover { color: var(--critical); }
+
+  /* right column: tabs */
+  /* WASD-Cluster: Grid-Position spiegelt die physische Tastenanordnung (W über S),
+     bewusst OHNE den horizontalen Zeilenversatz echter Tastaturen – hier zählt nur die
+     logische Nachbarschaft (W oberhalb der mittleren unteren Reihe), keine 1:1-Nachbildung. */
+  .key-cluster {
+    /* minmax(0, 1fr) allein reichte nicht: .key-cluster ist Flex-Kind von .panel
+       (display:flex; flex-direction:column). Auto-Margins (für die Zentrierung) heben
+       auf der Cross-Achse das Default-"align-items: stretch" auf – der Container schrumpft
+       dann auf seinen Inhalt (shrink-to-fit) statt eine definierte Breite zu bekommen, und
+       ohne definierte Breite haben "1fr"-Spalten nichts zum Verteilen und sizen wieder
+       inhaltsbasiert. Live im Browser verifiziert (getBoundingClientRect vor/nach Klick):
+       erst eine EXPLIZITE `width` (statt nur `max-width`) hält die Spalten wirklich konstant. */
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: 52px;
+    gap: 6px; width: 200px; margin: 0 auto;
+  }
+  #key-w { grid-column: 2; grid-row: 1; }
+  #key-a { grid-column: 1; grid-row: 2; }
+  #key-s { grid-column: 2; grid-row: 2; }
+  #key-d { grid-column: 3; grid-row: 2; }
+  .keycap {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+    background: var(--panel-raised); border: 1px solid var(--border); border-radius: 8px;
+    cursor: pointer; font-family: var(--font-ui); box-shadow: 0 2px 0 var(--border); padding: 4px 2px;
+    height: 52px; min-width: 0; overflow: hidden;
+  }
+  .keycap:hover { border-color: var(--text-muted); }
+  .keycap:active { transform: translateY(1px); box-shadow: 0 1px 0 var(--border); }
+  .keycap .keycap-letter { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--text); }
+  .keycap .keycap-sub {
+    font-size: 9px; color: var(--text-muted); text-align: center; line-height: 1.2; padding: 0 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+  }
+  /* Aktiv-Zustand ändert Rahmen-/Buchstabenfarbe UND eine dezente Hintergrund-Tönung –
+     nur den Rahmen hell aufleuchten zu lassen (vorherige Version) erzeugte auf dem sehr
+     dunklen Grund einen Irradiations-Effekt (helle dünne Linie wirkt optisch größer als
+     eine dunkle, obwohl die Box-Maße pixelgenau identisch bleiben – geprüft via
+     getBoundingClientRect-Vergleich). Die zusätzliche Flächen-Tönung verteilt das
+     "aktiv"-Signal auf Fläche statt nur auf einen dünnen Rahmen und mindert die Täuschung. */
+  .keycap.key-active-a { background: color-mix(in srgb, var(--accent-a) 14%, var(--panel-raised)); border-color: var(--accent-a); }
+  .keycap.key-active-a .keycap-letter { color: var(--accent-a); }
+  .keycap.key-active-b { background: color-mix(in srgb, var(--accent-b) 14%, var(--panel-raised)); border-color: var(--accent-b); }
+  .keycap.key-active-b .keycap-letter { color: var(--accent-b); }
+  .keycap.key-active-dry, .keycap.key-active-mode { background: color-mix(in srgb, var(--text) 10%, var(--panel-raised)); border-color: var(--text); }
+  .keycap.key-active-dry .keycap-letter, .keycap.key-active-mode .keycap-letter { color: var(--text); }
+
+  .slot-detail {
+    background: var(--panel-raised); border: 1px solid var(--border); border-radius: 9px;
+    padding: 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .readout-row { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; }
+  .readout-row .v { font-family: var(--font-mono); }
+  .readout-total { border-top: 1px solid var(--border); margin-top: 2px; padding-top: 7px; font-weight: 600; }
+  .clip-warn {
+    display: none; align-items: center; gap: 6px; font-size: 11.5px; color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 14%, transparent); border: 1px solid var(--warning);
+    border-radius: 6px; padding: 5px 8px; position: relative;
+  }
+  .clip-warn.visible { display: flex; }
+  .clip-warn .icon { width: 15px; height: 15px; border-radius: 50%; background: var(--warning); color: var(--bg); font-weight: 800; font-size: 10px; display: flex; align-items: center; justify-content: center; flex: none; }
+  .tooltip-pop {
+    position: absolute; bottom: calc(100% + 6px); left: 0; width: 220px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px;
+    font-size: 11.5px; color: var(--text); box-shadow: var(--shadow); display: none;
+    white-space: normal; line-height: 1.5; z-index: 10;
+  }
+  .clip-warn:hover .tooltip-pop, .clip-warn:focus-within .tooltip-pop { display: block; }
+
+  .btn-row { display: flex; gap: 8px; }
+  .btn-sec {
+    flex: 1; background: var(--panel-raised); border: 1px solid var(--border); color: var(--text);
+    border-radius: 7px; padding: 8px 6px; font-size: 12px; cursor: pointer; font-family: var(--font-ui);
+  }
+  .btn-sec:hover { border-color: var(--accent); color: var(--text); }
+
+  .presets-panel { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .presets-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  /* Speicher-Formular für Presets/Filter-Vorlagen (löst Abschnitt 8 – Speichern war bisher nur
+     datentechnisch in 3.5 beschrieben, ohne zugehöriges UI-Element). Inline statt Modal-Dialog,
+     um beim etablierten Muster dieses Panels (Buttons lösen direkt sichtbare Änderungen aus,
+     kein Overlay) zu bleiben. */
+  .save-form { display: flex; flex-direction: column; gap: 8px; background: var(--panel-raised); border: 1px solid var(--border); border-radius: 9px; padding: 10px; }
+  .save-type-toggle { display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-radius: 7px; padding: 3px; }
+  .save-type-btn { flex: 1; background: none; border: none; color: var(--text-muted); border-radius: 5px; padding: 5px 8px; font-size: 11.5px; cursor: pointer; font-family: var(--font-ui); }
+  .save-type-btn.is-active { background: var(--accent); color: #fff; }
+  .save-type-hint { font-size: 10.5px; color: var(--text-muted); line-height: 1.4; }
+  .text-input.input-error { border-color: var(--critical); }
+  .presets-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 2px; }
+  .presets-empty { font-size: 11.5px; color: var(--text-muted); padding: 4px 2px; }
+  .preset-chip {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    background: var(--panel-raised); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; font-size: 12.5px;
+  }
+  .preset-chip .name { font-weight: 600; }
+  .preset-chip .kind { color: var(--text-muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .preset-chip .row-actions { display: flex; align-items: center; gap: 6px; }
+  .preset-chip button {
+    background: transparent; border: 1px solid var(--accent); color: var(--accent);
+    border-radius: 5px; padding: 4px 9px; font-size: 11.5px; cursor: pointer; font-family: var(--font-ui);
+  }
+  .preset-chip button:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  .preset-chip .btn-del {
+    background: none; border: none; color: var(--text-muted); cursor: pointer; line-height: 1;
+    padding: 0 2px; min-width: 0; display: flex; align-items: center; justify-content: center;
+  }
+  .preset-chip .btn-del svg { width: 14px; height: 14px; stroke: currentColor; }
+  .preset-chip .btn-del:hover { color: var(--critical); }
+  .presets-subhead { font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
+  /* Presets und Filter-Vorlagen sind zwei Gruppen mit unterschiedlicher Zielsetzung (löst
+     Abschnitt 8), nicht nur eine Text-Untertitel-Unterscheidung innerhalb derselben Liste –
+     eigene, deutlichere Gruppenüberschrift oberhalb der jeweiligen Kuratiert/Eigene-Unterteilung. */
+  .presets-group-head {
+    font-size: 11px; font-weight: 600; color: var(--text); border-top: 1px solid var(--border);
+    padding-top: 10px; margin-top: 4px;
+  }
+  .presets-group-head:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+
+  .toast {
+    position: fixed; left: 24px; bottom: 24px; width: 300px;
+    background: var(--panel); border: 1px solid var(--critical); border-left: 4px solid var(--critical);
+    border-radius: 8px; padding: 10px 12px; box-shadow: var(--shadow); font-size: 12.5px;
+    display: none; z-index: 20;
+  }
+  .toast.visible { display: block; }
+  .toast .code { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); margin-bottom: 3px; }
+
+  /* Bestätigungs-Overlay für destruktive, sofort wirksame Aktionen ohne Undo im Mockup (löst
+     Abschnitt 8, ersetzt eine zuvor eingeführte, per Nutzer-Feedback verworfene inline
+     Zwei-Klick-Armierung): Bei einem Icon-only-Button (Mülleimer) war überhaupt nicht ersichtlich,
+     dass ein zweiter Klick etwas anderes bedeutet als der erste – die Bestätigung war unsichtbar,
+     bis man sie zufällig auslöste. Ein Overlay mit ausgeschriebenem Text + zwei eindeutig
+     beschrifteten Buttons (Abbrechen/destruktive Aktion) macht sowohl die Frage als auch die
+     beiden Antwortmöglichkeiten für jeden Button (auch Icon-only) gleich verständlich. */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(10,14,20,0.55);
+    align-items: center; justify-content: center; z-index: 50; padding: 16px;
+  }
+  .modal-overlay.visible { display: flex; }
+  .modal-box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px; width: 100%; max-width: 340px; box-shadow: var(--shadow);
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .modal-message { font-size: 13.5px; color: var(--text); line-height: 1.5; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .modal-actions .btn-sec, .modal-actions .btn-ghost-critical { flex: none; padding: 8px 14px; }
+
+  /* preview/demo controls - clearly separated from app chrome */
+  .demo-controls {
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 11.5px;
+    color: var(--text-muted);
+  }
+  .demo-controls b { color: var(--text); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .demo-controls button {
+    background: var(--panel-raised); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 5px 9px; font-size: 11.5px; cursor: pointer; font-family: var(--font-ui);
+  }
+  .demo-controls button.is-active { border-color: var(--accent); color: var(--accent); }
+  .demo-sep { width: 1px; align-self: stretch; background: var(--border); }
+
+  @media (max-width: 980px) {
+    .board { grid-template-columns: 1fr; }
+  }
+</style>
+
+<div class="cage-app">
+
+  <div class="statusbar">
+    <div class="wordmark"><b>CAGE</b><span>Custom Auto-Gain Equalizer · Arbeitstitel</span></div>
+    <div class="status-chip"><span class="dot"></span> Sidecar bereit</div>
+    <div class="status-chip">IPC v1.0</div>
+    <div class="statusbar-spacer"></div>
+    <div class="status-chip">Basis-Pre-Gain: <span class="mono">&minus;9.0 dB</span></div>
+  </div>
+
+  <div class="safe-banner" id="safeBanner">
+    <div class="icon">!</div>
+    <div class="msg"><b>Sicherheitsabschaltung aktiv</b> &mdash; <span class="cause">Watchdog: Sidecar-Prozess reagiert nicht (7.1)</span></div>
+    <button class="btn-ghost-critical">Details</button>
+    <button class="btn-ghost-critical">Erneut versuchen</button>
+  </div>
+
+  <div class="source-bar">
+    <div class="source-field">
+      <label class="field-label">Zielgerät (3.0)</label>
+      <select class="select">
+        <option>USB DAC — Sennheiser GSX 1000</option>
+        <option>Lautsprecher — Realtek USB Audio</option>
+        <option>Kopfhörer (Bluetooth) — WH-1000XM5</option>
+      </select>
+      <div class="format-row">
+        <div class="measurement-chip" style="flex:1;" tabindex="0" aria-describedby="formatTooltip">
+          24-bit &middot; 48 kHz
+          <div class="tooltip-pop" id="formatTooltip">Aktuelles Windows-Wiedergabeformat &ndash; nur Anzeige. Ändern über die Windows-Einstellungen-App (Microsoft: "Clients can read these properties, but should not set them").</div>
+        </div>
+        <button class="btn-format" title="Windows-Einstellungen öffnen (ms-settings:sound-defaultoutputproperties bzw. sound-devices) — zeigt das Format-Dropdown direkt, kein Control Panel">⚙</button>
+      </div>
+    </div>
+    <div class="source-field">
+      <label class="field-label">Kopfhörer-Modell</label>
+      <select class="select">
+        <option>Sennheiser HD 6XX</option>
+        <option>Beyerdynamic DT 990 Pro</option>
+        <option>Sony WH-1000XM5</option>
+      </select>
+    </div>
+    <div class="source-sep">oder</div>
+    <button class="btn-import">REW-Messung importieren</button>
+    <div class="measurement-chip" tabindex="0" aria-describedby="measurementImportTooltip">
+      <span id="measurementLabel">hd6xx_leftright_avg.txt · 694 Pkt.</span>
+      <div class="tooltip-pop" id="measurementImportTooltip">
+        Importiert 10:42<br>
+        Trennz.: Semikolon &rarr; Dezimal: Komma<br>
+        (autodetektiert, 3.1)
+      </div>
+    </div>
+  </div>
+
+  <div class="board">
+
+    <!-- LEFT (WIDE): TARGET + CHART -->
+    <div class="panel" style="gap:14px;">
+      <div class="eyebrow">Target</div>
+      <div>
+        <label class="field-label">Zielkurve</label>
+        <select class="select" id="targetCurveSelect" onchange="onTargetCurveChange()">
+          <option>Harman Over-Ear 2018</option>
+          <option>Diffuse Field</option>
+          <option>Free Field</option>
+        </select>
+      </div>
+
+      <div style="display:flex; gap:16px;">
+        <div class="macro-row" style="flex:1;">
+          <div class="top"><span>Bass</span><span class="val mono" id="bassVal">+0.0 dB</span></div>
+          <input type="range" min="-6" max="6" step="0.5" value="0" id="bassSlider" oninput="macroChange('bass', this.value)">
+        </div>
+        <div class="macro-row" style="flex:1;">
+          <div class="top"><span>Treble</span><span class="val mono" id="trebleVal">+0.0 dB</span></div>
+          <input type="range" min="-6" max="6" step="0.5" value="0" id="trebleSlider" oninput="macroChange('treble', this.value)">
+        </div>
+      </div>
+      <div class="caption">Shortcut für die manuelle Filter-Ebene (LS@105Hz/HS@10kHz, Q0.7) &mdash; ändert nicht die Zielkurve selbst (siehe 3.4).</div>
+
+      <div class="chart-wrap">
+        <div class="chart-panel">
+          <svg id="chart" viewBox="0 0 900 380"></svg>
+          <div class="node-tip" id="nodeTip"></div>
+        </div>
+        <div class="legend">
+          <button class="item" id="leg-dry" onclick="toggleVisibility('dry')"><span class="swatch dashed"></span> Dry (Referenz)</button>
+          <button class="item" id="leg-a" onclick="toggleVisibility('a')"><span class="swatch dot" style="background:var(--accent-a)"></span> Slot A</button>
+          <button class="item" id="leg-b" onclick="toggleVisibility('b')"><span class="swatch dot" style="background:var(--accent-b)"></span> Slot B</button>
+          <button class="item off" id="leg-measured" onclick="toggleVisibility('measured')"><span class="swatch dotted"></span> Gemessener Frequenzgang (3.1, Scope-Erweiterung)</button>
+          <button class="item off" id="leg-target" onclick="toggleVisibility('target')"><span class="swatch longdash"></span> Zielkurve (3.2, nicht ziehbar)</button>
+          <button class="item off" id="leg-advanced" onclick="toggleVisibility('advanced')"><span class="swatch dot" style="background:var(--text-muted); border-radius:1px; transform:rotate(45deg);"></span> AutoEQ-Bänder (Erweitert, nicht ziehbar)</button>
+        </div>
+      </div>
+
+      <div class="filter-list">
+        <div class="filter-list-head">
+          <span class="eyebrow" style="font-size:10.5px;">Custom-Filter (aktiver Slot, nach fc sortiert)</span>
+          <button class="btn-add-filter" id="btnAddFilter" onclick="addFilter()"><svg class="btn-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> Filter hinzufügen</button>
+        </div>
+        <div class="filter-rows" id="filterRows"></div>
+      </div>
+    </div>
+
+    <!-- RIGHT: OUTPUT & SLOTS -->
+    <div class="panel">
+      <div class="eyebrow">Output &amp; Slots</div>
+
+      <div class="key-cluster">
+        <button class="keycap" id="key-w" onclick="toggleModeKey()">
+          <span class="keycap-letter">W</span><span class="keycap-sub" id="keyWSub">Vergleich</span>
+        </button>
+        <button class="keycap key-active-a" id="key-a" onclick="setActiveSlot('a')">
+          <span class="keycap-letter">A</span><span class="keycap-sub">Slot A</span>
+        </button>
+        <button class="keycap" id="key-s" onclick="setActiveSlot('b')">
+          <span class="keycap-letter">S</span><span class="keycap-sub">Slot B</span>
+        </button>
+        <button class="keycap" id="key-d" onclick="setActiveSlot('dry')">
+          <span class="keycap-letter">D</span><span class="keycap-sub">Dry</span>
+        </button>
+      </div>
+      <div class="caption" style="text-align:center;">Auch per Tastatur bedienbar: A/S/D/W, solange dieses Fenster fokussiert ist.</div>
+      <div class="mode-info" tabindex="0" aria-describedby="modeCaption">
+        <span class="icon">i</span> Details
+        <div class="tooltip-pop" id="modeCaption">Basis-Pre-Gain aktiv &mdash; sicherer Vergleichspegel für A/B/Dry.</div>
+      </div>
+
+      <div class="slot-detail">
+        <div class="readout-row"><span>Basis-Pre-Gain</span><span class="v mono">&minus;9.0 dB</span></div>
+        <div class="readout-row"><span>Lautheitsausgleich (Slot A)</span><span class="v mono">&minus;2.3 dB</span></div>
+        <div class="readout-row readout-total"><span>Effektiver Preamp</span><span class="v mono" id="effectivePreamp">&minus;11.3 dB</span></div>
+        <div class="clip-warn" id="clipWarn" tabindex="0" aria-describedby="clipWarnTooltip">
+          <span class="icon">!</span> Notfall-Clipping-Schutz aktiv
+          <div class="tooltip-pop" id="clipWarnTooltip">Notfall-Clipping-Schutz aktiv statt Lautheitsausgleich &ndash; die Kurve enthält einen extremen Peak (4.2).</div>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn-sec" onclick="copySlot('a','b')">Kopieren A&rarr;B</button>
+        <button class="btn-sec" onclick="copySlot('b','a')">Kopieren B&rarr;A</button>
+        <button class="btn-sec" onclick="resetActiveSlot()">Zurücksetzen</button>
+      </div>
+
+      <div class="presets-panel">
+        <div class="presets-panel-head">
+          <div class="eyebrow" style="font-size:10.5px;">Presets &amp; Filter-Vorlagen</div>
+          <button class="btn-add-filter" onclick="toggleSaveForm()"><svg class="btn-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M5 4h11l3 3v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8 4v5h6V4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M8 21v-6h8v6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg> Speichern</button>
+        </div>
+        <div class="save-form" id="saveForm" style="display:none;">
+          <div class="save-type-toggle">
+            <button class="save-type-btn is-active" id="saveType-preset" onclick="setSaveType('preset')">Preset</button>
+            <button class="save-type-btn" id="saveType-template" onclick="setSaveType('template')">Filter-Vorlage</button>
+          </div>
+          <div class="save-type-hint" id="saveTypeHint">Sichert Messung, Zielkurve &amp; Custom-Filter des aktiven Slots (3.5).</div>
+          <input type="text" class="text-input" id="saveNameInput" placeholder="Name…" maxlength="60" onkeydown="if(event.key==='Enter'){confirmSavePreset();}">
+          <div class="btn-row">
+            <button class="btn-sec" onclick="confirmSavePreset()">Speichern</button>
+            <button class="btn-sec" onclick="toggleSaveForm()">Abbrechen</button>
+          </div>
+        </div>
+        <div class="presets-list" id="presetsList"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="demo-controls">
+    <b>Mockup-Vorschau (kein Teil der App)</b>
+    <button id="btnSafe" onclick="toggleDemo('safe')">Safe-State-Banner</button>
+    <button id="btnToast" onclick="toggleDemo('toast')">Validierungsfehler-Toast</button>
+    <button id="btnClip" onclick="toggleDemo('clip')">Clipping-Warnung (Slot A)</button>
+    <span class="demo-sep"></span>
+    <button id="theme-auto" class="is-active" onclick="setThemePreview('auto')">Theme: Auto</button>
+    <button id="theme-light" onclick="setThemePreview('light')">Hell erzwingen</button>
+    <button id="theme-dark" onclick="setThemePreview('dark')">Dunkel erzwingen</button>
+  </div>
+
+  <div class="toast" id="toast">
+    <div class="code">INVALID_MEASUREMENT_DATA</div>
+    Diese Datei enthält keine gültigen Messdaten.
+  </div>
+
+  <div class="modal-overlay" id="confirmOverlay">
+    <div class="modal-box" role="alertdialog" aria-modal="true" aria-describedby="confirmMessage">
+      <div class="modal-message" id="confirmMessage"></div>
+      <div class="modal-actions">
+        <button class="btn-sec" id="confirmCancelBtn" onclick="cancelConfirm()">Abbrechen</button>
+        <button class="btn-ghost-critical" id="confirmOkBtn" onclick="confirmOk()">Bestätigen</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const FMIN = 20, FMAX = 20000;
+  const DBMIN = -12, DBMAX = 12;
+  const MARGIN = { left: 46, right: 16, top: 14, bottom: 24 };
+
+  // Plot bounds in SVG user units, kept 1:1 with the container's actual CSS-pixel size
+  // (see syncViewBox below) so stroke-width/font-size — set as plain px in CSS — render at a
+  // constant on-screen weight instead of being stretched by the viewBox-to-viewport scale factor.
+  let plot = { x0: 60, x1: 860, y0: 20, y1: 340, w: 900, h: 380 };
+
+  function fx(freq){
+    const t = (Math.log10(freq) - Math.log10(FMIN)) / (Math.log10(FMAX) - Math.log10(FMIN));
+    return plot.x0 + t * (plot.x1 - plot.x0);
+  }
+  function fy(db){
+    const t = (db - DBMAX) / (DBMIN - DBMAX);
+    return plot.y0 + t * (plot.y1 - plot.y0);
+  }
+  function invY(y){
+    const t = (y - plot.y0) / (plot.y1 - plot.y0);
+    return DBMAX + t * (DBMIN - DBMAX);
+  }
+  function invX(x){
+    const t = (x - plot.x0) / (plot.x1 - plot.x0);
+    return Math.pow(10, Math.log10(FMIN) + t * (Math.log10(FMAX) - Math.log10(FMIN)));
+  }
+
+  function syncViewBox(){
+    const rect = chartPanel.getBoundingClientRect();
+    const w = Math.max(200, Math.round(rect.width));
+    const h = Math.max(120, Math.round(rect.height));
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    plot = { x0: MARGIN.left, x1: w - MARGIN.right, y0: MARGIN.top, y1: h - MARGIN.bottom, w, h };
+  }
+
+  // catmull-rom to bezier path through anchor points (sorted by x)
+  function smoothPath(pts){
+    if (pts.length < 2) return "";
+    let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)} `;
+    for (let i = 0; i < pts.length - 1; i++){
+      const p0 = pts[i === 0 ? 0 : i - 1];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[i + 2 < pts.length ? i + 2 : i + 1];
+      const c1x = p1.x + (p2.x - p0.x) / 6;
+      const c1y = p1.y + (p2.y - p0.y) / 6;
+      const c2x = p2.x - (p3.x - p1.x) / 6;
+      const c2y = p2.y - (p3.y - p1.y) / 6;
+      d += `C ${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)} `;
+    }
+    return d;
+  }
+
+  const AUTOEQ_FREQS = [60, 250, 900, 3200, 9000];
+
+  // Rohmessung (3.1) — nur zur Darstellung, nicht editierbar/draggable. Default aus (Scope-Erweiterung).
+  const MEASURED_POINTS = [
+    {freq: 20, gain: -1.0}, {freq: 50, gain: 0.4}, {freq: 100, gain: 1.3}, {freq: 200, gain: -0.2},
+    {freq: 500, gain: -1.1}, {freq: 1000, gain: 0.2}, {freq: 2000, gain: 2.4}, {freq: 3000, gain: 4.1},
+    {freq: 4000, gain: 1.2}, {freq: 6000, gain: -2.3}, {freq: 8000, gain: 3.0}, {freq: 10000, gain: -1.4},
+    {freq: 12000, gain: 0.8}, {freq: 16000, gain: -3.1}, {freq: 20000, gain: -2.0}
+  ];
+
+  // Zielkurven-Overlay (5.2, Nutzer-Vorschlag) — nur zur Darstellung, nicht editierbar/draggable,
+  // Default aus. Rein illustrative Platzhalter-Konturen für den Mockup-Demo-Zweck (keine echten
+  // AutoEq-Zielkurven-Datensätze) — Harman mit typischem Bass-Anstieg, Diffuse Field nahezu flach
+  // mit leichtem Höhen-Tilt, Free Field mit der charakteristischen Ohrmuschel-Resonanz um ~2.7kHz.
+  const TARGET_CURVES = {
+    'Harman Over-Ear 2018': [
+      {freq: 20, gain: -1.5}, {freq: 60, gain: 2.0}, {freq: 105, gain: 4.5}, {freq: 300, gain: 1.0},
+      {freq: 1000, gain: 0}, {freq: 3000, gain: -1.5}, {freq: 8000, gain: -1.0}, {freq: 20000, gain: -4.0}
+    ],
+    'Diffuse Field': [
+      {freq: 20, gain: 0}, {freq: 1000, gain: 0}, {freq: 3000, gain: 2.0}, {freq: 8000, gain: 1.0}, {freq: 20000, gain: -1.0}
+    ],
+    'Free Field': [
+      {freq: 20, gain: 0}, {freq: 1000, gain: 0}, {freq: 2700, gain: 5.0}, {freq: 8000, gain: 2.0}, {freq: 20000, gain: 0}
+    ]
+  };
+
+  let state = {
+    activeSlot: 'a',
+    // Getrennt von activeSlot (dem Slot, den Zahlenfeld-/Drag-Bearbeitung betrifft): welches
+    // der drei Keycaps (A/B/Dry) gerade als Vergleichsziel gewählt ist. Bei Dry bleibt
+    // activeSlot bewusst auf dem zuletzt bearbeiteten Slot stehen (Editierbarkeit über die
+    // Zahlenfelder bleibt erhalten), aber compareTarget steuert separat, ob im Diagramm gerade
+    // "wirklich etwas aktiv" aussehen soll – vorher fehlte diese Trennung, wodurch der zuletzt
+    // aktive Slot bei Dry weiterhin voll sichtbar/ziehbar blieb statt wie Dry selbst neutral zu wirken.
+    compareTarget: 'a',
+    finalMode: false,
+    visible: { dry: true, a: true, b: true, measured: false, target: false, advanced: false },
+    slots: {
+      a: {
+        nodes: [
+          {type: 'LS', freq: 105, gain: 3.0, q: 0.7},
+          {type: 'PK', freq: 900, gain: -1.5, q: 1.1},
+          {type: 'PK', freq: 2500, gain: -2.4, q: 1.4},
+          {type: 'PK', freq: 8000, gain: 1.6, q: 0.8}
+        ],
+        autoeq: [-0.4, 0.6, -0.9, -1.8, 1.1]
+      },
+      b: {
+        nodes: [
+          {type: 'PK', freq: 130, gain: 1.2, q: 0.7},
+          {type: 'PK', freq: 1200, gain: 0.6, q: 1.0},
+          {type: 'PK', freq: 4500, gain: -1.1, q: 1.2}
+        ],
+        autoeq: [0.2, -0.3, 0.4, -0.6, 0.3]
+      }
+    }
+  };
+
+  const svg = document.getElementById('chart');
+  const chartPanel = document.querySelector('.chart-panel');
+  const svgNS = "http://www.w3.org/2000/svg";
+
+  function el(tag, attrs){
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function curvePointsFromNodes(nodes){
+    const sorted = [...nodes].sort((a,b) => a.freq - b.freq);
+    const pts = [{x: fx(FMIN), y: fy(0)}];
+    sorted.forEach(n => pts.push({x: fx(n.freq), y: fy(n.gain)}));
+    pts.push({x: fx(FMAX), y: fy(0)});
+    return pts;
+  }
+
+  // Für die Rohmessung: an den Rändern flach vom ersten/letzten Messpunkt aus fortgesetzt,
+  // statt (wie bei Custom-Filtern) auf 0dB zu erzwingen — die Messung hat keinen "neutralen" Nullpunkt.
+  function curvePointsFromPairs(pairs){
+    const sorted = [...pairs].sort((a,b) => a.freq - b.freq);
+    const pts = [{x: fx(FMIN), y: fy(sorted[0].gain)}];
+    sorted.forEach(p => pts.push({x: fx(p.freq), y: fy(p.gain)}));
+    pts.push({x: fx(FMAX), y: fy(sorted[sorted.length - 1].gain)});
+    return pts;
+  }
+
+  // render() = renderChart() + renderFilterList(). Getrennt, damit der Fader in der Filter-Liste
+  // (natives <input type="range">) während des Ziehens nur renderChart() auslösen kann – ein
+  // voller Neuaufbau der Liste würde das Fader-Element selbst (und damit die native Ziehgeste
+  // des Browsers darauf) mitten im Drag zerstören, analog zum Grund für die Objekt-Referenz
+  // beim Chart-Node-Drag oben.
+  function render(){
+    renderChart();
+    renderFilterList();
+  }
+
+  function renderChart(){
+    svg.innerHTML = "";
+
+    // grid
+    const gridFreqs = [20,50,100,200,500,1000,2000,5000,10000,20000];
+    gridFreqs.forEach(f => {
+      const x = fx(f);
+      svg.appendChild(el('line', {x1:x, y1:plot.y0, x2:x, y2:plot.y1, class:'grid-line'}));
+      const label = f >= 1000 ? (f/1000)+"k" : f;
+      const t = el('text', {x:x, y:plot.y1+16, class:'axis-label', 'text-anchor':'middle'});
+      t.textContent = label;
+      svg.appendChild(t);
+    });
+    [-12,-6,0,6,12].forEach(db => {
+      const y = fy(db);
+      svg.appendChild(el('line', {x1:plot.x0, y1:y, x2:plot.x1, y2:y, class: db===0 ? 'zero-line':'grid-line'}));
+      const t = el('text', {x:plot.x0-10, y:y+4, class:'axis-label', 'text-anchor':'end'});
+      t.textContent = (db>0?'+':'')+db;
+      svg.appendChild(t);
+    });
+
+    // measured (raw, non-interactive, default hidden — Scope-Erweiterung, 3.1)
+    if (state.visible.measured){
+      const measuredPts = curvePointsFromPairs(MEASURED_POINTS);
+      svg.appendChild(el('path', {d: smoothPath(measuredPts), class:'curve-measured'}));
+    }
+
+    // Zielkurve (absolute Kontur der gewählten Zielkurve selbst, 3.2) — non-interactive, default
+    // hidden (5.2). Liest die aktuell im Dropdown gewählte Zielkurve live aus, damit ein Wechsel
+    // der Auswahl (auch ohne erneutes Ein-/Ausblenden) sofort die passende Kontur zeigt.
+    if (state.visible.target){
+      const targetName = document.getElementById('targetCurveSelect').value;
+      const targetPts = curvePointsFromPairs(TARGET_CURVES[targetName] || TARGET_CURVES['Harman Over-Ear 2018']);
+      svg.appendChild(el('path', {d: smoothPath(targetPts), class:'curve-target'}));
+    }
+
+    // dry
+    if (state.visible.dry){
+      svg.appendChild(el('path', {d: `M ${plot.x0} ${fy(0)} L ${plot.x1} ${fy(0)}`, class:'curve-dry'}));
+    }
+
+    // Custom-Filter nach fc sortieren (Graphic-EQ-Optik der Filter-Liste, s.u.) – vor dem
+    // Zeichnen und unabhängig von der Legenden-Sichtbarkeit, da die Filter-Liste des aktiven
+    // Slots auch dann sortiert bleiben soll, wenn dessen Kurve gerade ausgeblendet ist.
+    // Sicher auch während eines laufenden Drags, da activeDrag eine Objekt-Referenz hält,
+    // keinen Array-Index (s. attachDrag).
+    state.slots.a.nodes.sort((x,y) => x.freq - y.freq);
+    state.slots.b.nodes.sort((x,y) => x.freq - y.freq);
+
+    // slot curves
+    ['a','b'].forEach(slotKey => {
+      if (!state.visible[slotKey]) return;
+      // Bei Dry als Vergleichsziel (löst Abschnitt 8) gilt keiner der beiden Slots als "aktiv":
+      // beide Kurven erscheinen gedimmt, keine Filter-Punkte/-Ringe werden gezeichnet – vorher
+      // blieb der zuletzt bearbeitete Slot fälschlich voll sichtbar samt ziehbaren Punkten,
+      // obwohl gerade Dry (unbearbeitetes Signal) angehört wird.
+      const isActive = state.activeSlot === slotKey && state.compareTarget !== 'dry';
+      const slot = state.slots[slotKey];
+      const pts = curvePointsFromNodes(slot.nodes);
+      const path = el('path', {d: smoothPath(pts), class: `curve-${slotKey}` + (isActive ? '' : ' curve-dim')});
+      svg.appendChild(path);
+
+      // autoeq markers (advanced mode)
+      if (state.visible.advanced){
+        AUTOEQ_FREQS.forEach((f,i) => {
+          const gain = slot.autoeq[i];
+          const x = fx(f), y = fy(gain);
+          const d = el('rect', {x:x-4, y:y-4, width:8, height:8, class:'autoeq-marker', transform:`rotate(45 ${x} ${y})`, opacity: isActive ? 0.85 : 0.3});
+          svg.appendChild(d);
+        });
+      }
+
+      // draggable nodes only for active editable slot (not dry)
+      if (isActive){
+        slot.nodes.forEach((n, idx) => {
+          const x = fx(n.freq), y = fy(n.gain);
+          const ringR = 10 + 22 / n.q;
+          const ring = el('circle', {cx:x, cy:y, r:ringR, class:'node-q-ring', stroke: slotKey==='a' ? 'var(--accent-a)' : 'var(--accent-b)'});
+          svg.appendChild(ring);
+          const c = el('circle', {cx:x, cy:y, r:7, class:`node node-${slotKey}`, 'data-idx':idx});
+          attachDrag(c, slotKey, n);
+          svg.appendChild(c);
+        });
+      }
+    });
+  }
+
+  // Filtertyp-Icons statt Textkürzel: kleine Kurvenform statt "PK"/"LS"/"HS" – liest sich näher
+  // am tatsächlichen Effekt des Filters. PK = Glocke, LS/HS = Shelf-Stufe links/rechts (Spiegelbilder).
+  const FILTER_TYPES = ['PK', 'LS', 'HS'];
+  const TYPE_LABEL = { PK: 'Peaking', LS: 'Low-Shelf', HS: 'High-Shelf' };
+  const TYPE_ICON_PATH = {
+    // Flache Schultern links/rechts + deutliche Spitze in der Mitte statt einer runden
+    // Glockenkurve über die volle Breite – liest sich eindeutiger als "EQ-Kurve mit einem
+    // Peak", nicht als generische Glocke/Bell-Form.
+    PK: '<path d="M2 11 L6 11 Q12 11 12 3 Q12 11 18 11 L22 11" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    LS: '<path d="M2 5 L9 5 L15 11 L22 11" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+    HS: '<path d="M2 11 L9 11 L15 5 L22 5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
+  };
+  function typeIconSVG(type){
+    return `<svg viewBox="0 0 24 16" xmlns="http://www.w3.org/2000/svg">${TYPE_ICON_PATH[type]}</svg>`;
+  }
+
+  // Eindeutiges Löschen-Icon (Mülleimer) statt eines reinen "×"-Zeichens (löst Abschnitt 8) –
+  // ein "×" liest sich leicht als "schließen"/"abbrechen" statt "endgültig entfernen"; ein
+  // Mülleimer-Symbol ist die verbreitete, eindeutige Konvention für eine destruktive
+  // Löschen-Aktion (z. B. auch in FabFilter Pro-Q, Photoshop-Ebenenpalette). `stroke="currentColor"`
+  // statt einer festen Farbe, damit der bestehende Hover-Effekt (Farbwechsel auf --critical
+  // über die `color`-Eigenschaft des Buttons) unverändert weiterfunktioniert.
+  const TRASH_ICON_SVG = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M4 7h16M9.5 7V4.8c0-.72.58-1.3 1.3-1.3h2.4c.72 0 1.3.58 1.3 1.3V7M6.5 7l.8 12.7c.05.7.65 1.3 1.35 1.3h6.7c.7 0 1.3-.6 1.35-1.3L18 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  // Editierbare Filter-Liste (5.2) – ergänzt Drag/Mausrad um Präzision, Reproduzierbarkeit und
+  // Tastatur-/Screenreader-Zugänglichkeit. Zeigt/editiert die Custom-Filter des aktiven Slots
+  // (bereits nach fc sortiert, s. renderChart), bidirektional mit dem Diagramm synchron.
+  // Zeilen/Spalten transponiert: ein Filter = eine vertikale Spalte (Graphic-EQ-Optik).
+  // Bearbeitung (Filter-Liste + Macro-Regler) nur, solange Dry NICHT das Vergleichsziel ist
+  // (löst Abschnitt 8) – vorher blieb der zuletzt aktive Slot über Zahlenfelder/Fader/Macro-
+  // Regler weiterhin bearbeitbar, obwohl gerade Dry angehört wird: eine blinde Änderung ohne
+  // hörbares Feedback, bis man manuell zurückschaltet. Statt eines nur gedimmten, aber weiterhin
+  // interaktiven Bereichs: ein erklärender Platzhalter ersetzt die Filter-Spalten vollständig,
+  // "+ Filter hinzufügen" sowie beide Macro-Regler werden per natives `disabled` gesperrt
+  // (nicht nur optisch, auch tatsächlich nicht fokussierbar/bedienbar).
+  function renderFilterList(){
+    const rows = document.getElementById('filterRows');
+    const addBtn = document.getElementById('btnAddFilter');
+    const bassSlider = document.getElementById('bassSlider');
+    const trebleSlider = document.getElementById('trebleSlider');
+    const dryActive = state.compareTarget === 'dry';
+    addBtn.disabled = dryActive;
+    bassSlider.disabled = dryActive;
+    trebleSlider.disabled = dryActive;
+
+    rows.innerHTML = '';
+    if (dryActive){
+      const empty = document.createElement('div');
+      empty.className = 'filter-list-empty';
+      empty.textContent = 'Kein aktiver Slot – wähle Slot A oder B (Taste A/S), um Custom-Filter zu bearbeiten.';
+      rows.appendChild(empty);
+      return;
+    }
+    const nodes = state.slots[state.activeSlot].nodes;
+    // Kontextuelle Erstbenutzer-Führung statt eines stillen Leerbereichs (löst Abschnitt 8):
+    // ein frisch zurückgesetzter oder noch nie bearbeiteter Slot zeigte hier bisher einfach
+    // nichts an – keine Erklärung, wie ein erster Filter entsteht. Bewusst kein Hinweis auf
+    // Chart-Doppelklick (5.2 entscheidet sich explizit dagegen als primären Weg).
+    if (nodes.length === 0){
+      const empty = document.createElement('div');
+      empty.className = 'filter-list-empty';
+      empty.textContent = 'Noch keine Custom-Filter in diesem Slot – über „Filter hinzufügen" oben einen ersten Filter anlegen.';
+      rows.appendChild(empty);
+      return;
+    }
+    nodes.forEach((n, idx) => {
+      const band = document.createElement('div');
+      band.className = 'eq-band';
+      band.innerHTML = `
+        <button class="eq-type-btn" onclick="cycleFilterType(${idx})" title="${TYPE_LABEL[n.type]} (klicken zum Wechseln)">${typeIconSVG(n.type)}</button>
+        <span class="eq-num-label">dB</span>
+        <input type="number" class="eq-num" data-field="gain" value="${n.gain.toFixed(1)}" step="0.1" min="-12" max="12" oninput="liveUpdateFilterField(${idx}, 'gain', this.value)">
+        <div class="eq-fader-wrap">
+          <input type="range" class="eq-fader" data-field="gain" min="-12" max="12" step="0.1" value="${n.gain}"
+                 oninput="dragFilterGain(${idx}, this.value)" onchange="updateFilterField(${idx}, 'gain', this.value)">
+        </div>
+        <span class="eq-num-label">Hz</span>
+        <input type="number" class="eq-num" data-field="freq" value="${Math.round(n.freq)}" min="20" max="20000"
+               onkeydown="return fcArrowStep(event, ${idx})" oninput="liveUpdateFilterField(${idx}, 'freq', this.value)"
+               onchange="commitFilterField(${idx}, 'freq', this.value)">
+        <span class="eq-num-label">Q</span>
+        <input type="number" class="eq-num" data-field="q" value="${n.q.toFixed(2)}" step="0.05" min="0.3" max="5" oninput="liveUpdateFilterField(${idx}, 'q', this.value)">
+        <button class="eq-del-btn" onclick="removeFilter(${idx})" aria-label="Filter entfernen" title="Filter entfernen">${TRASH_ICON_SVG}</button>
+      `;
+      rows.appendChild(band);
+    });
+  }
+
+  window.cycleFilterType = function(idx){
+    const node = state.slots[state.activeSlot].nodes[idx];
+    node.type = FILTER_TYPES[(FILTER_TYPES.indexOf(node.type) + 1) % FILTER_TYPES.length];
+    render();
+  };
+
+  // Live-Update während des Fader-Ziehens: nur Chart + das eine Zahlenfeld aktualisieren,
+  // NICHT die ganze Liste neu aufbauen (würde das native Range-Input mitten im Drag zerstören
+  // und die Browser-eigene Ziehgeste darauf abbrechen – s. Kommentar bei render()/renderChart()).
+  window.dragFilterGain = function(idx, val){
+    const node = state.slots[state.activeSlot].nodes[idx];
+    node.gain = parseFloat(val);
+    renderChart();
+    const band = document.querySelectorAll('.eq-band')[idx];
+    const gainField = band && band.querySelector('input[data-field="gain"][type="number"]');
+    if (gainField) gainField.value = node.gain.toFixed(1);
+  };
+
+  // Klemmt einen fc-Wert an die Nachbarn im (bereits nach fc sortierten) Array, statt eine
+  // Umsortierung zuzulassen: renderChart() sortiert state.slots.X.nodes bei JEDEM Aufruf neu
+  // (nicht erst beim vollen render()) – die vorherige Annahme, eine Neusortierung würde
+  // "unkritisch" bis zum nächsten vollen render() warten, war falsch. Die im DOM verankerten
+  // idx-Werte (onclick/onkeydown/oninput-Attribute) werden bei einem reinen fc-Live-Update
+  // NICHT neu vergeben (kein Listen-Neuaufbau, s. liveUpdateFilterField/fcArrowStep) – überholt
+  // ein Filter dabei einen Nachbarn, zeigt derselbe idx danach auf einen anderen Filter als das
+  // gerade bediente Eingabefeld, und alle Felder dieser Zeile bearbeiten ab da den falschen
+  // Filter. Einfachste Lösung (statt Listen-Neuaufbau bei jedem Tastendruck, was den Fokus
+  // wieder zerstören würde): den Wert an der Nachbargrenze klemmen, eine Umsortierung durch
+  // reine fc-Edits kann so gar nicht erst auftreten. Ergebnis immer ganzzahlig (Festpunkt, Hz).
+  function clampFreqNoReorder(nodes, idx, proposed){
+    const lower = idx > 0 ? nodes[idx - 1].freq + 1 : FMIN;
+    const upper = idx < nodes.length - 1 ? nodes[idx + 1].freq - 1 : FMAX;
+    if (upper < lower) return Math.round(nodes[idx].freq);
+    return Math.round(Math.min(upper, Math.max(lower, proposed)));
+  }
+
+  // Pfeiltasten am fc-Feld schrittern logarithmisch (multiplikativ) statt linear/additiv:
+  // 1Hz Schritt ist bei 10000Hz irrelevant (unterhalb der Wahrnehmungsschwelle), bei 20Hz
+  // dagegen bereits spürbar. Fester Faktor (±2%) ist bei jeder fc gleich stark wahrnehmbar,
+  // eine feste Hz-Schrittweite dagegen nicht. Ersetzt das native (lineare) step-Verhalten
+  // vollständig für Pfeiltasten – Freitext-Eingabe/Tippen bleibt unverändert möglich.
+  window.fcArrowStep = function(e, idx){
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return true;
+    e.preventDefault();
+    const nodes = state.slots[state.activeSlot].nodes;
+    const node = nodes[idx];
+    const factor = 1.02;
+    let next = e.key === 'ArrowUp' ? node.freq * factor : node.freq / factor;
+    next = Math.min(FMAX, Math.max(FMIN, next));
+    next = clampFreqNoReorder(nodes, idx, next);
+    node.freq = next;
+    e.target.value = next;
+    renderChart();
+    return false;
+  };
+
+  // Live-Update für Zahlenfelder (fc/Gain/Q): denselben Fehler wie beim Fader vermeiden.
+  // Bei <input type="number"> lösen die Pfeiltasten (und die nativen Spinner-Pfeile) *sofort*
+  // ein change-Ereignis pro Schritt aus, nicht erst beim Verlassen des Felds wie bei Freitext.
+  // War das an den vollen render() gekoppelt, zerstörte jeder einzelne Pfeiltasten-Schritt das
+  // gesamte Feld (Listen-Neuaufbau) und der Fokus ging verloren. Hier daher nur Chart-Update,
+  // kein Listen-Neuaufbau während der Eingabe. Beim fc-Feld zusätzlich an den Nachbarn geklemmt
+  // (clampFreqNoReorder) – auch beim Freitext-Tippen, nicht nur bei Pfeiltasten: derselbe
+  // idx-Bug träte sonst identisch beim Durchtippen einer fc über einen Nachbarn hinweg auf.
+  // Unkritisch für die Zwischeneingabe, da die Klemmung nur den internen Wert/das Diagramm
+  // betrifft, nicht den vom Nutzer gerade getippten Text im Feld selbst.
+  window.liveUpdateFilterField = function(idx, field, val){
+    const parsed = parseFloat(val);
+    if (isNaN(parsed)) return;
+    const nodes = state.slots[state.activeSlot].nodes;
+    const node = nodes[idx];
+    const band = document.querySelectorAll('.eq-band')[idx];
+    if (field === 'freq'){
+      const wanted = Math.round(Math.min(FMAX, Math.max(FMIN, parsed)));
+      const clamped = clampFreqNoReorder(nodes, idx, wanted);
+      node.freq = clamped;
+      // Sichtbare Rückmeldung, solange der getippte Wert (noch) nicht 1:1 übernommen werden
+      // kann (s. Kommentar bei clampFreqNoReorder) – ohne dieses Signal wirkte die Eingabe
+      // wie folgenlos ("Wert bleibt stehen, wird aber nicht übernommen"), da das Feld selbst
+      // während des Tippens bewusst nicht überschrieben wird (kein Kampf um die Cursor-Position).
+      // Verschwindet automatisch beim endgültigen Commit (onchange, s. commitFilterField), da
+      // der volle render() die Liste inkl. aller Klassen frisch aufbaut.
+      const freqField = band && band.querySelector('input.eq-num[data-field="freq"]');
+      if (freqField) freqField.classList.toggle('eq-num--clamped', clamped !== wanted);
+    } else {
+      node[field] = parsed;
+    }
+    renderChart();
+    if (field === 'gain'){
+      const fader = band && band.querySelector('input[data-field="gain"][type="range"]');
+      if (fader) fader.value = parsed;
+    }
+  };
+
+  window.updateFilterField = function(idx, field, val){
+    const node = state.slots[state.activeSlot].nodes[idx];
+    node[field] = parseFloat(val);
+    render();
+  };
+
+  // Endgültiger Commit einer getippten fc-Eingabe (change-Ereignis, also bei Verlassen des
+  // Felds) – bewusst OHNE die Nachbar-Klemmung aus clampFreqNoReorder. Die Klemmung während
+  // des Tippens verhindert nur die transiente idx-Verwechslung (kein Listen-Neuaufbau während
+  // der Eingabe, s. liveUpdateFilterField), sie darf eine tatsächlich gewollte Umsortierung
+  // nicht dauerhaft blockieren – sonst bliebe ein Filter für immer auf der falschen Seite eines
+  // Nachbarn hängen, sobald der Nutzer ihn per Zahleneingabe daran vorbeibewegen wollte. Der
+  // volle render() sortiert neu und baut die Liste mit frischen idx-Bindungen auf, die
+  // gewünschte Positionsänderung im Graphic-EQ wird dadurch tatsächlich wirksam.
+  window.commitFilterField = function(idx, field, val){
+    const node = state.slots[state.activeSlot].nodes[idx];
+    const parsed = parseFloat(val);
+    if (isNaN(parsed)){ render(); return; }
+    node[field] = field === 'freq' ? Math.round(Math.min(FMAX, Math.max(FMIN, parsed))) : parsed;
+    render();
+  };
+  window.addFilter = function(){
+    state.slots[state.activeSlot].nodes.push({type: 'PK', freq: 1000, gain: 0, q: 0.7});
+    render();
+  };
+  window.removeFilter = function(idx){
+    state.slots[state.activeSlot].nodes.splice(idx, 1);
+    render();
+  };
+
+  // Rendering fully rebuilds the SVG (grid + curves + nodes) on every change, so a node
+  // being dragged is destroyed and replaced mid-gesture. Element-bound pointer capture would
+  // therefore be released after the first move; tracking the drag on `window` instead survives
+  // across re-renders.
+  const tip = document.getElementById('nodeTip');
+  // {slotKey, node}: eine direkte Objekt-Referenz statt eines Array-Index – die Filter-Liste
+  // sortiert bei jedem render() nach fc (s.u.), ein Index-basierter Verweis würde während eines
+  // laufenden Drags plötzlich auf einen anderen Filter zeigen, sobald sich die Sortierreihenfolge
+  // durch die Drag-Bewegung selbst ändert (z.B. wenn ein Punkt über einen anderen hinaus gezogen wird).
+  let activeDrag = null;
+
+  function updateTip(clientX, clientY, n){
+    const rect = svg.getBoundingClientRect();
+    tip.style.left = (clientX - rect.left + 14) + 'px';
+    tip.style.top = (clientY - rect.top - 10) + 'px';
+    tip.textContent = `${Math.round(n.freq)} Hz  ${n.gain>=0?'+':''}${n.gain.toFixed(1)} dB  Q ${n.q.toFixed(2)}`;
+    tip.style.display = 'block';
+  }
+
+  window.addEventListener('pointermove', (e) => {
+    if (!activeDrag) return;
+    const rect = svg.getBoundingClientRect();
+    const scaleX = plot.w / rect.width, scaleY = plot.h / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    const n = activeDrag.node;
+    n.freq = Math.min(FMAX, Math.max(FMIN, invX(Math.min(plot.x1, Math.max(plot.x0, x)))));
+    n.gain = Math.min(DBMAX, Math.max(DBMIN, invY(Math.min(plot.y1, Math.max(plot.y0, y)))));
+    updateTip(e.clientX, e.clientY, n);
+    render();
+  });
+  function endDrag(){
+    activeDrag = null;
+    tip.style.display = 'none';
+  }
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', endDrag);
+
+  function attachDrag(el_, slotKey, n){
+    el_.addEventListener('pointerdown', (e) => {
+      // Ohne preventDefault() bleibt die native Standardaktion des Browsers aktiv – dazu zählt
+      // das Starten einer Text-/Element-Selektion, sobald sich der Zeiger bei gedrücktem Button
+      // bewegt. Das lief bisher parallel zum eigenen Drag mit, und je nach Mausbewegung "gewann"
+      // mal die native Selektion (sichtbar als Markierung des Charts statt eines Node-Drags) –
+      // die eigentliche Ursache des unregelmäßig auftretenden Ziehen-Problems, nicht bloß
+      // Daneben-Klicken auf einen zu kleinen Hit-Bereich.
+      e.preventDefault();
+      activeDrag = {slotKey, node: n};
+      updateTip(e.clientX, e.clientY, n);
+    });
+    el_.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      n.q = Math.min(5, Math.max(0.3, n.q + (e.deltaY < 0 ? 0.1 : -0.1)));
+      updateTip(e.clientX, e.clientY, n);
+      render();
+    }, {passive:false});
+  }
+
+  window.setActiveSlot = function(slot){
+    // Dry has no editable node-set of its own; selecting it just switches which curve is
+    // being compared (5.2) and leaves the last-edited slot (A or B) as the one drag/wheel affect
+    // (Zahlenfeld-/Drag-Bearbeitung bleibt bewusst auf dem zuletzt aktiven Slot). compareTarget
+    // hält getrennt fest, welches Keycap gerade das Vergleichsziel ist – steuert in renderChart,
+    // ob überhaupt einer der beiden Slots "aktiv" (volle Deckkraft, ziehbare Punkte) aussehen soll.
+    document.getElementById('key-d').className = 'keycap' + (slot==='dry' ? ' key-active-dry' : '');
+    document.getElementById('key-a').className = 'keycap' + (slot==='a' ? ' key-active-a' : '');
+    document.getElementById('key-s').className = 'keycap' + (slot==='b' ? ' key-active-b' : '');
+    state.compareTarget = slot;
+    if (slot !== 'dry') state.activeSlot = slot;
+    // Kurve automatisch einblenden, sobald der zugehörige Slot ausgewählt wird (löst Abschnitt 8)
+    // – sonst bliebe die Kurve unsichtbar (und ohne ziehbare Punkte, da renderChart pro Slot
+    // early-returned, wenn state.visible[slotKey] falsch ist), obwohl der Nutzer gerade genau
+    // diesen Slot bearbeiten/vergleichen möchte. Bewusst NICHT dauerhaft erzwungen ("nicht
+    // setzend"): eine einmalige Aktion nur im Moment der Auswahl, kein fortlaufend erzwungener
+    // Zustand – der Nutzer kann die Kurve über die Legende danach weiterhin frei wieder ausblenden,
+    // ohne dass ein erneuter Slot-Wechsel nötig wäre, damit das wirkt.
+    if (!state.visible[slot]){
+      state.visible[slot] = true;
+      document.getElementById('leg-' + slot).classList.remove('off');
+    }
+    render();
+  };
+
+  // Legend-Klick: reine Diagramm-Sichtbarkeit, unabhängig vom aktiven Slot/den Dry-A-B-Tabs
+  // (5.2) — ein ausgeblendeter Slot bleibt weiterhin über die Slot-Tabs wähl-/hörbar.
+  window.toggleVisibility = function(key){
+    state.visible[key] = !state.visible[key];
+    document.getElementById('leg-' + key).classList.toggle('off', !state.visible[key]);
+    render();
+  };
+
+  window.macroChange = function(which, val){
+    const v = parseFloat(val);
+    document.getElementById(which === 'bass' ? 'bassVal' : 'trebleVal').textContent = (v>=0?'+':'') + v.toFixed(1) + ' dB';
+    const slot = state.slots[state.activeSlot];
+    const target = which === 'bass' ? 105 : 10000;
+    const wantedType = which === 'bass' ? 'LS' : 'HS';
+    // Nur ein Knoten desselben Typs (LS für Bass, HS für Höhen) UND in Frequenznähe darf
+    // wiederverwendet werden (löst Abschnitt 8, live als reproduzierbarer Bug bestätigt): Der
+    // Abgleich lief bisher rein über die Frequenz, unabhängig vom Filtertyp – ein unabhängig
+    // vom Nutzer angelegter Custom-Filter (z. B. ein PK), der zufällig nahe 105Hz/10000Hz liegt,
+    // bekam dadurch beim Bewegen des Reglers unbemerkt seinen Gain überschrieben, blieb aber als
+    // "Peaking" beschriftet – keine neue LS/HS-Stufe entstand, der bestehende Filter wurde
+    // stillschweigend zweckentfremdet. Jetzt wird ausschließlich ein Knoten desselben Typs
+    // gefunden/wiederverwendet; ein andersartiger Filter in der Nähe bleibt unangetastet.
+    let node = slot.nodes.find(n => n.type === wantedType && Math.abs(n.freq - target) < 5);
+    if (!node){ node = {type: wantedType, freq: target, gain: 0, q: 0.7}; slot.nodes.push(node); }
+    node.gain = v;
+    render();
+  };
+
+  window.setMode = function(isFinal){
+    state.finalMode = isFinal;
+    document.getElementById('key-w').className = 'keycap' + (isFinal ? ' key-active-mode' : '');
+    document.getElementById('keyWSub').textContent = isFinal ? 'Final' : 'Vergleich';
+    document.getElementById('modeCaption').textContent = isFinal
+      ? 'Basis-Pre-Gain wird kontrolliert ausgeblendet (Ramp, 6 dB/s) – maximaler clippingfreier Pegel (7.5).'
+      : 'Basis-Pre-Gain aktiv – sicherer Vergleichspegel für A/B/Dry.';
+  };
+
+  // Eigene, im Closure-Scope definierte Wrapper-Funktion: ein Inline-onclick="...state..."
+  // direkt am Element hätte keinen Zugriff auf das per `let state` in dieser IIFE deklarierte
+  // Objekt (Inline-Handler laufen im globalen Scope) – das war der Bug hinter der Maus/Tastatur-
+  // Inkonsistenz. `window.toggleModeKey` liegt dagegen im Closure-Scope und funktioniert für
+  // Klick und Taste identisch.
+  window.toggleModeKey = function(){
+    setMode(!state.finalMode);
+  };
+
+  // Derselbe Bug wie oben, hier noch einmal begangen und behoben: das Zielkurve-Dropdown war
+  // zunächst mit onchange="renderChart()" verdrahtet – renderChart() ist aber eine reine
+  // Closure-interne Funktion (nicht auf window), ein Inline-Attribut kann sie nicht sehen.
+  // Live geprüft: typeof renderChart im globalen Scope war "undefined", ein Wechsel der
+  // Zielkurve bei eingeblendetem Overlay zeigte dadurch weiterhin die alte Kontur. Behoben nach
+  // demselben Muster wie toggleModeKey: eigener window-Wrapper, der die Closure-Funktion aufruft.
+  window.onTargetCurveChange = function(){
+    renderChart();
+  };
+
+  // A/S/D/W-Shortcuts (5.2): FPS-Tastenposition (blind auffindbar), nur bei CAGE-Fokus
+  // (kein globaler Hook, siehe 5.2/Abschnitt 8 – Konflikt mit Spiele-Bewegungstasten),
+  // deaktiviert während ein Eingabefeld fokussiert ist. Fokus wandert bewusst mit auf die
+  // entsprechende Taste (nicht nur visuelle Konsistenz mit dem zuletzt geklickten Element,
+  // sondern auch Screenreader-Ansage des neuen Zustands – ohne Fokus-Wechsel bliebe der
+  // Zustandswechsel für assistive Technologien unangekündigt, da die farbliche Hervorhebung
+  // allein nicht vorgelesen wird).
+  window.addEventListener('keydown', (e) => {
+    const el = document.activeElement;
+    const isEditable = el && (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) || el.isContentEditable);
+    if (isEditable) return;
+    switch (e.key.toLowerCase()) {
+      case 'a': setActiveSlot('a'); document.getElementById('key-a').focus(); break;
+      case 's': setActiveSlot('b'); document.getElementById('key-s').focus(); break;
+      case 'd': setActiveSlot('dry'); document.getElementById('key-d').focus(); break;
+      case 'w': toggleModeKey(); document.getElementById('key-w').focus(); break;
+      default: return;
+    }
+    e.preventDefault();
+  });
+
+  // Bestätigungs-Overlay für destruktive, sofort wirksame Aktionen ohne Undo im Mockup (löst
+  // Abschnitt 8, Nutzer-Feedback): "Kopieren A→B/B→A" überschreibt den kompletten Ziel-Slot,
+  // "Zurücksetzen" leert alle Custom-Filter, das Löschen eines eigenen Presets entfernt einen
+  // gespeicherten Eintrag endgültig. Ersetzt eine zuvor eingeführte, inline "zweiter Klick
+  // bestätigt"-Armierung direkt am Button – die war gerade bei einem Icon-only-Button (Mülleimer)
+  // nicht verständlich: nichts am Icon selbst kommunizierte, dass ein zweiter Klick etwas anderes
+  // bedeutet als der erste. Ein Overlay mit ausgeschriebenem Text plus zwei eindeutig
+  // beschrifteten Buttons (Abbrechen/destruktive Aktion) macht Frage und beide Antworten für
+  // jeden auslösenden Button gleich verständlich, unabhängig davon, ob er Text oder nur ein
+  // Icon zeigt. Escape und Klick auf den abgedunkelten Hintergrund brechen ebenfalls ab; Tab
+  // bleibt auf die zwei Buttons im Overlay beschränkt (einfache Fokus-Falle), der Fokus kehrt
+  // beim Schließen zum auslösenden Element zurück.
+  let pendingConfirmAction = null;
+  let lastFocusedBeforeModal = null;
+  const confirmOverlayEl = document.getElementById('confirmOverlay');
+  const confirmCancelBtn = document.getElementById('confirmCancelBtn');
+  const confirmOkBtn = document.getElementById('confirmOkBtn');
+
+  function requestConfirm(message, confirmLabel, run){
+    pendingConfirmAction = run;
+    lastFocusedBeforeModal = document.activeElement;
+    document.getElementById('confirmMessage').textContent = message;
+    confirmOkBtn.textContent = confirmLabel;
+    confirmOverlayEl.classList.add('visible');
+    confirmCancelBtn.focus();
+  }
+
+  function closeConfirmOverlay(){
+    confirmOverlayEl.classList.remove('visible');
+    pendingConfirmAction = null;
+    if (lastFocusedBeforeModal && typeof lastFocusedBeforeModal.focus === 'function'){
+      lastFocusedBeforeModal.focus();
+    }
+    lastFocusedBeforeModal = null;
+  }
+
+  window.confirmOk = function(){
+    const run = pendingConfirmAction;
+    closeConfirmOverlay();
+    if (run) run();
+  };
+  window.cancelConfirm = function(){
+    closeConfirmOverlay();
+  };
+
+  confirmOverlayEl.addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) cancelConfirm();
+  });
+  confirmOverlayEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape'){ cancelConfirm(); return; }
+    if (e.key !== 'Tab') return;
+    const focusables = [confirmCancelBtn, confirmOkBtn];
+    const idx = focusables.indexOf(document.activeElement);
+    e.preventDefault();
+    const next = e.shiftKey ? (idx <= 0 ? focusables.length - 1 : idx - 1) : (idx === focusables.length - 1 ? 0 : idx + 1);
+    focusables[next].focus();
+  });
+
+  // Rückfrage entfällt automatisch, wenn die Aktion aktuell nichts zu verlieren hätte (Ziel-
+  // Slot bzw. aktiver Slot bereits leer) – kein unnötiger Rückfrage-Ballast, wenn ohnehin
+  // nichts überschrieben würde.
+  window.copySlot = function(from, to){
+    const doIt = () => { state.slots[to] = JSON.parse(JSON.stringify(state.slots[from])); render(); };
+    if (state.slots[to].nodes.length === 0){ doIt(); return; }
+    const fromLabel = from.toUpperCase(), toLabel = to.toUpperCase();
+    requestConfirm(`Slot ${toLabel} wirklich mit der kompletten Konfiguration von Slot ${fromLabel} überschreiben? Der bisherige Inhalt von Slot ${toLabel} geht dabei verloren.`, 'Überschreiben', doIt);
+  };
+  window.resetActiveSlot = function(){
+    const doIt = () => { state.slots[state.activeSlot].nodes = []; render(); };
+    if (state.slots[state.activeSlot].nodes.length === 0){ doIt(); return; }
+    const slotLabel = state.activeSlot.toUpperCase();
+    requestConfirm(`Wirklich alle Custom-Filter in Slot ${slotLabel} löschen?`, 'Zurücksetzen', doIt);
+  };
+
+  const PRESET_SETS = {
+    warm: [{freq:90,gain:2.5,q:0.7},{freq:3000,gain:-1.8,q:1.2},{freq:9000,gain:-1.0,q:0.8}],
+    bass: [{freq:105,gain:4.0,q:0.7}],
+    treble: [{freq:10000,gain:3.0,q:0.7}],
+    evening: [{freq:80,gain:1.0,q:0.7},{freq:6000,gain:-2.5,q:1.3}]
+  };
+
+  // Speichern/Löschen eigener Presets & Filter-Vorlagen (löst Abschnitt 8): 3.4/3.5 beschreiben
+  // bereits, DASS und WIE eigene Filter-Vorlagen/Session-Presets persistiert werden
+  // (filter_templates\/presets\, jeweils per Name), aber kein zugehöriges UI-Element dafür war
+  // spezifiziert – bisher liess sich in Diagramm/Liste nur laden, nie speichern. Kuratierte
+  // Einträge bleiben read-only (kein Lösch-Button), eigene sind es nicht (3.4: "anders als die
+  // read-only Built-ins").
+  //
+  // Getrennt nach Kind, nicht nur als Textlabel (löst Abschnitt 8, Nutzer-Feedback): Ein Preset
+  // ersetzt Messung + Zielkurve + Custom-Filter komplett, eine Filter-Vorlage nur die Custom-
+  // Filter (3.5/6.1) – komplett unterschiedliche Zielsetzungen ("vollständiges Setup
+  // replizieren" vs. "nur Filterkurve wiederverwenden"), die bisher nur als Text-Untertitel in
+  // ein und derselben Liste unterschieden wurden, mit identischem Lade-Verhalten für beide.
+  // Jetzt zwei separate Gruppen in der Liste (je mit eigenem Kuratiert/Eigene-Unterbereich),
+  // und `loadPreset` verhält sich tatsächlich unterschiedlich statt nur den Namen zu zeigen.
+  // Preset-Einträge tragen zusätzlich `target`/`measurementLabel`, um beim Laden auch
+  // Zielkurve-Auswahl und Messungs-Anzeige zu ersetzen (Filter-Vorlagen lassen beides unberührt).
+  const CURATED_PRESETS = [
+    {key: 'warm', name: 'Warm & Relaxed', kind: 'Preset', target: 'Diffuse Field', measurementLabel: 'warm_relaxed_demo.txt · 512 Pkt.'},
+    {key: 'bass', name: 'Bass Boost', kind: 'Filter-Vorlage'},
+    {key: 'treble', name: 'Treble Tamer', kind: 'Filter-Vorlage'}
+  ];
+  let ownPresets = [
+    {key: 'evening', name: 'Abend-Setup', kind: 'Preset', target: 'Free Field', measurementLabel: 'abend_setup_demo.txt · 480 Pkt.'}
+  ];
+  let saveType = 'preset';
+  let ownPresetSeq = 0;
+
+  function findPresetMeta(key){
+    return CURATED_PRESETS.find(p => p.key === key) || ownPresets.find(p => p.key === key);
+  }
+
+  window.loadPreset = function(key){
+    const meta = findPresetMeta(key);
+    state.slots[state.activeSlot].nodes = JSON.parse(JSON.stringify(PRESET_SETS[key]));
+    if (meta && meta.kind === 'Preset'){
+      if (meta.target) document.getElementById('targetCurveSelect').value = meta.target;
+      if (meta.measurementLabel) document.getElementById('measurementLabel').textContent = meta.measurementLabel;
+    }
+    render();
+  };
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]);
+  }
+
+  function presetChipEl(p, deletable){
+    const chip = document.createElement('div');
+    chip.className = 'preset-chip';
+    const loadLabel = p.kind === 'Preset' ? 'Setup laden' : 'Filter laden';
+    chip.innerHTML = `
+      <div><div class="name">${escapeHtml(p.name)}</div><div class="kind">${escapeHtml(p.kind)}</div></div>
+      <div class="row-actions">
+        <button onclick="loadPreset('${p.key}')">${loadLabel}</button>
+        ${deletable ? `<button class="btn-del" onclick="deleteOwnPreset('${p.key}')" aria-label="Preset löschen" title="Preset löschen">${TRASH_ICON_SVG}</button>` : ''}
+      </div>
+    `;
+    return chip;
+  }
+
+  function appendPresetGroup(list, groupLabel, kind){
+    const groupHead = document.createElement('div');
+    groupHead.className = 'presets-group-head';
+    groupHead.textContent = groupLabel;
+    list.appendChild(groupHead);
+
+    const curated = CURATED_PRESETS.filter(p => p.kind === kind);
+    const own = ownPresets.filter(p => p.kind === kind);
+
+    const curatedHead = document.createElement('div');
+    curatedHead.className = 'presets-subhead';
+    curatedHead.textContent = 'Kuratiert';
+    list.appendChild(curatedHead);
+    curated.forEach(p => list.appendChild(presetChipEl(p, false)));
+
+    const ownHead = document.createElement('div');
+    ownHead.className = 'presets-subhead';
+    ownHead.textContent = 'Eigene';
+    list.appendChild(ownHead);
+    if (own.length === 0){
+      const empty = document.createElement('div');
+      empty.className = 'presets-empty';
+      empty.textContent = kind === 'Preset' ? 'Noch keine eigenen Presets gespeichert.' : 'Noch keine eigenen Filter-Vorlagen gespeichert.';
+      list.appendChild(empty);
+    } else {
+      own.forEach(p => list.appendChild(presetChipEl(p, true)));
+    }
+  }
+
+  function renderPresets(){
+    const list = document.getElementById('presetsList');
+    list.innerHTML = '';
+    appendPresetGroup(list, 'Presets (Messung + Zielkurve + Filter)', 'Preset');
+    appendPresetGroup(list, 'Filter-Vorlagen (nur Custom-Filter)', 'Filter-Vorlage');
+  }
+
+  window.toggleSaveForm = function(){
+    const form = document.getElementById('saveForm');
+    const willShow = form.style.display === 'none';
+    form.style.display = willShow ? 'flex' : 'none';
+    if (willShow){
+      const nameInput = document.getElementById('saveNameInput');
+      nameInput.value = '';
+      nameInput.classList.remove('input-error');
+      nameInput.focus();
+    }
+  };
+
+  window.setSaveType = function(type){
+    saveType = type;
+    document.getElementById('saveType-preset').classList.toggle('is-active', type === 'preset');
+    document.getElementById('saveType-template').classList.toggle('is-active', type === 'template');
+    document.getElementById('saveTypeHint').textContent = type === 'preset'
+      ? 'Sichert Messung, Zielkurve & Custom-Filter des aktiven Slots (3.5).'
+      : 'Sichert nur die Custom-Filter des aktiven Slots, Messung/Zielkurve bleiben unverändert (3.4).';
+  };
+
+  window.confirmSavePreset = function(){
+    const nameInput = document.getElementById('saveNameInput');
+    const name = nameInput.value.trim();
+    if (!name){
+      nameInput.classList.add('input-error');
+      nameInput.focus();
+      return;
+    }
+    const kind = saveType === 'preset' ? 'Preset' : 'Filter-Vorlage';
+
+    // Legt einen neuen Eintrag an (existingKey null) oder überschreibt einen bestehenden
+    // eigenen Eintrag an derselben Stelle (existingKey gesetzt – gleicher Schlüssel wird
+    // wiederverwendet, kein zweiter, verwirrend gleichnamiger Eintrag entsteht daneben).
+    function doSave(existingKey){
+      const key = existingKey || ('own_' + (ownPresetSeq++));
+      PRESET_SETS[key] = JSON.parse(JSON.stringify(state.slots[state.activeSlot].nodes));
+      const entry = {key, name, kind};
+      // Nur ein volles Preset sichert zusätzlich Zielkurve/Messung (3.5) – eine Filter-Vorlage
+      // speichert bewusst nur die Custom-Filter, daher keine target/measurementLabel-Felder hier.
+      if (saveType === 'preset'){
+        entry.target = document.getElementById('targetCurveSelect').value;
+        entry.measurementLabel = document.getElementById('measurementLabel').textContent.trim();
+      }
+      if (existingKey){
+        ownPresets[ownPresets.findIndex(p => p.key === existingKey)] = entry;
+      } else {
+        ownPresets.push(entry);
+      }
+      toggleSaveForm();
+      renderPresets();
+    }
+
+    // Namenskollision nur gegen eigene Einträge derselben Art (Preset vs. Filter-Vorlage) prüfen
+    // (löst Abschnitt 8, Nutzer-Feedback zu stillem Überschreiben): Kuratierte Built-ins liegen
+    // in einem separaten, read-only Namensraum (3.5, eigener Ordner) – ein gleichnamiger eigener
+    // Eintrag würde die dortige Datei nicht wirklich überschreiben, nur ein gleichnamiger EIGENER
+    // Eintrag tut das tatsächlich. Ohne Rückfrage würde der bisherige Klick-Ablauf sonst
+    // stillschweigend einen zweiten, gleichnamigen Eintrag danebenlegen (verwirrend) bzw. auf der
+    // echten Persistenzschicht dieselbe gespeicherte Datei ersetzen, ohne dass der Nutzer das
+    // wollte oder bemerkt hätte.
+    const existing = ownPresets.find(p => p.kind === kind && p.name === name);
+    if (existing){
+      const kindLabel = kind === 'Preset' ? 'ein Preset' : 'eine Filter-Vorlage';
+      requestConfirm(`Es existiert bereits ${kindLabel} namens "${name}". Wirklich überschreiben?`, 'Überschreiben', () => doSave(existing.key));
+      return;
+    }
+    doSave(null);
+  };
+
+  window.deleteOwnPreset = function(key){
+    // Immer destruktiv (kein "leerer Ziel-Slot"-Sonderfall wie bei copySlot/resetActiveSlot) –
+    // ein gespeicherter Preset/Filter-Vorlage-Eintrag existiert per Definition schon, Löschen
+    // entfernt ihn immer endgültig. Name/Typ aus den Metadaten in die Rückfrage übernommen,
+    // damit auch beim Icon-only-Lösch-Button eindeutig ist, WAS gerade gelöscht würde.
+    const meta = findPresetMeta(key);
+    const label = meta ? `${meta.kind} "${meta.name}"` : 'Dieser Eintrag';
+    requestConfirm(`${label} wirklich unwiderruflich löschen?`, 'Löschen', () => {
+      ownPresets = ownPresets.filter(p => p.key !== key);
+      delete PRESET_SETS[key];
+      renderPresets();
+    });
+  };
+
+  window.toggleDemo = function(which){
+    if (which === 'safe'){
+      const b = document.getElementById('safeBanner');
+      b.classList.toggle('visible');
+      document.getElementById('btnSafe').classList.toggle('is-active');
+    } else if (which === 'toast'){
+      const t = document.getElementById('toast');
+      t.classList.toggle('visible');
+      document.getElementById('btnToast').classList.toggle('is-active');
+    } else if (which === 'clip'){
+      const c = document.getElementById('clipWarn');
+      c.classList.toggle('visible');
+      document.getElementById('btnClip').classList.toggle('is-active');
+    }
+  };
+
+  // Mockup-only: erzwingt Hell/Dunkel unabhängig von der echten OS-Einstellung, um beide
+  // Themes schnell gegenzuprüfen. Setzt dasselbe data-theme-Attribut, das der reale
+  // Artifact-Viewer-Theme-Umschalter auch setzt (siehe Root-Selektoren oben im CSS).
+  window.setThemePreview = function(mode){
+    if (mode === 'auto') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', mode);
+    ['auto','light','dark'].forEach(m => {
+      document.getElementById('theme-' + m).classList.toggle('is-active', m === mode);
+    });
+  };
+
+  syncViewBox();
+  render();
+  renderPresets();
+  new ResizeObserver(() => { syncViewBox(); render(); }).observe(chartPanel);
+})();
+</script>
