@@ -1,0 +1,12 @@
+# Cargo workspace root. Introduced when the project grew past one crate:
+#   * cageq-config-writer — renders EqAPO config + startup integrity (the leaf)
+#   * cageq-sidecar       — manages the Python DSP sidecar over stdio (this hop up)
+# A workspace gives one shared target/ dir and a single Cargo.lock, and lets the
+# crates depend on each other later (the sidecar's result will map onto the
+# writer's DeviceConfig).
+[workspace]
+resolver = "3"
+members = [
+    "cageq-config-writer",
+    "cageq-sidecar",
+]
