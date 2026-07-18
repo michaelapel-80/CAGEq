@@ -1,16 +1,16 @@
-//! Integration tests for the on-disk paths of `cage-config-writer`.
+//! Integration tests for the on-disk paths of `cageq-config-writer`.
 //!
 //! A file under `tests/` is compiled as a separate crate seeing only the public
 //! API — exactly how the Tauri core will use it. These drive `apply` /
-//! `write_cage_txt` / `ensure_include` / `read_cage_state` / `write_safe_state`
+//! `write_cageq_txt` / `ensure_include` / `read_cageq_state` / `write_safe_state`
 //! against real files in a temp directory (which stands in for EqAPO's config dir).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cage_config_writer::{
-    apply, decide_startup, read_cage_state, write_safe_state, BlockState, DeviceConfig, Filter,
-    FilterType, StartupDecision, WriteError, CAGE_FILENAME,
+use cageq_config_writer::{
+    apply, decide_startup, read_cageq_state, write_safe_state, BlockState, DeviceConfig, Filter,
+    FilterType, StartupDecision, WriteError, CAGEQ_FILENAME,
 };
 
 /// RAII temp directory (a unique dir under the OS temp dir) that deletes itself —
@@ -21,7 +21,7 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
-        let p = std::env::temp_dir().join(format!("cage-it-{}-{tag}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("cageq-it-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         TempDir(p)
@@ -55,24 +55,24 @@ fn sample() -> Vec<DeviceConfig> {
 fn apply_creates_both_files_and_state_round_trips() {
     let tmp = TempDir::new("apply");
     // Fresh config dir: apply must create config.txt (with the Include block) and
-    // cage.txt (with the filters).
+    // cageq.txt (with the filters).
     let hash = apply(tmp.dir(), &sample()).unwrap();
 
     let config = tmp.read("config.txt");
-    assert!(config.contains("#CAGE:BEGIN"));
-    assert!(config.contains("Include: cage.txt"));
+    assert!(config.contains("#CAGEq:BEGIN"));
+    assert!(config.contains("Include: cageq.txt"));
 
-    let cage = tmp.read(CAGE_FILENAME);
-    assert!(cage.contains("Device: USB DAC"));
-    assert!(cage.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"));
+    let cageq = tmp.read(CAGEQ_FILENAME);
+    assert!(cageq.contains("Device: USB DAC"));
+    assert!(cageq.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"));
 
-    // read_cage_state must recompute the exact hash apply returned.
-    match read_cage_state(&tmp.dir().join(CAGE_FILENAME)).unwrap() {
+    // read_cageq_state must recompute the exact hash apply returned.
+    match read_cageq_state(&tmp.dir().join(CAGEQ_FILENAME)).unwrap() {
         BlockState::Present { stored_hash, actual_hash } => {
             assert_eq!(stored_hash.as_deref(), Some(hash.as_str()));
             assert_eq!(actual_hash, hash);
         }
-        BlockState::Absent => panic!("expected a present cage.txt right after writing it"),
+        BlockState::Absent => panic!("expected a present cageq.txt right after writing it"),
     }
 }
 
@@ -85,18 +85,18 @@ fn apply_preserves_foreign_config_txt_and_is_idempotent() {
     apply(tmp.dir(), &sample()).unwrap();
     let after_first = tmp.read("config.txt");
     assert!(after_first.contains(foreign), "foreign content was not preserved");
-    assert!(after_first.contains("Include: cage.txt"));
+    assert!(after_first.contains("Include: cageq.txt"));
 
     // A second apply must not add a duplicate Include block.
     apply(tmp.dir(), &sample()).unwrap();
     let after_second = tmp.read("config.txt");
-    assert_eq!(after_second.matches("#CAGE:BEGIN").count(), 1, "Include block was duplicated");
+    assert_eq!(after_second.matches("#CAGEq:BEGIN").count(), 1, "Include block was duplicated");
     // config.txt is unchanged the second time (Include already correct).
     assert_eq!(after_first, after_second);
 }
 
 #[test]
-fn a_second_apply_rewrites_only_cage_txt() {
+fn a_second_apply_rewrites_only_cageq_txt() {
     let tmp = TempDir::new("rewrite");
     apply(tmp.dir(), &sample()).unwrap();
 
@@ -104,9 +104,9 @@ fn a_second_apply_rewrites_only_cage_txt() {
     changed[0].preamp_db = -6.0;
     apply(tmp.dir(), &changed).unwrap();
 
-    let cage = tmp.read(CAGE_FILENAME);
-    assert!(cage.contains("Preamp: -6.0 dB"));
-    assert!(!cage.contains("Preamp: -9.0 dB"));
+    let cageq = tmp.read(CAGEQ_FILENAME);
+    assert!(cageq.contains("Preamp: -6.0 dB"));
+    assert!(!cageq.contains("Preamp: -9.0 dB"));
 }
 
 #[test]
@@ -122,10 +122,10 @@ fn a_non_utf8_config_txt_fails_loudly_with_notutf8() {
 #[test]
 fn safe_state_is_written_and_recognised_at_startup() {
     let tmp = TempDir::new("safestate");
-    let cage_path = tmp.dir().join(CAGE_FILENAME);
-    write_safe_state(&cage_path).unwrap();
+    let cageq_path = tmp.dir().join(CAGEQ_FILENAME);
+    write_safe_state(&cageq_path).unwrap();
 
-    let state = read_cage_state(&cage_path).unwrap();
+    let state = read_cageq_state(&cageq_path).unwrap();
     // settings.json still remembers some earlier real-config hash.
     assert_eq!(decide_startup(&state, Some("deadbeef")), StartupDecision::SafeStateStillActive);
 }

@@ -1,21 +1,21 @@
 //! Equalizer APO config writer — two-file `Include` architecture (filter.md §3.0/§7.4).
 //!
 //! Verified against how the reference tool (AQUA) and EqAPO itself work:
-//!   * CAGE writes all its filters into its **own** file, `cage.txt`, and puts a
-//!     single `Include: cage.txt` line into EqAPO's `config.txt`. This is the
+//!   * CAGEq writes all its filters into its **own** file, `cageq.txt`, and puts a
+//!     single `Include: cageq.txt` line into EqAPO's `config.txt`. This is the
 //!     pattern EqAPO's config reference explicitly recommends, and AQUA uses it
 //!     (`aqua.txt` + `Include: aqua.txt`, verified in its `flush.ts`).
 //!   * EqAPO watches its **whole config directory** for changes
 //!     (`FindFirstChangeNotificationW(configPath, bWatchSubtree=true, ...)` in
-//!     FilterEngine.cpp) and reloads on any file change — so writing `cage.txt`
+//!     FilterEngine.cpp) and reloads on any file change — so writing `cageq.txt`
 //!     triggers a reload + the native 10 ms crossfade exactly like editing
 //!     config.txt would.
 //!
 //! Why this shape is simpler than splicing filters into config.txt directly:
-//!   * `cage.txt` is entirely ours -> wholesale atomic overwrite, no read-modify-
+//!   * `cageq.txt` is entirely ours -> wholesale atomic overwrite, no read-modify-
 //!     write, no foreign content to preserve, no UTF-8/ANSI concern for filters.
 //!   * `config.txt` only ever needs one pure-ASCII `Include:` line, wrapped in a
-//!     `#CAGE:BEGIN`/`#CAGE:END` comment block so we can add/verify/replace just
+//!     `#CAGEq:BEGIN`/`#CAGEq:END` comment block so we can add/verify/replace just
 //!     that block and leave everything else byte-for-byte intact.
 //!
 //! Design habit (worth internalising): the pure functions — rendering, hashing,
@@ -25,7 +25,7 @@
 //!
 //! Deliberately OUT of scope, flagged inline where relevant:
 //!   * preserving a foreign config.txt block's exact CRLF style (we emit LF; only
-//!     ever relevant to the one Include block, since cage.txt is fully ours)
+//!     ever relevant to the one Include block, since cageq.txt is fully ours)
 //!   * non-UTF-8 (legacy ANSI) config.txt: we support UTF-8 only and fail loudly
 //!     with WriteError::NotUtf8 rather than transcode (a scope decision, §7.4)
 //!
@@ -38,17 +38,17 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-// Line ending CAGE emits. EqAPO parses LF fine (it strips a trailing \r itself).
+// Line ending CAGEq emits. EqAPO parses LF fine (it strips a trailing \r itself).
 const NL: &str = "\n";
 // Comment markers around the Include line in config.txt. A leading '#' makes each
 // a comment EqAPO ignores; only the `Include:` line between them is a real command.
-const INCLUDE_BEGIN: &str = "#CAGE:BEGIN";
-const INCLUDE_END: &str = "#CAGE:END";
-// First line of cage.txt: a comment (no ':', starts with '#', so EqAPO ignores it)
+const INCLUDE_BEGIN: &str = "#CAGEq:BEGIN";
+const INCLUDE_END: &str = "#CAGEq:END";
+// First line of cageq.txt: a comment (no ':', starts with '#', so EqAPO ignores it)
 // that carries the integrity hash of everything below it.
-const CAGE_HEADER_PREFIX: &str = "# CAGE managed file - generated, do not edit. hash=";
-/// The filename CAGE writes its filters into, alongside config.txt.
-pub const CAGE_FILENAME: &str = "cage.txt";
+const CAGEQ_HEADER_PREFIX: &str = "# CAGEq managed file - generated, do not edit. hash=";
+/// The filename CAGEq writes its filters into, alongside config.txt.
+pub const CAGEQ_FILENAME: &str = "cageq.txt";
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -84,7 +84,7 @@ pub struct Filter {
     pub q: f64,
 }
 
-/// One device's managed configuration — becomes one `Device:` block in cage.txt.
+/// One device's managed configuration — becomes one `Device:` block in cageq.txt.
 #[derive(Debug, Clone)]
 pub struct DeviceConfig {
     pub device: String,
@@ -94,26 +94,26 @@ pub struct DeviceConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
-    #[error("config.txt/cage.txt I/O error: {0}")]
+    #[error("config.txt/cageq.txt I/O error: {0}")]
     Io(#[from] io::Error),
     #[error("config path has no parent directory for the temp file")]
     NoParentDir,
     /// config.txt exists but isn't valid UTF-8 — almost always a legacy ANSI
     /// file. EqAPO tolerates it via a per-line CP_ACP fallback (FilterEngine.cpp),
-    /// but CAGE supports UTF-8 only and fails loudly here rather than transcode
+    /// but CAGEq supports UTF-8 only and fails loudly here rather than transcode
     /// (§7.4). The fix for the user is to re-save config.txt as UTF-8.
-    #[error("config.txt is not valid UTF-8 (CAGE requires UTF-8; re-save it as UTF-8)")]
+    #[error("config.txt is not valid UTF-8 (CAGEq requires UTF-8; re-save it as UTF-8)")]
     NotUtf8,
 }
 
-/// What cage.txt currently says — consumed at startup (§3.0) to decide whether
+/// What cageq.txt currently says — consumed at startup (§3.0) to decide whether
 /// settings.json's remembered resume state is still trustworthy.
 #[derive(Debug)]
 pub enum BlockState {
-    /// No cage.txt, or one without a hash header: CAGE has never written it (or it
+    /// No cageq.txt, or one without a hash header: CAGEq has never written it (or it
     /// was wiped). Normal first-run state, not an error.
     Absent,
-    /// A CAGE-written cage.txt exists. `stored_hash` is what its header claims;
+    /// A CAGEq-written cageq.txt exists. `stored_hash` is what its header claims;
     /// `actual_hash` is recomputed from the body now. (`decide_startup` trusts the
     /// settings.json hash over `stored_hash`, which a hand-edit could forge.)
     Present {
@@ -126,15 +126,15 @@ pub enum BlockState {
 /// resume state remembered in settings.json.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StartupDecision {
-    /// No cage.txt yet (or one without a hash header). Start clean.
+    /// No cageq.txt yet (or one without a hash header). Start clean.
     FirstRun,
-    /// cage.txt is byte-identical to what CAGE last wrote (hash matches
+    /// cageq.txt is byte-identical to what CAGEq last wrote (hash matches
     /// settings.json). The remembered resume state is trustworthy.
     ResumeTrusted,
-    /// cage.txt is CAGE's hardcoded safe-state config (§7.2): the safety shutdown
+    /// cageq.txt is CAGEq's hardcoded safe-state config (§7.2): the safety shutdown
     /// was still active at the last exit/crash. Offer to restore the last state.
     SafeStateStillActive,
-    /// cage.txt differs from what CAGE last wrote and isn't the safe-state config —
+    /// cageq.txt differs from what CAGEq last wrote and isn't the safe-state config —
     /// changed by the user or another tool. Surface a neutral notice; don't keep
     /// asserting a specific preset/slot is active (fail-early).
     ExternallyModified,
@@ -144,37 +144,37 @@ pub enum StartupDecision {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Apply `configs` to Equalizer APO: ensure config.txt includes cage.txt, then
-/// (atomically) write cage.txt with the given per-device blocks. `config_dir` is
-/// EqAPO's config directory (where config.txt lives). Returns cage.txt's content
+/// Apply `configs` to Equalizer APO: ensure config.txt includes cageq.txt, then
+/// (atomically) write cageq.txt with the given per-device blocks. `config_dir` is
+/// EqAPO's config directory (where config.txt lives). Returns cageq.txt's content
 /// hash — persist it in settings.json for the next-startup integrity check (§3.0).
 ///
 /// The `ensure_include` step is a cheap no-op after the first run (it only rewrites
 /// config.txt when the Include block is missing/wrong), so the steady-state cost of
-/// a change is a single cage.txt write -> one EqAPO reload -> one native crossfade.
+/// a change is a single cageq.txt write -> one EqAPO reload -> one native crossfade.
 pub fn apply(config_dir: &Path, configs: &[DeviceConfig]) -> Result<String, WriteError> {
-    ensure_include(&config_dir.join("config.txt"), CAGE_FILENAME)?;
-    write_cage_txt(&config_dir.join(CAGE_FILENAME), configs)
+    ensure_include(&config_dir.join("config.txt"), CAGEQ_FILENAME)?;
+    write_cageq_txt(&config_dir.join(CAGEQ_FILENAME), configs)
 }
 
-/// Atomically overwrite cage.txt with the rendered device blocks. Returns the
-/// content hash written into the header. cage.txt is fully CAGE-owned, so this is
+/// Atomically overwrite cageq.txt with the rendered device blocks. Returns the
+/// content hash written into the header. cageq.txt is fully CAGEq-owned, so this is
 /// a plain wholesale write — no splicing, no foreign content.
-pub fn write_cage_txt(cage_path: &Path, configs: &[DeviceConfig]) -> Result<String, WriteError> {
-    let (text, hash) = render_cage_txt(configs);
-    atomic_write(cage_path, text.as_bytes())?;
+pub fn write_cageq_txt(cageq_path: &Path, configs: &[DeviceConfig]) -> Result<String, WriteError> {
+    let (text, hash) = render_cageq_txt(configs);
+    atomic_write(cageq_path, text.as_bytes())?;
     Ok(hash)
 }
 
-/// Ensure config.txt contains the `#CAGE:BEGIN`/`Include: <cage_filename>`/
-/// `#CAGE:END` block, preserving all other content byte-for-byte. Idempotent:
+/// Ensure config.txt contains the `#CAGEq:BEGIN`/`Include: <cageq_filename>`/
+/// `#CAGEq:END` block, preserving all other content byte-for-byte. Idempotent:
 /// returns `Ok(false)` and writes nothing when the block is already exactly right,
 /// `Ok(true)` when it added or fixed it. Appends at EOF when absent — placing it
-/// last means cage.txt's own leading `Device:` line controls scope and nothing
+/// last means cageq.txt's own leading `Device:` line controls scope and nothing
 /// after it is affected (the AQUA-proven placement).
-pub fn ensure_include(config_txt_path: &Path, cage_filename: &str) -> Result<bool, WriteError> {
+pub fn ensure_include(config_txt_path: &Path, cageq_filename: &str) -> Result<bool, WriteError> {
     let current = read_utf8_or_empty(config_txt_path)?;
-    match splice_include(&current, cage_filename) {
+    match splice_include(&current, cageq_filename) {
         Some(new_text) => {
             atomic_write(config_txt_path, new_text.as_bytes())?;
             Ok(true)
@@ -183,32 +183,32 @@ pub fn ensure_include(config_txt_path: &Path, cage_filename: &str) -> Result<boo
     }
 }
 
-/// Atomically write CAGE's hardcoded safe-state (§7.1/7.2) to cage.txt, using the
-/// same header+body format as a normal write so [`read_cage_state`] +
+/// Atomically write CAGEq's hardcoded safe-state (§7.1/7.2) to cageq.txt, using the
+/// same header+body format as a normal write so [`read_cageq_state`] +
 /// [`decide_startup`] recognise it as [`StartupDecision::SafeStateStillActive`].
-pub fn write_safe_state(cage_path: &Path) -> Result<(), WriteError> {
+pub fn write_safe_state(cageq_path: &Path) -> Result<(), WriteError> {
     let (text, _) = wrap_with_hash_header(&safe_state_body());
-    atomic_write(cage_path, text.as_bytes())
+    atomic_write(cageq_path, text.as_bytes())
 }
 
-/// Read cage.txt's integrity state for the startup check (§3.0).
-pub fn read_cage_state(cage_path: &Path) -> Result<BlockState, WriteError> {
-    match fs::read_to_string(cage_path) {
-        Ok(s) => Ok(cage_state_from_text(&s)),
+/// Read cageq.txt's integrity state for the startup check (§3.0).
+pub fn read_cageq_state(cageq_path: &Path) -> Result<BlockState, WriteError> {
+    match fs::read_to_string(cageq_path) {
+        Ok(s) => Ok(cageq_state_from_text(&s)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BlockState::Absent),
         Err(e) if e.kind() == io::ErrorKind::InvalidData => Err(WriteError::NotUtf8),
         Err(e) => Err(e.into()),
     }
 }
 
-/// Decide, from cage.txt's on-disk state and the hash CAGE recorded in
+/// Decide, from cageq.txt's on-disk state and the hash CAGEq recorded in
 /// settings.json, how much of the remembered resume state to trust at startup
 /// (§3.0). Pure — no I/O — so the whole decision table is unit-testable.
 ///
-/// `state` comes from [`read_cage_state`]; `expected_hash` is the device's
+/// `state` comes from [`read_cageq_state`]; `expected_hash` is the device's
 /// `last_written_hash` from settings.json, or `None` if there's no record yet.
 /// The trust signal is `actual_hash == expected_hash`: settings can't be forged by
-/// hand-editing cage.txt's own header, so it's the stronger of the two hashes.
+/// hand-editing cageq.txt's own header, so it's the stronger of the two hashes.
 pub fn decide_startup(state: &BlockState, expected_hash: Option<&str>) -> StartupDecision {
     let actual_hash = match state {
         BlockState::Absent | BlockState::Present { stored_hash: None, .. } => {
@@ -230,7 +230,7 @@ pub fn decide_startup(state: &BlockState, expected_hash: Option<&str>) -> Startu
     }
 }
 
-/// CAGE's hardcoded safe-state cage.txt body (§7.2): effective silence on all
+/// CAGEq's hardcoded safe-state cageq.txt body (§7.2): effective silence on all
 /// devices. Written by the watchdog on a fail-safe (§7.1) and recognised by the
 /// startup check. One canonical definition so the writer and the detector can't
 /// drift apart.
@@ -246,7 +246,7 @@ pub fn safe_state_body() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Pure helpers — rendering cage.txt
+// Pure helpers — rendering cageq.txt
 // ---------------------------------------------------------------------------
 
 /// One `Device:` block: the device line, a Preamp line, then one Filter line per
@@ -271,8 +271,8 @@ fn render_device_block(cfg: &DeviceConfig) -> String {
     s
 }
 
-/// The full cage.txt text (hash header + all device blocks) and its content hash.
-fn render_cage_txt(configs: &[DeviceConfig]) -> (String, String) {
+/// The full cageq.txt text (hash header + all device blocks) and its content hash.
+fn render_cageq_txt(configs: &[DeviceConfig]) -> (String, String) {
     let mut body = String::new();
     for cfg in configs {
         body.push_str(&render_device_block(cfg));
@@ -284,13 +284,13 @@ fn render_cage_txt(configs: &[DeviceConfig]) -> (String, String) {
 /// The hash is over `body` only (not the header — that would be circular).
 fn wrap_with_hash_header(body: &str) -> (String, String) {
     let hash = content_hash(body);
-    (format!("{CAGE_HEADER_PREFIX}{hash}{NL}{body}"), hash)
+    (format!("{CAGEQ_HEADER_PREFIX}{hash}{NL}{body}"), hash)
 }
 
-/// Parse cage.txt text into a [`BlockState`]: pull the hash out of the header line
+/// Parse cageq.txt text into a [`BlockState`]: pull the hash out of the header line
 /// and recompute it over the body. Must mirror `wrap_with_hash_header` exactly, or
 /// the startup check would false-positive forever (guarded by a round-trip test).
-fn cage_state_from_text(text: &str) -> BlockState {
+fn cageq_state_from_text(text: &str) -> BlockState {
     let Some((header, body)) = text.split_once('\n') else {
         return BlockState::Absent;
     };
@@ -322,15 +322,15 @@ fn content_hash(body: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// The canonical Include block, markers included and trailing newline.
-fn render_include_block(cage_filename: &str) -> String {
-    format!("{INCLUDE_BEGIN}{NL}Include: {cage_filename}{NL}{INCLUDE_END}{NL}")
+fn render_include_block(cageq_filename: &str) -> String {
+    format!("{INCLUDE_BEGIN}{NL}Include: {cageq_filename}{NL}{INCLUDE_END}{NL}")
 }
 
 /// Compute the new config.txt content that ensures the Include block is present
 /// and correct, or `None` if it's already exactly right (so no write is needed).
 /// Everything outside the block is preserved byte-for-byte.
-fn splice_include(current: &str, cage_filename: &str) -> Option<String> {
-    let block = render_include_block(cage_filename);
+fn splice_include(current: &str, cageq_filename: &str) -> Option<String> {
+    let block = render_include_block(cageq_filename);
     match find_marker_range(current) {
         Some((start, end)) => {
             if &current[start..end] == block.as_str() {
@@ -355,7 +355,7 @@ fn splice_include(current: &str, cage_filename: &str) -> Option<String> {
     }
 }
 
-/// Inclusive byte range of an existing CAGE marker block: from the start of the
+/// Inclusive byte range of an existing CAGEq marker block: from the start of the
 /// BEGIN line to just past the END line's newline. Guards against a marker string
 /// appearing mid-line rather than as an actual marker.
 fn find_marker_range(text: &str) -> Option<(usize, usize)> {
@@ -411,11 +411,11 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), WriteError> {
 
 /// A temp path next to the target so the rename stays on one volume. The PID
 /// suffix suffices — §2's single-instance lock precludes a second concurrent
-/// writer. TODO: a crash between write and rename can leave a stale `.cage-tmp-*`;
+/// writer. TODO: a crash between write and rename can leave a stale `.cageq-tmp-*`;
 /// a real impl would sweep these on startup.
 fn temp_sibling(target: &Path) -> PathBuf {
     let mut name = target.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(format!(".cage-tmp-{}", std::process::id()));
+    name.push(format!(".cageq-tmp-{}", std::process::id()));
     target.with_file_name(name)
 }
 
@@ -448,39 +448,39 @@ mod tests {
     }
 
     #[test]
-    fn cage_text_hash_round_trips() {
+    fn cageq_text_hash_round_trips() {
         // The invariant the whole restart check leans on: the hash recomputed from
-        // a written cage.txt equals the hash returned when writing it.
-        let (text, stored) = render_cage_txt(&sample());
-        match cage_state_from_text(&text) {
+        // a written cageq.txt equals the hash returned when writing it.
+        let (text, stored) = render_cageq_txt(&sample());
+        match cageq_state_from_text(&text) {
             BlockState::Present { stored_hash, actual_hash } => {
                 assert_eq!(stored_hash.as_deref(), Some(stored.as_str()));
                 assert_eq!(actual_hash, stored);
             }
-            BlockState::Absent => panic!("freshly rendered cage.txt must parse as Present"),
+            BlockState::Absent => panic!("freshly rendered cageq.txt must parse as Present"),
         }
     }
 
     #[test]
     fn include_block_appended_when_absent() {
-        let out = splice_include("", CAGE_FILENAME).expect("empty file needs the block added");
+        let out = splice_include("", CAGEQ_FILENAME).expect("empty file needs the block added");
         assert!(out.contains(INCLUDE_BEGIN));
-        assert!(out.contains("Include: cage.txt"));
+        assert!(out.contains("Include: cageq.txt"));
         assert!(out.contains(INCLUDE_END));
     }
 
     #[test]
     fn include_block_is_noop_when_already_correct() {
-        let existing = render_include_block(CAGE_FILENAME);
-        assert!(splice_include(&existing, CAGE_FILENAME).is_none());
+        let existing = render_include_block(CAGEQ_FILENAME);
+        assert!(splice_include(&existing, CAGEQ_FILENAME).is_none());
     }
 
     #[test]
     fn include_preserves_foreign_config_content() {
         let foreign = "Device: Other\nFilter: ON PK Fc 1000 Hz Gain 2 dB Q 1\n";
-        let out = splice_include(foreign, CAGE_FILENAME).expect("block must be appended");
+        let out = splice_include(foreign, CAGEQ_FILENAME).expect("block must be appended");
         assert!(out.contains(foreign), "foreign content was altered");
-        assert!(out.contains("Include: cage.txt"));
+        assert!(out.contains("Include: cageq.txt"));
     }
 
     #[test]

@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cage-config-writer"
+name = "cageq-config-writer"
 version = "0.1.0"
 dependencies = [
  "sha2",
