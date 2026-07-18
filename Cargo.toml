@@ -9,4 +9,5 @@ resolver = "3"
 members = [
     "cageq-config-writer",
     "cageq-sidecar",
+    "cageq-watchdog",
 ]

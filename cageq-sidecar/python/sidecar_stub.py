@@ -12,6 +12,8 @@ Run manually to poke at it:
     {"jsonrpc":"2.0","id":1,"method":"ping","params":null}
 """
 import sys
+import os
+import time
 import json
 
 
@@ -19,6 +21,19 @@ def handle(method, params):
     """Return the JSON-RPC *result* for a method, or raise KeyError if unknown."""
     if method == "ping":
         return {"pong": True}
+
+    if method == "sleep_ms":
+        # Block this long before replying — stands in for a slow AutoEq fit, and
+        # lets the watchdog tests drive the busy-mode response timeout.
+        ms = int(params.get("ms", 0))
+        time.sleep(ms / 1000.0)
+        return {"slept_ms": ms}
+
+    if method == "exit":
+        # Simulate a crash: leave *without* replying, so the Rust side sees EOF
+        # (SidecarError::Exited). os._exit skips cleanup, like a real hard crash.
+        sys.stdout.flush()
+        os._exit(int(params.get("code", 1)))
 
     if method == "calculate_filters":
         # Canned answer, shaped exactly like cageq-config-writer's DeviceConfig
