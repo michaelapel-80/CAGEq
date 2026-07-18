@@ -1,19 +1,20 @@
-//! End-to-end watchdog tests. Each spawns a real Python stub (via cageq-sidecar),
-//! wraps it in a Supervisor with *small* deadlines, and provokes one fault, then
-//! asserts (a) the trip reason and (b) that the safe state actually hit disk.
+//! End-to-end watchdog + recovery tests. Each spawns real Python stub processes
+//! (via cageq-sidecar) with small deadlines/backoffs, provokes a fault, and asserts
+//! on the health state machine and the on-disk safe state.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-use cageq_sidecar::Sidecar;
-use cageq_watchdog::{Mode, Supervisor, SupervisorError, TripReason, WatchdogConfig};
+use cageq_sidecar::{Sidecar, SidecarError};
+use cageq_watchdog::{Health, Supervisor, SupervisorError, WatchdogConfig};
 use serde_json::json;
 
 // --- test rig -------------------------------------------------------------
 
-/// The shared stub lives in the sidecar crate; reach it via the workspace root.
 fn stub_script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -50,7 +51,28 @@ fn find_python() -> PathBuf {
     panic!("no working Python found; set CAGEQ_PYTHON to a python.exe");
 }
 
-/// RAII temp dir standing in for EqAPO's config directory.
+/// A spawn closure that always produces a healthy stub sidecar.
+fn healthy_spawner() -> impl Fn() -> Result<Sidecar, SidecarError> + Send + 'static {
+    let (py, script) = (find_python(), stub_script());
+    move || Sidecar::spawn(&py, &script)
+}
+
+/// A spawn closure that succeeds only on the invocations for which `ok(index)` is
+/// true (0-based, counting every call including the initial one), else returns a
+/// spawn error. Lets tests script "restart keeps failing" and "succeeds on retry".
+fn counting_spawner(ok: impl Fn(usize) -> bool + Send + 'static) -> impl Fn() -> Result<Sidecar, SidecarError> + Send + 'static {
+    let (py, script) = (find_python(), stub_script());
+    let n = Arc::new(AtomicUsize::new(0));
+    move || {
+        let i = n.fetch_add(1, Ordering::SeqCst);
+        if ok(i) {
+            Sidecar::spawn(&py, &script)
+        } else {
+            Err(SidecarError::Spawn(std::io::Error::new(std::io::ErrorKind::NotFound, "simulated spawn failure")))
+        }
+    }
+}
+
 struct TempDir(PathBuf);
 impl TempDir {
     fn new(tag: &str) -> Self {
@@ -69,19 +91,15 @@ impl Drop for TempDir {
     }
 }
 
-/// Short deadlines so a run is milliseconds, not seconds.
+/// Small deadlines/backoffs so a run is ms, not the 5s/2s/15s + 2/5/10s defaults.
 fn fast_cfg() -> WatchdogConfig {
     WatchdogConfig {
         idle_interval: Duration::from_millis(300),
         idle_response: Duration::from_millis(250),
-        busy_response: Duration::from_millis(300),
-        tick: Duration::from_millis(50),
+        busy_response: Duration::from_millis(200),
+        tick: Duration::from_millis(40),
+        restart_backoffs: vec![Duration::from_millis(30); 3],
     }
-}
-
-fn supervise(cageq: &Path) -> Supervisor {
-    let sidecar = Sidecar::spawn(&find_python(), &stub_script()).expect("spawn stub");
-    Supervisor::start(sidecar, fast_cfg(), cageq)
 }
 
 fn wrote_safe_state(path: &Path) -> bool {
@@ -93,45 +111,81 @@ fn wrote_safe_state(path: &Path) -> bool {
 #[test]
 fn healthy_sidecar_never_trips() {
     let tmp = TempDir::new("healthy");
-    let sup = supervise(&tmp.cageq_txt());
+    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), tmp.cageq_txt()).unwrap();
 
-    // A normal request answers well inside the busy deadline.
     let v = sup.call("calculate_filters", json!({ "device": "DAC" })).expect("call ok");
     assert_eq!(v["device"], "DAC");
 
-    // Sit idle across several heartbeat intervals; the pings must all succeed.
-    std::thread::sleep(Duration::from_millis(1000));
-    assert_eq!(sup.tripped(), None, "healthy sidecar should not trip");
+    std::thread::sleep(Duration::from_millis(1000)); // several idle heartbeats
+    assert_eq!(sup.health(), Health::Running);
+    assert_eq!(sup.recoveries(), 0);
     assert!(!tmp.cageq_txt().exists(), "no safe state should have been written");
 }
 
 #[test]
-fn busy_timeout_trips_and_writes_safe_state() {
-    let tmp = TempDir::new("busy");
-    let sup = supervise(&tmp.cageq_txt());
+fn crash_trips_then_auto_recovers() {
+    let tmp = TempDir::new("crash");
+    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), tmp.cageq_txt()).unwrap();
 
-    // A call that sleeps well past busy_response (300 ms): the monitor must trip.
-    let err = sup.call("sleep_ms", json!({ "ms": 1500 })).unwrap_err();
-    match err {
-        SupervisorError::Tripped(TripReason::Unresponsive { mode: Mode::Busy, .. }) => {}
-        other => panic!("expected Tripped(Unresponsive{{Busy}}), got {other:?}"),
-    }
-    assert!(wrote_safe_state(&tmp.cageq_txt()), "safe state must be on disk after a trip");
+    // A crash: the call fails, the watchdog writes silence, then restarts.
+    let _ = sup.call("exit", json!({ "code": 1 }));
+    let h = sup.wait_until(|h| matches!(h, Health::Running), Duration::from_secs(3));
+    assert!(matches!(h, Health::Running), "should auto-recover to Running, got {h:?}");
+    assert!(sup.recoveries() >= 1);
+    assert!(wrote_safe_state(&tmp.cageq_txt()), "safe state must have been written on the trip");
+
+    // The fresh sidecar serves calls again.
+    let v = sup.call("calculate_filters", json!({ "device": "DAC2" })).unwrap();
+    assert_eq!(v["device"], "DAC2");
 }
 
 #[test]
-fn sidecar_crash_trips_with_exited() {
-    let tmp = TempDir::new("crash");
-    let sup = supervise(&tmp.cageq_txt());
+fn hang_is_killed_and_recovers_without_waiting_it_out() {
+    let tmp = TempDir::new("hang");
+    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), tmp.cageq_txt()).unwrap();
 
-    // `exit` terminates the child without replying -> EOF -> Exited.
+    let start = Instant::now();
+    // Sleeps 5 s, but busy_response is 200 ms: the monitor must *kill* the hung
+    // child (cross-thread) and recover long before 5 s would pass.
+    let _ = sup.call("sleep_ms", json!({ "ms": 5000 }));
+    let h = sup.wait_until(|h| matches!(h, Health::Running), Duration::from_secs(3));
+
+    assert!(matches!(h, Health::Running), "should recover after killing the hang, got {h:?}");
+    assert!(start.elapsed() < Duration::from_secs(4), "recovered without waiting out the 5 s hang");
+    assert!(sup.recoveries() >= 1);
+    assert!(sup.call("ping", json!(null)).is_ok());
+}
+
+#[test]
+fn persistent_restart_failure_goes_terminal() {
+    let tmp = TempDir::new("terminal");
+    // Only the initial spawn (index 0) works; every restart attempt fails.
+    let sup = Supervisor::start(counting_spawner(|i| i == 0), fast_cfg(), tmp.cageq_txt()).unwrap();
+
     let _ = sup.call("exit", json!({ "code": 1 }));
-    assert_eq!(sup.tripped(), Some(TripReason::SidecarExited));
-    assert!(wrote_safe_state(&tmp.cageq_txt()));
+    let h = sup.wait_until(|h| matches!(h, Health::Terminal { .. }), Duration::from_secs(3));
+    assert!(matches!(h, Health::Terminal { .. }), "3 failed restarts -> Terminal, got {h:?}");
 
-    // Once tripped, further calls fail fast rather than touching the dead process.
+    // A terminal supervisor rejects work fast, without touching a sidecar.
     match sup.call("ping", json!(null)) {
-        Err(SupervisorError::Tripped(TripReason::SidecarExited)) => {}
-        other => panic!("expected fast Tripped after a trip, got {other:?}"),
+        Err(SupervisorError::Tripped(_)) => {}
+        other => panic!("terminal supervisor should reject calls, got {other:?}"),
     }
+}
+
+#[test]
+fn manual_retry_recovers_from_terminal() {
+    let tmp = TempDir::new("manual");
+    // ok on the initial spawn (0) and the manual attempt (4); the 3 automatic
+    // attempts (1,2,3) fail, so we reach Terminal first.
+    let sup = Supervisor::start(counting_spawner(|i| i == 0 || i >= 4), fast_cfg(), tmp.cageq_txt()).unwrap();
+
+    let _ = sup.call("exit", json!({ "code": 1 }));
+    let h = sup.wait_until(|h| matches!(h, Health::Terminal { .. }), Duration::from_secs(3));
+    assert!(matches!(h, Health::Terminal { .. }), "expected Terminal first, got {h:?}");
+
+    sup.retry();
+    let h = sup.wait_until(|h| matches!(h, Health::Running), Duration::from_secs(3));
+    assert!(matches!(h, Health::Running), "manual retry should heal, got {h:?}");
+    assert!(sup.call("ping", json!(null)).is_ok());
 }
