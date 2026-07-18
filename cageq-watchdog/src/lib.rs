@@ -12,7 +12,12 @@
 //!     time, heartbeats when idle, and — because it also owns the spawn closure —
 //!     performs restarts;
 //!   * a **monitor** thread owns only a clock and the shared state; it trips on a
-//!     blown deadline and *kills* the current sidecar to unblock the driver.
+//!     blown deadline and *kills* the current sidecar to unblock the driver;
+//!   * a short-lived **exit waiter** thread per sidecar generation blocks on the
+//!     process handle ([`cageq_sidecar::Killer::wait`]) and trips the instant the
+//!     process exits — event-based crash detection (§7.1) that doesn't wait for the
+//!     next heartbeat. A generation counter plus the `Running` guard make a waiter
+//!     for a replaced or intentionally-killed process a harmless no-op.
 //!
 //! They share an `Arc<Mutex<Shared>>`. The mutex is only ever held briefly and
 //! never across a blocking call (a sidecar read, a spawn, a backoff sleep), so the
@@ -153,6 +158,10 @@ struct Shared {
     /// Kill handle for the *current* sidecar; updated on every (re)spawn so the
     /// monitor always kills the right process.
     killer: Option<cageq_sidecar::Killer>,
+    /// Bumped on every (re)spawn. An exit waiter captures the generation it was born
+    /// under and only trips if it still matches — so a waiter for a replaced process
+    /// can't cause a spurious trip.
+    generation: u64,
     safe_state_path: PathBuf,
     shutdown: bool,
     manual_retry: bool,
@@ -214,12 +223,16 @@ impl Supervisor {
         let shared = Arc::new(Mutex::new(Shared {
             health: Health::Running,
             in_flight: None,
-            killer: Some(sidecar.killer()),
+            killer: None,
+            generation: 0,
             safe_state_path: safe_state_path.into(),
             shutdown: false,
             manual_retry: false,
             recoveries: 0,
         }));
+        // Watch the initial process for exit (event-based, §7.1); this also sets the
+        // kill handle and generation.
+        install_waiter(&shared, sidecar.killer());
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
 
         let driver = {
@@ -479,7 +492,9 @@ where
     };
     let killer = fresh.killer();
     *sidecar = fresh; // dropping the old Sidecar kills the old (crashed/hung) process
-    shared.lock().unwrap().killer = Some(killer);
+    // Watch the new process; bumps the generation so the old, now-dead process's
+    // waiter fires harmlessly (generation mismatch).
+    install_waiter(shared, killer);
 
     // A fresh, ping-answering process is a sufficiently safe recovery signal (§7.2).
     match sidecar.ping() {
@@ -507,6 +522,29 @@ fn interruptible_sleep(shared: &Arc<Mutex<Shared>>, dur: Duration, tick: Duratio
         }
         thread::sleep(tick.min(deadline - now));
     }
+}
+
+/// Record a newly-(re)spawned sidecar as current — bump the generation, store its
+/// kill handle — and spawn a thread that blocks on its OS process handle and trips
+/// **the instant** it exits (§7.1's event-based detection; no polling, no waiting
+/// for the next heartbeat). The generation it captures, plus the `Running` guard in
+/// `trip_if_running`, make the waiter of a replaced or intentionally-killed process
+/// a no-op, so only a genuine crash of the *current* sidecar trips.
+fn install_waiter(shared: &Arc<Mutex<Shared>>, killer: cageq_sidecar::Killer) {
+    let generation = {
+        let mut s = shared.lock().unwrap();
+        s.generation += 1;
+        s.killer = Some(killer.clone());
+        s.generation
+    };
+    let shared = Arc::clone(shared);
+    thread::spawn(move || {
+        let _ = killer.wait(); // blocks until THIS process exits
+        let mut s = shared.lock().unwrap();
+        if !s.shutdown && s.generation == generation {
+            s.trip_if_running(TripReason::SidecarExited);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

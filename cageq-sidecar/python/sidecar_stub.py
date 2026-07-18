@@ -15,6 +15,7 @@ import sys
 import os
 import time
 import json
+import threading
 
 
 def handle(method, params):
@@ -34,6 +35,15 @@ def handle(method, params):
         # (SidecarError::Exited). os._exit skips cleanup, like a real hard crash.
         sys.stdout.flush()
         os._exit(int(params.get("code", 1)))
+
+    if method == "die_after_ms":
+        # Reply immediately, then crash later from a timer — simulates a process
+        # that dies while the Rust side is *idle* (between heartbeats), so only the
+        # event-based exit waiter can notice it promptly.
+        ms = int(params.get("ms", 0))
+        code = int(params.get("code", 1))
+        threading.Timer(ms / 1000.0, lambda: os._exit(code)).start()
+        return {"scheduled_ms": ms}
 
     if method == "calculate_filters":
         # Canned answer, shaped exactly like cageq-config-writer's DeviceConfig

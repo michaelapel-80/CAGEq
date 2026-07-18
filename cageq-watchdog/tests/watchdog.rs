@@ -157,6 +157,34 @@ fn hang_is_killed_and_recovers_without_waiting_it_out() {
 }
 
 #[test]
+fn idle_crash_is_detected_event_based() {
+    let tmp = TempDir::new("idlecrash");
+    // Long idle_interval so the driver stays blocked in recv when the process dies:
+    // only the event-based exit waiter can notice it promptly. Long backoff so
+    // recovery doesn't race the assertion.
+    let cfg = WatchdogConfig {
+        idle_interval: Duration::from_secs(10),
+        idle_response: Duration::from_secs(2),
+        busy_response: Duration::from_secs(10),
+        tick: Duration::from_millis(40),
+        restart_backoffs: vec![Duration::from_secs(30)],
+    };
+    let sup = Supervisor::start(healthy_spawner(), cfg, tmp.cageq_txt()).unwrap();
+
+    // Replies immediately, then the process crashes ~300 ms later while we're idle.
+    sup.call("die_after_ms", json!({ "ms": 300, "code": 1 })).expect("schedule ok");
+
+    // The safe state must appear well before the 10 s idle heartbeat would fire —
+    // that is only possible via the OS-handle waiter.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && !wrote_safe_state(&tmp.cageq_txt()) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(wrote_safe_state(&tmp.cageq_txt()), "idle crash should mute promptly via the exit waiter");
+    assert!(matches!(sup.health(), Health::Recovering { .. } | Health::Terminal { .. }));
+}
+
+#[test]
 fn persistent_restart_failure_goes_terminal() {
     let tmp = TempDir::new("terminal");
     // Only the initial spawn (index 0) works; every restart attempt fails.
