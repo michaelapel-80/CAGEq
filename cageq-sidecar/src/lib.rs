@@ -34,11 +34,13 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use shared_child::SharedChild;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -113,7 +115,7 @@ struct RpcError {
 /// A live sidecar process plus the plumbing to talk to it. Owns the child, so
 /// when this value drops the process is killed (see the `Drop` impl).
 pub struct Sidecar {
-    child: Child,
+    proc: Arc<SharedChild>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
@@ -127,21 +129,23 @@ impl Sidecar {
     /// interpreter path (resolve the real `python.exe`, not a launcher, so `Drop`
     /// kills the actual process); `script` is the sidecar entry point.
     pub fn spawn(python: &Path, script: &Path) -> Result<Self, SidecarError> {
-        let mut child = Command::new(python)
-            .arg("-u") // unbuffered stdio: replies flush immediately (trap #2)
+        let mut cmd = Command::new(python);
+        cmd.arg("-u") // unbuffered stdio: replies flush immediately (trap #2)
             .arg(script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(SidecarError::Spawn)?;
+            .stderr(Stdio::piped());
 
-        // `take()` moves each handle out of the Child (leaving None), so we own
-        // them directly and the borrow of `child` ends here. They're guaranteed
-        // Some right after a piped spawn; the ok_or maps the impossible None.
-        let stdin = child.stdin.take().ok_or_else(|| miswired("stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| miswired("stdout"))?;
-        let stderr = child.stderr.take().ok_or_else(|| miswired("stderr"))?;
+        // SharedChild wraps the process so kill()/wait() work from ANY thread via a
+        // shared OS handle — the capability the watchdog needs to force-unblock a
+        // hung read, and that std's Child (kill takes &mut self) cannot provide.
+        let proc = Arc::new(SharedChild::spawn(&mut cmd).map_err(SidecarError::Spawn)?);
+
+        // Take the piped handles out of the shared process; guaranteed Some right
+        // after a piped spawn, so the ok_or maps the impossible None.
+        let stdin = proc.take_stdin().ok_or_else(|| miswired("stdin"))?;
+        let stdout = proc.take_stdout().ok_or_else(|| miswired("stdout"))?;
+        let stderr = proc.take_stderr().ok_or_else(|| miswired("stderr"))?;
 
         // Drain stderr forever on its own thread (trap #1). `move` transfers
         // ownership of `stderr` into the closure; the thread ends on its own when
@@ -156,7 +160,7 @@ impl Sidecar {
         });
 
         Ok(Sidecar {
-            child,
+            proc,
             stdin,
             stdout: BufReader::new(stdout),
             next_id: 1,
@@ -221,13 +225,46 @@ impl Sidecar {
     }
 }
 
+impl Sidecar {
+    /// A cheap, cloneable handle that can kill or wait on the child from **any**
+    /// thread — the capability std's `Child` lacks. The watchdog holds one so it can
+    /// force-unblock a hung read from its monitor thread (killing the child closes
+    /// the pipes, so the driver's blocked `read_line` returns EOF).
+    pub fn killer(&self) -> Killer {
+        Killer(Arc::clone(&self.proc))
+    }
+}
+
+/// See [`Sidecar::killer`]. Clone freely; every clone controls the same process.
+#[derive(Clone)]
+pub struct Killer(Arc<SharedChild>);
+
+impl Killer {
+    /// Terminate the child. Killing an already-exited process is a harmless error
+    /// the caller can ignore.
+    pub fn kill(&self) -> std::io::Result<()> {
+        self.0.kill()
+    }
+
+    /// Block until the child exits — event-based, no polling. Lets a supervisor
+    /// detect a crash the instant it happens rather than on the next interaction.
+    pub fn wait(&self) -> std::io::Result<()> {
+        self.0.wait().map(|_| ())
+    }
+
+    /// The OS process id, for logging/diagnostics.
+    pub fn pid(&self) -> u32 {
+        self.0.id()
+    }
+}
+
 impl Drop for Sidecar {
     /// RAII teardown. A destructor must never panic, so every step is best-effort.
     /// Killing the child closes its pipes, which lets the stderr pump reach EOF and
     /// end; we then join it so no thread outlives the handle.
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait(); // reap the zombie; also unblocks the pump's read
+        let _ = self.proc.kill();
+        let _ = self.proc.wait(); // reap the zombie; also unblocks the pump's read
         if let Some(h) = self.stderr_pump.take() {
             let _ = h.join();
         }

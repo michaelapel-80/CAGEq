@@ -8,4 +8,5 @@ edition = "2024"
 # #[derive(Serialize, Deserialize)] macros. serde_json = the JSON format impl.
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+shared_child = "1.1.1"
 thiserror = "2.0"
