@@ -1,13 +1,13 @@
-# CAGE – Custom Auto-Gain Equalizer
+# CAGEq – Caged Auto-Gain EQ
 *(Arbeitstitel) · Kurzvorstellung für Mitwirkende und Tester*
 
 > Diese Seite ist eine verkürzte, auf Überzeugung statt Vollständigkeit ausgelegte Fassung von [`filter.md`](filter.md), dem vollständigen Architektur-Dokument (ADD). Für Implementierungsdetails, offene Design-Fragen und die komplette Historie der Entscheidungen bitte dort nachlesen.
 
 ---
 
-## Was ist CAGE?
+## Was ist CAGEq?
 
-Eine moderne, eigenständige Windows-App zur Erstellung, Verwaltung und zum **lautheitsneutralen Vergleich** von parametrischen Equalizer-Filtern – auf Basis echter Kopfhörer-Messdaten. CAGE übernimmt dabei die Steuerung von [Equalizer APO](https://sourceforge.net/projects/equalizerapo/), macht aber die eigentliche Filterberechnung, den A/B/Dry-Vergleich und die Sicherheitsmechanismen drumherum erst benutzbar.
+Eine moderne, eigenständige Windows-App zur Erstellung, Verwaltung und zum **lautheitsneutralen Vergleich** von parametrischen Equalizer-Filtern – auf Basis echter Kopfhörer-Messdaten. CAGEq übernimmt dabei die Steuerung von [Equalizer APO](https://sourceforge.net/projects/equalizerapo/), macht aber die eigentliche Filterberechnung, den A/B/Dry-Vergleich und die Sicherheitsmechanismen drumherum erst benutzbar.
 
 Von der Idee her verwandt mit [AQUA](https://github.com/h39s/AQUA), aber eine unabhängige Neuentwicklung mit eigenem, bewusst anderem Tech-Stack – kein Fork, kein Codeübernahme.
 
@@ -25,7 +25,7 @@ Wer seinen Kopfhörer per EQ korrigieren will, kennt das: Eine gute Korrekturkur
 
 ## Sicherheit hat Vorrang
 
-CAGE folgt konsequent der Regel *"lieber kein Sound als falscher Sound"*: Bei jeder Unstimmigkeit schaltet das System sofort in einen definierten, stummen Sicherheitszustand – inklusive eines von der Haupt-Engine unabhängigen Watchdogs, der auch dann noch eingreifen kann, wenn die Berechnungs-Komponente selbst abgestürzt ist. Digitales Übersteuern (über 0 dBFS) ist durch mehrere unabhängige Prüfungen praktisch ausgeschlossen, nicht nur durch eine einzelne Rechnung.
+CAGEq folgt konsequent der Regel *"lieber kein Sound als falscher Sound"*: Bei jeder Unstimmigkeit schaltet das System sofort in einen definierten, stummen Sicherheitszustand – inklusive eines von der Haupt-Engine unabhängigen Watchdogs, der auch dann noch eingreifen kann, wenn die Berechnungs-Komponente selbst abgestürzt ist. Digitales Übersteuern (über 0 dBFS) ist durch mehrere unabhängige Prüfungen praktisch ausgeschlossen, nicht nur durch eine einzelne Rechnung.
 
 ## Wie es technisch funktioniert (für Mitentwickler)
 
