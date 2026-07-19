@@ -36,6 +36,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 // Line ending CAGEq emits. EqAPO parses LF fine (it strips a trailing \r itself).
@@ -54,7 +55,7 @@ pub const CAGEQ_FILENAME: &str = "cageq.txt";
 // Data model
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FilterType {
     Peaking,   // PK
     LowShelf,  // LSC
@@ -76,7 +77,7 @@ impl FilterType {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Filter {
     pub kind: FilterType,
     pub freq_hz: f64,
@@ -85,7 +86,8 @@ pub struct Filter {
 }
 
 /// One device's managed configuration — becomes one `Device:` block in cageq.txt.
-#[derive(Debug, Clone)]
+/// Deserializable so the sidecar's `calculate_filters` reply maps straight onto it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConfig {
     pub device: String,
     pub preamp_db: f64,
@@ -124,7 +126,7 @@ pub enum BlockState {
 
 /// The verdict of the startup integrity check (§3.0) — how far to trust the
 /// resume state remembered in settings.json.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupDecision {
     /// No cageq.txt yet (or one without a hash header). Start clean.
     FirstRun,

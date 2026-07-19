@@ -15,7 +15,20 @@ dependencies = [
 name = "cageq-config-writer"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "cageq-core"
+version = "0.1.0"
+dependencies = [
+ "cageq-config-writer",
+ "cageq-sidecar",
+ "cageq-watchdog",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
