@@ -4,7 +4,7 @@ import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string };
 type Target = { name: string; path: string };
-type AudioDevice = { id: string; name: string; eqapo_pattern: string };
+type AudioDevice = { id: string; name: string; eqapo_pattern: string; eqapo_enabled: boolean };
 type ApplyResult = {
   hash: string;
   device: string;
@@ -54,7 +54,8 @@ function App() {
         setHeadphones(hp.headphones);
         setTargets(tg.targets);
         setDevices(dev);
-        setDeviceId(dev[0]?.id ?? "");
+        // Prefer a device EqAPO is actually installed on, so the default selection works.
+        setDeviceId((dev.find((d) => d.eqapo_enabled) ?? dev[0])?.id ?? "");
         const harman = tg.targets.find((t) => /harman over-ear 2018$/i.test(t.name));
         setTargetPath(harman?.path ?? tg.targets[0]?.path ?? "");
       } catch (e) {
@@ -116,6 +117,8 @@ function App() {
     }
   }
 
+  const selectedDevice = devices.find((d) => d.id === deviceId);
+
   return (
     <main className="container">
       <h1>CAGEq</h1>
@@ -132,20 +135,30 @@ function App() {
       )}
 
       {!loading && (
-        <p className="row" style={{ alignItems: "center", gap: "0.5em" }}>
-          <label htmlFor="device-select">Output device:</label>
-          {devices.length === 0 ? (
-            <span style={{ opacity: 0.7 }}>no active playback device detected</span>
-          ) : (
-            <select id="device-select" value={deviceId} onChange={(e) => setDeviceId(e.currentTarget.value)}>
-              {devices.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name}
-                </option>
-              ))}
-            </select>
+        <div>
+          <p className="row" style={{ alignItems: "center", gap: "0.5em" }}>
+            <label htmlFor="device-select">Output device:</label>
+            {devices.length === 0 ? (
+              <span style={{ opacity: 0.7 }}>no active playback device detected</span>
+            ) : (
+              <select id="device-select" value={deviceId} onChange={(e) => setDeviceId(e.currentTarget.value)}>
+                {devices.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                    {d.eqapo_enabled ? "" : " — ⚠ Equalizer APO not installed"}
+                  </option>
+                ))}
+              </select>
+            )}
+          </p>
+          {selectedDevice && !selectedDevice.eqapo_enabled && (
+            <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.5em" }}>
+              ⚠ Equalizer APO isn't installed on this device, so applying an EQ here has no effect.
+              Enable it for this device with Equalizer APO's <em>Configurator</em> (DeviceSelector.exe),
+              then reboot.
+            </p>
           )}
-        </p>
+        </div>
       )}
 
       {loading ? (

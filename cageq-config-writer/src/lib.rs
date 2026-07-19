@@ -308,6 +308,10 @@ pub struct AudioDevice {
     /// The string to write on the `Device:` line — [`name`](Self::name) normalised to
     /// EqAPO's word-match form (see [`eqapo_device_pattern`]).
     pub eqapo_pattern: String,
+    /// Whether Equalizer APO's APO is actually installed on this endpoint (§3.0). When
+    /// `false`, a `Device:`-scoped config for it is inert — the UI warns and points at
+    /// EqAPO's DeviceSelector instead of writing something that silently does nothing.
+    pub eqapo_enabled: bool,
 }
 
 /// Normalise a Windows device name into an EqAPO `Device:` pattern.
@@ -373,9 +377,32 @@ fn render_devices_from_registry() -> Vec<AudioDevice> {
             (None, None) => guid.clone(),
         };
         let eqapo_pattern = eqapo_device_pattern(&name);
-        devices.push(AudioDevice { id: guid, name, eqapo_pattern });
+        let eqapo_enabled = endpoint_has_eqapo_apo(&endpoint);
+        devices.push(AudioDevice { id: guid, name, eqapo_pattern, eqapo_enabled });
     }
     devices
+}
+
+/// Is Equalizer APO's APO installed on this endpoint? EqAPO inserts one of its APO
+/// CLSIDs into the endpoint's `FxProperties` effect chain (pre-mix `{EACD2258-…}` /
+/// post-mix `{EC1CC9CE-…}`, verified against a live install). We scan every value
+/// rather than hard-coding the slot indices, so all install variants (normal /
+/// troubleshooting / install-as-LFX) register as enabled.
+#[cfg(windows)]
+fn endpoint_has_eqapo_apo(endpoint: &winreg::RegKey) -> bool {
+    use winreg::types::FromRegValue;
+
+    // EqAPO's two APO CLSIDs (braces stripped, upper-case) as they appear as REG_SZ
+    // GUID values under FxProperties.
+    const EQAPO_APO_CLSIDS: [&str; 2] =
+        ["EACD2258-FCAC-4FF4-B36D-419E924A6D79", "EC1CC9CE-FAED-4822-828A-82A81A6F018F"];
+
+    let Ok(fx) = endpoint.open_subkey("FxProperties") else { return false };
+    fx.enum_values().flatten().any(|(_, val)| {
+        let Ok(s) = String::from_reg_value(&val) else { return false };
+        let s = s.to_ascii_uppercase();
+        EQAPO_APO_CLSIDS.iter().any(|clsid| s.contains(clsid))
+    })
 }
 
 #[cfg(not(windows))]
