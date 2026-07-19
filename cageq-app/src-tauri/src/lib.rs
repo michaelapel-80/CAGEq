@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use cageq_core::{CalcRequest, Core, CoreError, Sidecar, WatchdogConfig, detect_eqapo_config_dir};
+use cageq_core::{
+    Applied, CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, LoudnessSettings, Sidecar,
+    WatchdogConfig, detect_eqapo_config_dir,
+};
 use serde_json::{json, Map, Value};
 use tauri::State;
 
@@ -54,17 +57,23 @@ fn apply(device: String, headphone: String, target: Option<String>, state: State
                 inputs.insert("target".into(), Value::String(t));
             }
             let applied = core.apply(CalcRequest { device, inputs }).map_err(|e| e.to_string())?;
-            let cageq_path = config_dir.join("cageq.txt");
-            let cageq_text = std::fs::read_to_string(&cageq_path).unwrap_or_default();
-            Ok(ApplyResult {
-                hash: applied.hash,
-                device: applied.device,
-                cageq_path: cageq_path.display().to_string(),
-                cageq_text,
-                preamp_db: applied.preamp_db,
-                clipping_warning: applied.clipping_warning,
-            })
+            Ok(apply_result(applied, config_dir))
         }
+    }
+}
+
+/// Build the UI-facing result from an [`Applied`], reading back the exact cageq.txt
+/// that was written (the end-to-end proof). Shared by `apply` and `set_loudness`.
+fn apply_result(applied: Applied, config_dir: &Path) -> ApplyResult {
+    let cageq_path = config_dir.join("cageq.txt");
+    let cageq_text = std::fs::read_to_string(&cageq_path).unwrap_or_default();
+    ApplyResult {
+        hash: applied.hash,
+        device: applied.device,
+        cageq_path: cageq_path.display().to_string(),
+        cageq_text,
+        preamp_db: applied.preamp_db,
+        clipping_warning: applied.clipping_warning,
     }
 }
 
@@ -83,6 +92,47 @@ fn list_targets(state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, .. } => core.request("list_targets", json!({})).map_err(|e| e.to_string()),
+    }
+}
+
+/// The current §4.0 loudness settings (base pre-gain + mode).
+#[tauri::command]
+fn get_loudness(state: State<Backend>) -> Result<LoudnessSettings, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => Ok(core.loudness()),
+    }
+}
+
+/// What `set_loudness` returns: the (clamped, persisted) settings, plus the config
+/// re-applied with them — so the UI's shown preamp/cageq.txt updates live.
+#[derive(serde::Serialize)]
+struct LoudnessUpdate {
+    settings: LoudnessSettings,
+    /// Present when a config was already applied and re-applying it succeeded.
+    applied: Option<ApplyResult>,
+}
+
+/// Set the §4.0 loudness settings (base pre-gain + Comparison/FinalVolume mode),
+/// persist them, and re-apply the current config so the change takes effect
+/// immediately. Base pre-gain is clamped to attenuation only (−40..0 dB): a positive
+/// value would be a boost, which the safety model must never allow.
+#[tauri::command]
+fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<LoudnessUpdate, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, config_dir, .. } => {
+            let base = if settings.base_pregain_db.is_finite() {
+                settings.base_pregain_db.clamp(-40.0, 0.0)
+            } else {
+                DEFAULT_BASE_PREGAIN_DB
+            };
+            let settings = LoudnessSettings { base_pregain_db: base, mode: settings.mode };
+            core.set_loudness(settings);
+            let _ = save_settings(&AppSettings { loudness: settings }); // best-effort persist
+            let applied = core.reapply().and_then(|r| r.ok()).map(|a| apply_result(a, config_dir));
+            Ok(LoudnessUpdate { settings, applied })
+        }
     }
 }
 
@@ -110,6 +160,53 @@ fn status(state: State<Backend>) -> Status {
     }
 }
 
+// --- persisted settings (§3.5, minimal) -----------------------------------
+
+/// The app's persisted settings. A struct (not a bare value) so it can grow without
+/// invalidating older files; `#[serde(default)]` fills in anything a prior version
+/// didn't write. Currently just the §4.0 loudness settings.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct AppSettings {
+    #[serde(default)]
+    loudness: LoudnessSettings,
+}
+
+/// settings.json location: `%APPDATA%\CAGEq\settings.json`, overridable via
+/// CAGEQ_SETTINGS_PATH (used by tests to avoid touching the real profile).
+fn settings_path() -> PathBuf {
+    if let Ok(p) = env::var("CAGEQ_SETTINGS_PATH") {
+        return PathBuf::from(p);
+    }
+    let base = env::var("APPDATA").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    base.join("CAGEq").join("settings.json")
+}
+
+/// Load persisted settings, or defaults if the file is missing/unreadable/corrupt
+/// (a bad settings file must never stop the app from starting).
+fn load_settings() -> AppSettings {
+    load_settings_from(&settings_path())
+}
+
+fn load_settings_from(path: &Path) -> AppSettings {
+    match std::fs::read_to_string(path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => AppSettings::default(),
+    }
+}
+
+/// Persist settings (best-effort; creates the parent dir).
+fn save_settings(s: &AppSettings) -> std::io::Result<()> {
+    save_settings_to(&settings_path(), s)
+}
+
+fn save_settings_to(path: &Path, s: &AppSettings) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string_pretty(s).map_err(std::io::Error::other)?;
+    std::fs::write(path, json)
+}
+
 // --- backend setup --------------------------------------------------------
 
 fn build_backend() -> Backend {
@@ -121,7 +218,10 @@ fn build_backend() -> Backend {
         format!("stub ({})", script.display())
     };
     match start_core(&config_dir, python, script) {
-        Ok(core) => Backend::Ready { core, config_dir, config_source, sidecar },
+        Ok(core) => {
+            core.set_loudness(load_settings().loudness); // restore §4.0 settings
+            Backend::Ready { core, config_dir, config_source, sidecar }
+        }
         Err(e) => Backend::Failed(format!("backend init failed: {e}")),
     }
 }
@@ -204,7 +304,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(build_backend())
-        .invoke_handler(tauri::generate_handler![apply, status, list_headphones, list_targets])
+        .invoke_handler(tauri::generate_handler![
+            apply,
+            status,
+            list_headphones,
+            list_targets,
+            get_loudness,
+            set_loudness
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -212,6 +319,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cageq_core::LoudnessMode;
 
     /// A synthetic measurement (used by the offline e2e test so it needs no network):
     /// +5 dB ~3 kHz, -3 dB ~6 kHz, gentle bass rise.
@@ -288,5 +396,50 @@ mod tests {
 
         drop(core);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn preamp_line(text: &str) -> String {
+        text.lines().find(|l| l.starts_with("Preamp:")).expect("a Preamp line").to_string()
+    }
+
+    /// Changing the §4.0 loudness settings and re-applying updates the written preamp
+    /// live: FinalVolume (max clipping-free, -G_max_peak) differs from Comparison
+    /// (base pre-gain + loudness match) for a non-flat curve.
+    #[test]
+    fn loudness_mode_changes_the_written_preamp_on_reapply() {
+        let dir = std::env::temp_dir().join(format!("cageq-app-loud-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (python, script) = resolve_sidecar();
+        let core = start_core(&dir, python, script).expect("core should start");
+
+        // Default (Comparison, -9 dB base pre-gain).
+        core.apply(CalcRequest { device: "Dev".into(), inputs: demo_inputs() }).expect("apply");
+        let comparison = preamp_line(&std::fs::read_to_string(dir.join("cageq.txt")).unwrap());
+
+        // Switch to FinalVolume and re-apply the same config.
+        core.set_loudness(LoudnessSettings { base_pregain_db: -9.0, mode: LoudnessMode::FinalVolume });
+        core.reapply().expect("something was applied").expect("reapply ok");
+        let final_vol = preamp_line(&std::fs::read_to_string(dir.join("cageq.txt")).unwrap());
+
+        assert_ne!(comparison, final_vol, "mode change should move the preamp");
+
+        drop(core);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Persisted settings round-trip through the settings.json file (path-based
+    /// helpers, so no global env mutation and the real profile is untouched).
+    #[test]
+    fn settings_persist_and_reload() {
+        let path = std::env::temp_dir().join(format!("cageq-settings-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(load_settings_from(&path).loudness, LoudnessSettings::default(), "missing -> defaults");
+
+        let want = LoudnessSettings { base_pregain_db: -6.0, mode: LoudnessMode::FinalVolume };
+        save_settings_to(&path, &AppSettings { loudness: want }).expect("save");
+        assert_eq!(load_settings_from(&path).loudness, want, "reloaded value should match saved");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

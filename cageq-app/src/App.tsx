@@ -20,6 +20,9 @@ type Status = {
   config_source: string;
   sidecar: string;
 };
+type LoudnessMode = "Comparison" | "FinalVolume";
+type LoudnessSettings = { base_pregain_db: number; mode: LoudnessMode };
+type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 
 const display = (h: Headphone) => `${h.name} · ${h.source} · ${h.form_factor}`;
 
@@ -30,6 +33,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [targetPath, setTargetPath] = useState("");
   const [result, setResult] = useState<ApplyResult | null>(null);
+  const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [applying, setApplying] = useState(false);
@@ -38,6 +42,7 @@ function App() {
     (async () => {
       try {
         setStatus(await invoke<Status>("status"));
+        setLoudness(await invoke<LoudnessSettings>("get_loudness"));
         const [hp, tg] = await Promise.all([
           invoke<{ headphones: Headphone[] }>("list_headphones"),
           invoke<{ targets: Target[] }>("list_targets"),
@@ -53,6 +58,20 @@ function App() {
       }
     })();
   }, []);
+
+  // Persist a loudness change; the backend re-applies the current config so the
+  // shown preamp/config updates live (applied is null when nothing is applied yet).
+  async function updateLoudness(next: LoudnessSettings) {
+    setLoudness(next); // optimistic
+    try {
+      setError("");
+      const update = await invoke<LoudnessUpdate>("set_loudness", { settings: next });
+      setLoudness(update.settings); // clamped/authoritative value from the backend
+      if (update.applied) setResult(update.applied);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   // Filter client-side and cap the datalist so 6800+ entries stay responsive.
   const matches = useMemo(() => {
@@ -136,12 +155,60 @@ function App() {
         </form>
       )}
 
+      {loudness && (
+        <fieldset style={{ marginTop: "1em", textAlign: "left", border: "1px solid #0003", borderRadius: 6 }}>
+          <legend>Loudness (§4.0)</legend>
+          <div className="row" style={{ alignItems: "center", flexWrap: "wrap", gap: "0.75em" }}>
+            <label>
+              <input
+                type="radio"
+                name="loudness-mode"
+                checked={loudness.mode === "Comparison"}
+                onChange={() => updateLoudness({ ...loudness, mode: "Comparison" })}
+              />{" "}
+              Comparison (A/B-fair)
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="loudness-mode"
+                checked={loudness.mode === "FinalVolume"}
+                onChange={() => updateLoudness({ ...loudness, mode: "FinalVolume" })}
+              />{" "}
+              Final volume (loudest safe)
+            </label>
+            <label style={{ opacity: loudness.mode === "Comparison" ? 1 : 0.4 }}>
+              Base pre-gain:{" "}
+              <input
+                type="number"
+                min={-40}
+                max={0}
+                step={1}
+                value={loudness.base_pregain_db}
+                disabled={loudness.mode !== "Comparison"}
+                onChange={(e) =>
+                  updateLoudness({ ...loudness, base_pregain_db: Number(e.currentTarget.value) })
+                }
+                style={{ width: "5em" }}
+              />{" "}
+              dB
+            </label>
+          </div>
+          <p style={{ fontSize: "0.78em", opacity: 0.7, margin: "0.5em 0 0" }}>
+            {loudness.mode === "Comparison"
+              ? "Every curve ends up equally loud (base pre-gain + loudness match) so A/B comparisons judge timbre, not level."
+              : "Maximum clipping-free volume (peak at 0 dBFS) — base pre-gain and loudness match are disabled."}
+          </p>
+        </fieldset>
+      )}
+
       {error && <p style={{ color: "crimson" }}>{error}</p>}
 
       {result && (
         <>
           <p>
-            Preamp <code>{result.preamp_db.toFixed(1)} dB</code> (Auto-LUFS loudness match) · hash{" "}
+            Preamp <code>{result.preamp_db.toFixed(1)} dB</code>{" "}
+            {loudness?.mode === "FinalVolume" ? "(max clipping-free)" : "(Auto-LUFS loudness match)"} · hash{" "}
             <code>{result.hash}</code> → {result.cageq_path}
           </p>
           {result.clipping_warning && (

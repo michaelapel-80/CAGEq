@@ -84,6 +84,31 @@ pub struct Applied {
 /// typical curves and the §4.2 ceiling only trips on genuinely extreme ones.
 pub const DEFAULT_BASE_PREGAIN_DB: f64 = -9.0;
 
+/// filter.md §4.0 loudness mode — the "Vergleichsmodus ↔ Finale Lautstärke" toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoudnessMode {
+    /// A/B-fair: base pre-gain + §4.1 loudness match, capped by the §4.2 ceiling.
+    /// Every curve ends up equally loud so comparisons judge timbre, not level.
+    Comparison,
+    /// Maximum clipping-free level (peak at 0 dBFS): no comfort buffer, no loudness
+    /// match — AQUA's default. Loudest safe playback for actual listening.
+    FinalVolume,
+}
+
+/// filter.md §4.0 user loudness settings: the base pre-gain and which mode is active.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LoudnessSettings {
+    /// §4.0 base pre-gain (user headroom), in dB. Applies in [`LoudnessMode::Comparison`].
+    pub base_pregain_db: f64,
+    pub mode: LoudnessMode,
+}
+
+impl Default for LoudnessSettings {
+    fn default() -> Self {
+        LoudnessSettings { base_pregain_db: DEFAULT_BASE_PREGAIN_DB, mode: LoudnessMode::Comparison }
+    }
+}
+
 /// The sidecar's `calculate_filters` reply: the fitted filters plus the two
 /// curve-derived quantities the core composes the preamp from. The DSP reports these
 /// physical quantities; the *policy* (base pre-gain, clipping ceiling) lives here.
@@ -108,23 +133,33 @@ struct Preamp {
     clipping_warning: bool,
 }
 
-/// Compose the final preamp from the curve quantities and the user's base pre-gain
-/// (filter.md §4.0 formula + §4.2 cascaded clipping ceiling):
+/// Compose the final preamp from the curve quantities and the user's loudness
+/// settings (filter.md §4.0 + §4.2).
 ///
+/// [`LoudnessMode::FinalVolume`]: maximum clipping-free level — `Preamp = -G_max_peak`
+/// (peak at 0 dBFS), no buffer, no loudness match; the ceiling can't be "overridden"
+/// so there's nothing to warn about.
+///
+/// [`LoudnessMode::Comparison`]:
 /// ```text
 ///   G_max_allowed = -G_max_peak - base_pregain_db   (§4.2, buffer-aware)
 ///   relative      = min(G_target, G_max_allowed)     (§4.2)
 ///   Preamp_final  = base_pregain_db + relative        (§4.0)
 /// ```
-///
 /// When the ceiling binds (`G_max_allowed < G_target`) `base_pregain_db` cancels and
 /// `Preamp_final == -G_max_peak` — the comfort buffer is spent to stay just below
-/// 0 dBFS rather than needlessly quiet; the never-clip guarantee holds either way.
-fn compose_preamp(g_target_db: f64, g_max_peak_db: f64, base_pregain_db: f64) -> Preamp {
-    let g_max_allowed = -g_max_peak_db - base_pregain_db;
-    let clipping_warning = g_max_allowed < g_target_db;
-    let relative = g_target_db.min(g_max_allowed);
-    Preamp { db: base_pregain_db + relative, clipping_warning }
+/// 0 dBFS rather than needlessly quiet. The never-clip guarantee holds in both modes.
+fn compose_preamp(g_target_db: f64, g_max_peak_db: f64, s: &LoudnessSettings) -> Preamp {
+    match s.mode {
+        LoudnessMode::FinalVolume => Preamp { db: -g_max_peak_db, clipping_warning: false },
+        LoudnessMode::Comparison => {
+            let base = s.base_pregain_db;
+            let g_max_allowed = -g_max_peak_db - base;
+            let clipping_warning = g_max_allowed < g_target_db;
+            let relative = g_target_db.min(g_max_allowed);
+            Preamp { db: base + relative, clipping_warning }
+        }
+    }
 }
 
 /// Errors from the core.
@@ -154,8 +189,8 @@ struct Inner {
     applied_count: AtomicU32,
     shutdown: AtomicBool,
     startup: StartupDecision,
-    /// §4.0 base pre-gain (user headroom), applied to every composed preamp.
-    base_pregain_db: Mutex<f64>,
+    /// §4.0 loudness settings (base pre-gain + mode) applied to every composed preamp.
+    loudness: Mutex<LoudnessSettings>,
 }
 
 /// The orchestrator handle.
@@ -195,7 +230,7 @@ impl Core {
             applied_count: AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
             startup,
-            base_pregain_db: Mutex::new(DEFAULT_BASE_PREGAIN_DB),
+            loudness: Mutex::new(LoudnessSettings::default()),
         });
 
         let reconciler = {
@@ -238,15 +273,24 @@ impl Core {
         self.inner.applied_count.load(Ordering::SeqCst)
     }
 
-    /// The §4.0 base pre-gain (user headroom) currently in effect, in dB.
-    pub fn base_pregain_db(&self) -> f64 {
-        *self.inner.base_pregain_db.lock().unwrap()
+    /// The §4.0 loudness settings (base pre-gain + mode) currently in effect.
+    pub fn loudness(&self) -> LoudnessSettings {
+        *self.inner.loudness.lock().unwrap()
     }
 
-    /// Set the §4.0 base pre-gain (user headroom). Applies to the next apply and any
-    /// post-recovery re-apply; does not rewrite the current config on its own.
-    pub fn set_base_pregain_db(&self, db: f64) {
-        *self.inner.base_pregain_db.lock().unwrap() = db;
+    /// Set the §4.0 loudness settings. Takes effect on the next apply (see
+    /// [`Core::reapply`] to push the change onto the currently-applied config) and on
+    /// any post-recovery re-apply; does not rewrite the current config on its own.
+    pub fn set_loudness(&self, settings: LoudnessSettings) {
+        *self.inner.loudness.lock().unwrap() = settings;
+    }
+
+    /// Re-run the last applied request with the current settings — e.g. after a
+    /// loudness-settings change, to update the written preamp live. `None` if nothing
+    /// has been applied yet; otherwise the fresh [`Applied`] (or a write/DSP error).
+    pub fn reapply(&self) -> Option<Result<Applied, CoreError>> {
+        let last = self.inner.last_applied.lock().unwrap().clone()?;
+        Some(do_apply(&self.supervisor, &self.inner, last))
     }
 }
 
@@ -278,8 +322,8 @@ fn do_apply(supervisor: &Supervisor, inner: &Inner, request: CalcRequest) -> Res
 
     // Compose the final preamp here (policy), from the curve quantities the DSP
     // reported (physics): §4.0 base pre-gain + §4.1 loudness match, capped by §4.2.
-    let base = *inner.base_pregain_db.lock().unwrap();
-    let preamp = compose_preamp(result.g_target_db, result.g_max_peak_db, base);
+    let loudness = *inner.loudness.lock().unwrap();
+    let preamp = compose_preamp(result.g_target_db, result.g_max_peak_db, &loudness);
     let device_config =
         DeviceConfig { device: result.device, preamp_db: preamp.db, filters: result.filters };
 
@@ -336,11 +380,15 @@ mod tests {
         assert!((a - b).abs() < 1e-9, "expected {b}, got {a}");
     }
 
+    fn comparison(base: f64) -> LoudnessSettings {
+        LoudnessSettings { base_pregain_db: base, mode: LoudnessMode::Comparison }
+    }
+
     #[test]
     fn typical_curve_the_loudness_match_binds() {
         // Moderate peak (+6), moderate loudness target (-4), default headroom.
         // G_max_allowed = -6 - (-9) = +3 > G_target, so G_target binds; no warning.
-        let p = compose_preamp(-4.0, 6.0, DEFAULT_BASE_PREGAIN_DB);
+        let p = compose_preamp(-4.0, 6.0, &comparison(DEFAULT_BASE_PREGAIN_DB));
         approx(p.db, -13.0); // base_pregain (-9) + relative (-4)
         assert!(!p.clipping_warning);
     }
@@ -349,7 +397,7 @@ mod tests {
     fn extreme_peak_the_ceiling_binds_and_base_pregain_cancels() {
         // Stacked custom filters: peak +25. The §4.2 ceiling takes over and the
         // comfort buffer is spent — Preamp_final collapses to exactly -G_max_peak.
-        let p = compose_preamp(-6.0, 25.0, DEFAULT_BASE_PREGAIN_DB);
+        let p = compose_preamp(-6.0, 25.0, &comparison(DEFAULT_BASE_PREGAIN_DB));
         approx(p.db, -25.0); // == -G_max_peak, independent of base_pregain
         assert!(p.clipping_warning);
     }
@@ -358,7 +406,7 @@ mod tests {
     fn ceiling_never_exceeds_zero_dbfs_regardless_of_base_pregain() {
         // For any base pre-gain, a positive-peak curve stays at or below -G_max_peak.
         for base in [-3.0, -9.0, -18.0] {
-            let p = compose_preamp(10.0, 12.0, base); // absurd +10 target vs +12 peak
+            let p = compose_preamp(10.0, 12.0, &comparison(base)); // absurd +10 vs +12 peak
             assert!(p.db <= -12.0 + 1e-9, "base {base}: preamp {} > -peak", p.db);
             assert!(p.clipping_warning);
         }
@@ -368,8 +416,18 @@ mod tests {
     fn stub_defaults_yield_just_the_base_pregain() {
         // Missing g_target/g_max_peak default to 0 (the stub): a flat, level-neutral
         // curve leaves only the base pre-gain, and never trips the ceiling.
-        let p = compose_preamp(0.0, 0.0, DEFAULT_BASE_PREGAIN_DB);
+        let p = compose_preamp(0.0, 0.0, &comparison(DEFAULT_BASE_PREGAIN_DB));
         approx(p.db, DEFAULT_BASE_PREGAIN_DB);
+        assert!(!p.clipping_warning);
+    }
+
+    #[test]
+    fn final_volume_is_max_clipping_free_ignoring_buffer_and_match() {
+        // FinalVolume: peak sits exactly at 0 dBFS, base pre-gain and loudness target
+        // are both ignored, and there is no ceiling override to warn about.
+        let s = LoudnessSettings { base_pregain_db: -9.0, mode: LoudnessMode::FinalVolume };
+        let p = compose_preamp(-4.0, 6.0, &s);
+        approx(p.db, -6.0); // -G_max_peak, regardless of base_pregain / G_target
         assert!(!p.clipping_warning);
     }
 }
