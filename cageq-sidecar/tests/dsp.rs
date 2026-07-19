@@ -85,6 +85,44 @@ fn real_dsp_fits_parametric_filters() {
 }
 
 #[test]
+fn real_dsp_appends_custom_filters() {
+    let Some(python) = venv_python() else {
+        eprintln!("skipping custom-filter test: no .venv");
+        return;
+    };
+    let mut sc = Sidecar::spawn(&python, &dsp_script()).expect("spawn dsp sidecar");
+    sc.ping().expect("ping");
+
+    let reply = sc
+        .call(
+            "calculate_filters",
+            json!({
+                "device": "Test DAC",
+                "measurement": synthetic_measurement(),
+                "custom_filters": [{ "kind": "Peaking", "freq_hz": 1000.0, "gain_db": 10.0, "q": 2.0 }],
+            }),
+        )
+        .expect("calculate_filters with custom filters");
+
+    // The custom filter is appended to the AutoEq bands...
+    let filters = reply["filters"].as_array().expect("filters array");
+    let has_custom = filters.iter().any(|f| {
+        f["kind"] == "Peaking"
+            && (f["freq_hz"].as_f64().unwrap() - 1000.0).abs() < 1.0
+            && (f["gain_db"].as_f64().unwrap() - 10.0).abs() < 0.1
+    });
+    assert!(has_custom, "custom +10 dB peak should be present: {filters:?}");
+
+    // ...and the combined curve peak reflects its boost, so §4.2 clipping protection
+    // accounts for it (this measurement is otherwise a cut, peak near 0).
+    assert!(
+        reply["g_max_peak_db"].as_f64().unwrap() >= 8.0,
+        "combined peak should include the custom +10 dB boost, got {}",
+        reply["g_max_peak_db"]
+    );
+}
+
+#[test]
 fn real_dsp_lists_the_autoeq_catalogue() {
     let Some(python) = venv_python() else {
         eprintln!("skipping catalogue test: no .venv");

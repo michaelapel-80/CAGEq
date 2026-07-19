@@ -25,8 +25,11 @@ type LoudnessMode = "Comparison" | "FinalVolume";
 type LoudnessSettings = { base_pregain_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 type SlotName = "A" | "B" | "Dry";
-type SlotInputs = { model: string; measurementPath: string; targetPath: string };
+type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
+type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number };
+type SlotInputs = { model: string; measurementPath: string; targetPath: string; customFilters: CustomFilter[] };
 type Selection = { headphone: string | null; target: string | null };
+const FILTER_KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
 
 // oratory1990 is the common reference measurement — default to it when a model has it.
 const measurementRank = (h: Headphone) => (h.source === "oratory1990" ? 0 : 1);
@@ -43,6 +46,7 @@ function App() {
   const [query, setQuery] = useState(""); // headphone-model search / selected model name
   const [measurementPath, setMeasurementPath] = useState(""); // chosen measurement (source) path
   const [targetPath, setTargetPath] = useState("");
+  const [customFilters, setCustomFilters] = useState<CustomFilter[]>([]); // §3.4 manual filters
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
   const [activeSlot, setActiveSlot] = useState<SlotName>("A");
@@ -153,9 +157,13 @@ function App() {
           headphone: measurementPath,
           target: targetPath || null,
           slot: activeSlot,
+          customFilters,
         })
       );
-      setSlotInputs((prev) => ({ ...prev, [activeSlot]: { model: query, measurementPath, targetPath } }));
+      setSlotInputs((prev) => ({
+        ...prev,
+        [activeSlot]: { model: query, measurementPath, targetPath, customFilters },
+      }));
       setStatus(await invoke<Status>("status"));
     } catch (e) {
       setError(String(e));
@@ -176,6 +184,7 @@ function App() {
         setQuery(s.model);
         setMeasurementPath(s.measurementPath);
         setTargetPath(s.targetPath);
+        setCustomFilters(s.customFilters);
       }
       if (!s) return; // empty slot: nothing written yet, user will configure + apply
     }
@@ -203,6 +212,7 @@ function App() {
       setQuery(src.model);
       setMeasurementPath(src.measurementPath);
       setTargetPath(src.targetPath);
+      setCustomFilters(src.customFilters);
       setResult(applied);
     } catch (e) {
       setError(String(e));
@@ -214,6 +224,13 @@ function App() {
     const dev = devices.find((d) => d.id === id);
     if (dev) await invoke("set_device", { device: dev.eqapo_pattern });
   }
+
+  // Custom-filter (§3.4) editing — changes take effect on the next Apply.
+  const addFilter = () =>
+    setCustomFilters((cf) => [...cf, { kind: "Peaking", freq_hz: 1000, gain_db: 0, q: 1 }]);
+  const updateFilter = (i: number, patch: Partial<CustomFilter>) =>
+    setCustomFilters((cf) => cf.map((f, j) => (j === i ? { ...f, ...patch } : f)));
+  const removeFilter = (i: number) => setCustomFilters((cf) => cf.filter((_, j) => j !== i));
 
   // A/S/D switch slots, W toggles loudness mode — but not while typing in a field
   // (filter.md §5.2 blind-comparison shortcuts).
@@ -358,7 +375,7 @@ function App() {
               measurements.map((m) => (
                 <option key={m.path} value={m.path}>
                   by {m.source}
-                  {m.rig ? ` on ${m.rig}` : ""} · {m.form_factor}
+                  {m.rig ? ` on ${m.rig}` : ""}
                 </option>
               ))
             )}
@@ -374,6 +391,71 @@ function App() {
             {applying ? "Fitting…" : dryActive ? "Dry (pick A or B to edit)" : `Apply → Slot ${activeSlot}`}
           </button>
         </form>
+      )}
+
+      {!loading && (
+        <fieldset
+          style={{ marginTop: "1em", textAlign: "left", border: "1px solid #0003", borderRadius: 6, opacity: dryActive ? 0.5 : 1 }}
+        >
+          <legend>Custom filters (§3.4)</legend>
+          {customFilters.length === 0 && (
+            <p style={{ fontSize: "0.8em", opacity: 0.7, margin: "0 0 0.5em" }}>
+              No manual filters — the AutoEq fit is used as-is. Add one to shape it further.
+            </p>
+          )}
+          {customFilters.map((f, i) => (
+            <div key={i} className="row" style={{ gap: "0.4em", alignItems: "center", marginBottom: "0.3em" }}>
+              <select
+                value={f.kind}
+                disabled={dryActive}
+                onChange={(e) => updateFilter(i, { kind: e.currentTarget.value as FilterKind })}
+              >
+                {FILTER_KINDS.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </select>
+              <label style={{ fontSize: "0.8em" }}>
+                Fc{" "}
+                <input
+                  type="number" min={20} max={20000} step={10} value={f.freq_hz} disabled={dryActive}
+                  onChange={(e) => updateFilter(i, { freq_hz: Number(e.currentTarget.value) })}
+                  style={{ width: "5.5em" }}
+                />{" "}
+                Hz
+              </label>
+              <label style={{ fontSize: "0.8em" }}>
+                Gain{" "}
+                <input
+                  type="number" min={-20} max={20} step={0.5} value={f.gain_db} disabled={dryActive}
+                  onChange={(e) => updateFilter(i, { gain_db: Number(e.currentTarget.value) })}
+                  style={{ width: "4em" }}
+                />{" "}
+                dB
+              </label>
+              <label style={{ fontSize: "0.8em" }}>
+                Q{" "}
+                <input
+                  type="number" min={0.1} max={20} step={0.1} value={f.q} disabled={dryActive}
+                  onChange={(e) => updateFilter(i, { q: Number(e.currentTarget.value) })}
+                  style={{ width: "4em" }}
+                />
+              </label>
+              <button type="button" onClick={() => removeFilter(i)} disabled={dryActive} title="Remove">
+                ✕
+              </button>
+            </div>
+          ))}
+          <button type="button" onClick={addFilter} disabled={dryActive} style={{ fontSize: "0.85em" }}>
+            + Add filter
+          </button>
+          {customFilters.length > 0 && (
+            <span style={{ fontSize: "0.75em", opacity: 0.6, marginLeft: "0.6em" }}>
+              takes effect on Apply → Slot {activeSlot}
+            </span>
+          )}
+        </fieldset>
       )}
 
       {loudness && (

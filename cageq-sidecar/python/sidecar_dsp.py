@@ -24,7 +24,16 @@ import urllib.parse
 os.environ.setdefault("MPLBACKEND", "Agg")  # headless subprocess: no GUI backend
 
 import numpy as np  # noqa: E402
+import autoeq.peq as autoeq_peq  # noqa: E402
 from autoeq.frequency_response import FrequencyResponse  # noqa: E402
+
+# User custom-filter kinds -> AutoEq PEQ filter classes (same biquad model as the fit,
+# so a custom filter's response composes exactly with the AutoEq bands).
+_CUSTOM_FILTER_CLASSES = {
+    "Peaking": autoeq_peq.Peaking,
+    "LowShelf": autoeq_peq.LowShelf,
+    "HighShelf": autoeq_peq.HighShelf,
+}
 
 GH_API = "https://api.github.com/repos/jaakkopasanen/AutoEq"
 GH_RAW = "https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master"
@@ -213,6 +222,26 @@ def _target_raw(params, grid):
     return np.zeros(len(grid))
 
 
+def _custom_filters(params, f, fs):
+    """Parse the user's custom filters (filter.md §3.4) into EqAPO-shaped dicts plus
+    their combined response in dB on grid `f`. Each is an AutoEq PEQ filter (same
+    biquad model as the fit), so it composes additively with the AutoEq bands; the
+    combined curve then drives the §4.1 loudness match and §4.2 clipping ceiling."""
+    out, curve = [], np.zeros(len(f))
+    for cf in params.get("custom_filters") or []:
+        kind = cf.get("kind")
+        cls = _CUSTOM_FILTER_CLASSES.get(kind)
+        if cls is None:
+            raise ValueError(f"unknown custom filter kind: {kind!r}")
+        fc, gain, q = float(cf["freq_hz"]), float(cf["gain_db"]), float(cf["q"])
+        # Wide bounds so the user's exact values aren't clamped to optimiser limits.
+        filt = cls(f, fs, fc=fc, q=q, gain=gain, min_fc=1.0, max_fc=24000.0,
+                   min_q=0.01, max_q=100.0, min_gain=-60.0, max_gain=60.0)
+        curve = curve + filt.fr
+        out.append({"kind": kind, "freq_hz": round(fc, 2), "gain_db": round(gain, 2), "q": round(q, 4)})
+    return out, curve
+
+
 def calculate_filters(params):
     device = params.get("device", "Unknown")
     fr = _measurement_fr(params)
@@ -244,14 +273,19 @@ def calculate_filters(params):
         }
         for f in peq.filters
     ]
+    # Append the user's custom filters (§3.4) and combine their response with the
+    # AutoEq curve; the *combined* curve drives the level policy.
+    custom, custom_curve = _custom_filters(params, peq.f, fs)
+    filters += custom
+    combined = peq.fr + custom_curve
+
     # We report the two curve-derived quantities the Rust core needs to compose the
     # final preamp (filter.md §4.0/§4.2); the DSP does not own the user's base pre-gain
     # or clipping policy:
     #   g_target_db   — §4.1 K-weighted loudness compensation for this curve,
     #   g_max_peak_db — the composed EQ curve's positive peak, for the §4.2 ceiling.
-    # peq.fr is the parametric filters' combined response in dB on the log grid peq.f.
-    g_target = loudness_target_db(peq.f, peq.fr)
-    g_max_peak = float(np.max(peq.fr))
+    g_target = loudness_target_db(peq.f, combined)
+    g_max_peak = float(np.max(combined))
     return {
         "device": device,
         "filters": filters,

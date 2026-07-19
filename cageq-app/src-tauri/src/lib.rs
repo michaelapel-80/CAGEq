@@ -4,8 +4,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use cageq_core::{
-    Applied, AudioDevice, CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, LoudnessSettings,
-    Sidecar, Slot, WatchdogConfig, detect_eqapo_config_dir, list_render_devices,
+    Applied, AudioDevice, CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, Filter,
+    LoudnessSettings, Sidecar, Slot, WatchdogConfig, detect_eqapo_config_dir, list_render_devices,
 };
 use serde_json::{json, Map, Value};
 use tauri::State;
@@ -52,6 +52,7 @@ fn apply(
     headphone: String,
     target: Option<String>,
     slot: Slot,
+    custom_filters: Vec<Filter>,
     state: State<Backend>,
 ) -> Result<ApplyResult, String> {
     match state.inner() {
@@ -61,6 +62,12 @@ fn apply(
             inputs.insert("headphone".into(), Value::String(headphone.clone()));
             if let Some(t) = &target {
                 inputs.insert("target".into(), Value::String(t.clone()));
+            }
+            // §3.4 manual filters stacked on the AutoEq fit; the sidecar combines them
+            // into the curve that drives the loudness/clipping policy.
+            if !custom_filters.is_empty() {
+                let cf = serde_json::to_value(&custom_filters).map_err(|e| e.to_string())?;
+                inputs.insert("custom_filters".into(), cf);
             }
             let applied = core.apply_to_slot(slot, CalcRequest { device, inputs }).map_err(|e| e.to_string())?;
             // Remember what was applied so the pickers pre-fill on the next launch.
