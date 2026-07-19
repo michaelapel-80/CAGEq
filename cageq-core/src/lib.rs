@@ -167,16 +167,21 @@ struct Preamp {
 /// `Preamp_final == -G_max_peak` — the comfort buffer is spent to stay just below
 /// 0 dBFS rather than needlessly quiet. The never-clip guarantee holds in both modes.
 fn compose_preamp(g_target_db: f64, g_max_peak_db: f64, s: &LoudnessSettings) -> Preamp {
-    match s.mode {
-        LoudnessMode::FinalVolume => Preamp { db: -g_max_peak_db, clipping_warning: false },
+    let (db, clipping_warning) = match s.mode {
+        LoudnessMode::FinalVolume => (-g_max_peak_db, false),
         LoudnessMode::Comparison => {
             let base = s.base_pregain_db;
             let g_max_allowed = -g_max_peak_db - base;
             let clipping_warning = g_max_allowed < g_target_db;
             let relative = g_target_db.min(g_max_allowed);
-            Preamp { db: base + relative, clipping_warning }
+            (base + relative, clipping_warning)
         }
-    }
+    };
+    // Normalise IEEE-754 negative zero (e.g. `-g_max_peak` for a flat curve) so the
+    // written config and UI read "0.0 dB", never "-0.0 dB". `-0.0 == 0.0`, so this
+    // only changes the sign bit, not the value.
+    let db = if db == 0.0 { 0.0 } else { db };
+    Preamp { db, clipping_warning }
 }
 
 /// Errors from the core.
@@ -539,6 +544,18 @@ mod tests {
         let p = compose_preamp(0.0, 0.0, &comparison(DEFAULT_BASE_PREGAIN_DB));
         approx(p.db, DEFAULT_BASE_PREGAIN_DB);
         assert!(!p.clipping_warning);
+    }
+
+    #[test]
+    fn dry_curve_composes_per_mode_without_negative_zero() {
+        // Dry is a flat curve (g_target = g_max_peak = 0).
+        // Comparison: it gets the base pre-gain, so it's level-matched with A/B.
+        let cmp = compose_preamp(0.0, 0.0, &comparison(DEFAULT_BASE_PREGAIN_DB));
+        approx(cmp.db, DEFAULT_BASE_PREGAIN_DB);
+        // FinalVolume: max clipping-free = 0 dB — and formatted "0.0", not "-0.0".
+        let fin = compose_preamp(0.0, 0.0, &LoudnessSettings { base_pregain_db: -9.0, mode: LoudnessMode::FinalVolume });
+        approx(fin.db, 0.0);
+        assert_eq!(format!("{:.1}", fin.db), "0.0", "negative zero must not leak through");
     }
 
     #[test]
