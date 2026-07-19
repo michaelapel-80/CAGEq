@@ -422,7 +422,14 @@ fn render_device_block(cfg: &DeviceConfig) -> String {
     let mut s = String::new();
     let _ = write!(s, "Device: {}{NL}", cfg.device);
     let _ = write!(s, "Preamp: {:.1} dB{NL}", cfg.preamp_db);
-    for (i, f) in cfg.filters.iter().enumerate() {
+    // Emit filters sorted by centre frequency (low -> high). Order never changes the
+    // combined response (a biquad cascade is commutative), but AutoEq returns its
+    // peaking filters in optimiser-convergence order, which reads as an arbitrary
+    // jumble in the file. Sorting makes the preview stable and readable — and later
+    // merges custom filters (§3.4) into the same low->high list.
+    let mut filters: Vec<&Filter> = cfg.filters.iter().collect();
+    filters.sort_by(|a, b| a.freq_hz.total_cmp(&b.freq_hz));
+    for (i, f) in filters.iter().enumerate() {
         let _ = write!(
             s,
             "Filter {}: ON {} Fc {:.0} Hz Gain {:.1} dB Q {:.2}{NL}",
@@ -610,6 +617,31 @@ mod tests {
         assert!(block.contains("Preamp: -9.0 dB"));
         assert!(block.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"));
         assert!(block.contains("Filter 2: ON PK Fc 2500 Hz Gain -2.4 dB Q 1.40"));
+    }
+
+    #[test]
+    fn filters_are_emitted_sorted_by_frequency() {
+        // AutoEq returns peaking filters in optimiser order; the writer sorts them
+        // low->high so the file preview is stable (the combined response is identical
+        // either way — a biquad cascade is commutative).
+        let cfg = DeviceConfig {
+            device: "DAC".into(),
+            preamp_db: -9.0,
+            filters: vec![
+                Filter { kind: FilterType::HighShelf, freq_hz: 10000.0, gain_db: -1.0, q: 0.7 },
+                Filter { kind: FilterType::Peaking, freq_hz: 191.0, gain_db: -5.0, q: 0.4 },
+                Filter { kind: FilterType::Peaking, freq_hz: 22.0, gain_db: 1.6, q: 5.9 },
+                Filter { kind: FilterType::LowShelf, freq_hz: 105.0, gain_db: 3.0, q: 0.7 },
+            ],
+        };
+        let block = render_device_block(&cfg);
+        let fcs: Vec<u32> = block
+            .lines()
+            .filter_map(|l| l.split("Fc ").nth(1))
+            .filter_map(|rest| rest.split(" Hz").next())
+            .filter_map(|n| n.parse().ok())
+            .collect();
+        assert_eq!(fcs, vec![22, 105, 191, 10000], "filters should be ascending by Fc");
     }
 
     #[test]
