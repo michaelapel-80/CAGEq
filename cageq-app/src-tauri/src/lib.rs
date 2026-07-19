@@ -58,14 +58,23 @@ fn apply(
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, config_dir, .. } => {
             let mut inputs = Map::new();
-            inputs.insert("headphone".into(), Value::String(headphone));
-            if let Some(t) = target {
-                inputs.insert("target".into(), Value::String(t));
+            inputs.insert("headphone".into(), Value::String(headphone.clone()));
+            if let Some(t) = &target {
+                inputs.insert("target".into(), Value::String(t.clone()));
             }
             let applied = core.apply_to_slot(slot, CalcRequest { device, inputs }).map_err(|e| e.to_string())?;
+            // Remember what was applied so the pickers pre-fill on the next launch.
+            update_settings(|s| s.selection = Selection { headphone: Some(headphone), target });
             Ok(apply_result(applied, config_dir))
         }
     }
+}
+
+/// The last-applied headphone/target (catalogue paths) to pre-fill the pickers on
+/// startup. Empty on a clean install.
+#[tauri::command]
+fn get_selection() -> Selection {
+    load_settings().selection
 }
 
 /// Switch the active comparison slot (A/B/Dry) and write its cached config — instant,
@@ -168,7 +177,7 @@ fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<Lou
             };
             let settings = LoudnessSettings { base_pregain_db: base, mode: settings.mode };
             core.set_loudness(settings);
-            let _ = save_settings(&AppSettings { loudness: settings }); // best-effort persist
+            update_settings(|s| s.loudness = settings); // persist without wiping the selection
             let applied = core.reapply().and_then(|r| r.ok()).map(|a| apply_result(a, config_dir));
             Ok(LoudnessUpdate { settings, applied })
         }
@@ -203,11 +212,23 @@ fn status(state: State<Backend>) -> Status {
 
 /// The app's persisted settings. A struct (not a bare value) so it can grow without
 /// invalidating older files; `#[serde(default)]` fills in anything a prior version
-/// didn't write. Currently just the §4.0 loudness settings.
+/// didn't write.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct AppSettings {
     #[serde(default)]
     loudness: LoudnessSettings,
+    /// Last-used headphone/target, restored into the pickers on the next launch.
+    #[serde(default)]
+    selection: Selection,
+}
+
+/// The last-applied headphone and target, by their catalogue paths (stable ids).
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
+struct Selection {
+    #[serde(default)]
+    headphone: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
 }
 
 /// settings.json location: `%APPDATA%\CAGEq\settings.json`, overridable via
@@ -244,6 +265,14 @@ fn save_settings_to(path: &Path, s: &AppSettings) -> std::io::Result<()> {
     }
     let json = serde_json::to_string_pretty(s).map_err(std::io::Error::other)?;
     std::fs::write(path, json)
+}
+
+/// Update one field of the persisted settings without clobbering the others
+/// (load-modify-save). Best-effort; a failed write just loses the update.
+fn update_settings(edit: impl FnOnce(&mut AppSettings)) {
+    let mut s = load_settings();
+    edit(&mut s);
+    let _ = save_settings(&s);
 }
 
 // --- backend setup --------------------------------------------------------
@@ -352,7 +381,8 @@ pub fn run() {
             list_devices,
             list_targets,
             get_loudness,
-            set_loudness
+            set_loudness,
+            get_selection
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -479,8 +509,12 @@ mod tests {
         assert_eq!(load_settings_from(&path).loudness, LoudnessSettings::default(), "missing -> defaults");
 
         let want = LoudnessSettings { base_pregain_db: -6.0, mode: LoudnessMode::FinalVolume };
-        save_settings_to(&path, &AppSettings { loudness: want }).expect("save");
-        assert_eq!(load_settings_from(&path).loudness, want, "reloaded value should match saved");
+        let selection = Selection { headphone: Some("measurements/x.csv".into()), target: Some("targets/y.csv".into()) };
+        save_settings_to(&path, &AppSettings { loudness: want, selection: selection.clone() }).expect("save");
+        let reloaded = load_settings_from(&path);
+        assert_eq!(reloaded.loudness, want, "reloaded loudness should match saved");
+        assert_eq!(reloaded.selection.headphone, selection.headphone, "reloaded headphone should match");
+        assert_eq!(reloaded.selection.target, selection.target, "reloaded target should match");
 
         let _ = std::fs::remove_file(&path);
     }

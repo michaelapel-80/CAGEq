@@ -26,6 +26,7 @@ type LoudnessSettings = { base_pregain_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 type SlotName = "A" | "B" | "Dry";
 type SlotInputs = { query: string; targetPath: string };
+type Selection = { headphone: string | null; target: string | null };
 
 const display = (h: Headphone) => `${h.name} · ${h.source} · ${h.form_factor}`;
 // Slot A = goldenrod, Slot B = blue, Dry = neutral (filter.md §5.2 accent colours).
@@ -66,8 +67,14 @@ function App() {
         const initial = dev.find((d) => d.eqapo_enabled) ?? dev[0];
         setDeviceId(initial?.id ?? "");
         if (initial) await invoke("set_device", { device: initial.eqapo_pattern });
+        // Restore the last-used headphone/target (backfilled by path); fall back to the
+        // Harman default target when nothing was saved.
+        const sel = await invoke<Selection>("get_selection");
+        const savedHp = sel.headphone ? hp.headphones.find((h) => h.path === sel.headphone) : undefined;
+        if (savedHp) setQuery(display(savedHp));
+        const savedTarget = sel.target && tg.targets.some((t) => t.path === sel.target) ? sel.target : undefined;
         const harman = tg.targets.find((t) => /harman over-ear 2018$/i.test(t.name));
-        setTargetPath(harman?.path ?? tg.targets[0]?.path ?? "");
+        setTargetPath(savedTarget ?? harman?.path ?? tg.targets[0]?.path ?? "");
       } catch (e) {
         setError(String(e));
       } finally {
