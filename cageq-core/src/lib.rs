@@ -4,8 +4,11 @@
 //!   * owns the DSP sidecar through the fail-safe [`Supervisor`] (watchdog),
 //!   * turns a user request into filters by asking the sidecar to
 //!     `calculate_filters`, then writes them to EqAPO via the config-writer,
-//!   * after a watchdog recovery, re-applies the last-good config so EqAPO leaves
-//!     the safe state (the "auto-leave" §7.2 leaves to this layer),
+//!   * holds the A/B/Dry comparison slots (§5.2): each fit is cached, so switching
+//!     which one is active is a pure re-write (no re-fit) — the loudness match (§4.1)
+//!     keeps them level-matched so switching compares timbre, not level,
+//!   * after a watchdog recovery, re-writes the active slot so EqAPO leaves the safe
+//!     state (the "auto-leave" §7.2 leaves to this layer),
 //!   * runs the §3.0 startup-integrity check.
 //!
 //! The sidecar's `calculate_filters` reply carries the fitted filters plus two
@@ -17,7 +20,8 @@
 //! ## Threads
 //! One background **reconciler** thread watches the supervisor's recovery counter;
 //! when it advances (the watchdog brought a fresh sidecar up), the reconciler
-//! re-applies the last request. Everything else runs on the caller's thread. The
+//! re-writes the active slot's cached config. Everything else runs on the caller's
+//! thread. The
 //! `Supervisor` is shared as `Arc<Supervisor>` (its `call`/`health`/`recoveries`
 //! all take `&self`), so caller and reconciler can both drive it; the driver
 //! serialises the actual requests, and an `apply_lock` serialises calc+write so the
@@ -110,9 +114,21 @@ impl Default for LoudnessSettings {
     }
 }
 
+/// A comparison slot (filter.md §5.2). `A`/`B` are editable configurations you can
+/// A/B by ear; `Dry` is the fixed no-correction reference. Exactly one is active and
+/// written to cageq.txt at a time; the loudness match (§4.1) keeps all three at equal
+/// loudness so switching compares timbre, not level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Slot {
+    A,
+    B,
+    Dry,
+}
+
 /// The sidecar's `calculate_filters` reply: the fitted filters plus the two
 /// curve-derived quantities the core composes the preamp from. The DSP reports these
 /// physical quantities; the *policy* (base pre-gain, clipping ceiling) lives here.
+/// Cached per slot so switching is a pure re-write — no re-fit.
 #[derive(Debug, Clone, Deserialize)]
 struct CalcResult {
     device: String,
@@ -174,11 +190,60 @@ pub enum CoreError {
     Write(#[from] WriteError),
     #[error("could not (de)serialize a DSP message: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("the Dry slot is a fixed reference and cannot be applied to")]
+    DryNotEditable,
+    #[error("slot {0:?} has nothing to activate yet")]
+    EmptySlot(Slot),
 }
 
 // ---------------------------------------------------------------------------
 // Core
 // ---------------------------------------------------------------------------
+
+/// The three comparison slots (filter.md §5.2). `A`/`B` cache a computed fit so
+/// switching to one is a pure re-write; `Dry` is synthesised as "no filters" for the
+/// shared output `device`. `active` is what's currently written to cageq.txt.
+struct SlotStore {
+    a: Option<CalcResult>,
+    b: Option<CalcResult>,
+    /// Output device every slot is scoped to (set on apply / [`Core::set_device`]).
+    device: Option<String>,
+    active: Slot,
+}
+
+impl SlotStore {
+    fn slot_mut(&mut self, slot: Slot) -> &mut Option<CalcResult> {
+        match slot {
+            Slot::A => &mut self.a,
+            Slot::B => &mut self.b,
+            Slot::Dry => unreachable!("Dry has no cached fit"),
+        }
+    }
+
+    /// Does `slot` have something writable? (A/B need a cached fit; Dry needs a device.)
+    fn has(&self, slot: Slot) -> bool {
+        match slot {
+            Slot::A => self.a.is_some(),
+            Slot::B => self.b.is_some(),
+            Slot::Dry => self.device.is_some(),
+        }
+    }
+
+    /// The effective fit for the active slot — Dry synthesised as no-filters/flat — or
+    /// `None` when the active slot has nothing to write yet.
+    fn effective(&self) -> Option<CalcResult> {
+        match self.active {
+            Slot::A => self.a.clone(),
+            Slot::B => self.b.clone(),
+            Slot::Dry => self.device.clone().map(|device| CalcResult {
+                device,
+                filters: Vec::new(),
+                g_target_db: 0.0,
+                g_max_peak_db: 0.0,
+            }),
+        }
+    }
+}
 
 /// State shared with the reconciler thread.
 struct Inner {
@@ -186,7 +251,8 @@ struct Inner {
     /// Serialises a calc+write so a user apply and a recovery re-apply never
     /// interleave their writes to cageq.txt.
     apply_lock: Mutex<()>,
-    last_applied: Mutex<Option<CalcRequest>>,
+    /// The A/B/Dry comparison slots and which is active (filter.md §5.2).
+    slots: Mutex<SlotStore>,
     applied_count: AtomicU32,
     shutdown: AtomicBool,
     startup: StartupDecision,
@@ -227,7 +293,7 @@ impl Core {
         let inner = Arc::new(Inner {
             config_dir,
             apply_lock: Mutex::new(()),
-            last_applied: Mutex::new(None),
+            slots: Mutex::new(SlotStore { a: None, b: None, device: None, active: Slot::A }),
             applied_count: AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
             startup,
@@ -242,10 +308,44 @@ impl Core {
         Ok(Core { supervisor, inner, reconciler: Some(reconciler) })
     }
 
-    /// Calculate filters for `request` via the sidecar and write them to EqAPO.
-    /// Records the request as last-good for post-recovery re-apply.
+    /// Calculate filters for `request`, load them into `slot` (A or B), make it active,
+    /// and write it to EqAPO. The fit is cached so [`Core::activate_slot`] can switch
+    /// back to it later without re-fitting. Errors with [`CoreError::DryNotEditable`]
+    /// for `Slot::Dry` (the fixed reference has no inputs).
+    pub fn apply_to_slot(&self, slot: Slot, request: CalcRequest) -> Result<Applied, CoreError> {
+        if slot == Slot::Dry {
+            return Err(CoreError::DryNotEditable);
+        }
+        do_apply_to_slot(&self.supervisor, &self.inner, slot, request)
+    }
+
+    /// Apply to slot A (the default editable slot) — convenience over
+    /// [`Core::apply_to_slot`].
     pub fn apply(&self, request: CalcRequest) -> Result<Applied, CoreError> {
-        do_apply(&self.supervisor, &self.inner, request)
+        self.apply_to_slot(Slot::A, request)
+    }
+
+    /// Make `slot` active and write its already-computed config to cageq.txt — a pure
+    /// file write (no sidecar), so A/B/Dry switching is instant. Errors with
+    /// [`CoreError::EmptySlot`] if the target slot has nothing to write yet.
+    pub fn activate_slot(&self, slot: Slot) -> Result<Applied, CoreError> {
+        let _guard = self.inner.apply_lock.lock().unwrap();
+        if !self.inner.slots.lock().unwrap().has(slot) {
+            return Err(CoreError::EmptySlot(slot));
+        }
+        self.inner.slots.lock().unwrap().active = slot;
+        write_active_locked(&self.inner)
+    }
+
+    /// The currently active slot.
+    pub fn active_slot(&self) -> Slot {
+        self.inner.slots.lock().unwrap().active
+    }
+
+    /// Set the shared output device every slot is scoped to (§3.0). Lets Dry be written
+    /// before any fit exists; a subsequent apply overwrites it with its own device.
+    pub fn set_device(&self, device: String) {
+        self.inner.slots.lock().unwrap().device = Some(device);
     }
 
     /// Send a raw request to the sidecar (the core is the process's front door).
@@ -286,12 +386,14 @@ impl Core {
         *self.inner.loudness.lock().unwrap() = settings;
     }
 
-    /// Re-run the last applied request with the current settings — e.g. after a
-    /// loudness-settings change, to update the written preamp live. `None` if nothing
-    /// has been applied yet; otherwise the fresh [`Applied`] (or a write/DSP error).
+    /// Re-write the active slot with the current settings — e.g. after a loudness-
+    /// settings change, to update the written preamp live. A pure re-write of the
+    /// cached fit (no sidecar). `None` if the active slot has nothing to write yet;
+    /// otherwise the fresh [`Applied`] (or a write error).
     pub fn reapply(&self) -> Option<Result<Applied, CoreError>> {
-        let last = self.inner.last_applied.lock().unwrap().clone()?;
-        Some(do_apply(&self.supervisor, &self.inner, last))
+        let _guard = self.inner.apply_lock.lock().unwrap();
+        self.inner.slots.lock().unwrap().effective()?; // nothing active to rewrite yet
+        Some(write_active_locked(&self.inner))
     }
 }
 
@@ -310,27 +412,47 @@ impl Drop for Core {
 // The calc+write step and the reconciler
 // ---------------------------------------------------------------------------
 
-/// The one place a config is produced and written: ask the sidecar to compute
-/// filters, deserialize straight into `DeviceConfig`, write via the config-writer,
-/// remember the request. Held under `apply_lock` so callers and the reconciler
-/// serialise.
-fn do_apply(supervisor: &Supervisor, inner: &Inner, request: CalcRequest) -> Result<Applied, CoreError> {
+/// Fit `request` via the sidecar, cache the result in `slot`, make it active, and
+/// write it. Held under `apply_lock` so callers and the reconciler serialise.
+fn do_apply_to_slot(
+    supervisor: &Supervisor,
+    inner: &Inner,
+    slot: Slot,
+    request: CalcRequest,
+) -> Result<Applied, CoreError> {
     let _guard = inner.apply_lock.lock().unwrap();
 
     let params = serde_json::to_value(&request)?;
     let reply = supervisor.call("calculate_filters", params)?;
     let result: CalcResult = serde_json::from_value(reply)?;
 
+    {
+        let mut store = inner.slots.lock().unwrap();
+        store.device = Some(result.device.clone());
+        *store.slot_mut(slot) = Some(result);
+        store.active = slot;
+    }
+    write_active_locked(inner)
+}
+
+/// Compose the active slot's cached fit with the current loudness settings and write
+/// it to cageq.txt. The single place a config reaches disk; assumes `apply_lock` is
+/// held by the caller. Errors with [`CoreError::EmptySlot`] if the active slot is empty.
+fn write_active_locked(inner: &Inner) -> Result<Applied, CoreError> {
+    let effective = {
+        let store = inner.slots.lock().unwrap();
+        store.effective().ok_or(CoreError::EmptySlot(store.active))?
+    };
+
     // Compose the final preamp here (policy), from the curve quantities the DSP
     // reported (physics): §4.0 base pre-gain + §4.1 loudness match, capped by §4.2.
     let loudness = *inner.loudness.lock().unwrap();
-    let preamp = compose_preamp(result.g_target_db, result.g_max_peak_db, &loudness);
+    let preamp = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &loudness);
     let device_config =
-        DeviceConfig { device: result.device, preamp_db: preamp.db, filters: result.filters };
+        DeviceConfig { device: effective.device, preamp_db: preamp.db, filters: effective.filters };
 
     let hash = cw::apply(&inner.config_dir, std::slice::from_ref(&device_config))?;
 
-    *inner.last_applied.lock().unwrap() = Some(request);
     inner.applied_count.fetch_add(1, Ordering::SeqCst);
     Ok(Applied {
         hash,
@@ -340,8 +462,9 @@ fn do_apply(supervisor: &Supervisor, inner: &Inner, request: CalcRequest) -> Res
     })
 }
 
-/// Watch the supervisor's recovery counter; each time it advances and the sidecar
-/// is `Running` again, re-apply the last-good config so EqAPO leaves the safe state.
+/// Watch the supervisor's recovery counter; each time it advances and the sidecar is
+/// `Running` again, re-write the active slot (cached — no sidecar) so EqAPO leaves the
+/// safe state.
 fn reconcile_loop(supervisor: Arc<Supervisor>, inner: Arc<Inner>, poll: Duration) {
     let mut handled = supervisor.recoveries();
     loop {
@@ -353,17 +476,13 @@ fn reconcile_loop(supervisor: Arc<Supervisor>, inner: Arc<Inner>, poll: Duration
         if recoveries <= handled || !matches!(supervisor.health(), Health::Running) {
             continue;
         }
-        // A fresh sidecar is up. Re-apply the last request; if it faults again the
-        // watchdog handles it and we retry on the next recovery.
-        let last = inner.last_applied.lock().unwrap().clone();
-        match last {
-            // Re-apply failure leaves `handled` unchanged so we retry next recovery.
-            Some(req) => {
-                if do_apply(&supervisor, &inner, req).is_ok() {
-                    handled = recoveries;
-                }
-            }
-            None => handled = recoveries, // nothing applied yet, nothing to restore
+        // A fresh sidecar is up. Re-write the active slot's cached config; if the write
+        // fails, leave `handled` unchanged so we retry on the next poll.
+        let _guard = inner.apply_lock.lock().unwrap();
+        if inner.slots.lock().unwrap().effective().is_none() {
+            handled = recoveries; // nothing applied yet, nothing to restore
+        } else if write_active_locked(&inner).is_ok() {
+            handled = recoveries;
         }
     }
 }

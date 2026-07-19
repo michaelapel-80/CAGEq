@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use cageq_config_writer::{self as cw, BlockState, StartupDecision};
-use cageq_core::{CalcRequest, Core, DEFAULT_BASE_PREGAIN_DB};
+use cageq_core::{CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, Slot};
 use cageq_sidecar::{Sidecar, SidecarError};
 use cageq_watchdog::{Health, WatchdogConfig};
 use serde_json::json;
@@ -89,6 +89,40 @@ fn fast_cfg() -> WatchdogConfig {
 }
 
 // --- tests ----------------------------------------------------------------
+
+#[test]
+fn slots_switch_by_rewrite_without_refitting() {
+    let tmp = TempDir::new("slots");
+    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+
+    // Populate A and B with distinct device names (the stub echoes device).
+    core.apply_to_slot(Slot::A, CalcRequest::for_device("Device A")).expect("apply A");
+    core.apply_to_slot(Slot::B, CalcRequest::for_device("Device B")).expect("apply B");
+    assert_eq!(core.active_slot(), Slot::B);
+    assert!(tmp.cageq().contains("Device: Device B"));
+
+    // Switching back to A is a pure re-write — cageq.txt flips, no extra fit.
+    let a = core.activate_slot(Slot::A).expect("activate A");
+    assert_eq!(a.device, "Device A");
+    assert_eq!(core.active_slot(), Slot::A);
+    let cageq = tmp.cageq();
+    assert!(cageq.contains("Device: Device A"), "{cageq}");
+    assert!(cageq.contains("Filter 1:"), "A keeps its filters: {cageq}");
+
+    // Dry writes the no-correction reference: same device scope, but no filters.
+    core.activate_slot(Slot::Dry).expect("activate Dry");
+    let dry = tmp.cageq();
+    assert!(!dry.contains("Filter 1:"), "Dry has no filters: {dry}");
+
+    // Dry isn't editable; and an untouched slot has nothing to activate.
+    assert!(matches!(
+        core.apply_to_slot(Slot::Dry, CalcRequest::for_device("x")),
+        Err(CoreError::DryNotEditable)
+    ));
+    let empty = TempDir::new("empty");
+    let fresh = Core::start(empty.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    assert!(matches!(fresh.activate_slot(Slot::B), Err(CoreError::EmptySlot(Slot::B))));
+}
 
 #[test]
 fn apply_calculates_and_writes_config() {

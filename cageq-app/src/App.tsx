@@ -24,8 +24,13 @@ type Status = {
 type LoudnessMode = "Comparison" | "FinalVolume";
 type LoudnessSettings = { base_pregain_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
+type SlotName = "A" | "B" | "Dry";
+type SlotInputs = { query: string; targetPath: string };
 
 const display = (h: Headphone) => `${h.name} · ${h.source} · ${h.form_factor}`;
+// Slot A = goldenrod, Slot B = blue, Dry = neutral (filter.md §5.2 accent colours).
+const SLOT_COLOR: Record<SlotName, string> = { A: "#daa520", B: "#3b82f6", Dry: "#9ca3af" };
+const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
 
 function App() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -37,6 +42,9 @@ function App() {
   const [targetPath, setTargetPath] = useState("");
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
+  const [activeSlot, setActiveSlot] = useState<SlotName>("A");
+  // Last-applied inputs per editable slot (for display + reloading the controls).
+  const [slotInputs, setSlotInputs] = useState<Record<"A" | "B", SlotInputs | null>>({ A: null, B: null });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [applying, setApplying] = useState(false);
@@ -55,7 +63,9 @@ function App() {
         setTargets(tg.targets);
         setDevices(dev);
         // Prefer a device EqAPO is actually installed on, so the default selection works.
-        setDeviceId((dev.find((d) => d.eqapo_enabled) ?? dev[0])?.id ?? "");
+        const initial = dev.find((d) => d.eqapo_enabled) ?? dev[0];
+        setDeviceId(initial?.id ?? "");
+        if (initial) await invoke("set_device", { device: initial.eqapo_pattern });
         const harman = tg.targets.find((t) => /harman over-ear 2018$/i.test(t.name));
         setTargetPath(harman?.path ?? tg.targets[0]?.path ?? "");
       } catch (e) {
@@ -88,6 +98,7 @@ function App() {
   }, [query, headphones]);
 
   async function apply() {
+    if (activeSlot === "Dry") return; // Dry is a fixed reference, not editable
     const hp = headphones.find((h) => display(h) === query);
     if (!hp) {
       setError("Pick a headphone from the list first.");
@@ -106,8 +117,10 @@ function App() {
           device: dev.eqapo_pattern, // the EqAPO-matchable device pattern, not the headphone
           headphone: hp.path,
           target: targetPath || null,
+          slot: activeSlot,
         })
       );
+      setSlotInputs((prev) => ({ ...prev, [activeSlot]: { query, targetPath } }));
       setStatus(await invoke<Status>("status"));
     } catch (e) {
       setError(String(e));
@@ -117,7 +130,51 @@ function App() {
     }
   }
 
+  // Switch the active comparison slot. Populated A/B and Dry write instantly (cached,
+  // no re-fit); switching to an empty A/B just makes it the editable target.
+  async function switchSlot(slot: SlotName) {
+    if (slot === activeSlot) return;
+    setActiveSlot(slot);
+    if (slot !== "Dry") {
+      const s = slotInputs[slot];
+      if (s) {
+        setQuery(s.query);
+        setTargetPath(s.targetPath);
+      }
+      if (!s) return; // empty slot: nothing written yet, user will configure + apply
+    }
+    try {
+      setError("");
+      setResult(await invoke<ApplyResult>("activate_slot", { slot }));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function changeDevice(id: string) {
+    setDeviceId(id);
+    const dev = devices.find((d) => d.id === id);
+    if (dev) await invoke("set_device", { device: dev.eqapo_pattern });
+  }
+
+  // A/S/D switch slots, W toggles loudness mode — but not while typing in a field
+  // (filter.md §5.2 blind-comparison shortcuts).
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const el = document.activeElement;
+      if (el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) return;
+      if (e.key === "a") switchSlot("A");
+      else if (e.key === "s") switchSlot("B");
+      else if (e.key === "d") switchSlot("Dry");
+      else if (e.key === "w" && loudness)
+        updateLoudness({ ...loudness, mode: loudness.mode === "Comparison" ? "FinalVolume" : "Comparison" });
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   const selectedDevice = devices.find((d) => d.id === deviceId);
+  const dryActive = activeSlot === "Dry";
 
   return (
     <main className="container">
@@ -141,7 +198,7 @@ function App() {
             {devices.length === 0 ? (
               <span style={{ opacity: 0.7 }}>no active playback device detected</span>
             ) : (
-              <select id="device-select" value={deviceId} onChange={(e) => setDeviceId(e.currentTarget.value)}>
+              <select id="device-select" value={deviceId} onChange={(e) => changeDevice(e.currentTarget.value)}>
                 {devices.map((d) => (
                   <option key={d.id} value={d.id}>
                     {d.name}
@@ -161,6 +218,40 @@ function App() {
         </div>
       )}
 
+      {!loading && (
+        <div style={{ margin: "0.75em 0" }}>
+          <div className="row" style={{ gap: "0.4em", alignItems: "center" }}>
+            <span style={{ fontSize: "0.85em", opacity: 0.75 }}>Compare:</span>
+            {SLOT_ORDER.map((s) => {
+              const active = s === activeSlot;
+              const populated = s === "Dry" || slotInputs[s] !== null;
+              const key = s === "A" ? "A" : s === "B" ? "S" : "D";
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => switchSlot(s)}
+                  title={`${s} (key ${key})${populated ? "" : " — empty"}`}
+                  style={{
+                    borderWidth: 2,
+                    borderStyle: "solid",
+                    borderColor: active ? SLOT_COLOR[s] : "transparent",
+                    color: active ? SLOT_COLOR[s] : undefined,
+                    fontWeight: active ? 700 : 400,
+                    opacity: populated || active ? 1 : 0.55,
+                  }}
+                >
+                  {s === "Dry" ? "Dry" : `Slot ${s}`} <kbd style={{ fontSize: "0.7em", opacity: 0.6 }}>{key}</kbd>
+                </button>
+              );
+            })}
+          </div>
+          <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.3em 0 0" }}>
+            A / S / D switch slots, W toggles the loudness mode — even without looking at the screen.
+          </p>
+        </div>
+      )}
+
       {loading ? (
         <p>Loading AutoEq catalogue…</p>
       ) : (
@@ -177,21 +268,22 @@ function App() {
             onChange={(e) => setQuery(e.currentTarget.value)}
             placeholder={`Search ${headphones.length} headphones…`}
             style={{ minWidth: "22em" }}
+            disabled={dryActive}
           />
           <datalist id="hp-list">
             {matches.map((h) => (
               <option key={h.path} value={display(h)} />
             ))}
           </datalist>
-          <select value={targetPath} onChange={(e) => setTargetPath(e.currentTarget.value)}>
+          <select value={targetPath} onChange={(e) => setTargetPath(e.currentTarget.value)} disabled={dryActive}>
             {targets.map((t) => (
               <option key={t.path} value={t.path}>
                 {t.name}
               </option>
             ))}
           </select>
-          <button type="submit" disabled={applying}>
-            {applying ? "Fitting…" : "Apply"}
+          <button type="submit" disabled={applying || dryActive}>
+            {applying ? "Fitting…" : dryActive ? "Dry (pick A or B to edit)" : `Apply → Slot ${activeSlot}`}
           </button>
         </form>
       )}

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use cageq_core::{
     Applied, AudioDevice, CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, LoudnessSettings,
-    Sidecar, WatchdogConfig, detect_eqapo_config_dir, list_render_devices,
+    Sidecar, Slot, WatchdogConfig, detect_eqapo_config_dir, list_render_devices,
 };
 use serde_json::{json, Map, Value};
 use tauri::State;
@@ -44,10 +44,16 @@ struct Status {
 }
 
 /// Fit the selected AutoEq `headphone` (a catalogue path) against an optional named
-/// `target` via the sidecar, write cageq.txt through cageq-core, and return the hash
-/// plus the file content actually written.
+/// `target` into comparison `slot` (A or B), write cageq.txt through cageq-core, and
+/// return the hash plus the file content actually written.
 #[tauri::command]
-fn apply(device: String, headphone: String, target: Option<String>, state: State<Backend>) -> Result<ApplyResult, String> {
+fn apply(
+    device: String,
+    headphone: String,
+    target: Option<String>,
+    slot: Slot,
+    state: State<Backend>,
+) -> Result<ApplyResult, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, config_dir, .. } => {
@@ -56,8 +62,34 @@ fn apply(device: String, headphone: String, target: Option<String>, state: State
             if let Some(t) = target {
                 inputs.insert("target".into(), Value::String(t));
             }
-            let applied = core.apply(CalcRequest { device, inputs }).map_err(|e| e.to_string())?;
+            let applied = core.apply_to_slot(slot, CalcRequest { device, inputs }).map_err(|e| e.to_string())?;
             Ok(apply_result(applied, config_dir))
+        }
+    }
+}
+
+/// Switch the active comparison slot (A/B/Dry) and write its cached config — instant,
+/// no re-fit (filter.md §5.2). Returns the newly-written config for the UI.
+#[tauri::command]
+fn activate_slot(slot: Slot, state: State<Backend>) -> Result<ApplyResult, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, config_dir, .. } => {
+            let applied = core.activate_slot(slot).map_err(|e| e.to_string())?;
+            Ok(apply_result(applied, config_dir))
+        }
+    }
+}
+
+/// Tell the core which output device every slot is scoped to, so Dry can be written
+/// before any fit exists. Called when the user picks a device.
+#[tauri::command]
+fn set_device(device: String, state: State<Backend>) -> Result<(), String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => {
+            core.set_device(device);
+            Ok(())
         }
     }
 }
@@ -313,6 +345,8 @@ pub fn run() {
         .manage(build_backend())
         .invoke_handler(tauri::generate_handler![
             apply,
+            activate_slot,
+            set_device,
             status,
             list_headphones,
             list_devices,
