@@ -8,9 +8,11 @@
 //!     the safe state (the "auto-leave" §7.2 leaves to this layer),
 //!   * runs the §3.0 startup-integrity check.
 //!
-//! The sidecar's `calculate_filters` reply deserializes *directly* into the
-//! config-writer's [`DeviceConfig`] — the shared type is the contract between the
-//! Python DSP and the Rust writer.
+//! The sidecar's `calculate_filters` reply carries the fitted filters plus two
+//! curve-derived quantities (§4.1 loudness target, §4.2 curve peak); the core
+//! composes the final `Preamp:` from them and the user's §4.0 base pre-gain, then
+//! builds the config-writer's [`DeviceConfig`]. The DSP reports physics; the core
+//! owns the preamp/clipping policy.
 //!
 //! ## Threads
 //! One background **reconciler** thread watches the supervisor's recovery counter;
@@ -29,7 +31,7 @@ use std::time::Duration;
 
 use cageq_config_writer::{self as cw, WriteError};
 use cageq_watchdog::{Supervisor, SupervisorError};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 // Re-export the domain types through cageq-core so the app/UI layer depends only on
@@ -68,6 +70,59 @@ pub struct Applied {
     pub hash: String,
     /// Device the config was written for (echoed by the DSP).
     pub device: String,
+    /// The composed final `Preamp:` value written (filter.md §4.0/§4.2).
+    pub preamp_db: f64,
+    /// True when the §4.2 emergency clipping ceiling bound the level instead of the
+    /// §4.1 loudness match — surfaced to the UI as the §5.1 per-slot clipping warning.
+    pub clipping_warning: bool,
+}
+
+/// filter.md §4.0 default base pre-gain (user headroom), in dB. A conservative,
+/// always-applied reserve so the §4.1 loudness match stays the binding term for
+/// typical curves and the §4.2 ceiling only trips on genuinely extreme ones.
+pub const DEFAULT_BASE_PREGAIN_DB: f64 = -9.0;
+
+/// The sidecar's `calculate_filters` reply: the fitted filters plus the two
+/// curve-derived quantities the core composes the preamp from. The DSP reports these
+/// physical quantities; the *policy* (base pre-gain, clipping ceiling) lives here.
+#[derive(Debug, Clone, Deserialize)]
+struct CalcResult {
+    device: String,
+    filters: Vec<Filter>,
+    /// §4.1 K-weighted loudness compensation for this curve. Defaults to 0 (a
+    /// level-neutral offset) so the dependency-free stub still composes.
+    #[serde(default)]
+    g_target_db: f64,
+    /// The composed EQ curve's positive peak, for the §4.2 clipping ceiling.
+    #[serde(default)]
+    g_max_peak_db: f64,
+}
+
+/// The composed preamp for one curve (filter.md §4.0 + §4.2).
+struct Preamp {
+    /// Final `Preamp:` value written to cageq.txt.
+    db: f64,
+    /// True when the §4.2 ceiling bound the level instead of the §4.1 loudness match.
+    clipping_warning: bool,
+}
+
+/// Compose the final preamp from the curve quantities and the user's base pre-gain
+/// (filter.md §4.0 formula + §4.2 cascaded clipping ceiling):
+///
+/// ```text
+///   G_max_allowed = -G_max_peak - base_pregain_db   (§4.2, buffer-aware)
+///   relative      = min(G_target, G_max_allowed)     (§4.2)
+///   Preamp_final  = base_pregain_db + relative        (§4.0)
+/// ```
+///
+/// When the ceiling binds (`G_max_allowed < G_target`) `base_pregain_db` cancels and
+/// `Preamp_final == -G_max_peak` — the comfort buffer is spent to stay just below
+/// 0 dBFS rather than needlessly quiet; the never-clip guarantee holds either way.
+fn compose_preamp(g_target_db: f64, g_max_peak_db: f64, base_pregain_db: f64) -> Preamp {
+    let g_max_allowed = -g_max_peak_db - base_pregain_db;
+    let clipping_warning = g_max_allowed < g_target_db;
+    let relative = g_target_db.min(g_max_allowed);
+    Preamp { db: base_pregain_db + relative, clipping_warning }
 }
 
 /// Errors from the core.
@@ -97,6 +152,8 @@ struct Inner {
     applied_count: AtomicU32,
     shutdown: AtomicBool,
     startup: StartupDecision,
+    /// §4.0 base pre-gain (user headroom), applied to every composed preamp.
+    base_pregain_db: Mutex<f64>,
 }
 
 /// The orchestrator handle.
@@ -136,6 +193,7 @@ impl Core {
             applied_count: AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
             startup,
+            base_pregain_db: Mutex::new(DEFAULT_BASE_PREGAIN_DB),
         });
 
         let reconciler = {
@@ -177,6 +235,17 @@ impl Core {
     pub fn applied_count(&self) -> u32 {
         self.inner.applied_count.load(Ordering::SeqCst)
     }
+
+    /// The §4.0 base pre-gain (user headroom) currently in effect, in dB.
+    pub fn base_pregain_db(&self) -> f64 {
+        *self.inner.base_pregain_db.lock().unwrap()
+    }
+
+    /// Set the §4.0 base pre-gain (user headroom). Applies to the next apply and any
+    /// post-recovery re-apply; does not rewrite the current config on its own.
+    pub fn set_base_pregain_db(&self, db: f64) {
+        *self.inner.base_pregain_db.lock().unwrap() = db;
+    }
 }
 
 impl Drop for Core {
@@ -203,13 +272,25 @@ fn do_apply(supervisor: &Supervisor, inner: &Inner, request: CalcRequest) -> Res
 
     let params = serde_json::to_value(&request)?;
     let reply = supervisor.call("calculate_filters", params)?;
-    let device_config: DeviceConfig = serde_json::from_value(reply)?;
+    let result: CalcResult = serde_json::from_value(reply)?;
+
+    // Compose the final preamp here (policy), from the curve quantities the DSP
+    // reported (physics): §4.0 base pre-gain + §4.1 loudness match, capped by §4.2.
+    let base = *inner.base_pregain_db.lock().unwrap();
+    let preamp = compose_preamp(result.g_target_db, result.g_max_peak_db, base);
+    let device_config =
+        DeviceConfig { device: result.device, preamp_db: preamp.db, filters: result.filters };
 
     let hash = cw::apply(&inner.config_dir, std::slice::from_ref(&device_config))?;
 
     *inner.last_applied.lock().unwrap() = Some(request);
     inner.applied_count.fetch_add(1, Ordering::SeqCst);
-    Ok(Applied { hash, device: device_config.device })
+    Ok(Applied {
+        hash,
+        device: device_config.device,
+        preamp_db: preamp.db,
+        clipping_warning: preamp.clipping_warning,
+    })
 }
 
 /// Watch the supervisor's recovery counter; each time it advances and the sidecar
@@ -243,4 +324,50 @@ fn reconcile_loop(supervisor: Arc<Supervisor>, inner: Arc<Inner>, poll: Duration
 /// The cageq.txt path inside an EqAPO config directory.
 pub fn cageq_path_in(config_dir: &Path) -> PathBuf {
     config_dir.join(cw::CAGEQ_FILENAME)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx(a: f64, b: f64) {
+        assert!((a - b).abs() < 1e-9, "expected {b}, got {a}");
+    }
+
+    #[test]
+    fn typical_curve_the_loudness_match_binds() {
+        // Moderate peak (+6), moderate loudness target (-4), default headroom.
+        // G_max_allowed = -6 - (-9) = +3 > G_target, so G_target binds; no warning.
+        let p = compose_preamp(-4.0, 6.0, DEFAULT_BASE_PREGAIN_DB);
+        approx(p.db, -13.0); // base_pregain (-9) + relative (-4)
+        assert!(!p.clipping_warning);
+    }
+
+    #[test]
+    fn extreme_peak_the_ceiling_binds_and_base_pregain_cancels() {
+        // Stacked custom filters: peak +25. The §4.2 ceiling takes over and the
+        // comfort buffer is spent — Preamp_final collapses to exactly -G_max_peak.
+        let p = compose_preamp(-6.0, 25.0, DEFAULT_BASE_PREGAIN_DB);
+        approx(p.db, -25.0); // == -G_max_peak, independent of base_pregain
+        assert!(p.clipping_warning);
+    }
+
+    #[test]
+    fn ceiling_never_exceeds_zero_dbfs_regardless_of_base_pregain() {
+        // For any base pre-gain, a positive-peak curve stays at or below -G_max_peak.
+        for base in [-3.0, -9.0, -18.0] {
+            let p = compose_preamp(10.0, 12.0, base); // absurd +10 target vs +12 peak
+            assert!(p.db <= -12.0 + 1e-9, "base {base}: preamp {} > -peak", p.db);
+            assert!(p.clipping_warning);
+        }
+    }
+
+    #[test]
+    fn stub_defaults_yield_just_the_base_pregain() {
+        // Missing g_target/g_max_peak default to 0 (the stub): a flat, level-neutral
+        // curve leaves only the base pre-gain, and never trips the ceiling.
+        let p = compose_preamp(0.0, 0.0, DEFAULT_BASE_PREGAIN_DB);
+        approx(p.db, DEFAULT_BASE_PREGAIN_DB);
+        assert!(!p.clipping_warning);
+    }
 }

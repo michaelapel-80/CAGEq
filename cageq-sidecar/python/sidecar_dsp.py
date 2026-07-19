@@ -108,6 +108,48 @@ def list_targets(refresh=False):
     return targets
 
 
+# --- loudness (filter.md §4.1) --------------------------------------------
+
+# ITU-R BS.1770-4 K-weighting, as a cascade of two biquads specified at 48 kHz:
+#   stage 1 — "head" high-shelf (+~4 dB above ~1.5 kHz),
+#   stage 2 — "RLB" high-pass (rolls off the low bass).
+# Coefficients are the standard's reference values (fs = 48 kHz).
+_KW_S1_B = (1.53512485958697, -2.69169618940638, 1.19839281085285)
+_KW_S1_A = (1.0, -1.69065929318241, 0.73248077421585)
+_KW_S2_B = (1.0, -2.0, 1.0)
+_KW_S2_A = (1.0, -1.99004745483398, 0.99007225036621)
+
+
+def _k_weight_power(f, fs=48000.0):
+    """The K-weighting *power* response |H_k(f)|^2 on frequency grid `f`, evaluated
+    analytically from the digital biquad cascade (z = e^{-jω}, ω = 2π f / fs)."""
+    z = np.exp(-1j * 2.0 * np.pi * f / fs)
+
+    def _mag2(b, a):
+        num = b[0] + b[1] * z + b[2] * z * z
+        den = a[0] + a[1] * z + a[2] * z * z
+        return np.abs(num / den) ** 2
+
+    return _mag2(_KW_S1_B, _KW_S1_A) * _mag2(_KW_S2_B, _KW_S2_A)
+
+
+def loudness_target_db(f, g_eq_db):
+    """§4.1 relative loudness compensation G_target for an EQ curve `g_eq_db` on the
+    log grid `f`. A K-weighted pink-noise energy model: how much the curve raises the
+    perceived loudness of pink noise, negated so applying it is level-neutral vs. dry.
+
+    NOT a measurement of real audio and NOT an absolute LUFS level — a per-curve
+    broadband offset so A/B/Dry comparisons judge timbre, not level. `f` must be a
+    log-spaced grid (constant ratio per octave) so P_pink = 1/f is constant energy
+    per octave (see the §4.1 grid note)."""
+    w_k = _k_weight_power(f)
+    p_pink = 1.0 / f
+    p_dry = np.sum(p_pink * w_k)
+    p_wet = np.sum(p_pink * w_k * 10.0 ** (g_eq_db / 10.0))
+    delta_l = 10.0 * np.log10(p_wet / p_dry)
+    return -delta_l
+
+
 # --- the fit --------------------------------------------------------------
 
 def _measurement_fr(params):
@@ -163,9 +205,20 @@ def calculate_filters(params):
         }
         for f in peq.filters
     ]
-    # AutoEq's preamp: negative headroom so the summed curve doesn't clip. (CAGE's
-    # Auto-LUFS loudness-match, filter.md §4.1, is a separate later stage.)
-    return {"device": device, "preamp_db": round(float(-peq.max_gain), 2), "filters": filters}
+    # We report the two curve-derived quantities the Rust core needs to compose the
+    # final preamp (filter.md §4.0/§4.2); the DSP does not own the user's base pre-gain
+    # or clipping policy:
+    #   g_target_db   — §4.1 K-weighted loudness compensation for this curve,
+    #   g_max_peak_db — the composed EQ curve's positive peak, for the §4.2 ceiling.
+    # peq.fr is the parametric filters' combined response in dB on the log grid peq.f.
+    g_target = loudness_target_db(peq.f, peq.fr)
+    g_max_peak = float(np.max(peq.fr))
+    return {
+        "device": device,
+        "filters": filters,
+        "g_target_db": round(g_target, 2),
+        "g_max_peak_db": round(g_max_peak, 2),
+    }
 
 
 # --- JSON-RPC loop --------------------------------------------------------

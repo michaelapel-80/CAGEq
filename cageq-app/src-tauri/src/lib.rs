@@ -22,6 +22,10 @@ struct ApplyResult {
     cageq_path: String,
     /// The exact text written to cageq.txt — the end-to-end proof for the UI.
     cageq_text: String,
+    /// Composed final preamp (§4.0/§4.2): base pre-gain + §4.1 loudness match, capped.
+    preamp_db: f64,
+    /// §4.2 emergency ceiling bound the level instead of the §4.1 loudness match.
+    clipping_warning: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -55,6 +59,8 @@ fn apply(device: String, headphone: String, target: Option<String>, state: State
                 device: applied.device,
                 cageq_path: cageq_path.display().to_string(),
                 cageq_text,
+                preamp_db: applied.preamp_db,
+                clipping_warning: applied.clipping_warning,
             })
         }
     }

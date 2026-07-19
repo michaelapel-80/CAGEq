@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use cageq_config_writer::{self as cw, BlockState, StartupDecision};
-use cageq_core::{CalcRequest, Core};
+use cageq_core::{CalcRequest, Core, DEFAULT_BASE_PREGAIN_DB};
 use cageq_sidecar::{Sidecar, SidecarError};
 use cageq_watchdog::{Health, WatchdogConfig};
 use serde_json::json;
@@ -103,7 +103,12 @@ fn apply_calculates_and_writes_config() {
     let cageq = tmp.cageq();
     assert!(cageq.contains("Device: USB DAC"), "{cageq}");
     assert!(cageq.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"), "{cageq}");
-    assert!(cageq.contains("Preamp: -6.5 dB"), "{cageq}");
+    // The core composes the preamp itself (§4.0/§4.2) and ignores any preamp the
+    // sidecar reports; the stub sends no loudness data, so this is just the default
+    // base pre-gain (-9.0 dB), and the §4.2 ceiling does not trip on a flat curve.
+    assert!(cageq.contains("Preamp: -9.0 dB"), "{cageq}");
+    assert_eq!(applied.preamp_db, DEFAULT_BASE_PREGAIN_DB);
+    assert!(!applied.clipping_warning);
     // ...and config.txt got the Include block.
     assert!(tmp.config().contains("Include: cageq.txt"));
 

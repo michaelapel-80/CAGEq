@@ -4,7 +4,14 @@ import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string };
 type Target = { name: string; path: string };
-type ApplyResult = { hash: string; device: string; cageq_path: string; cageq_text: string };
+type ApplyResult = {
+  hash: string;
+  device: string;
+  cageq_path: string;
+  cageq_text: string;
+  preamp_db: number;
+  clipping_warning: boolean;
+};
 type Status = {
   startup: string;
   health: string;
@@ -131,8 +138,15 @@ function App() {
       {result && (
         <>
           <p>
-            Wrote hash <code>{result.hash}</code> → {result.cageq_path}
+            Preamp <code>{result.preamp_db.toFixed(1)} dB</code> (Auto-LUFS loudness match) · hash{" "}
+            <code>{result.hash}</code> → {result.cageq_path}
           </p>
+          {result.clipping_warning && (
+            <p style={{ color: "#b8860b" }}>
+              ⚠ Emergency clipping protection active instead of the loudness match — this curve has an
+              extreme peak.
+            </p>
+          )}
           <pre
             style={{
               textAlign: "left",

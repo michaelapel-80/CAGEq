@@ -74,8 +74,14 @@ fn real_dsp_fits_parametric_filters() {
     let fc = strongest["freq_hz"].as_f64().unwrap();
     assert!((2000.0..4500.0).contains(&fc), "cut should sit near the 3 kHz bump, got {fc}");
 
-    // Preamp is present and non-positive (headroom, never a boost).
-    assert!(reply["preamp_db"].as_f64().unwrap() <= 0.0);
+    // The curve-derived quantities the Rust core composes the preamp from
+    // (filter.md §4.1/§4.2) are present and finite; the core owns the preamp itself.
+    let g_target = reply["g_target_db"].as_f64().expect("g_target_db");
+    let g_max_peak = reply["g_max_peak_db"].as_f64().expect("g_max_peak_db");
+    assert!(g_target.is_finite() && g_max_peak.is_finite());
+    // This curve is dominated by a cut, so correcting it lowers loudness → the
+    // level-neutral compensation is a (small) boost: G_target >= 0.
+    assert!(g_target >= 0.0, "cut-dominated curve should want a non-negative G_target, got {g_target}");
 }
 
 #[test]
