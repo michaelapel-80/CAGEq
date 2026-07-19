@@ -1,65 +1,150 @@
 #!/usr/bin/env python3
 """CAGEq DSP sidecar — the real AutoEq-backed engine.
 
-Speaks the exact same line-delimited JSON-RPC 2.0 as sidecar_stub.py (ping /
-shutdown / calculate_filters), but calculate_filters runs the AutoEq pipeline:
-interpolate the measurement + target onto the log grid, compute the error, and fit
-parametric filters. Drop-in replacement for the stub behind the same contract.
+Speaks the same line-delimited JSON-RPC 2.0 as sidecar_stub.py. Methods:
+  ping / shutdown
+  list_headphones {refresh?}   -> the AutoEq measurement catalogue (cached index)
+  list_targets    {refresh?}   -> available AutoEq target curves
+  calculate_filters {device, (headphone | measurement), target?, ...}
 
-Requires the Python 3.10 venv with autoeq installed (see requirements.txt). AutoEq
-pulls matplotlib, so we force the headless Agg backend before importing it.
+Measurement/target data is NOT bundled (the AutoEq repo is ~4.4 GB); we build a
+searchable index from GitHub's tree API once, then fetch each chosen headphone's
+CSV on demand from raw.githubusercontent and cache it locally. AutoEq is MIT.
+
+Requires the Python 3.10 venv with autoeq (see requirements.txt). AutoEq pulls
+matplotlib, so we force the headless Agg backend before importing it.
 """
 import sys
 import os
 import json
+import tempfile
+import urllib.request
+import urllib.parse
 
 os.environ.setdefault("MPLBACKEND", "Agg")  # headless subprocess: no GUI backend
 
 import numpy as np  # noqa: E402
 from autoeq.frequency_response import FrequencyResponse  # noqa: E402
 
+GH_API = "https://api.github.com/repos/jaakkopasanen/AutoEq"
+GH_RAW = "https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master"
 
-def calculate_filters(params):
-    """measurement (+ optional target) -> parametric filters in DeviceConfig shape.
 
-    params:
-      device: str
-      measurement: [{frequency, raw_db}, ...]   (>= 2 points)
-      target:      [{frequency, target_db}, ...] (optional; flat if omitted)
-      peaking_filters: int (default 8)   — plus a low + high shelf => 8+2 bands
-      max_gain: float (default 6.0)      — AutoEq equalization gain ceiling
-      fs: int (default 48000)
-    """
-    device = params.get("device", "Unknown")
+# --- cache + http ---------------------------------------------------------
+
+def _cache_dir():
+    d = os.environ.get("CAGEQ_CACHE_DIR") or os.path.join(tempfile.gettempdir(), "cageq-cache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _http_get(url, binary=False):
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "CAGEq", "Accept": "application/vnd.github+json"}
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = r.read()
+    return data if binary else data.decode("utf-8")
+
+
+def _cached_download(rel_path):
+    """Fetch a repo file (by repo-relative path) from raw.githubusercontent, cached
+    by path. Returns the local file path."""
+    safe = rel_path.replace("/", "__").replace("\\", "__")
+    cpath = os.path.join(_cache_dir(), "files", safe)
+    os.makedirs(os.path.dirname(cpath), exist_ok=True)
+    if not os.path.exists(cpath):
+        data = _http_get(GH_RAW + "/" + urllib.parse.quote(rel_path), binary=True)
+        with open(cpath, "wb") as fh:
+            fh.write(data)
+    return cpath
+
+
+# --- AutoEq catalogue -----------------------------------------------------
+
+def build_index(refresh=False):
+    """The headphone catalogue: [{source, form_factor, name, path}]. Built once from
+    the measurements git tree (one recursive call, ~6800 entries), cached to disk."""
+    idx_path = os.path.join(_cache_dir(), "headphone_index.json")
+    if not refresh and os.path.exists(idx_path):
+        with open(idx_path, encoding="utf-8") as fh:
+            return json.load(fh)
+    root = json.loads(_http_get(GH_API + "/git/trees/master"))
+    meas_sha = next(e["sha"] for e in root["tree"] if e["path"] == "measurements")
+    tree = json.loads(_http_get(GH_API + f"/git/trees/{meas_sha}?recursive=1"))
+    index = []
+    for e in tree["tree"]:
+        if e["type"] != "blob" or not e["path"].endswith(".csv"):
+            continue
+        parts = e["path"].split("/")  # <source>/data/<form-factor>/<model>.csv
+        if len(parts) >= 4 and parts[1] == "data":
+            index.append({
+                "source": parts[0],
+                "form_factor": parts[2],
+                "name": parts[-1][:-4],
+                "path": "measurements/" + e["path"],
+            })
+    index.sort(key=lambda h: (h["name"].lower(), h["source"]))
+    with open(idx_path, "w", encoding="utf-8") as fh:
+        json.dump(index, fh)
+    return index
+
+
+def list_targets(refresh=False):
+    """Available target curves: [{name, path}]. From the targets/ dir listing."""
+    cpath = os.path.join(_cache_dir(), "targets_index.json")
+    if not refresh and os.path.exists(cpath):
+        with open(cpath, encoding="utf-8") as fh:
+            return json.load(fh)
+    entries = json.loads(_http_get(GH_API + "/contents/targets"))
+    targets = [
+        {"name": e["name"][:-4], "path": "targets/" + e["name"]}
+        for e in entries
+        if e["type"] == "file" and e["name"].endswith(".csv")
+    ]
+    targets.sort(key=lambda t: t["name"].lower())
+    with open(cpath, "w", encoding="utf-8") as fh:
+        json.dump(targets, fh)
+    return targets
+
+
+# --- the fit --------------------------------------------------------------
+
+def _measurement_fr(params):
+    """Build the source FrequencyResponse from a selected headphone (fetched CSV) or
+    a raw measurement array."""
+    if params.get("headphone"):
+        return FrequencyResponse.read_csv(_cached_download(params["headphone"]))
     measurement = params.get("measurement") or []
     if len(measurement) < 2:
-        raise ValueError("measurement needs at least 2 points")
+        raise ValueError("need 'headphone' (a catalogue path) or a 'measurement' array")
+    freq = np.array([p["frequency"] for p in measurement], dtype=float)
+    raw = np.array([p["raw_db"] for p in measurement], dtype=float)
+    return FrequencyResponse(name=params.get("device", "measurement"), frequency=freq, raw=raw)
 
-    m_freq = np.array([p["frequency"] for p in measurement], dtype=float)
-    m_raw = np.array([p["raw_db"] for p in measurement], dtype=float)
 
-    fr = FrequencyResponse(name=device, frequency=m_freq, raw=m_raw)
-    fr.interpolate()  # onto AutoEq's standard log grid (20..20k, f_step 1.01)
+def _target_raw(params, grid):
+    """Target dB values on `grid`: a named AutoEq target (fetched), else flat."""
+    if params.get("target"):
+        tfr = FrequencyResponse.read_csv(_cached_download(params["target"]))
+        tfr.interpolate(f=grid)
+        return tfr.raw
+    return np.zeros(len(grid))
+
+
+def calculate_filters(params):
+    device = params.get("device", "Unknown")
+    fr = _measurement_fr(params)
+    fr.interpolate()  # AutoEq's standard log grid (20..20k, f_step 1.01)
     fr.center()
 
-    # Target on fr's grid: provided points (interpolated) or flat.
-    target_points = params.get("target")
-    if target_points:
-        t_freq = np.array([p["frequency"] for p in target_points], dtype=float)
-        t_val = np.array([p["target_db"] for p in target_points], dtype=float)
-        tfr = FrequencyResponse(name="target", frequency=t_freq, raw=t_val)
-        tfr.interpolate(f=fr.frequency)
-        target = FrequencyResponse(name="target", frequency=fr.frequency, raw=tfr.raw)
-    else:
-        target = FrequencyResponse(name="target", frequency=fr.frequency, raw=np.zeros(len(fr.frequency)))
-
-    fr.compensate(target)  # error = raw - target
+    target = FrequencyResponse(name="target", frequency=fr.frequency, raw=_target_raw(params, fr.frequency))
+    fr.compensate(target)
     fr.smoothen()
     fr.equalize(max_gain=float(params.get("max_gain", 6.0)))
 
     peaking = int(params.get("peaking_filters", 8))
     fs = int(params.get("fs", 48000))
-    # Low + high shelf with fixed fc/q (gain optimized) plus N fully-optimized peaks.
     config = {
         "filters": [
             {"type": "LOW_SHELF", "fc": 105.0, "q": 0.7},
@@ -78,10 +163,12 @@ def calculate_filters(params):
         }
         for f in peq.filters
     ]
-    # AutoEq's preamp: enough negative gain to keep the summed curve from clipping.
-    # (CAGE's Auto-LUFS loudness-match, filter.md §4.1, is a separate later stage.)
+    # AutoEq's preamp: negative headroom so the summed curve doesn't clip. (CAGE's
+    # Auto-LUFS loudness-match, filter.md §4.1, is a separate later stage.)
     return {"device": device, "preamp_db": round(float(-peq.max_gain), 2), "filters": filters}
 
+
+# --- JSON-RPC loop --------------------------------------------------------
 
 def reply(rid, result=None, error=None):
     msg = {"jsonrpc": "2.0", "id": rid}
@@ -107,11 +194,16 @@ def main():
         if method == "shutdown":
             reply(rid, result={"bye": True})
             return
+        params = req.get("params") or {}
         try:
             if method == "ping":
                 reply(rid, result={"pong": True})
+            elif method == "list_headphones":
+                reply(rid, result={"headphones": build_index(refresh=bool(params.get("refresh")))})
+            elif method == "list_targets":
+                reply(rid, result={"targets": list_targets(refresh=bool(params.get("refresh")))})
             elif method == "calculate_filters":
-                reply(rid, result=calculate_filters(req.get("params") or {}))
+                reply(rid, result=calculate_filters(params))
             else:
                 reply(rid, error={"code": -32601, "message": f"unknown method: {method}"})
         except Exception as e:  # keep the loop alive; report the failure

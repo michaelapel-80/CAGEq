@@ -77,3 +77,25 @@ fn real_dsp_fits_parametric_filters() {
     // Preamp is present and non-positive (headroom, never a boost).
     assert!(reply["preamp_db"].as_f64().unwrap() <= 0.0);
 }
+
+#[test]
+fn real_dsp_lists_the_autoeq_catalogue() {
+    let Some(python) = venv_python() else {
+        eprintln!("skipping catalogue test: no .venv");
+        return;
+    };
+    let mut sc = Sidecar::spawn(&python, &dsp_script()).expect("spawn dsp sidecar");
+    sc.ping().expect("ping");
+
+    // Building the index needs GitHub once (cached after). Soft-skip on a network
+    // error so the suite doesn't depend on connectivity.
+    match sc.call("list_headphones", json!({})) {
+        Ok(v) => {
+            let hp = v["headphones"].as_array().expect("headphones array");
+            assert!(hp.len() > 1000, "expected the full catalogue, got {}", hp.len());
+            let e = &hp[0];
+            assert!(e["name"].is_string() && e["path"].is_string() && e["source"].is_string());
+        }
+        Err(err) => eprintln!("skipping catalogue assertions (network?): {err}"),
+    }
+}
