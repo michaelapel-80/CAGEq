@@ -13,6 +13,7 @@ type Status = {
   health: string;
   recoveries: number;
   config_dir: string;
+  sidecar: string;
 };
 
 function App() {
@@ -47,10 +48,12 @@ function App() {
   return (
     <main className="container">
       <h1>CAGEq</h1>
-      <p>Caged Auto-Gain EQ — live backend (stub DSP)</p>
+      <p>Caged Auto-Gain EQ — live backend (demo measurement)</p>
 
       {status && (
         <p style={{ fontSize: "0.85em", opacity: 0.8 }}>
+          sidecar: {status.sidecar}
+          <br />
           startup: {status.startup} · health: {status.health} · recoveries:{" "}
           {status.recoveries}
           <br />
