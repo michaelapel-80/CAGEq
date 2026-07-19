@@ -17,6 +17,7 @@ matplotlib, so we force the headless Agg backend before importing it.
 import sys
 import os
 import json
+import hashlib
 import tempfile
 import urllib.request
 import urllib.parse
@@ -242,12 +243,38 @@ def _custom_filters(params, f, fs):
     return out, curve
 
 
-def calculate_filters(params):
-    device = params.get("device", "Unknown")
+# The AutoEq fit is the expensive step (SciPy optimisation, ~1-2 s). It depends only
+# on the measurement + target + fit params — NOT on custom filters — so we cache it by
+# those inputs. Changing only custom filters (add/edit/remove) then reuses the cached
+# fit and just recombines (filter.md §5.2 performance rule). In-process dict; the
+# sidecar handles requests one at a time, so no locking is needed.
+_FIT_CACHE = {}
+_FIT_CACHE_MAX = 32
+
+
+def _fit_key(params):
+    """A hashable key over exactly the inputs the AutoEq fit depends on."""
+    src = params.get("headphone")
+    if not src:
+        meas = params.get("measurement") or []
+        digest = hashlib.sha1(repr([(round(float(p["frequency"]), 4), round(float(p["raw_db"]), 4)) for p in meas]).encode()).hexdigest()
+        src = "meas:" + digest
+    return (src, params.get("target") or "",
+            float(params.get("max_gain", 6.0)), int(params.get("peaking_filters", 8)), int(params.get("fs", 48000)))
+
+
+def _autoeq_fit(params):
+    """Run (or reuse from cache) the AutoEq parametric fit. Returns
+    (filter_dicts, f_grid, response_db) — response_db is the AutoEq bands' combined
+    response on f_grid. Cached by [`_fit_key`]; custom filters never enter here."""
+    key = _fit_key(params)
+    cached = _FIT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
     fr = _measurement_fr(params)
     fr.interpolate()  # AutoEq's standard log grid (20..20k, f_step 1.01)
     fr.center()
-
     target = FrequencyResponse(name="target", frequency=fr.frequency, raw=_target_raw(params, fr.frequency))
     fr.compensate(target)
     fr.smoothen()
@@ -263,7 +290,6 @@ def calculate_filters(params):
         + [{"type": "PEAKING"} for _ in range(peaking)]
     }
     peq = fr.optimize_parametric_eq([config], fs)[0]
-
     filters = [
         {
             "kind": type(f).__name__,  # 'LowShelf' | 'HighShelf' | 'Peaking' == Rust FilterType
@@ -273,18 +299,29 @@ def calculate_filters(params):
         }
         for f in peq.filters
     ]
+    result = (filters, peq.f, peq.fr)
+    if len(_FIT_CACHE) >= _FIT_CACHE_MAX:
+        _FIT_CACHE.pop(next(iter(_FIT_CACHE)))  # evict oldest (dicts keep insertion order)
+    _FIT_CACHE[key] = result
+    return result
+
+
+def calculate_filters(params):
+    device = params.get("device", "Unknown")
+    autoeq_filters, f, autoeq_curve = _autoeq_fit(params)  # cached; no re-fit on custom-filter changes
+
     # Append the user's custom filters (§3.4) and combine their response with the
     # AutoEq curve; the *combined* curve drives the level policy.
-    custom, custom_curve = _custom_filters(params, peq.f, fs)
-    filters += custom
-    combined = peq.fr + custom_curve
+    custom, custom_curve = _custom_filters(params, f, int(params.get("fs", 48000)))
+    filters = autoeq_filters + custom  # new list — never mutate the cached fit
+    combined = autoeq_curve + custom_curve
 
     # We report the two curve-derived quantities the Rust core needs to compose the
     # final preamp (filter.md §4.0/§4.2); the DSP does not own the user's base pre-gain
     # or clipping policy:
     #   g_target_db   — §4.1 K-weighted loudness compensation for this curve,
     #   g_max_peak_db — the composed EQ curve's positive peak, for the §4.2 ceiling.
-    g_target = loudness_target_db(peq.f, combined)
+    g_target = loudness_target_db(f, combined)
     g_max_peak = float(np.max(combined))
     return {
         "device": device,
