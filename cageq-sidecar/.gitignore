@@ -1,0 +1,7 @@
+# Rust build artifacts
+/target/
+
+# Python sidecar virtualenv (Python 3.12, holds AutoEq + numpy/scipy/…) and caches
+.venv/
+__pycache__/
+*.pyc
