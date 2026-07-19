@@ -1,36 +1,68 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-// Mirrors cageq-core's DeviceConfig (re-exported from cageq-config-writer). Tauri
-// serialises the Rust return value via serde, so these fields line up 1:1.
-type Filter = { kind: string; freq_hz: number; gain_db: number; q: number };
-type DeviceConfig = { device: string; preamp_db: number; filters: Filter[] };
+type ApplyResult = {
+  hash: string;
+  device: string;
+  cageq_path: string;
+  cageq_text: string;
+};
+type Status = {
+  startup: string;
+  health: string;
+  recoveries: number;
+  config_dir: string;
+};
 
 function App() {
   const [device, setDevice] = useState("USB DAC");
-  const [config, setConfig] = useState<DeviceConfig | null>(null);
+  const [result, setResult] = useState<ApplyResult | null>(null);
+  const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState("");
 
-  async function compute() {
+  async function refreshStatus() {
     try {
-      setError("");
-      setConfig(await invoke<DeviceConfig>("sample_config", { device }));
+      setStatus(await invoke<Status>("status"));
     } catch (e) {
       setError(String(e));
+    }
+  }
+
+  useEffect(() => {
+    refreshStatus();
+  }, []);
+
+  async function apply() {
+    try {
+      setError("");
+      setResult(await invoke<ApplyResult>("apply", { device }));
+      await refreshStatus();
+    } catch (e) {
+      setError(String(e));
+      setResult(null);
     }
   }
 
   return (
     <main className="container">
       <h1>CAGEq</h1>
-      <p>Caged Auto-Gain EQ — backend wiring smoke test</p>
+      <p>Caged Auto-Gain EQ — live backend (stub DSP)</p>
+
+      {status && (
+        <p style={{ fontSize: "0.85em", opacity: 0.8 }}>
+          startup: {status.startup} · health: {status.health} · recoveries:{" "}
+          {status.recoveries}
+          <br />
+          config dir: {status.config_dir}
+        </p>
+      )}
 
       <form
         className="row"
         onSubmit={(e) => {
           e.preventDefault();
-          compute();
+          apply();
         }}
       >
         <input
@@ -38,38 +70,26 @@ function App() {
           onChange={(e) => setDevice(e.currentTarget.value)}
           placeholder="Device name"
         />
-        <button type="submit">Compute filters</button>
+        <button type="submit">Apply</button>
       </form>
 
       {error && <p style={{ color: "crimson" }}>{error}</p>}
 
-      {config && (
+      {result && (
         <>
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Type</th>
-                <th>Fc (Hz)</th>
-                <th>Gain (dB)</th>
-                <th>Q</th>
-              </tr>
-            </thead>
-            <tbody>
-              {config.filters.map((f, i) => (
-                <tr key={i}>
-                  <td>{i + 1}</td>
-                  <td>{f.kind}</td>
-                  <td>{f.freq_hz}</td>
-                  <td>{f.gain_db}</td>
-                  <td>{f.q}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
           <p>
-            Preamp: {config.preamp_db} dB · Device: {config.device}
+            Wrote hash <code>{result.hash}</code> → {result.cageq_path}
           </p>
+          <pre
+            style={{
+              textAlign: "left",
+              background: "#0002",
+              padding: "0.75em",
+              overflowX: "auto",
+            }}
+          >
+            {result.cageq_text}
+          </pre>
         </>
       )}
     </main>

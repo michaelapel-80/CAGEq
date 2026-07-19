@@ -28,15 +28,16 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use cageq_config_writer::{self as cw, WriteError};
-use cageq_sidecar::{Sidecar, SidecarError};
-use cageq_watchdog::{Supervisor, SupervisorError, WatchdogConfig};
+use cageq_watchdog::{Supervisor, SupervisorError};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 // Re-export the domain types through cageq-core so the app/UI layer depends only on
-// this facade, not each building-block crate. These are also used internally below.
+// this facade, not each building-block crate. Several are also used internally below
+// (the `pub use` both re-exports and brings them into scope here).
 pub use cageq_config_writer::{DeviceConfig, Filter, FilterType, StartupDecision};
-pub use cageq_watchdog::Health;
+pub use cageq_sidecar::{Sidecar, SidecarError};
+pub use cageq_watchdog::{Health, WatchdogConfig};
 
 // ---------------------------------------------------------------------------
 // Public request/response types
@@ -61,7 +62,7 @@ impl CalcRequest {
 }
 
 /// The result of a successful apply.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Applied {
     /// cageq.txt content hash — persist in settings.json for the next startup check.
     pub hash: String,
