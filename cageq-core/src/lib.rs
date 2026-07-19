@@ -38,7 +38,8 @@ use serde_json::{Map, Value};
 // this facade, not each building-block crate. Several are also used internally below
 // (the `pub use` both re-exports and brings them into scope here).
 pub use cageq_config_writer::{
-    DeviceConfig, Filter, FilterType, StartupDecision, detect_eqapo_config_dir,
+    AudioDevice, DeviceConfig, Filter, FilterType, StartupDecision, detect_eqapo_config_dir,
+    list_render_devices,
 };
 pub use cageq_sidecar::{Sidecar, SidecarError};
 pub use cageq_watchdog::{Health, WatchdogConfig};

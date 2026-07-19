@@ -295,6 +295,95 @@ fn eqapo_config_dir_from_registry() -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Windows playback-device detection (§3.0)
+// ---------------------------------------------------------------------------
+
+/// A Windows audio playback (render) endpoint the user can scope the EQ to (§3.0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioDevice {
+    /// The endpoint GUID (registry subkey name), a stable unique id.
+    pub id: String,
+    /// Human-readable name for the UI, e.g. "Lautsprecher (SPL Phonitor One)".
+    pub name: String,
+    /// The string to write on the `Device:` line — [`name`](Self::name) normalised to
+    /// EqAPO's word-match form (see [`eqapo_device_pattern`]).
+    pub eqapo_pattern: String,
+}
+
+/// Normalise a Windows device name into an EqAPO `Device:` pattern.
+///
+/// EqAPO matches a `Device:` pattern as space-separated words that must *all* appear
+/// (as substrings) in the endpoint's combined "device-name connection-name GUID"
+/// string (verified against EqAPO's Configuration reference). A raw friendly name like
+/// `Lautsprecher (SPL Phonitor One)` would tokenise to `(SPL` / `One)`, which don't
+/// substring-match — so we replace every non-alphanumeric character with a space and
+/// collapse runs of whitespace, leaving clean words that do match.
+pub fn eqapo_device_pattern(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Enumerate active Windows playback (render) endpoints (§3.0), for the device
+/// picker. Read-only registry access; returns an empty list on non-Windows, when the
+/// key is unreadable, or when nothing is active. Order follows the registry.
+pub fn list_render_devices() -> Vec<AudioDevice> {
+    render_devices_from_registry()
+}
+
+#[cfg(windows)]
+fn render_devices_from_registry() -> Vec<AudioDevice> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+
+    // Endpoint property keys (PROPERTYKEY "{fmtid},pid" as stored under Properties):
+    //   DeviceDesc            -> EqAPO's "connection name" (e.g. "Lautsprecher"/"Speakers")
+    //   DeviceInterface name  -> EqAPO's "device name"     (e.g. "SPL Phonitor One")
+    const DEVICE_DESC: &str = "{a45c254e-df1c-4efd-8020-67d146a850e0},2";
+    const INTERFACE_NAME: &str = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6";
+    const DEVICE_STATE_ACTIVE: u32 = 0x1;
+
+    let render = match RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render")
+    {
+        Ok(k) => k,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut devices = Vec::new();
+    for guid in render.enum_keys().flatten() {
+        let Ok(endpoint) = render.open_subkey(&guid) else { continue };
+        // Only active (plugged-in, enabled, present) endpoints.
+        if endpoint.get_value::<u32, _>("DeviceState").ok() != Some(DEVICE_STATE_ACTIVE) {
+            continue;
+        }
+        let props = match endpoint.open_subkey("Properties") {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let desc = props.get_value::<String, _>(DEVICE_DESC).ok();
+        let iface = props.get_value::<String, _>(INTERFACE_NAME).ok();
+        let name = match (desc, iface) {
+            (Some(d), Some(i)) => format!("{d} ({i})"),
+            (Some(d), None) => d,
+            (None, Some(i)) => i,
+            (None, None) => guid.clone(),
+        };
+        let eqapo_pattern = eqapo_device_pattern(&name);
+        devices.push(AudioDevice { id: guid, name, eqapo_pattern });
+    }
+    devices
+}
+
+#[cfg(not(windows))]
+fn render_devices_from_registry() -> Vec<AudioDevice> {
+    Vec::new()
+}
+
+// ---------------------------------------------------------------------------
 // Pure helpers — rendering cageq.txt
 // ---------------------------------------------------------------------------
 
@@ -585,6 +674,28 @@ mod tests {
         // caller relies on this to skip its temp-dir fallback). Read-only — no writes.
         if let Some(dir) = detect_eqapo_config_dir() {
             assert!(dir.is_dir(), "returned {dir:?}, which is not an existing directory");
+        }
+    }
+
+    #[test]
+    fn eqapo_pattern_strips_punctuation_to_matchable_words() {
+        // The real case: parentheses would otherwise yield non-matching "(SPL"/"One)".
+        assert_eq!(eqapo_device_pattern("Lautsprecher (SPL Phonitor One)"), "Lautsprecher SPL Phonitor One");
+        // Collapses runs of separators and trims.
+        assert_eq!(eqapo_device_pattern("  Speakers  -  Realtek(R)  "), "Speakers Realtek R");
+        // "all" (the EqAPO wildcard) and plain names pass through unchanged.
+        assert_eq!(eqapo_device_pattern("all"), "all");
+        assert_eq!(eqapo_device_pattern("Headphones"), "Headphones");
+    }
+
+    #[test]
+    fn list_render_devices_honours_its_contract() {
+        // Environment-dependent. Contract: never panics; every entry carries a non-empty
+        // id and an eqapo_pattern that is exactly the normalised name (no stray
+        // punctuation the Device: line couldn't match).
+        for d in list_render_devices() {
+            assert!(!d.id.is_empty(), "device id should be non-empty");
+            assert_eq!(d.eqapo_pattern, eqapo_device_pattern(&d.name));
         }
     }
 }

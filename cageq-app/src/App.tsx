@@ -4,6 +4,7 @@ import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string };
 type Target = { name: string; path: string };
+type AudioDevice = { id: string; name: string; eqapo_pattern: string };
 type ApplyResult = {
   hash: string;
   device: string;
@@ -30,6 +31,8 @@ function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [headphones, setHeadphones] = useState<Headphone[]>([]);
   const [targets, setTargets] = useState<Target[]>([]);
+  const [devices, setDevices] = useState<AudioDevice[]>([]);
+  const [deviceId, setDeviceId] = useState("");
   const [query, setQuery] = useState("");
   const [targetPath, setTargetPath] = useState("");
   const [result, setResult] = useState<ApplyResult | null>(null);
@@ -43,12 +46,15 @@ function App() {
       try {
         setStatus(await invoke<Status>("status"));
         setLoudness(await invoke<LoudnessSettings>("get_loudness"));
-        const [hp, tg] = await Promise.all([
+        const [hp, tg, dev] = await Promise.all([
           invoke<{ headphones: Headphone[] }>("list_headphones"),
           invoke<{ targets: Target[] }>("list_targets"),
+          invoke<AudioDevice[]>("list_devices"),
         ]);
         setHeadphones(hp.headphones);
         setTargets(tg.targets);
+        setDevices(dev);
+        setDeviceId(dev[0]?.id ?? "");
         const harman = tg.targets.find((t) => /harman over-ear 2018$/i.test(t.name));
         setTargetPath(harman?.path ?? tg.targets[0]?.path ?? "");
       } catch (e) {
@@ -86,12 +92,17 @@ function App() {
       setError("Pick a headphone from the list first.");
       return;
     }
+    const dev = devices.find((d) => d.id === deviceId);
+    if (!dev) {
+      setError("Pick an output device first.");
+      return;
+    }
     try {
       setError("");
       setApplying(true);
       setResult(
         await invoke<ApplyResult>("apply", {
-          device: hp.name,
+          device: dev.eqapo_pattern, // the EqAPO-matchable device pattern, not the headphone
           headphone: hp.path,
           target: targetPath || null,
         })
@@ -117,6 +128,23 @@ function App() {
           config: {status.config_source}
           <br />
           <span style={{ opacity: 0.7 }}>writes to: {status.config_dir}</span>
+        </p>
+      )}
+
+      {!loading && (
+        <p className="row" style={{ alignItems: "center", gap: "0.5em" }}>
+          <label htmlFor="device-select">Output device:</label>
+          {devices.length === 0 ? (
+            <span style={{ opacity: 0.7 }}>no active playback device detected</span>
+          ) : (
+            <select id="device-select" value={deviceId} onChange={(e) => setDeviceId(e.currentTarget.value)}>
+              {devices.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+          )}
         </p>
       )}
 

@@ -4,8 +4,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use cageq_core::{
-    Applied, CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, LoudnessSettings, Sidecar,
-    WatchdogConfig, detect_eqapo_config_dir,
+    Applied, AudioDevice, CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, LoudnessSettings,
+    Sidecar, WatchdogConfig, detect_eqapo_config_dir, list_render_devices,
 };
 use serde_json::{json, Map, Value};
 use tauri::State;
@@ -84,6 +84,13 @@ fn list_headphones(state: State<Backend>) -> Result<Value, String> {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, .. } => core.request("list_headphones", json!({})).map_err(|e| e.to_string()),
     }
+}
+
+/// Active Windows playback devices to scope the EQ to (§3.0). A local registry read,
+/// not a sidecar call — available even if the DSP failed to start.
+#[tauri::command]
+fn list_devices() -> Vec<AudioDevice> {
+    list_render_devices()
 }
 
 /// The AutoEq target curves. Relayed as-is.
@@ -308,6 +315,7 @@ pub fn run() {
             apply,
             status,
             list_headphones,
+            list_devices,
             list_targets,
             get_loudness,
             set_loudness
