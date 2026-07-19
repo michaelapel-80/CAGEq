@@ -25,10 +25,11 @@ type LoudnessMode = "Comparison" | "FinalVolume";
 type LoudnessSettings = { base_pregain_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 type SlotName = "A" | "B" | "Dry";
-type SlotInputs = { query: string; targetPath: string };
+type SlotInputs = { model: string; measurementPath: string; targetPath: string };
 type Selection = { headphone: string | null; target: string | null };
 
-const display = (h: Headphone) => `${h.name} · ${h.source} · ${h.form_factor}`;
+// oratory1990 is the common reference measurement — default to it when a model has it.
+const measurementRank = (h: Headphone) => (h.source === "oratory1990" ? 0 : 1);
 // Slot A = goldenrod, Slot B = blue, Dry = neutral (filter.md §5.2 accent colours).
 const SLOT_COLOR: Record<SlotName, string> = { A: "#daa520", B: "#3b82f6", Dry: "#9ca3af" };
 const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
@@ -39,7 +40,8 @@ function App() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [deviceId, setDeviceId] = useState("");
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(""); // headphone-model search / selected model name
+  const [measurementPath, setMeasurementPath] = useState(""); // chosen measurement (source) path
   const [targetPath, setTargetPath] = useState("");
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
@@ -71,7 +73,10 @@ function App() {
         // Harman default target when nothing was saved.
         const sel = await invoke<Selection>("get_selection");
         const savedHp = sel.headphone ? hp.headphones.find((h) => h.path === sel.headphone) : undefined;
-        if (savedHp) setQuery(display(savedHp));
+        if (savedHp) {
+          setQuery(savedHp.name);
+          setMeasurementPath(savedHp.path);
+        }
         const savedTarget = sel.target && tg.targets.some((t) => t.path === sel.target) ? sel.target : undefined;
         const harman = tg.targets.find((t) => /harman over-ear 2018$/i.test(t.name));
         setTargetPath(savedTarget ?? harman?.path ?? tg.targets[0]?.path ?? "");
@@ -97,18 +102,41 @@ function App() {
     }
   }
 
-  // Filter client-side and cap the datalist so 6800+ entries stay responsive.
-  const matches = useMemo(() => {
+  // Group measurements by model name, so the same model measured by several sources
+  // is one model with several measurements (not N merged rows). oratory1990 first.
+  const byModel = useMemo(() => {
+    const m = new Map<string, Headphone[]>();
+    for (const h of headphones) {
+      const arr = m.get(h.name);
+      if (arr) arr.push(h);
+      else m.set(h.name, [h]);
+    }
+    for (const arr of m.values())
+      arr.sort((a, b) => measurementRank(a) - measurementRank(b) || a.source.localeCompare(b.source));
+    return m;
+  }, [headphones]);
+
+  // Model names matching the search (capped so 2000+ models stay responsive).
+  const modelMatches = useMemo(() => {
     if (query.length < 2) return [];
     const q = query.toLowerCase();
-    return headphones.filter((h) => display(h).toLowerCase().includes(q)).slice(0, 200);
-  }, [query, headphones]);
+    return [...byModel.keys()].filter((n) => n.toLowerCase().includes(q)).slice(0, 200);
+  }, [query, byModel]);
+
+  // Measurements available for the currently-selected model (empty until one is picked).
+  const measurements = byModel.get(query) ?? [];
+
+  // Picking a model auto-selects its default (oratory1990-first) measurement.
+  function onModelInput(value: string) {
+    setQuery(value);
+    const ms = byModel.get(value);
+    setMeasurementPath(ms ? ms[0].path : "");
+  }
 
   async function apply() {
     if (activeSlot === "Dry") return; // Dry is a fixed reference, not editable
-    const hp = headphones.find((h) => display(h) === query);
-    if (!hp) {
-      setError("Pick a headphone from the list first.");
+    if (!measurementPath) {
+      setError("Pick a headphone model and measurement first.");
       return;
     }
     const dev = devices.find((d) => d.id === deviceId);
@@ -122,12 +150,12 @@ function App() {
       setResult(
         await invoke<ApplyResult>("apply", {
           device: dev.eqapo_pattern, // the EqAPO-matchable device pattern, not the headphone
-          headphone: hp.path,
+          headphone: measurementPath,
           target: targetPath || null,
           slot: activeSlot,
         })
       );
-      setSlotInputs((prev) => ({ ...prev, [activeSlot]: { query, targetPath } }));
+      setSlotInputs((prev) => ({ ...prev, [activeSlot]: { model: query, measurementPath, targetPath } }));
       setStatus(await invoke<Status>("status"));
     } catch (e) {
       setError(String(e));
@@ -145,7 +173,8 @@ function App() {
     if (slot !== "Dry") {
       const s = slotInputs[slot];
       if (s) {
-        setQuery(s.query);
+        setQuery(s.model);
+        setMeasurementPath(s.measurementPath);
         setTargetPath(s.targetPath);
       }
       if (!s) return; // empty slot: nothing written yet, user will configure + apply
@@ -171,7 +200,8 @@ function App() {
       const applied = await invoke<ApplyResult>("copy_slot", { from, to });
       setSlotInputs((prev) => ({ ...prev, [to]: src }));
       setActiveSlot(to);
-      setQuery(src.query);
+      setQuery(src.model);
+      setMeasurementPath(src.measurementPath);
       setTargetPath(src.targetPath);
       setResult(applied);
     } catch (e) {
@@ -304,18 +334,34 @@ function App() {
           }}
         >
           <input
-            list="hp-list"
+            list="model-list"
             value={query}
-            onChange={(e) => setQuery(e.currentTarget.value)}
-            placeholder={`Search ${headphones.length} headphones…`}
-            style={{ minWidth: "22em" }}
+            onChange={(e) => onModelInput(e.currentTarget.value)}
+            placeholder={`Search ${byModel.size} headphone models…`}
+            style={{ minWidth: "16em" }}
             disabled={dryActive}
           />
-          <datalist id="hp-list">
-            {matches.map((h) => (
-              <option key={h.path} value={display(h)} />
+          <datalist id="model-list">
+            {modelMatches.map((name) => (
+              <option key={name} value={name} />
             ))}
           </datalist>
+          <select
+            value={measurementPath}
+            onChange={(e) => setMeasurementPath(e.currentTarget.value)}
+            disabled={dryActive || measurements.length === 0}
+            title="Measurement source / rig"
+          >
+            {measurements.length === 0 ? (
+              <option value="">— pick a model —</option>
+            ) : (
+              measurements.map((m) => (
+                <option key={m.path} value={m.path}>
+                  by {m.source} · {m.form_factor}
+                </option>
+              ))
+            )}
+          </select>
           <select value={targetPath} onChange={(e) => setTargetPath(e.currentTarget.value)} disabled={dryActive}>
             {targets.map((t) => (
               <option key={t.path} value={t.path}>
