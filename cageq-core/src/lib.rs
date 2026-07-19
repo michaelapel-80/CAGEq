@@ -27,11 +27,16 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use cageq_config_writer::{self as cw, DeviceConfig, StartupDecision, WriteError};
+use cageq_config_writer::{self as cw, WriteError};
 use cageq_sidecar::{Sidecar, SidecarError};
-use cageq_watchdog::{Health, Supervisor, SupervisorError, WatchdogConfig};
+use cageq_watchdog::{Supervisor, SupervisorError, WatchdogConfig};
 use serde::Serialize;
 use serde_json::{Map, Value};
+
+// Re-export the domain types through cageq-core so the app/UI layer depends only on
+// this facade, not each building-block crate. These are also used internally below.
+pub use cageq_config_writer::{DeviceConfig, Filter, FilterType, StartupDecision};
+pub use cageq_watchdog::Health;
 
 // ---------------------------------------------------------------------------
 // Public request/response types
