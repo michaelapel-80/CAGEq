@@ -249,6 +249,12 @@ function App() {
           <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.3em 0 0" }}>
             A / S / D switch slots, W toggles the loudness mode — even without looking at the screen.
           </p>
+          {loudness?.mode === "FinalVolume" && (slotInputs.A !== null || slotInputs.B !== null) && (
+            <p style={{ color: "#b8860b", fontSize: "0.78em", margin: "0.4em 0 0" }}>
+              ⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched —
+              a louder slot can just sound "better". Press <kbd>W</kbd> for Comparison to A/B fairly.
+            </p>
+          )}
         </div>
       )}
 
