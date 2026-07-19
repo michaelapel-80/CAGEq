@@ -24,6 +24,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 cageq-core = { path = "../../cageq-core" }
 
+# §2 single-instance: all devices share one cageq.txt, so a second CAGEq process
+# would race the first on writes. Desktop-only (Cargo needs the real target cfg here;
+# the `desktop` alias only exists for `#[cfg(desktop)]` in code).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+
 # Standalone workspace: keeps the Tauri app (with its heavy deps and its
 # frontend-dist build requirement) out of the core Cargo workspace, so `cargo test`
 # on the core crates stays fast and decoupled from the frontend build state.

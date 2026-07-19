@@ -389,7 +389,24 @@ fn resolve_python() -> PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    // §2: enforce a single instance so two CAGEq processes never race on cageq.txt.
+    // Must be registered first (plugin docs). A second launch focuses the existing
+    // window instead of starting a rival writer, then exits.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            use tauri::Manager;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .manage(build_backend())
         .invoke_handler(tauri::generate_handler![
