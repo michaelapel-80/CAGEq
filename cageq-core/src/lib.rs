@@ -392,6 +392,12 @@ impl Core {
         self.supervisor.recoveries()
     }
 
+    /// Request one manual recovery attempt out of the `Terminal` state (§7.2) — e.g.
+    /// from a UI "Retry" button. No-op if the sidecar isn't Terminal.
+    pub fn retry(&self) {
+        self.supervisor.retry();
+    }
+
     /// How many times a config has been written (initial applies + re-applies).
     pub fn applied_count(&self) -> u32 {
         self.inner.applied_count.load(Ordering::SeqCst)

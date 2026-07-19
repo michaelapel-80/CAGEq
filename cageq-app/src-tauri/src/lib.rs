@@ -4,7 +4,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use cageq_core::{
-    Applied, AudioDevice, CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, Filter,
+    Applied, AudioDevice, CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, Filter, Health,
     LoudnessSettings, Sidecar, Slot, WatchdogConfig, detect_eqapo_config_dir, list_render_devices,
 };
 use serde_json::{json, Map, Value};
@@ -33,14 +33,26 @@ struct ApplyResult {
 
 #[derive(serde::Serialize)]
 struct Status {
+    /// §3.0 startup verdict: FirstRun / ResumeTrusted / SafeStateStillActive / ExternallyModified.
     startup: String,
+    /// Watchdog health detail (Debug of the Health enum).
     health: String,
+    /// Coarse health for UI branching: "Running" | "Recovering" | "Terminal" | "-".
+    health_kind: String,
     recoveries: u32,
     config_dir: String,
     /// How config_dir was resolved: the detected EqAPO dir, an override, or dev temp.
     config_source: String,
     /// Which sidecar is live: the real AutoEq DSP or the stub.
     sidecar: String,
+}
+
+fn health_kind(h: &Health) -> &'static str {
+    match h {
+        Health::Running => "Running",
+        Health::Recovering { .. } => "Recovering",
+        Health::Terminal { .. } => "Terminal",
+    }
 }
 
 /// Fit the selected AutoEq `headphone` (a catalogue path) against an optional named
@@ -124,8 +136,10 @@ fn set_device(device: String, state: State<Backend>) -> Result<(), String> {
 }
 
 /// Build the UI-facing result from an [`Applied`], reading back the exact cageq.txt
-/// that was written (the end-to-end proof). Shared by `apply` and `set_loudness`.
+/// that was written (the end-to-end proof). Shared by every write path. Persists the
+/// hash so the next startup's §3.0 integrity check has something to compare against.
 fn apply_result(applied: Applied, config_dir: &Path) -> ApplyResult {
+    update_settings(|s| s.last_hash = Some(applied.hash.clone()));
     let cageq_path = config_dir.join("cageq.txt");
     let cageq_text = std::fs::read_to_string(&cageq_path).unwrap_or_default();
     ApplyResult {
@@ -212,19 +226,37 @@ fn status(state: State<Backend>) -> Status {
         Backend::Failed(e) => Status {
             startup: format!("init failed: {e}"),
             health: "-".into(),
+            health_kind: "-".into(),
             recoveries: 0,
             config_dir: "-".into(),
             config_source: "-".into(),
             sidecar: "-".into(),
         },
-        Backend::Ready { core, config_dir, config_source, sidecar } => Status {
-            startup: format!("{:?}", core.startup_decision()),
-            health: format!("{:?}", core.health()),
-            recoveries: core.recoveries(),
-            config_dir: config_dir.display().to_string(),
-            config_source: config_source.clone(),
-            sidecar: sidecar.clone(),
-        },
+        Backend::Ready { core, config_dir, config_source, sidecar } => {
+            let health = core.health();
+            Status {
+                startup: format!("{:?}", core.startup_decision()),
+                health_kind: health_kind(&health).into(),
+                health: format!("{health:?}"),
+                recoveries: core.recoveries(),
+                config_dir: config_dir.display().to_string(),
+                config_source: config_source.clone(),
+                sidecar: sidecar.clone(),
+            }
+        }
+    }
+}
+
+/// Request one manual recovery attempt out of the watchdog `Terminal` state (§7.2) —
+/// from the UI's "Retry" button. The watchdog acts asynchronously; poll `status`.
+#[tauri::command]
+fn retry(state: State<Backend>) -> Result<(), String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => {
+            core.retry();
+            Ok(())
+        }
     }
 }
 
@@ -240,6 +272,10 @@ struct AppSettings {
     /// Last-used headphone/target, restored into the pickers on the next launch.
     #[serde(default)]
     selection: Selection,
+    /// Content hash of the last cageq.txt CAGEq wrote (§3.0). Compared on the next
+    /// startup to tell "unchanged" from "safe-state still active" / "externally edited".
+    #[serde(default)]
+    last_hash: Option<String>,
 }
 
 /// The last-applied headphone and target, by their catalogue paths (stable ids).
@@ -305,19 +341,25 @@ fn build_backend() -> Backend {
     } else {
         format!("stub ({})", script.display())
     };
-    match start_core(&config_dir, python, script) {
+    let settings = load_settings();
+    match start_core(&config_dir, python, script, settings.last_hash.as_deref()) {
         Ok(core) => {
-            core.set_loudness(load_settings().loudness); // restore §4.0 settings
+            core.set_loudness(settings.loudness); // restore §4.0 settings
             Backend::Ready { core, config_dir, config_source, sidecar }
         }
         Err(e) => Backend::Failed(format!("backend init failed: {e}")),
     }
 }
 
-fn start_core(config_dir: &Path, python: PathBuf, script: PathBuf) -> Result<Core, CoreError> {
+fn start_core(
+    config_dir: &Path,
+    python: PathBuf,
+    script: PathBuf,
+    expected_hash: Option<&str>,
+) -> Result<Core, CoreError> {
     let _ = std::fs::create_dir_all(config_dir);
     let spawn_fn = move || Sidecar::spawn(&python, &script);
-    Core::start(config_dir, spawn_fn, watchdog_cfg(), None)
+    Core::start(config_dir, spawn_fn, watchdog_cfg(), expected_hash)
 }
 
 /// Lenient timeouts: the real DSP sidecar spends a few seconds importing
@@ -420,7 +462,8 @@ pub fn run() {
             list_targets,
             get_loudness,
             set_loudness,
-            get_selection
+            get_selection,
+            retry
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -459,7 +502,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let (python, script) = resolve_sidecar();
-        let core = start_core(&dir, python, script).expect("core should start");
+        let core = start_core(&dir, python, script, None).expect("core should start");
         let request = CalcRequest { device: "Test DAC".into(), inputs: demo_inputs() };
         let applied = core.apply(request).expect("apply should compute + write");
 
@@ -483,7 +526,7 @@ mod tests {
         }
         let dir = std::env::temp_dir().join(format!("cageq-app-cat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let core = start_core(&dir, python, script).expect("core should start");
+        let core = start_core(&dir, python, script, None).expect("core should start");
 
         let list = match core.request("list_headphones", json!({})) {
             Ok(v) => v,
@@ -520,7 +563,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cageq-app-loud-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let (python, script) = resolve_sidecar();
-        let core = start_core(&dir, python, script).expect("core should start");
+        let core = start_core(&dir, python, script, None).expect("core should start");
 
         // Default (Comparison, -9 dB base pre-gain).
         core.apply(CalcRequest { device: "Dev".into(), inputs: demo_inputs() }).expect("apply");
@@ -548,11 +591,16 @@ mod tests {
 
         let want = LoudnessSettings { base_pregain_db: -6.0, mode: LoudnessMode::FinalVolume };
         let selection = Selection { headphone: Some("measurements/x.csv".into()), target: Some("targets/y.csv".into()) };
-        save_settings_to(&path, &AppSettings { loudness: want, selection: selection.clone() }).expect("save");
+        save_settings_to(
+            &path,
+            &AppSettings { loudness: want, selection: selection.clone(), last_hash: Some("abc123".into()) },
+        )
+        .expect("save");
         let reloaded = load_settings_from(&path);
         assert_eq!(reloaded.loudness, want, "reloaded loudness should match saved");
         assert_eq!(reloaded.selection.headphone, selection.headphone, "reloaded headphone should match");
         assert_eq!(reloaded.selection.target, selection.target, "reloaded target should match");
+        assert_eq!(reloaded.last_hash.as_deref(), Some("abc123"), "reloaded hash should match");
 
         let _ = std::fs::remove_file(&path);
     }

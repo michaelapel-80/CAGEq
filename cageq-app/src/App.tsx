@@ -16,6 +16,7 @@ type ApplyResult = {
 type Status = {
   startup: string;
   health: string;
+  health_kind: string; // "Running" | "Recovering" | "Terminal" | "-"
   recoveries: number;
   config_dir: string;
   config_source: string;
@@ -91,6 +92,24 @@ function App() {
       }
     })();
   }, []);
+
+  // Poll status so the fail-safe banner reflects live watchdog health (trip/recover).
+  useEffect(() => {
+    const id = setInterval(() => {
+      invoke<Status>("status").then(setStatus).catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, []);
+
+  async function retry() {
+    try {
+      setError("");
+      await invoke("retry");
+      setStatus(await invoke<Status>("status"));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   // Persist a loudness change; the backend re-applies the current config so the
   // shown preamp/config updates live (applied is null when nothing is applied yet).
@@ -251,10 +270,59 @@ function App() {
   const selectedDevice = devices.find((d) => d.id === deviceId);
   const dryActive = activeSlot === "Dry";
 
+  // Fail-safe / startup banner (§5.1). Watchdog states are live; the startup verdicts
+  // only matter until the user applies something (they describe the state at launch).
+  const banner = (() => {
+    if (!status) return null;
+    if (status.health_kind === "Terminal")
+      return {
+        critical: true,
+        text: "Safety shutdown: the audio DSP couldn't be recovered, so EQ is muted.",
+        retry: true,
+      };
+    if (status.health_kind === "Recovering")
+      return { critical: false, text: "Recovering the audio DSP… (safe state active, EQ muted)", retry: false };
+    if (!result && status.startup === "SafeStateStillActive")
+      return {
+        critical: false,
+        text: "A safety shutdown from a previous session is still active (EQ muted). Apply a correction to restore it.",
+        retry: false,
+      };
+    if (!result && status.startup === "ExternallyModified")
+      return {
+        critical: false,
+        text: "cageq.txt was changed outside CAGEq since the last run — the shown state may not match what's applied.",
+        retry: false,
+      };
+    return null;
+  })();
+
   return (
     <main className="container">
       <h1>CAGEq</h1>
       <p>Caged Auto-Gain EQ — AutoEq database</p>
+
+      {banner && (
+        <div
+          style={{
+            border: `1px solid ${banner.critical ? "#c0392b" : "#b8860b"}`,
+            background: banner.critical ? "#c0392b18" : "#b8860b14",
+            color: banner.critical ? "#c0392b" : "#8a6d00",
+            borderRadius: 6,
+            padding: "0.6em 0.8em",
+            margin: "0 0 0.8em",
+            fontSize: "0.9em",
+          }}
+        >
+          {banner.critical ? "⛔ " : "⚠ "}
+          {banner.text}
+          {banner.retry && (
+            <button type="button" onClick={retry} style={{ marginLeft: "0.6em" }}>
+              Retry
+            </button>
+          )}
+        </div>
+      )}
 
       {status && (
         <p style={{ fontSize: "0.8em", opacity: 0.75 }}>
