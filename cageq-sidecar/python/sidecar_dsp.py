@@ -62,10 +62,39 @@ def _cached_download(rel_path):
 
 # --- AutoEq catalogue -----------------------------------------------------
 
+def _rig_map_for_source(source):
+    """{(form_factor, name): rig} for one source, parsed from its name_index.tsv
+    (columns: url, source_name, name, form, rig). Best-effort: {} if the source has no
+    name_index.tsv (404) or on any error. The .tsv is cached like any repo file."""
+    try:
+        path = _cached_download("measurements/" + source + "/name_index.tsv")
+    except Exception:
+        return {}
+    rigs = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            next(fh, None)  # header row
+            for line in fh:
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) < 5:
+                    continue
+                name, form, rig = cols[2].strip(), cols[3].strip(), cols[4].strip()
+                # Skip ignored/unpublished rows; first published entry wins (they're
+                # consistent per model — multiple raw rows map to the same rig).
+                if name and form != "ignore" and rig:
+                    rigs.setdefault((form, name), rig)
+    except Exception:
+        return {}
+    return rigs
+
+
 def build_index(refresh=False):
-    """The headphone catalogue: [{source, form_factor, name, path}]. Built once from
-    the measurements git tree (one recursive call, ~6800 entries), cached to disk."""
-    idx_path = os.path.join(_cache_dir(), "headphone_index.json")
+    """The headphone catalogue: [{source, form_factor, name, path, rig}]. Built once
+    from the measurements git tree (one recursive call, ~6800 entries), then enriched
+    with the measurement rig from each source's name_index.tsv, and cached to disk.
+    `rig` is "" for sources without a name_index.tsv."""
+    # v2: added the `rig` field — a fresh name skips stale v1 caches automatically.
+    idx_path = os.path.join(_cache_dir(), "headphone_index_v2.json")
     if not refresh and os.path.exists(idx_path):
         with open(idx_path, encoding="utf-8") as fh:
             return json.load(fh)
@@ -83,7 +112,17 @@ def build_index(refresh=False):
                 "form_factor": parts[2],
                 "name": parts[-1][:-4],
                 "path": "measurements/" + e["path"],
+                "rig": "",
             })
+
+    # Enrich with rigs, fetching each source's name_index.tsv once (cached).
+    rig_cache = {}
+    for e in index:
+        src = e["source"]
+        if src not in rig_cache:
+            rig_cache[src] = _rig_map_for_source(src)
+        e["rig"] = rig_cache[src].get((e["form_factor"], e["name"]), "")
+
     index.sort(key=lambda h: (h["name"].lower(), h["source"]))
     with open(idx_path, "w", encoding="utf-8") as fh:
         json.dump(index, fh)

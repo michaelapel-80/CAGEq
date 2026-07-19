@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-type Headphone = { source: string; form_factor: string; name: string; path: string };
+type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
 type Target = { name: string; path: string };
 type AudioDevice = { id: string; name: string; eqapo_pattern: string; eqapo_enabled: boolean };
 type ApplyResult = {
@@ -357,7 +357,8 @@ function App() {
             ) : (
               measurements.map((m) => (
                 <option key={m.path} value={m.path}>
-                  by {m.source} · {m.form_factor}
+                  by {m.source}
+                  {m.rig ? ` on ${m.rig}` : ""} · {m.form_factor}
                 </option>
               ))
             )}
