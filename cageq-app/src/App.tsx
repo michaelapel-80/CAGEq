@@ -1,13 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-type ApplyResult = {
-  hash: string;
-  device: string;
-  cageq_path: string;
-  cageq_text: string;
-};
+type Headphone = { source: string; form_factor: string; name: string; path: string };
+type Target = { name: string; path: string };
+type ApplyResult = { hash: string; device: string; cageq_path: string; cageq_text: string };
 type Status = {
   startup: string;
   health: string;
@@ -16,65 +13,118 @@ type Status = {
   sidecar: string;
 };
 
-function App() {
-  const [device, setDevice] = useState("USB DAC");
-  const [result, setResult] = useState<ApplyResult | null>(null);
-  const [status, setStatus] = useState<Status | null>(null);
-  const [error, setError] = useState("");
+const display = (h: Headphone) => `${h.name} · ${h.source} · ${h.form_factor}`;
 
-  async function refreshStatus() {
+function App() {
+  const [status, setStatus] = useState<Status | null>(null);
+  const [headphones, setHeadphones] = useState<Headphone[]>([]);
+  const [targets, setTargets] = useState<Target[]>([]);
+  const [query, setQuery] = useState("");
+  const [targetPath, setTargetPath] = useState("");
+  const [result, setResult] = useState<ApplyResult | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [applying, setApplying] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        setStatus(await invoke<Status>("status"));
+        const [hp, tg] = await Promise.all([
+          invoke<{ headphones: Headphone[] }>("list_headphones"),
+          invoke<{ targets: Target[] }>("list_targets"),
+        ]);
+        setHeadphones(hp.headphones);
+        setTargets(tg.targets);
+        const harman = tg.targets.find((t) => /harman over-ear 2018$/i.test(t.name));
+        setTargetPath(harman?.path ?? tg.targets[0]?.path ?? "");
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  // Filter client-side and cap the datalist so 6800+ entries stay responsive.
+  const matches = useMemo(() => {
+    if (query.length < 2) return [];
+    const q = query.toLowerCase();
+    return headphones.filter((h) => display(h).toLowerCase().includes(q)).slice(0, 200);
+  }, [query, headphones]);
+
+  async function apply() {
+    const hp = headphones.find((h) => display(h) === query);
+    if (!hp) {
+      setError("Pick a headphone from the list first.");
+      return;
+    }
     try {
+      setError("");
+      setApplying(true);
+      setResult(
+        await invoke<ApplyResult>("apply", {
+          device: hp.name,
+          headphone: hp.path,
+          target: targetPath || null,
+        })
+      );
       setStatus(await invoke<Status>("status"));
     } catch (e) {
       setError(String(e));
-    }
-  }
-
-  useEffect(() => {
-    refreshStatus();
-  }, []);
-
-  async function apply() {
-    try {
-      setError("");
-      setResult(await invoke<ApplyResult>("apply", { device }));
-      await refreshStatus();
-    } catch (e) {
-      setError(String(e));
       setResult(null);
+    } finally {
+      setApplying(false);
     }
   }
 
   return (
     <main className="container">
       <h1>CAGEq</h1>
-      <p>Caged Auto-Gain EQ — live backend (demo measurement)</p>
+      <p>Caged Auto-Gain EQ — AutoEq database</p>
 
       {status && (
-        <p style={{ fontSize: "0.85em", opacity: 0.8 }}>
-          sidecar: {status.sidecar}
-          <br />
-          startup: {status.startup} · health: {status.health} · recoveries:{" "}
-          {status.recoveries}
+        <p style={{ fontSize: "0.8em", opacity: 0.75 }}>
+          sidecar: {status.sidecar} · health: {status.health}
           <br />
           config dir: {status.config_dir}
         </p>
       )}
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          apply();
-        }}
-      >
-        <input
-          value={device}
-          onChange={(e) => setDevice(e.currentTarget.value)}
-          placeholder="Device name"
-        />
-        <button type="submit">Apply</button>
-      </form>
+      {loading ? (
+        <p>Loading AutoEq catalogue…</p>
+      ) : (
+        <form
+          className="row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            apply();
+          }}
+        >
+          <input
+            list="hp-list"
+            value={query}
+            onChange={(e) => setQuery(e.currentTarget.value)}
+            placeholder={`Search ${headphones.length} headphones…`}
+            style={{ minWidth: "22em" }}
+          />
+          <datalist id="hp-list">
+            {matches.map((h) => (
+              <option key={h.path} value={display(h)} />
+            ))}
+          </datalist>
+          <select value={targetPath} onChange={(e) => setTargetPath(e.currentTarget.value)}>
+            {targets.map((t) => (
+              <option key={t.path} value={t.path}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+          <button type="submit" disabled={applying}>
+            {applying ? "Fitting…" : "Apply"}
+          </button>
+        </form>
+      )}
 
       {error && <p style={{ color: "crimson" }}>{error}</p>}
 

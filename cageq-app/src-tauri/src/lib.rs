@@ -34,19 +34,20 @@ struct Status {
     sidecar: String,
 }
 
-/// Calculate filters for `device` via the sidecar and write cageq.txt through
-/// cageq-core, returning the hash plus the file content actually written.
-///
-/// Until the measurement-import UI exists, this feeds the engine a built-in **demo
-/// measurement** — so against the real DSP the result is genuine AutoEq output for a
-/// synthetic curve, and against the stub it's ignored.
+/// Fit the selected AutoEq `headphone` (a catalogue path) against an optional named
+/// `target` via the sidecar, write cageq.txt through cageq-core, and return the hash
+/// plus the file content actually written.
 #[tauri::command]
-fn apply(device: String, state: State<Backend>) -> Result<ApplyResult, String> {
+fn apply(device: String, headphone: String, target: Option<String>, state: State<Backend>) -> Result<ApplyResult, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, config_dir, .. } => {
-            let request = CalcRequest { device, inputs: demo_inputs() };
-            let applied = core.apply(request).map_err(|e| e.to_string())?;
+            let mut inputs = Map::new();
+            inputs.insert("headphone".into(), Value::String(headphone));
+            if let Some(t) = target {
+                inputs.insert("target".into(), Value::String(t));
+            }
+            let applied = core.apply(CalcRequest { device, inputs }).map_err(|e| e.to_string())?;
             let cageq_path = config_dir.join("cageq.txt");
             let cageq_text = std::fs::read_to_string(&cageq_path).unwrap_or_default();
             Ok(ApplyResult {
@@ -56,6 +57,24 @@ fn apply(device: String, state: State<Backend>) -> Result<ApplyResult, String> {
                 cageq_text,
             })
         }
+    }
+}
+
+/// The AutoEq headphone catalogue (built/cached by the sidecar). Relayed as-is.
+#[tauri::command]
+fn list_headphones(state: State<Backend>) -> Result<Value, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => core.request("list_headphones", json!({})).map_err(|e| e.to_string()),
+    }
+}
+
+/// The AutoEq target curves. Relayed as-is.
+#[tauri::command]
+fn list_targets(state: State<Backend>) -> Result<Value, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => core.request("list_targets", json!({})).map_err(|e| e.to_string()),
     }
 }
 
@@ -79,30 +98,6 @@ fn status(state: State<Backend>) -> Status {
             sidecar: sidecar.clone(),
         },
     }
-}
-
-// --- demo measurement (until the REW import UI exists) ---------------------
-
-/// A synthetic headphone-ish deviation: a +5 dB bump ~3 kHz, a -3 dB dip ~6 kHz, and
-/// a gentle bass rise — enough for AutoEq to produce interesting corrections.
-fn sample_measurement() -> Vec<Value> {
-    let mut pts = Vec::new();
-    let mut f = 20.0_f64;
-    while f <= 20_000.0 {
-        let lg = f.log10();
-        let bump3k = 5.0 * (-0.5 * ((lg - 3000.0_f64.log10()) / 0.08).powi(2)).exp();
-        let dip6k = -3.0 * (-0.5 * ((lg - 6000.0_f64.log10()) / 0.06).powi(2)).exp();
-        let bass = 3.0 * (-0.5 * ((lg - 45.0_f64.log10()) / 0.35).powi(2)).exp();
-        pts.push(json!({ "frequency": f, "raw_db": bump3k + dip6k + bass }));
-        f *= 1.05;
-    }
-    pts
-}
-
-fn demo_inputs() -> Map<String, Value> {
-    let mut m = Map::new();
-    m.insert("measurement".into(), Value::Array(sample_measurement()));
-    m
 }
 
 // --- backend setup --------------------------------------------------------
@@ -188,8 +183,26 @@ fn resolve_python() -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A synthetic measurement (used by the offline e2e test so it needs no network):
+    /// +5 dB ~3 kHz, -3 dB ~6 kHz, gentle bass rise.
+    fn demo_inputs() -> Map<String, Value> {
+        let mut pts = Vec::new();
+        let mut f = 20.0_f64;
+        while f <= 20_000.0 {
+            let lg = f.log10();
+            let bump3k = 5.0 * (-0.5 * ((lg - 3000.0_f64.log10()) / 0.08).powi(2)).exp();
+            let dip6k = -3.0 * (-0.5 * ((lg - 6000.0_f64.log10()) / 0.06).powi(2)).exp();
+            let bass = 3.0 * (-0.5 * ((lg - 45.0_f64.log10()) / 0.35).powi(2)).exp();
+            pts.push(json!({ "frequency": f, "raw_db": bump3k + dip6k + bass }));
+            f *= 1.05;
+        }
+        let mut m = Map::new();
+        m.insert("measurement".into(), Value::Array(pts));
+        m
+    }
+
     /// Exercises the app's dev-path wiring end to end (no Tauri/GUI): resolve the
-    /// sidecar, start a Core, and apply the demo measurement, asserting a real
+    /// sidecar, start a Core, and apply a synthetic measurement, asserting a real
     /// cageq.txt is written. Runs against whichever sidecar resolves (real DSP if the
     /// venv is present, else the stub). Needs a working Python.
     #[test]
@@ -210,6 +223,42 @@ mod tests {
         drop(core);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The real catalogue path: list headphones, then fit the first one. Only runs
+    /// against the real DSP; soft-skips on the stub or a network error.
+    #[test]
+    fn dev_backend_applies_a_catalogue_headphone() {
+        let (python, script) = resolve_sidecar();
+        if script.file_name().and_then(|n| n.to_str()) != Some("sidecar_dsp.py") {
+            eprintln!("skipping catalogue apply: stub sidecar (no venv)");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cageq-app-cat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let core = start_core(&dir, python, script).expect("core should start");
+
+        let list = match core.request("list_headphones", json!({})) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("skipping catalogue apply (network?): {e}");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+        };
+        let hp = &list["headphones"].as_array().expect("headphones")[0];
+        let (name, path) = (hp["name"].as_str().unwrap().to_string(), hp["path"].as_str().unwrap().to_string());
+
+        let mut inputs = Map::new();
+        inputs.insert("headphone".into(), Value::String(path));
+        core.apply(CalcRequest { device: name.clone(), inputs }).expect("apply a catalogue headphone");
+
+        let text = std::fs::read_to_string(dir.join("cageq.txt")).unwrap();
+        assert!(text.contains(&format!("Device: {name}")), "{text}");
+        assert!(text.contains("Filter 1:"), "{text}");
+
+        drop(core);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -217,7 +266,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(build_backend())
-        .invoke_handler(tauri::generate_handler![apply, status])
+        .invoke_handler(tauri::generate_handler![apply, status, list_headphones, list_targets])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
