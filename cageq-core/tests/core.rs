@@ -125,6 +125,30 @@ fn slots_switch_by_rewrite_without_refitting() {
 }
 
 #[test]
+fn copy_slot_duplicates_a_fit_and_activates_the_target() {
+    let tmp = TempDir::new("copy");
+    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+
+    core.apply_to_slot(Slot::A, CalcRequest::for_device("Device A")).expect("apply A");
+
+    // Copy A -> B: B now holds A's config and becomes active.
+    let copied = core.copy_slot(Slot::A, Slot::B).expect("copy A->B");
+    assert_eq!(copied.device, "Device A");
+    assert_eq!(core.active_slot(), Slot::B);
+    assert!(tmp.cageq().contains("Device: Device A"), "B mirrors A: {}", tmp.cageq());
+
+    // B is independent now: re-applying B doesn't disturb A.
+    core.apply_to_slot(Slot::B, CalcRequest::for_device("Device B")).expect("apply B");
+    assert_eq!(core.activate_slot(Slot::A).unwrap().device, "Device A");
+
+    // Copying from an empty slot errors; Dry can't take part.
+    let fresh = TempDir::new("copy-empty");
+    let c2 = Core::start(fresh.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    assert!(matches!(c2.copy_slot(Slot::A, Slot::B), Err(CoreError::EmptySlot(Slot::A))));
+    assert!(matches!(core.copy_slot(Slot::A, Slot::Dry), Err(CoreError::DryNotEditable)));
+}
+
+#[test]
 fn apply_calculates_and_writes_config() {
     let tmp = TempDir::new("apply");
     let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();

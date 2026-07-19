@@ -90,6 +90,19 @@ fn activate_slot(slot: Slot, state: State<Backend>) -> Result<ApplyResult, Strin
     }
 }
 
+/// Copy slot `from` onto slot `to` (A/B) and make `to` active — a starting point for
+/// a variant (filter.md §5.2). Returns the newly-written config.
+#[tauri::command]
+fn copy_slot(from: Slot, to: Slot, state: State<Backend>) -> Result<ApplyResult, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, config_dir, .. } => {
+            let applied = core.copy_slot(from, to).map_err(|e| e.to_string())?;
+            Ok(apply_result(applied, config_dir))
+        }
+    }
+}
+
 /// Tell the core which output device every slot is scoped to, so Dry can be written
 /// before any fit exists. Called when the user picks a device.
 #[tauri::command]
@@ -375,6 +388,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             apply,
             activate_slot,
+            copy_slot,
             set_device,
             status,
             list_headphones,

@@ -158,6 +158,27 @@ function App() {
     }
   }
 
+  // Copy one editable slot onto the other and make it active — a starting point for
+  // a variant (the target's cageq.txt is identical until you tweak it).
+  async function copySlot(from: "A" | "B", to: "A" | "B") {
+    const src = slotInputs[from];
+    if (!src) {
+      setError(`Slot ${from} is empty — apply something to it first.`);
+      return;
+    }
+    try {
+      setError("");
+      const applied = await invoke<ApplyResult>("copy_slot", { from, to });
+      setSlotInputs((prev) => ({ ...prev, [to]: src }));
+      setActiveSlot(to);
+      setQuery(src.query);
+      setTargetPath(src.targetPath);
+      setResult(applied);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function changeDevice(id: string) {
     setDeviceId(id);
     const dev = devices.find((d) => d.id === id);
@@ -252,6 +273,13 @@ function App() {
                 </button>
               );
             })}
+            <span style={{ marginLeft: "0.6em", fontSize: "0.75em", opacity: 0.6 }}>Copy:</span>
+            <button type="button" onClick={() => copySlot("A", "B")} disabled={!slotInputs.A} style={{ fontSize: "0.8em" }}>
+              A→B
+            </button>
+            <button type="button" onClick={() => copySlot("B", "A")} disabled={!slotInputs.B} style={{ fontSize: "0.8em" }}>
+              B→A
+            </button>
           </div>
           <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.3em 0 0" }}>
             A / S / D switch slots, W toggles the loudness mode — even without looking at the screen.

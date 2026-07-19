@@ -342,6 +342,24 @@ impl Core {
         write_active_locked(&self.inner)
     }
 
+    /// Copy slot `from`'s cached fit into slot `to` and make `to` active (filter.md
+    /// §5.2 — a starting point for a variant). Both must be A or B; errors with
+    /// [`CoreError::EmptySlot`] if `from` has nothing to copy. Writing `to` reproduces
+    /// `from`'s config exactly, so there's no audible change until `to` is edited.
+    pub fn copy_slot(&self, from: Slot, to: Slot) -> Result<Applied, CoreError> {
+        if from == Slot::Dry || to == Slot::Dry {
+            return Err(CoreError::DryNotEditable);
+        }
+        let _guard = self.inner.apply_lock.lock().unwrap();
+        {
+            let mut store = self.inner.slots.lock().unwrap();
+            let src = store.slot_mut(from).clone().ok_or(CoreError::EmptySlot(from))?;
+            *store.slot_mut(to) = Some(src);
+            store.active = to;
+        }
+        write_active_locked(&self.inner)
+    }
+
     /// The currently active slot.
     pub fn active_slot(&self) -> Slot {
         self.inner.slots.lock().unwrap().active
