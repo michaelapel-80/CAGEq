@@ -7,3 +7,8 @@ edition = "2024"
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.11.0"
 thiserror = "2.0.18"
+
+# EqAPO's install location lives in the Windows registry (§3.0 config-dir detection).
+# Windows-only; on other platforms detection compiles to a None fallback.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

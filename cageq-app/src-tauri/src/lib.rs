@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use cageq_core::{CalcRequest, Core, CoreError, Sidecar, WatchdogConfig};
+use cageq_core::{CalcRequest, Core, CoreError, Sidecar, WatchdogConfig, detect_eqapo_config_dir};
 use serde_json::{json, Map, Value};
 use tauri::State;
 
@@ -11,7 +11,7 @@ use tauri::State;
 /// keeps the init error string so commands can report it instead of the app being
 /// silently dead (e.g. if no Python/sidecar is found).
 enum Backend {
-    Ready { core: Core, config_dir: PathBuf, sidecar: String },
+    Ready { core: Core, config_dir: PathBuf, config_source: String, sidecar: String },
     Failed(String),
 }
 
@@ -34,6 +34,8 @@ struct Status {
     health: String,
     recoveries: u32,
     config_dir: String,
+    /// How config_dir was resolved: the detected EqAPO dir, an override, or dev temp.
+    config_source: String,
     /// Which sidecar is live: the real AutoEq DSP or the stub.
     sidecar: String,
 }
@@ -94,13 +96,15 @@ fn status(state: State<Backend>) -> Status {
             health: "-".into(),
             recoveries: 0,
             config_dir: "-".into(),
+            config_source: "-".into(),
             sidecar: "-".into(),
         },
-        Backend::Ready { core, config_dir, sidecar } => Status {
+        Backend::Ready { core, config_dir, config_source, sidecar } => Status {
             startup: format!("{:?}", core.startup_decision()),
             health: format!("{:?}", core.health()),
             recoveries: core.recoveries(),
             config_dir: config_dir.display().to_string(),
+            config_source: config_source.clone(),
             sidecar: sidecar.clone(),
         },
     }
@@ -109,7 +113,7 @@ fn status(state: State<Backend>) -> Status {
 // --- backend setup --------------------------------------------------------
 
 fn build_backend() -> Backend {
-    let config_dir = dev_config_dir();
+    let (config_dir, config_source) = resolve_config_dir();
     let (python, script) = resolve_sidecar();
     let sidecar = if script.file_name().is_some_and(|n| n == "sidecar_dsp.py") {
         format!("AutoEq DSP ({})", python.display())
@@ -117,7 +121,7 @@ fn build_backend() -> Backend {
         format!("stub ({})", script.display())
     };
     match start_core(&config_dir, python, script) {
-        Ok(core) => Backend::Ready { core, config_dir, sidecar },
+        Ok(core) => Backend::Ready { core, config_dir, config_source, sidecar },
         Err(e) => Backend::Failed(format!("backend init failed: {e}")),
     }
 }
@@ -141,10 +145,20 @@ fn watchdog_cfg() -> WatchdogConfig {
     }
 }
 
-/// Where cageq.txt is written in dev. Overridable via CAGEQ_CONFIG_DIR; defaults to
-/// a temp folder — NOT EqAPO's real config dir (locating that is a separate step).
-fn dev_config_dir() -> PathBuf {
-    env::var("CAGEQ_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir().join("cageq-dev-config"))
+/// Resolve where cageq.txt is written, plus a human label of how it was found (for
+/// the UI). Precedence: an explicit `CAGEQ_CONFIG_DIR` override (dev/tests) → the
+/// detected Equalizer APO config dir (§3.0, the real target that affects audio) → a
+/// dev temp folder, so the app still runs on a machine without EqAPO installed.
+fn resolve_config_dir() -> (PathBuf, String) {
+    if let Ok(dir) = env::var("CAGEQ_CONFIG_DIR") {
+        return (PathBuf::from(dir), "override (CAGEQ_CONFIG_DIR)".into());
+    }
+    if let Some(dir) = detect_eqapo_config_dir() {
+        let label = format!("Equalizer APO — {}", dir.display());
+        return (dir, label);
+    }
+    let dev = std::env::temp_dir().join("cageq-dev-config");
+    (dev, "dev temp (Equalizer APO not detected)".into())
 }
 
 fn sidecar_root() -> PathBuf {
@@ -183,6 +197,16 @@ fn resolve_python() -> PathBuf {
         }
     }
     PathBuf::from("python")
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .manage(build_backend())
+        .invoke_handler(tauri::generate_handler![apply, status, list_headphones, list_targets])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
 
 #[cfg(test)]
@@ -265,14 +289,4 @@ mod tests {
         drop(core);
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .manage(build_backend())
-        .invoke_handler(tauri::generate_handler![apply, status, list_headphones, list_targets])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }

@@ -37,7 +37,9 @@ use serde_json::{Map, Value};
 // Re-export the domain types through cageq-core so the app/UI layer depends only on
 // this facade, not each building-block crate. Several are also used internally below
 // (the `pub use` both re-exports and brings them into scope here).
-pub use cageq_config_writer::{DeviceConfig, Filter, FilterType, StartupDecision};
+pub use cageq_config_writer::{
+    DeviceConfig, Filter, FilterType, StartupDecision, detect_eqapo_config_dir,
+};
 pub use cageq_sidecar::{Sidecar, SidecarError};
 pub use cageq_watchdog::{Health, WatchdogConfig};
 

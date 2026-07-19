@@ -17,6 +17,7 @@ type Status = {
   health: string;
   recoveries: number;
   config_dir: string;
+  config_source: string;
   sidecar: string;
 };
 
@@ -94,7 +95,9 @@ function App() {
         <p style={{ fontSize: "0.8em", opacity: 0.75 }}>
           sidecar: {status.sidecar} · health: {status.health}
           <br />
-          config dir: {status.config_dir}
+          config: {status.config_source}
+          <br />
+          <span style={{ opacity: 0.7 }}>writes to: {status.config_dir}</span>
         </p>
       )}
 

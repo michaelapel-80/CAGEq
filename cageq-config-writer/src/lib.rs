@@ -248,6 +248,53 @@ pub fn safe_state_body() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// EqAPO config-directory detection (§3.0)
+// ---------------------------------------------------------------------------
+
+/// Locate Equalizer APO's config directory — where `config.txt` lives and where
+/// cageq.txt must be written for EqAPO to load it (§3.0).
+///
+/// EqAPO records its paths under `HKLM\SOFTWARE\EqualizerAPO` at install time. We
+/// read `ConfigPath` directly (the installer writes the resolved config dir there,
+/// e.g. `C:\Program Files\EqualizerAPO\config`); if only `InstallPath` is present we
+/// derive `<InstallPath>\config`. Returns `None` when EqAPO isn't installed, the key
+/// is missing, or the resolved directory doesn't exist — the caller decides the
+/// fallback (the desktop app drops to a dev temp dir and says so in the UI).
+///
+/// Read-only: this never creates or writes anything. On non-Windows it is a compile-
+/// time `None` so the crate still builds and tests elsewhere.
+pub fn detect_eqapo_config_dir() -> Option<PathBuf> {
+    let dir = eqapo_config_dir_from_registry()?;
+    dir.is_dir().then_some(dir)
+}
+
+#[cfg(windows)]
+fn eqapo_config_dir_from_registry() -> Option<PathBuf> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+
+    let key = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SOFTWARE\EqualizerAPO")
+        .ok()?;
+    // Prefer the explicit ConfigPath the installer resolved; fall back to
+    // <InstallPath>\config if only the install root is recorded.
+    if let Ok(config_path) = key.get_value::<String, _>("ConfigPath") {
+        let p = PathBuf::from(config_path.trim());
+        if !p.as_os_str().is_empty() {
+            return Some(p);
+        }
+    }
+    let install: String = key.get_value("InstallPath").ok()?;
+    let install = install.trim();
+    (!install.is_empty()).then(|| PathBuf::from(install).join("config"))
+}
+
+#[cfg(not(windows))]
+fn eqapo_config_dir_from_registry() -> Option<PathBuf> {
+    None // no Windows registry off-platform; detection is inherently Windows-only
+}
+
+// ---------------------------------------------------------------------------
 // Pure helpers — rendering cageq.txt
 // ---------------------------------------------------------------------------
 
@@ -528,5 +575,16 @@ mod tests {
         let s = present("99999999");
         assert_eq!(decide_startup(&s, Some("11111111")), StartupDecision::ExternallyModified);
         assert_eq!(decide_startup(&s, None), StartupDecision::ExternallyModified);
+    }
+
+    #[test]
+    fn detect_eqapo_config_dir_is_read_only_and_honours_its_contract() {
+        // Environment-dependent (EqAPO may or may not be installed), so we can't assert
+        // a specific path. What we *can* pin down is the function's contract: it never
+        // panics, and whenever it returns Some, that path is an existing directory (the
+        // caller relies on this to skip its temp-dir fallback). Read-only — no writes.
+        if let Some(dir) = detect_eqapo_config_dir() {
+            assert!(dir.is_dir(), "returned {dir:?}, which is not an existing directory");
+        }
     }
 }
