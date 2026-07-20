@@ -461,6 +461,17 @@ impl Core {
             Some(write_active_locked(&self.inner))
         }
     }
+
+    /// Preview the preamp change (new − current, dB) that switching to `settings` would
+    /// cause for the active config, without writing anything — for the §7.5 confirm
+    /// dialog. Positive = louder. `None` if nothing is active.
+    pub fn preview_preamp_delta(&self, settings: LoudnessSettings) -> Option<f64> {
+        let cur = *self.inner.loudness.lock().unwrap();
+        let effective = self.inner.slots.lock().unwrap().effective()?;
+        let start = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &cur).db;
+        let target = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &settings).db;
+        Some(target - start)
+    }
 }
 
 impl Drop for Core {

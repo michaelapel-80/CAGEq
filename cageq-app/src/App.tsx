@@ -50,6 +50,9 @@ function App() {
   const [customFilters, setCustomFilters] = useState<CustomFilter[]>([]); // §3.4 manual filters
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
+  const [confirmFinalVolume, setConfirmFinalVolume] = useState(true); // §7.5 point 1
+  const [pendingFinal, setPendingFinal] = useState<{ next: LoudnessSettings; jump: number } | null>(null);
+  const [dontAskAgain, setDontAskAgain] = useState(false);
   const [activeSlot, setActiveSlot] = useState<SlotName>("A");
   // Last-applied inputs per editable slot (for display + reloading the controls).
   const [slotInputs, setSlotInputs] = useState<Record<"A" | "B", SlotInputs | null>>({ A: null, B: null });
@@ -62,6 +65,7 @@ function App() {
       try {
         setStatus(await invoke<Status>("status"));
         setLoudness(await invoke<LoudnessSettings>("get_loudness"));
+        setConfirmFinalVolume(await invoke<boolean>("get_confirm_final_volume"));
         const [hp, tg, dev] = await Promise.all([
           invoke<{ headphones: Headphone[] }>("list_headphones"),
           invoke<{ targets: Target[] }>("list_targets"),
@@ -123,6 +127,41 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  // Route mode/pre-gain changes; gate a switch to Final volume behind the §7.5 confirm
+  // dialog, but only when it's actually a volume increase and the confirm is enabled.
+  async function requestLoudness(next: LoudnessSettings) {
+    const goingFinal = next.mode === "FinalVolume" && loudness?.mode !== "FinalVolume";
+    if (goingFinal && confirmFinalVolume) {
+      try {
+        const jump = await invoke<number | null>("preview_loudness", { settings: next });
+        if (jump != null && jump > 0.5) {
+          setDontAskAgain(false);
+          setPendingFinal({ next, jump });
+          return;
+        }
+      } catch {
+        /* preview failed — fall through to a direct (still ramped) apply */
+      }
+    }
+    await updateLoudness(next);
+  }
+
+  async function confirmFinal() {
+    const p = pendingFinal;
+    setPendingFinal(null);
+    if (!p) return;
+    if (dontAskAgain) {
+      setConfirmFinalVolume(false);
+      await invoke("set_confirm_final_volume", { enabled: false });
+    }
+    await updateLoudness(p.next);
+  }
+
+  async function toggleConfirmFinalVolume(enabled: boolean) {
+    setConfirmFinalVolume(enabled);
+    await invoke("set_confirm_final_volume", { enabled });
   }
 
   // Group measurements by model name, so the same model measured by several sources
@@ -261,7 +300,7 @@ function App() {
       else if (e.key === "s") switchSlot("B");
       else if (e.key === "d") switchSlot("Dry");
       else if (e.key === "w" && loudness)
-        updateLoudness({ ...loudness, mode: loudness.mode === "Comparison" ? "FinalVolume" : "Comparison" });
+        requestLoudness({ ...loudness, mode: loudness.mode === "Comparison" ? "FinalVolume" : "Comparison" });
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -301,6 +340,43 @@ function App() {
     <main className="container">
       <h1>CAGEq</h1>
       <p>Caged Auto-Gain EQ — AutoEq database</p>
+
+      {pendingFinal && (
+        <div
+          onClick={() => setPendingFinal(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "#0006",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 10,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: "var(--bg, #fff)", color: "inherit", border: "1px solid #0003", borderRadius: 8, padding: "1.2em", maxWidth: "26em", textAlign: "left" }}
+          >
+            <p style={{ marginTop: 0 }}>
+              Switching to <b>Final volume</b> raises the volume by{" "}
+              <b>+{pendingFinal.jump.toFixed(1)} dB</b> (ramped in at 6 dB/s). Continue?
+            </p>
+            <label style={{ fontSize: "0.85em", display: "block", margin: "0.6em 0" }}>
+              <input type="checkbox" checked={dontAskAgain} onChange={(e) => setDontAskAgain(e.currentTarget.checked)} />{" "}
+              Don't ask again (re-enable in the Loudness panel)
+            </label>
+            <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
+              <button type="button" onClick={() => setPendingFinal(null)}>
+                Cancel
+              </button>
+              <button type="button" onClick={confirmFinal}>
+                Switch to Final volume
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {banner && (
         <div
@@ -535,7 +611,7 @@ function App() {
                 type="radio"
                 name="loudness-mode"
                 checked={loudness.mode === "Comparison"}
-                onChange={() => updateLoudness({ ...loudness, mode: "Comparison" })}
+                onChange={() => requestLoudness({ ...loudness, mode: "Comparison" })}
               />{" "}
               Comparison (A/B-fair)
             </label>
@@ -544,7 +620,7 @@ function App() {
                 type="radio"
                 name="loudness-mode"
                 checked={loudness.mode === "FinalVolume"}
-                onChange={() => updateLoudness({ ...loudness, mode: "FinalVolume" })}
+                onChange={() => requestLoudness({ ...loudness, mode: "FinalVolume" })}
               />{" "}
               Final volume (loudest safe)
             </label>
@@ -570,6 +646,14 @@ function App() {
               ? "Every curve ends up equally loud (base pre-gain + loudness match) so A/B comparisons judge timbre, not level."
               : "Maximum clipping-free volume (peak at 0 dBFS) — base pre-gain and loudness match are disabled."}
           </p>
+          <label style={{ fontSize: "0.78em", opacity: 0.8, display: "block", marginTop: "0.5em" }}>
+            <input
+              type="checkbox"
+              checked={confirmFinalVolume}
+              onChange={(e) => toggleConfirmFinalVolume(e.currentTarget.checked)}
+            />{" "}
+            Confirm before switching to Final volume
+          </label>
         </fieldset>
       )}
 

@@ -219,6 +219,29 @@ fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<Lou
     }
 }
 
+/// Preview the dB the preamp would change if `settings` were applied to the active
+/// config (positive = louder) — for the §7.5 confirm dialog. `None` if nothing active.
+#[tauri::command]
+fn preview_loudness(settings: LoudnessSettings, state: State<Backend>) -> Option<f64> {
+    match state.inner() {
+        Backend::Ready { core, .. } => core.preview_preamp_delta(settings),
+        Backend::Failed(_) => None,
+    }
+}
+
+/// Whether the §7.5 "switching to Final volume" confirmation is enabled.
+#[tauri::command]
+fn get_confirm_final_volume() -> bool {
+    load_settings().confirm_final_volume
+}
+
+/// Enable/disable the §7.5 confirmation ("don't ask again" clears it; a UI checkbox
+/// re-enables it).
+#[tauri::command]
+fn set_confirm_final_volume(enabled: bool) {
+    update_settings(|s| s.confirm_final_volume = enabled);
+}
+
 /// Backend status for the UI: startup verdict, watchdog health, recovery count,
 /// and which sidecar is live.
 #[tauri::command]
@@ -266,7 +289,7 @@ fn retry(state: State<Backend>) -> Result<(), String> {
 /// The app's persisted settings. A struct (not a bare value) so it can grow without
 /// invalidating older files; `#[serde(default)]` fills in anything a prior version
 /// didn't write.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct AppSettings {
     #[serde(default)]
     loudness: LoudnessSettings,
@@ -277,6 +300,25 @@ struct AppSettings {
     /// startup to tell "unchanged" from "safe-state still active" / "externally edited".
     #[serde(default)]
     last_hash: Option<String>,
+    /// §7.5 point 1: confirm before switching to Finale Lautstärke (the volume jump).
+    /// Defaults on; the dialog's "don't ask again" clears it, a UI checkbox re-enables.
+    #[serde(default = "default_true")]
+    confirm_final_volume: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        AppSettings {
+            loudness: LoudnessSettings::default(),
+            selection: Selection::default(),
+            last_hash: None,
+            confirm_final_volume: true,
+        }
+    }
 }
 
 /// The last-applied headphone and target, by their catalogue paths (stable ids).
@@ -504,6 +546,9 @@ pub fn run() {
             list_targets,
             get_loudness,
             set_loudness,
+            preview_loudness,
+            get_confirm_final_volume,
+            set_confirm_final_volume,
             get_selection,
             retry
         ])
@@ -641,7 +686,12 @@ mod tests {
         let selection = Selection { headphone: Some("measurements/x.csv".into()), target: Some("targets/y.csv".into()) };
         save_settings_to(
             &path,
-            &AppSettings { loudness: want, selection: selection.clone(), last_hash: Some("abc123".into()) },
+            &AppSettings {
+                loudness: want,
+                selection: selection.clone(),
+                last_hash: Some("abc123".into()),
+                confirm_final_volume: false,
+            },
         )
         .expect("save");
         let reloaded = load_settings_from(&path);
@@ -649,6 +699,10 @@ mod tests {
         assert_eq!(reloaded.selection.headphone, selection.headphone, "reloaded headphone should match");
         assert_eq!(reloaded.selection.target, selection.target, "reloaded target should match");
         assert_eq!(reloaded.last_hash.as_deref(), Some("abc123"), "reloaded hash should match");
+        assert!(!reloaded.confirm_final_volume, "reloaded confirm flag should match saved (false)");
+        // A missing field (old settings.json) defaults the confirm flag ON.
+        std::fs::write(&path, r#"{"loudness":{"base_pregain_db":-9.0,"mode":"Comparison"}}"#).unwrap();
+        assert!(load_settings_from(&path).confirm_final_volume, "missing confirm flag defaults to true");
 
         let _ = std::fs::remove_file(&path);
     }
