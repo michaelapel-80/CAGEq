@@ -131,10 +131,20 @@ impl Sidecar {
     pub fn spawn(python: &Path, script: &Path) -> Result<Self, SidecarError> {
         let mut cmd = Command::new(python);
         cmd.arg("-u") // unbuffered stdio: replies flush immediately (trap #2)
-            .arg(script)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .arg(script);
+        Self::spawn_command(cmd)
+    }
+
+    /// Launch a self-contained sidecar **executable** (the PyInstaller-frozen bundle)
+    /// directly — no interpreter, no script argument, no bundled Python needed on the
+    /// target machine. Speaks the same line-delimited JSON-RPC over stdio.
+    pub fn spawn_program(program: &Path) -> Result<Self, SidecarError> {
+        Self::spawn_command(Command::new(program))
+    }
+
+    /// Shared spawn path: pipe stdio, wrap in `SharedChild`, and start the stderr pump.
+    fn spawn_command(mut cmd: Command) -> Result<Self, SidecarError> {
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         // SharedChild wraps the process so kill()/wait() work from ANY thread via a
         // shared OS handle — the capability the watchdog needs to force-unblock a

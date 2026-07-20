@@ -333,16 +333,22 @@ fn update_settings(edit: impl FnOnce(&mut AppSettings)) {
 
 // --- backend setup --------------------------------------------------------
 
-fn build_backend() -> Backend {
+/// How to launch the DSP sidecar.
+enum SidecarSource {
+    /// The self-contained PyInstaller-frozen executable (bundled release build) — no
+    /// Python needed on the machine.
+    Frozen(PathBuf),
+    /// A Python interpreter + a script (dev venv, an env override, or the stub).
+    Python { python: PathBuf, script: PathBuf },
+}
+
+/// `bundled_sidecar` is the frozen sidecar exe inside the app's resources (release), or
+/// `None` in dev.
+fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
     let (config_dir, config_source) = resolve_config_dir();
-    let (python, script) = resolve_sidecar();
-    let sidecar = if script.file_name().is_some_and(|n| n == "sidecar_dsp.py") {
-        format!("AutoEq DSP ({})", python.display())
-    } else {
-        format!("stub ({})", script.display())
-    };
+    let (source, sidecar) = resolve_sidecar(bundled_sidecar.as_deref());
     let settings = load_settings();
-    match start_core(&config_dir, python, script, settings.last_hash.as_deref()) {
+    match start_core(&config_dir, source, settings.last_hash.as_deref()) {
         Ok(core) => {
             core.set_loudness(settings.loudness); // restore §4.0 settings
             Backend::Ready { core, config_dir, config_source, sidecar }
@@ -353,12 +359,14 @@ fn build_backend() -> Backend {
 
 fn start_core(
     config_dir: &Path,
-    python: PathBuf,
-    script: PathBuf,
+    source: SidecarSource,
     expected_hash: Option<&str>,
 ) -> Result<Core, CoreError> {
     let _ = std::fs::create_dir_all(config_dir);
-    let spawn_fn = move || Sidecar::spawn(&python, &script);
+    let spawn_fn = move || match &source {
+        SidecarSource::Frozen(exe) => Sidecar::spawn_program(exe),
+        SidecarSource::Python { python, script } => Sidecar::spawn(python, script),
+    };
     Core::start(config_dir, spawn_fn, watchdog_cfg(), expected_hash)
 }
 
@@ -396,23 +404,43 @@ fn sidecar_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("cageq-sidecar")
 }
 
-/// Resolve (interpreter, script) as a consistent pair. Prefers the real AutoEq DSP
-/// (the Python 3.10 venv + sidecar_dsp.py) when both are present; otherwise falls
-/// back to a `py`-resolved interpreter + the dependency-free stub. Env vars
-/// CAGEQ_PYTHON / CAGEQ_SIDECAR_SCRIPT override either half.
-fn resolve_sidecar() -> (PathBuf, PathBuf) {
+/// Resolve how to launch the sidecar, plus a human label for the UI. Precedence:
+///   1. `CAGEQ_PYTHON` / `CAGEQ_SIDECAR_SCRIPT` env override (dev/tests/other machine),
+///   2. the bundled frozen executable (self-contained release),
+///   3. the dev venv + `sidecar_dsp.py`,
+///   4. a `py`-resolved interpreter + the dependency-free stub.
+fn resolve_sidecar(bundled: Option<&Path>) -> (SidecarSource, String) {
     let root = sidecar_root();
+    let env_python = env::var("CAGEQ_PYTHON").ok();
+    let env_script = env::var("CAGEQ_SIDECAR_SCRIPT").ok();
+
+    // 1. Explicit override — a Python interpreter + script.
+    if env_python.is_some() || env_script.is_some() {
+        let python = env_python.map(PathBuf::from).unwrap_or_else(resolve_python);
+        let script =
+            env_script.map(PathBuf::from).unwrap_or_else(|| root.join("python").join("sidecar_dsp.py"));
+        let label = format!("AutoEq DSP, override ({})", python.display());
+        return (SidecarSource::Python { python, script }, label);
+    }
+
+    // 2. Bundled frozen executable (release).
+    if let Some(exe) = bundled {
+        if exe.exists() {
+            return (SidecarSource::Frozen(exe.to_path_buf()), format!("AutoEq DSP, bundled ({})", exe.display()));
+        }
+    }
+
+    // 3. Dev venv + real script.
     let venv = root.join(".venv").join("Scripts").join("python.exe");
     let dsp = root.join("python").join("sidecar_dsp.py");
-    let use_real = venv.exists() && dsp.exists();
+    if venv.exists() && dsp.exists() {
+        let label = format!("AutoEq DSP, dev venv ({})", venv.display());
+        return (SidecarSource::Python { python: venv, script: dsp }, label);
+    }
 
-    let python = env::var("CAGEQ_PYTHON")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| if use_real { venv } else { resolve_python() });
-    let script = env::var("CAGEQ_SIDECAR_SCRIPT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| if use_real { dsp } else { root.join("python").join("sidecar_stub.py") });
-    (python, script)
+    // 4. Fallback: the dependency-free stub.
+    let script = root.join("python").join("sidecar_stub.py");
+    (SidecarSource::Python { python: resolve_python(), script: script.clone() }, format!("stub ({})", script.display()))
 }
 
 /// Fallback interpreter resolution: the Windows `py` launcher's target, else bare
@@ -450,7 +478,20 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_opener::init())
-        .manage(build_backend())
+        .setup(|app| {
+            // The frozen DSP sidecar ships as a bundled resource (see tauri.conf.json);
+            // its path needs the app handle, so build the backend here rather than in
+            // `.manage(...)`. In dev this path won't exist and resolve_sidecar falls
+            // back to the venv.
+            use tauri::Manager;
+            let bundled = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|r| r.join("sidecar").join("cageq-sidecar.exe"));
+            app.manage(build_backend(bundled));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             apply,
             activate_slot,
@@ -501,8 +542,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cageq-app-it-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let (python, script) = resolve_sidecar();
-        let core = start_core(&dir, python, script, None).expect("core should start");
+        let (source, _) = resolve_sidecar(None);
+        let core = start_core(&dir, source, None).expect("core should start");
         let request = CalcRequest { device: "Test DAC".into(), inputs: demo_inputs() };
         let applied = core.apply(request).expect("apply should compute + write");
 
@@ -519,14 +560,20 @@ mod tests {
     /// against the real DSP; soft-skips on the stub or a network error.
     #[test]
     fn dev_backend_applies_a_catalogue_headphone() {
-        let (python, script) = resolve_sidecar();
-        if script.file_name().and_then(|n| n.to_str()) != Some("sidecar_dsp.py") {
+        let (source, _) = resolve_sidecar(None);
+        let is_real = match &source {
+            SidecarSource::Frozen(_) => true,
+            SidecarSource::Python { script, .. } => {
+                script.file_name().and_then(|n| n.to_str()) == Some("sidecar_dsp.py")
+            }
+        };
+        if !is_real {
             eprintln!("skipping catalogue apply: stub sidecar (no venv)");
             return;
         }
         let dir = std::env::temp_dir().join(format!("cageq-app-cat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let core = start_core(&dir, python, script, None).expect("core should start");
+        let core = start_core(&dir, source, None).expect("core should start");
 
         let list = match core.request("list_headphones", json!({})) {
             Ok(v) => v,
@@ -562,8 +609,8 @@ mod tests {
     fn loudness_mode_changes_the_written_preamp_on_reapply() {
         let dir = std::env::temp_dir().join(format!("cageq-app-loud-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let (python, script) = resolve_sidecar();
-        let core = start_core(&dir, python, script, None).expect("core should start");
+        let (source, _) = resolve_sidecar(None);
+        let core = start_core(&dir, source, None).expect("core should start");
 
         // Default (Comparison, -9 dB base pre-gain).
         core.apply(CalcRequest { device: "Dev".into(), inputs: demo_inputs() }).expect("apply");
