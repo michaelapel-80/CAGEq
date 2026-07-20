@@ -6,7 +6,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use cageq_config_writer::{self as cw, BlockState, StartupDecision};
-use cageq_core::{CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, Slot};
+use cageq_core::{
+    CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, LoudnessMode, LoudnessSettings, Slot,
+};
 use cageq_sidecar::{Sidecar, SidecarError};
 use cageq_watchdog::{Health, WatchdogConfig};
 use serde_json::json;
@@ -146,6 +148,35 @@ fn copy_slot_duplicates_a_fit_and_activates_the_target() {
     let c2 = Core::start(fresh.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
     assert!(matches!(c2.copy_slot(Slot::A, Slot::B), Err(CoreError::EmptySlot(Slot::A))));
     assert!(matches!(core.copy_slot(Slot::A, Slot::Dry), Err(CoreError::DryNotEditable)));
+}
+
+#[test]
+fn loudness_increase_ramps_but_decrease_is_direct() {
+    let tmp = TempDir::new("ramp");
+    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+
+    // Small base pre-gain so the Comparison->Final increase is a quick ~1 dB ramp.
+    core.set_loudness(LoudnessSettings { base_pregain_db: -1.0, mode: LoudnessMode::Comparison });
+    core.apply(CalcRequest::for_device("DAC")).expect("apply"); // stub is flat -> preamp -1.0
+    assert!(tmp.cageq().contains("Preamp: -1.0 dB"), "{}", tmp.cageq());
+    let after_apply = core.applied_count();
+
+    // Comparison -> FinalVolume raises volume (-1 -> 0 dB): ramped over several writes,
+    // landing exactly on 0.
+    core.update_loudness(LoudnessSettings { base_pregain_db: -1.0, mode: LoudnessMode::FinalVolume })
+        .expect("something active")
+        .expect("ramp ok");
+    assert!(tmp.cageq().contains("Preamp: 0.0 dB"), "{}", tmp.cageq());
+    let ramp_writes = core.applied_count() - after_apply;
+    assert!(ramp_writes >= 3, "an increase should ramp over several writes, got {ramp_writes}");
+    let after_ramp = core.applied_count();
+
+    // FinalVolume -> Comparison lowers volume (0 -> -1 dB): direct, one write.
+    core.update_loudness(LoudnessSettings { base_pregain_db: -1.0, mode: LoudnessMode::Comparison })
+        .expect("something active")
+        .expect("direct ok");
+    assert!(tmp.cageq().contains("Preamp: -1.0 dB"), "{}", tmp.cageq());
+    assert_eq!(core.applied_count() - after_ramp, 1, "a decrease is a single direct write");
 }
 
 #[test]

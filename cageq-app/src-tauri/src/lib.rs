@@ -210,9 +210,10 @@ fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<Lou
                 DEFAULT_BASE_PREGAIN_DB
             };
             let settings = LoudnessSettings { base_pregain_db: base, mode: settings.mode };
-            core.set_loudness(settings);
             update_settings(|s| s.loudness = settings); // persist without wiping the selection
-            let applied = core.reapply().and_then(|r| r.ok()).map(|a| apply_result(a, config_dir));
+            // update_loudness sets the settings and pushes them live — ramping a volume
+            // increase (§7.5), or writing directly for a decrease. Blocks for the ramp.
+            let applied = core.update_loudness(settings).and_then(|r| r.ok()).map(|a| apply_result(a, config_dir));
             Ok(LoudnessUpdate { settings, applied })
         }
     }

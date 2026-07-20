@@ -199,7 +199,17 @@ pub enum CoreError {
     DryNotEditable,
     #[error("slot {0:?} has nothing to activate yet")]
     EmptySlot(Slot),
+    #[error("loudness ramp aborted (safe state active)")]
+    RampAborted,
 }
+
+/// §7.5 maximum volume-increase rate for the "Finale Lautstärke" transition. The
+/// suggested-default first assumption (a common auto-gain-ramp figure); a bigger jump
+/// takes proportionally longer instead of a sudden, possibly hazardous leap.
+const RAMP_RATE_DB_PER_SEC: f64 = 6.0;
+/// One ramp step. ≥15 ms so EqAPO's native 10 ms crossfade smooths each step and the
+/// consecutive-write debounce (§5.3) is respected.
+const RAMP_STEP: Duration = Duration::from_millis(25);
 
 // ---------------------------------------------------------------------------
 // Core
@@ -424,6 +434,33 @@ impl Core {
         self.inner.slots.lock().unwrap().effective()?; // nothing active to rewrite yet
         Some(write_active_locked(&self.inner))
     }
+
+    /// Change the §4.0 loudness settings and push them onto the active config. A change
+    /// that **raises** the volume (e.g. Comparison → Finale Lautstärke, or raising the
+    /// base pre-gain) is ramped in at [`RAMP_RATE_DB_PER_SEC`] (§7.5) rather than
+    /// jumping — this call blocks for the ramp duration (~`Δ/6` s). A change that
+    /// lowers or keeps the volume is applied directly (a drop is no hazard). `None` if
+    /// nothing is active yet; a ramp interrupted by a safe state returns
+    /// [`CoreError::RampAborted`].
+    pub fn update_loudness(&self, settings: LoudnessSettings) -> Option<Result<Applied, CoreError>> {
+        let prev = {
+            let mut l = self.inner.loudness.lock().unwrap();
+            let prev = *l;
+            *l = settings;
+            prev
+        };
+        let effective = self.inner.slots.lock().unwrap().effective()?;
+        let start = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &prev).db;
+        let target = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &settings).db;
+
+        // Ramp only a real increase; a decrease/no-change writes directly.
+        if target > start + 0.05 {
+            Some(ramp_preamp(&self.supervisor, &self.inner, start, target))
+        } else {
+            let _guard = self.inner.apply_lock.lock().unwrap();
+            Some(write_active_locked(&self.inner))
+        }
+    }
 }
 
 impl Drop for Core {
@@ -464,31 +501,62 @@ fn do_apply_to_slot(
     write_active_locked(inner)
 }
 
-/// Compose the active slot's cached fit with the current loudness settings and write
-/// it to cageq.txt. The single place a config reaches disk; assumes `apply_lock` is
-/// held by the caller. Errors with [`CoreError::EmptySlot`] if the active slot is empty.
-fn write_active_locked(inner: &Inner) -> Result<Applied, CoreError> {
-    let effective = {
-        let store = inner.slots.lock().unwrap();
-        store.effective().ok_or(CoreError::EmptySlot(store.active))?
-    };
+/// The active slot's effective fit (Dry synthesised), or `EmptySlot`.
+fn current_effective(inner: &Inner) -> Result<CalcResult, CoreError> {
+    let store = inner.slots.lock().unwrap();
+    store.effective().ok_or(CoreError::EmptySlot(store.active))
+}
 
+/// Write `effective`'s filters at an explicit `preamp_db`. Assumes `apply_lock` held.
+/// The single place a config reaches disk.
+fn write_effective(
+    inner: &Inner,
+    effective: CalcResult,
+    preamp_db: f64,
+    clipping_warning: bool,
+) -> Result<Applied, CoreError> {
+    let device_config = DeviceConfig { device: effective.device, preamp_db, filters: effective.filters };
+    let hash = cw::apply(&inner.config_dir, std::slice::from_ref(&device_config))?;
+    inner.applied_count.fetch_add(1, Ordering::SeqCst);
+    Ok(Applied { hash, device: device_config.device, preamp_db, clipping_warning })
+}
+
+/// Compose the active slot's cached fit with the current loudness settings and write
+/// it. Assumes `apply_lock` held. `EmptySlot` if the active slot is empty.
+fn write_active_locked(inner: &Inner) -> Result<Applied, CoreError> {
+    let effective = current_effective(inner)?;
     // Compose the final preamp here (policy), from the curve quantities the DSP
     // reported (physics): §4.0 base pre-gain + §4.1 loudness match, capped by §4.2.
     let loudness = *inner.loudness.lock().unwrap();
     let preamp = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &loudness);
-    let device_config =
-        DeviceConfig { device: effective.device, preamp_db: preamp.db, filters: effective.filters };
+    write_effective(inner, effective, preamp.db, preamp.clipping_warning)
+}
 
-    let hash = cw::apply(&inner.config_dir, std::slice::from_ref(&device_config))?;
-
-    inner.applied_count.fetch_add(1, Ordering::SeqCst);
-    Ok(Applied {
-        hash,
-        device: device_config.device,
-        preamp_db: preamp.db,
-        clipping_warning: preamp.clipping_warning,
-    })
+/// §7.5 controlled preamp increase: step from `start` up to the composed target at
+/// [`RAMP_RATE_DB_PER_SEC`], one write per [`RAMP_STEP`] (EqAPO crossfades each). Holds
+/// `apply_lock` for the whole ramp so no other write interleaves. Aborts (leaving the
+/// watchdog's safe state in place) the instant health leaves `Running`.
+fn ramp_preamp(
+    supervisor: &Supervisor,
+    inner: &Inner,
+    start: f64,
+    target: f64,
+) -> Result<Applied, CoreError> {
+    let _guard = inner.apply_lock.lock().unwrap();
+    let step_db = RAMP_RATE_DB_PER_SEC * RAMP_STEP.as_secs_f64();
+    let mut cur = start;
+    while cur + step_db < target {
+        cur += step_db;
+        if !matches!(supervisor.health(), Health::Running) {
+            return Err(CoreError::RampAborted); // safe state tripped — stop increasing
+        }
+        write_effective(inner, current_effective(inner)?, cur, false)?;
+        thread::sleep(RAMP_STEP);
+    }
+    if !matches!(supervisor.health(), Health::Running) {
+        return Err(CoreError::RampAborted);
+    }
+    write_active_locked(inner) // land exactly on the composed target
 }
 
 /// Watch the supervisor's recovery counter; each time it advances and the sidecar is
