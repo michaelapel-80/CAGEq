@@ -363,10 +363,7 @@ function App() {
   })();
 
   return (
-    <main className="container">
-      <h1>CAGEq</h1>
-      <p>Caged Auto-Gain EQ — AutoEq database</p>
-
+    <main className="app">
       {pendingFinal && (
         <div
           onClick={() => setPendingFinal(null)}
@@ -426,342 +423,361 @@ function App() {
         </div>
       )}
 
-      {status && (
-        <p style={{ fontSize: "0.8em", opacity: 0.75 }}>
-          sidecar: {status.sidecar} · health: {status.health}
-          <br />
-          config: {status.config_source}
-          <br />
-          <span style={{ opacity: 0.7 }}>writes to: {status.config_dir}</span>
+      {/* ---- header: the "set once per session" inputs (§5.1) ---- */}
+      <header className="app-header">
+        <h1>CAGEq</h1>
+        {!loading && (
+          <>
+            <span className="row" style={{ gap: "0.4em" }}>
+              <label htmlFor="device-select" style={{ fontSize: "0.85em", opacity: 0.75 }}>
+                Output
+              </label>
+              {devices.length === 0 ? (
+                <span style={{ opacity: 0.7, fontSize: "0.85em" }}>no active playback device</span>
+              ) : (
+                <select id="device-select" value={deviceId} onChange={(e) => changeDevice(e.currentTarget.value)}>
+                  {devices.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                      {d.eqapo_enabled ? "" : " — ⚠ Equalizer APO not installed"}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </span>
+            <form
+              className="row"
+              style={{ gap: "0.4em" }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                apply();
+              }}
+            >
+              <label style={{ fontSize: "0.85em", opacity: 0.75 }}>Headphone</label>
+              <input
+                list="model-list"
+                value={query}
+                onChange={(e) => onModelInput(e.currentTarget.value)}
+                placeholder={`Search ${byModel.size} models…`}
+                style={{ minWidth: "14em" }}
+                disabled={dryActive}
+              />
+              <datalist id="model-list">
+                {modelMatches.map((name) => (
+                  <option key={name} value={name} />
+                ))}
+              </datalist>
+              <select
+                value={measurementPath}
+                onChange={(e) => setMeasurementPath(e.currentTarget.value)}
+                disabled={dryActive || measurements.length === 0}
+                title="Measurement source / rig"
+              >
+                {measurements.length === 0 ? (
+                  <option value="">— pick a model —</option>
+                ) : (
+                  measurements.map((m) => (
+                    <option key={m.path} value={m.path}>
+                      by {m.source}
+                      {m.rig ? ` on ${m.rig}` : ""}
+                    </option>
+                  ))
+                )}
+              </select>
+            </form>
+          </>
+        )}
+        {status && (
+          <span style={{ fontSize: "0.72em", opacity: 0.6, marginLeft: "auto", textAlign: "right" }}>
+            {status.sidecar} · {status.health}
+            <br />
+            {status.config_source}
+          </span>
+        )}
+      </header>
+
+      {!loading && selectedDevice && !selectedDevice.eqapo_enabled && (
+        <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.8em" }}>
+          ⚠ Equalizer APO isn't installed on this device, so applying an EQ here has no effect. Enable it
+          for this device with Equalizer APO's <em>Configurator</em> (DeviceSelector.exe), then reboot.
         </p>
       )}
 
-      {!loading && (
-        <div>
-          <p className="row" style={{ alignItems: "center", gap: "0.5em" }}>
-            <label htmlFor="device-select">Output device:</label>
-            {devices.length === 0 ? (
-              <span style={{ opacity: 0.7 }}>no active playback device detected</span>
-            ) : (
-              <select id="device-select" value={deviceId} onChange={(e) => changeDevice(e.currentTarget.value)}>
-                {devices.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                    {d.eqapo_enabled ? "" : " — ⚠ Equalizer APO not installed"}
-                  </option>
-                ))}
-              </select>
-            )}
-          </p>
-          {selectedDevice && !selectedDevice.eqapo_enabled && (
-            <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.5em" }}>
-              ⚠ Equalizer APO isn't installed on this device, so applying an EQ here has no effect.
-              Enable it for this device with Equalizer APO's <em>Configurator</em> (DeviceSelector.exe),
-              then reboot.
-            </p>
-          )}
-        </div>
-      )}
+      {loading && <p>Loading AutoEq catalogue…</p>}
 
-      {!loading && (
-        <div style={{ margin: "0.75em 0" }}>
-          <div className="row" style={{ gap: "0.4em", alignItems: "center" }}>
-            <span style={{ fontSize: "0.85em", opacity: 0.75 }}>Compare:</span>
-            {SLOT_ORDER.map((s) => {
-              const active = s === activeSlot;
-              const populated = s === "Dry" || slotInputs[s] !== null;
-              const key = s === "A" ? "A" : s === "B" ? "S" : "D";
-              return (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => switchSlot(s)}
-                  title={`${s} (key ${key})${populated ? "" : " — empty"}`}
-                  style={{
-                    borderWidth: 2,
-                    borderStyle: "solid",
-                    borderColor: active ? SLOT_COLOR[s] : "transparent",
-                    color: active ? SLOT_COLOR[s] : undefined,
-                    fontWeight: active ? 700 : 400,
-                    opacity: populated || active ? 1 : 0.55,
-                  }}
-                >
-                  {s === "Dry" ? "Dry" : `Slot ${s}`} <kbd style={{ fontSize: "0.7em", opacity: 0.6 }}>{key}</kbd>
+      <div className="app-main">
+        {/* ================= LEFT: target + macros + chart + bands ================= */}
+        <section>
+          {!loading && (
+            <div className="panel">
+              <h2>Correction</h2>
+              <div className="row" style={{ gap: "0.5em" }}>
+                <label style={{ fontSize: "0.85em", opacity: 0.75 }}>Target</label>
+                <select value={targetPath} onChange={(e) => setTargetPath(e.currentTarget.value)} disabled={dryActive}>
+                  {targets.map((t) => (
+                    <option key={t.path} value={t.path}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+                <button type="button" onClick={apply} disabled={applying || dryActive} style={{ marginLeft: "auto" }}>
+                  {applying ? "Fitting…" : dryActive ? "Dry (pick A or B)" : `Apply → Slot ${activeSlot}`}
                 </button>
-              );
-            })}
-            <span style={{ marginLeft: "0.6em", fontSize: "0.75em", opacity: 0.6 }}>Copy:</span>
-            <button type="button" onClick={() => copySlot("A", "B")} disabled={!slotInputs.A} style={{ fontSize: "0.8em" }}>
-              A→B
-            </button>
-            <button type="button" onClick={() => copySlot("B", "A")} disabled={!slotInputs.B} style={{ fontSize: "0.8em" }}>
-              B→A
-            </button>
-          </div>
-          <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.3em 0 0" }}>
-            A / S / D switch slots, W toggles the loudness mode — even without looking at the screen.
-          </p>
-          {loudness?.mode === "FinalVolume" && (slotInputs.A !== null || slotInputs.B !== null) && (
-            <p style={{ color: "#b8860b", fontSize: "0.78em", margin: "0.4em 0 0" }}>
-              ⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched —
-              a louder slot can just sound "better". Press <kbd>W</kbd> for Comparison to A/B fairly.
-            </p>
-          )}
-        </div>
-      )}
+              </div>
 
-      {loading ? (
-        <p>Loading AutoEq catalogue…</p>
-      ) : (
-        <form
-          className="row"
-          onSubmit={(e) => {
-            e.preventDefault();
-            apply();
-          }}
-        >
-          <input
-            list="model-list"
-            value={query}
-            onChange={(e) => onModelInput(e.currentTarget.value)}
-            placeholder={`Search ${byModel.size} headphone models…`}
-            style={{ minWidth: "16em" }}
-            disabled={dryActive}
-          />
-          <datalist id="model-list">
-            {modelMatches.map((name) => (
-              <option key={name} value={name} />
-            ))}
-          </datalist>
-          <select
-            value={measurementPath}
-            onChange={(e) => setMeasurementPath(e.currentTarget.value)}
-            disabled={dryActive || measurements.length === 0}
-            title="Measurement source / rig"
-          >
-            {measurements.length === 0 ? (
-              <option value="">— pick a model —</option>
-            ) : (
-              measurements.map((m) => (
-                <option key={m.path} value={m.path}>
-                  by {m.source}
-                  {m.rig ? ` on ${m.rig}` : ""}
-                </option>
-              ))
-            )}
-          </select>
-          <select value={targetPath} onChange={(e) => setTargetPath(e.currentTarget.value)} disabled={dryActive}>
-            {targets.map((t) => (
-              <option key={t.path} value={t.path}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-          <button type="submit" disabled={applying || dryActive}>
-            {applying ? "Fitting…" : dryActive ? "Dry (pick A or B to edit)" : `Apply → Slot ${activeSlot}`}
-          </button>
-        </form>
-      )}
-
-      {!loading && (
-        <fieldset
-          style={{ marginTop: "1em", textAlign: "left", border: "1px solid #0003", borderRadius: 6, opacity: dryActive ? 0.5 : 1 }}
-        >
-          <legend>Tone (§3.4)</legend>
-          <p style={{ fontSize: "0.78em", opacity: 0.7, margin: "0 0 0.6em" }}>
-            Your tonal preference, layered on top of the AutoEq correction. Starts flat — everything
-            here is an offset from the corrected sound.
-          </p>
-
-          {/* curated presets */}
-          <div className="row" style={{ gap: "0.35em", flexWrap: "wrap", marginBottom: "0.6em" }}>
-            {TONE_PRESETS.map((p) => (
-              <button
-                key={p.name}
-                type="button"
-                disabled={dryActive}
-                onClick={() => setCustomFilters(p.filters.map((f) => ({ ...f })))}
-                style={{ fontSize: "0.8em" }}
-              >
-                {p.name}
-              </button>
-            ))}
-          </div>
-
-          {/* macro shelves */}
-          {(
-            [
-              ["Bass", MACRO_BASS],
-              ["Treble", MACRO_TREBLE],
-            ] as const
-          ).map(([label, spec]) => (
-            <div key={label} className="row" style={{ gap: "0.5em", alignItems: "center", marginBottom: "0.25em" }}>
-              <span style={{ fontSize: "0.8em", width: "3.5em" }}>{label}</span>
-              <input
-                type="range"
-                min={-12}
-                max={12}
-                step={0.5}
-                value={macroGain(spec)}
-                disabled={dryActive}
-                onChange={(e) => setMacro(spec, Number(e.currentTarget.value))}
-                style={{ flex: 1, maxWidth: "16em" }}
-              />
-              <span style={{ fontSize: "0.8em", width: "4em", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                {macroGain(spec) > 0 ? "+" : ""}
-                {macroGain(spec).toFixed(1)} dB
-              </span>
-            </div>
-          ))}
-
-          <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.6em 0 0.3em" }}>Bands</p>
-          {customFilters.length === 0 && (
-            <p style={{ fontSize: "0.8em", opacity: 0.7, margin: "0 0 0.5em" }}>
-              No tone filters — the AutoEq correction is used as-is.
-            </p>
-          )}
-          {customFilters.map((f, i) => (
-            <div key={i} className="row" style={{ gap: "0.4em", alignItems: "center", marginBottom: "0.3em" }}>
-              <select
-                value={f.kind}
-                disabled={dryActive}
-                onChange={(e) => updateFilter(i, { kind: e.currentTarget.value as FilterKind })}
-              >
-                {FILTER_KINDS.map((k) => (
-                  <option key={k} value={k}>
-                    {k}
-                  </option>
+              {/* macro shelves sit directly above the diagram (§5.1) */}
+              <div style={{ marginTop: "0.7em", opacity: dryActive ? 0.5 : 1 }}>
+                {(
+                  [
+                    ["Bass", MACRO_BASS],
+                    ["Treble", MACRO_TREBLE],
+                  ] as const
+                ).map(([label, spec]) => (
+                  <div key={label} className="row" style={{ gap: "0.5em", marginBottom: "0.25em" }}>
+                    <span style={{ fontSize: "0.8em", width: "3.5em" }}>{label}</span>
+                    <input
+                      type="range"
+                      min={-12}
+                      max={12}
+                      step={0.5}
+                      value={macroGain(spec)}
+                      disabled={dryActive}
+                      onChange={(e) => setMacro(spec, Number(e.currentTarget.value))}
+                      style={{ flex: 1, maxWidth: "18em" }}
+                    />
+                    <span
+                      style={{ fontSize: "0.8em", width: "4em", textAlign: "right", fontVariantNumeric: "tabular-nums" }}
+                    >
+                      {macroGain(spec) > 0 ? "+" : ""}
+                      {macroGain(spec).toFixed(1)} dB
+                    </span>
+                  </div>
                 ))}
-              </select>
-              <label style={{ fontSize: "0.8em" }}>
-                Fc{" "}
+              </div>
+
+              {result && (
+                <>
+                  <EqChart
+                    series={[
+                      { bands: result.filters, color: SLOT_COLOR[activeSlot], label: "Applied total", muted: true },
+                      { bands: customFilters, color: "#16a34a", label: "Tone (your offset)" },
+                    ]}
+                  />
+                  <p style={{ fontSize: "0.8em", opacity: 0.75, margin: "0.2em 0 0" }}>
+                    Preamp <code>{result.preamp_db.toFixed(1)} dB</code>{" "}
+                    {loudness?.mode === "FinalVolume" ? "(max clipping-free)" : "(Auto-LUFS)"} · hash{" "}
+                    <code>{result.hash}</code>
+                  </p>
+                  {result.clipping_warning && (
+                    <p style={{ color: "#b8860b", fontSize: "0.8em", margin: "0.2em 0 0" }}>
+                      ⚠ Emergency clipping protection active instead of the loudness match — extreme peak.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ---- tone bands (the detailed editor, §5.2 filter list) ---- */}
+          {!loading && (
+            <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
+              <h2>Tone bands (§3.4)</h2>
+              {customFilters.length === 0 && (
+                <p style={{ fontSize: "0.8em", opacity: 0.7, margin: "0 0 0.5em" }}>
+                  No tone filters — the AutoEq correction is used as-is.
+                </p>
+              )}
+              {customFilters.map((f, i) => (
+                <div key={i} className="row" style={{ gap: "0.4em", marginBottom: "0.3em" }}>
+                  <select
+                    value={f.kind}
+                    disabled={dryActive}
+                    onChange={(e) => updateFilter(i, { kind: e.currentTarget.value as FilterKind })}
+                  >
+                    {FILTER_KINDS.map((k) => (
+                      <option key={k} value={k}>
+                        {k}
+                      </option>
+                    ))}
+                  </select>
+                  <label style={{ fontSize: "0.8em" }}>
+                    Fc{" "}
+                    <input
+                      type="number" min={20} max={20000} step={10} value={f.freq_hz} disabled={dryActive}
+                      onChange={(e) => updateFilter(i, { freq_hz: Number(e.currentTarget.value) })}
+                      style={{ width: "5.5em" }}
+                    />{" "}
+                    Hz
+                  </label>
+                  <label style={{ fontSize: "0.8em" }}>
+                    Gain{" "}
+                    <input
+                      type="number" min={-20} max={20} step={0.5} value={f.gain_db} disabled={dryActive}
+                      onChange={(e) => updateFilter(i, { gain_db: Number(e.currentTarget.value) })}
+                      style={{ width: "4em" }}
+                    />{" "}
+                    dB
+                  </label>
+                  <label style={{ fontSize: "0.8em" }}>
+                    Q{" "}
+                    <input
+                      type="number" min={0.1} max={20} step={0.1} value={f.q} disabled={dryActive}
+                      onChange={(e) => updateFilter(i, { q: Number(e.currentTarget.value) })}
+                      style={{ width: "4em" }}
+                    />
+                  </label>
+                  <button type="button" onClick={() => removeFilter(i)} disabled={dryActive} title="Remove">
+                    ✕
+                  </button>
+                </div>
+              ))}
+              <button type="button" onClick={addFilter} disabled={dryActive} style={{ fontSize: "0.85em" }}>
+                + Add filter
+              </button>
+              {customFilters.length > 0 && (
+                <span style={{ fontSize: "0.75em", opacity: 0.6, marginLeft: "0.6em" }}>
+                  takes effect on Apply → Slot {activeSlot}
+                </span>
+              )}
+            </div>
+          )}
+        </section>
+
+        {/* ================= RIGHT: slots + loudness + presets ================= */}
+        <aside>
+          {!loading && (
+            <div className="panel">
+              <h2>Compare</h2>
+              <div className="row" style={{ gap: "0.4em" }}>
+                {SLOT_ORDER.map((s) => {
+                  const active = s === activeSlot;
+                  const populated = s === "Dry" || slotInputs[s] !== null;
+                  const key = s === "A" ? "A" : s === "B" ? "S" : "D";
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => switchSlot(s)}
+                      title={`${s} (key ${key})${populated ? "" : " — empty"}`}
+                      style={{
+                        borderWidth: 2,
+                        borderStyle: "solid",
+                        borderColor: active ? SLOT_COLOR[s] : "transparent",
+                        color: active ? SLOT_COLOR[s] : undefined,
+                        fontWeight: active ? 700 : 400,
+                        opacity: populated || active ? 1 : 0.55,
+                      }}
+                    >
+                      {s === "Dry" ? "Dry" : `Slot ${s}`} <kbd style={{ fontSize: "0.7em", opacity: 0.6 }}>{key}</kbd>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="row" style={{ gap: "0.4em", marginTop: "0.4em" }}>
+                <span style={{ fontSize: "0.75em", opacity: 0.6 }}>Copy:</span>
+                <button type="button" onClick={() => copySlot("A", "B")} disabled={!slotInputs.A} style={{ fontSize: "0.8em" }}>
+                  A→B
+                </button>
+                <button type="button" onClick={() => copySlot("B", "A")} disabled={!slotInputs.B} style={{ fontSize: "0.8em" }}>
+                  B→A
+                </button>
+              </div>
+              <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.5em 0 0" }}>
+                A / S / D switch slots, W toggles the loudness mode — even without looking at the screen.
+              </p>
+              {loudness?.mode === "FinalVolume" && (slotInputs.A !== null || slotInputs.B !== null) && (
+                <p style={{ color: "#b8860b", fontSize: "0.78em", margin: "0.4em 0 0" }}>
+                  ⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched
+                  — a louder slot can just sound "better". Press <kbd>W</kbd> for Comparison to A/B fairly.
+                </p>
+              )}
+            </div>
+          )}
+
+          {loudness && (
+            <div className="panel">
+              <h2>Loudness (§4.0)</h2>
+              <label style={{ display: "block", marginBottom: "0.2em" }}>
                 <input
-                  type="number" min={20} max={20000} step={10} value={f.freq_hz} disabled={dryActive}
-                  onChange={(e) => updateFilter(i, { freq_hz: Number(e.currentTarget.value) })}
-                  style={{ width: "5.5em" }}
+                  type="radio"
+                  name="loudness-mode"
+                  checked={loudness.mode === "Comparison"}
+                  onChange={() => requestLoudness({ ...loudness, mode: "Comparison" })}
                 />{" "}
-                Hz
+                Comparison (A/B-fair)
               </label>
-              <label style={{ fontSize: "0.8em" }}>
-                Gain{" "}
+              <label style={{ display: "block", marginBottom: "0.4em" }}>
                 <input
-                  type="number" min={-20} max={20} step={0.5} value={f.gain_db} disabled={dryActive}
-                  onChange={(e) => updateFilter(i, { gain_db: Number(e.currentTarget.value) })}
-                  style={{ width: "4em" }}
+                  type="radio"
+                  name="loudness-mode"
+                  checked={loudness.mode === "FinalVolume"}
+                  onChange={() => requestLoudness({ ...loudness, mode: "FinalVolume" })}
                 />{" "}
+                Final volume (loudest safe)
+              </label>
+              <label className="row" style={{ opacity: loudness.mode === "Comparison" ? 1 : 0.4, fontSize: "0.85em" }}>
+                Base pre-gain
+                <input
+                  type="number"
+                  min={-40}
+                  max={0}
+                  step={1}
+                  value={loudness.base_pregain_db}
+                  disabled={loudness.mode !== "Comparison"}
+                  onChange={(e) => updateLoudness({ ...loudness, base_pregain_db: Number(e.currentTarget.value) })}
+                  style={{ width: "4.5em" }}
+                />
                 dB
               </label>
-              <label style={{ fontSize: "0.8em" }}>
-                Q{" "}
+              <p style={{ fontSize: "0.75em", opacity: 0.7, margin: "0.5em 0 0" }}>
+                {loudness.mode === "Comparison"
+                  ? "Every curve ends up equally loud, so A/B comparisons judge timbre, not level."
+                  : "Maximum clipping-free volume — base pre-gain and loudness match are disabled."}
+              </p>
+              <label style={{ fontSize: "0.75em", opacity: 0.8, display: "block", marginTop: "0.5em" }}>
                 <input
-                  type="number" min={0.1} max={20} step={0.1} value={f.q} disabled={dryActive}
-                  onChange={(e) => updateFilter(i, { q: Number(e.currentTarget.value) })}
-                  style={{ width: "4em" }}
-                />
+                  type="checkbox"
+                  checked={confirmFinalVolume}
+                  onChange={(e) => toggleConfirmFinalVolume(e.currentTarget.checked)}
+                />{" "}
+                Confirm before switching to Final volume
               </label>
-              <button type="button" onClick={() => removeFilter(i)} disabled={dryActive} title="Remove">
-                ✕
-              </button>
             </div>
-          ))}
-          <button type="button" onClick={addFilter} disabled={dryActive} style={{ fontSize: "0.85em" }}>
-            + Add filter
-          </button>
-          {customFilters.length > 0 && (
-            <span style={{ fontSize: "0.75em", opacity: 0.6, marginLeft: "0.6em" }}>
-              takes effect on Apply → Slot {activeSlot}
-            </span>
           )}
-        </fieldset>
-      )}
 
-      {loudness && (
-        <fieldset style={{ marginTop: "1em", textAlign: "left", border: "1px solid #0003", borderRadius: 6 }}>
-          <legend>Loudness (§4.0)</legend>
-          <div className="row" style={{ alignItems: "center", flexWrap: "wrap", gap: "0.75em" }}>
-            <label>
-              <input
-                type="radio"
-                name="loudness-mode"
-                checked={loudness.mode === "Comparison"}
-                onChange={() => requestLoudness({ ...loudness, mode: "Comparison" })}
-              />{" "}
-              Comparison (A/B-fair)
-            </label>
-            <label>
-              <input
-                type="radio"
-                name="loudness-mode"
-                checked={loudness.mode === "FinalVolume"}
-                onChange={() => requestLoudness({ ...loudness, mode: "FinalVolume" })}
-              />{" "}
-              Final volume (loudest safe)
-            </label>
-            <label style={{ opacity: loudness.mode === "Comparison" ? 1 : 0.4 }}>
-              Base pre-gain:{" "}
-              <input
-                type="number"
-                min={-40}
-                max={0}
-                step={1}
-                value={loudness.base_pregain_db}
-                disabled={loudness.mode !== "Comparison"}
-                onChange={(e) =>
-                  updateLoudness({ ...loudness, base_pregain_db: Number(e.currentTarget.value) })
-                }
-                style={{ width: "5em" }}
-              />{" "}
-              dB
-            </label>
-          </div>
-          <p style={{ fontSize: "0.78em", opacity: 0.7, margin: "0.5em 0 0" }}>
-            {loudness.mode === "Comparison"
-              ? "Every curve ends up equally loud (base pre-gain + loudness match) so A/B comparisons judge timbre, not level."
-              : "Maximum clipping-free volume (peak at 0 dBFS) — base pre-gain and loudness match are disabled."}
-          </p>
-          <label style={{ fontSize: "0.78em", opacity: 0.8, display: "block", marginTop: "0.5em" }}>
-            <input
-              type="checkbox"
-              checked={confirmFinalVolume}
-              onChange={(e) => toggleConfirmFinalVolume(e.currentTarget.checked)}
-            />{" "}
-            Confirm before switching to Final volume
-          </label>
-        </fieldset>
-      )}
+          {!loading && (
+            <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
+              <h2>Tone presets</h2>
+              <p style={{ fontSize: "0.75em", opacity: 0.7, margin: "0 0 0.6em" }}>
+                Your tonal preference on top of the correction — starts flat, everything here is an offset.
+              </p>
+              <div className="row" style={{ gap: "0.35em" }}>
+                {TONE_PRESETS.map((p) => (
+                  <button
+                    key={p.name}
+                    type="button"
+                    disabled={dryActive}
+                    onClick={() => setCustomFilters(p.filters.map((f) => ({ ...f })))}
+                    style={{ fontSize: "0.8em" }}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </aside>
+      </div>
 
       {error && <p style={{ color: "crimson" }}>{error}</p>}
 
       {result && (
-        <>
-          <p>
-            Preamp <code>{result.preamp_db.toFixed(1)} dB</code>{" "}
-            {loudness?.mode === "FinalVolume" ? "(max clipping-free)" : "(Auto-LUFS loudness match)"} · hash{" "}
-            <code>{result.hash}</code> → {result.cageq_path}
-          </p>
-          {result.clipping_warning && (
-            <p style={{ color: "#b8860b" }}>
-              ⚠ Emergency clipping protection active instead of the loudness match — this curve has an
-              extreme peak.
-            </p>
-          )}
-          <EqChart
-            series={[
-              { bands: result.filters, color: SLOT_COLOR[activeSlot], label: "Applied total", muted: true },
-              { bands: customFilters, color: "#16a34a", label: "Tone (your offset)" },
-            ]}
-          />
-          <pre
-            style={{
-              textAlign: "left",
-              background: "#0002",
-              padding: "0.75em",
-              overflowX: "auto",
-            }}
-          >
+        <details style={{ marginTop: "0.5em", fontSize: "0.8em" }}>
+          <summary style={{ cursor: "pointer", opacity: 0.7 }}>Written config — {result.cageq_path}</summary>
+          <pre style={{ textAlign: "left", background: "#0002", padding: "0.75em", overflowX: "auto" }}>
             {result.cageq_text}
           </pre>
-        </>
+        </details>
       )}
     </main>
   );

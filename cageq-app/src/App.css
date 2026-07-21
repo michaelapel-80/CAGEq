@@ -114,3 +114,64 @@ button {
     background-color: #0f0f0f69;
   }
 }
+
+/* --- §5.1 dashboard layout ------------------------------------------------
+   Header (set-once-per-session inputs) over a two-column main area:
+   left = target + macros + chart + bands, right = slots + loudness + presets. */
+
+.app {
+  margin: 0 auto;
+  padding: 1rem 1.25rem 2rem;
+  max-width: 1400px;
+  text-align: left;
+}
+.app h1 {
+  text-align: left;
+  font-size: 1.4rem;
+  margin: 0;
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1.1rem;
+  padding-bottom: 0.7rem;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.3);
+  margin-bottom: 1rem;
+}
+
+.app-main {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 1.1rem;
+  align-items: start;
+}
+@media (max-width: 950px) {
+  .app-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.panel {
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  border-radius: 6px;
+  padding: 0.7rem 0.85rem;
+  margin: 0 0 1rem;
+}
+.panel > h2 {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.6;
+  margin: 0 0 0.6rem;
+}
+
+/* Dashboard rows read left-to-right, not centred like the starter template. */
+.row {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
