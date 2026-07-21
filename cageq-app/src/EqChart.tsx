@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Band, composedCurveDb, logGrid } from "./biquad";
 
 /**
@@ -21,15 +21,38 @@ export type Series = {
   muted?: boolean;
 };
 
+/** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). */
+export type Nodes = {
+  bands: Band[];
+  color: string;
+  onChange: (index: number, patch: Partial<Band>) => void;
+  /** Fired once when a drag finishes (for a final, un-throttled commit). */
+  onDragEnd?: () => void;
+  disabled?: boolean;
+};
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
 const F_MAX = 20000;
 const fmtHz = (f: number) => (f >= 1000 ? `${f / 1000}k` : `${f}`);
 
-export function EqChart({ series, height = 210 }: { series: Series[]; height?: number }) {
+export function EqChart({
+  series,
+  nodes,
+  height = 210,
+}: {
+  series: Series[];
+  nodes?: Nodes;
+  height?: number;
+}) {
   const W = 720;
   const H = height;
   const PAD = { l: 40, r: 12, t: 12, b: 24 };
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
   const { freqs, curves, yMin, yMax, step } = useMemo(() => {
     const freqs = logGrid(480, F_MIN, F_MAX);
@@ -52,6 +75,32 @@ export function EqChart({ series, height = 210 }: { series: Series[]; height?: n
   const lnSpan = Math.log(F_MAX) - lnMin;
   const x = (f: number) => PAD.l + ((Math.log(f) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
   const y = (db: number) => PAD.t + ((yMax - db) / (yMax - yMin)) * (H - PAD.t - PAD.b);
+  // Inverse scales, for turning a pointer position back into (frequency, gain).
+  const invX = (vx: number) => Math.exp(lnMin + ((vx - PAD.l) / (W - PAD.l - PAD.r)) * lnSpan);
+  const invY = (vy: number) => yMax - ((vy - PAD.t) / (H - PAD.t - PAD.b)) * (yMax - yMin);
+
+  /** Pointer client coords -> viewBox coords (the SVG scales to its container). */
+  const toViewBox = (clientX: number, clientY: number) => {
+    const r = svgRef.current!.getBoundingClientRect();
+    return { vx: ((clientX - r.left) / r.width) * W, vy: ((clientY - r.top) / r.height) * H };
+  };
+
+  // Q on the wheel. Registered natively with { passive: false } because React's
+  // synthetic wheel handler can't preventDefault — without it the page scrolls too.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el || !nodes || nodes.disabled) return;
+    const onWheel = (e: WheelEvent) => {
+      if (hoverIdx == null) return;
+      e.preventDefault();
+      const band = nodes.bands[hoverIdx];
+      if (!band) return;
+      const factor = e.deltaY > 0 ? 1 / 1.12 : 1.12;
+      nodes.onChange(hoverIdx, { q: Math.round(clamp(band.q * factor, 0.1, 20) * 100) / 100 });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [nodes, hoverIdx]);
 
   const paths = useMemo(
     () =>
@@ -71,6 +120,7 @@ export function EqChart({ series, height = 210 }: { series: Series[]; height?: n
 
   return (
     <svg
+      ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
       style={{ width: "100%", height: "auto", userSelect: "none", touchAction: "none" }}
       role="img"
@@ -123,6 +173,56 @@ export function EqChart({ series, height = 210 }: { series: Series[]; height?: n
           <path key={`c${i}`} d={paths[i]} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" />
         ),
       )}
+
+      {/* draggable band handles (§5.2): X = fc, Y = gain, wheel = Q */}
+      {nodes?.bands.map((b, i) => {
+        const cx = x(clamp(b.freq_hz, F_MIN, F_MAX));
+        const cy = y(clamp(b.gain_db, yMin, yMax));
+        const active = dragIdx === i || hoverIdx === i;
+        return (
+          <g key={`n${i}`}>
+            <circle
+              cx={cx}
+              cy={cy}
+              r={active ? 7 : 5.5}
+              fill={nodes.color}
+              fillOpacity={active ? 0.95 : 0.75}
+              stroke="currentColor"
+              strokeOpacity={0.35}
+              style={{ cursor: nodes.disabled ? "default" : dragIdx === i ? "grabbing" : "grab" }}
+              onPointerEnter={() => setHoverIdx(i)}
+              onPointerLeave={() => setHoverIdx((h) => (h === i ? null : h))}
+              onPointerDown={(e) => {
+                if (nodes.disabled) return;
+                // Without preventDefault the browser's native selection drag races ours.
+                e.preventDefault();
+                (e.target as Element).setPointerCapture(e.pointerId);
+                setDragIdx(i);
+              }}
+              onPointerMove={(e) => {
+                if (dragIdx !== i) return;
+                const { vx, vy } = toViewBox(e.clientX, e.clientY);
+                nodes.onChange(i, {
+                  freq_hz: Math.round(clamp(invX(vx), F_MIN, F_MAX)),
+                  gain_db: Math.round(clamp(invY(vy), -20, 20) * 10) / 10,
+                });
+              }}
+              onPointerUp={(e) => {
+                if (dragIdx !== i) return;
+                (e.target as Element).releasePointerCapture(e.pointerId);
+                setDragIdx(null);
+                nodes.onDragEnd?.();
+              }}
+            />
+            {active && (
+              <text x={cx} y={cy - 11} textAnchor="middle" fontSize="9.5" fill="currentColor" opacity={0.8}>
+                {b.freq_hz >= 1000 ? `${(b.freq_hz / 1000).toFixed(2)}k` : b.freq_hz} Hz · {b.gain_db > 0 ? "+" : ""}
+                {b.gain_db.toFixed(1)} dB · Q {b.q.toFixed(2)}
+              </text>
+            )}
+          </g>
+        );
+      })}
 
       {/* legend */}
       {series.map((s, i) => (

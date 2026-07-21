@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cageq_config_writer::{self as cw, WriteError};
 use cageq_watchdog::{Supervisor, SupervisorError};
@@ -214,6 +214,14 @@ const RAMP_RATE_DB_PER_SEC: f64 = 6.0;
 /// consecutive-write debounce (§5.3) is respected.
 const RAMP_STEP: Duration = Duration::from_millis(25);
 
+/// filter.md §5.3 hard rule: EqAPO does **not** reset its crossfade progress counter
+/// when a reload lands while a transition is still running (FilterEngine.cpp:258-261) —
+/// the in-flight counter gets applied to the new curve, which is audible as a jump. So
+/// consecutive writes must be spaced at least this far apart. Enforced here (server
+/// side) rather than trusting callers: live editing (tone drags, auto-apply) would
+/// otherwise fire writes far faster than this.
+const MIN_WRITE_SPACING: Duration = Duration::from_millis(15);
+
 // ---------------------------------------------------------------------------
 // Core
 // ---------------------------------------------------------------------------
@@ -273,6 +281,8 @@ struct Inner {
     slots: Mutex<SlotStore>,
     applied_count: AtomicU32,
     shutdown: AtomicBool,
+    /// When the last cageq.txt write happened, for the §5.3 ≥15 ms spacing rule.
+    last_write: Mutex<Instant>,
     startup: StartupDecision,
     /// §4.0 loudness settings (base pre-gain + mode) applied to every composed preamp.
     loudness: Mutex<LoudnessSettings>,
@@ -314,6 +324,7 @@ impl Core {
             slots: Mutex::new(SlotStore { a: None, b: None, device: None, active: Slot::A }),
             applied_count: AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
+            last_write: Mutex::new(Instant::now() - MIN_WRITE_SPACING),
             startup,
             loudness: Mutex::new(LoudnessSettings::default()),
         });
@@ -515,6 +526,18 @@ fn do_apply_to_slot(
     write_active_locked(inner)
 }
 
+/// Block until at least [`MIN_WRITE_SPACING`] has passed since the previous write
+/// (§5.3). Only the *write* is delayed, never the calculation — callers already did
+/// their work. Cheap no-op for ordinary, human-paced changes.
+fn space_out_write(inner: &Inner) {
+    let mut last = inner.last_write.lock().unwrap();
+    let since = last.elapsed();
+    if since < MIN_WRITE_SPACING {
+        thread::sleep(MIN_WRITE_SPACING - since);
+    }
+    *last = Instant::now();
+}
+
 /// The active slot's effective fit (Dry synthesised), or `EmptySlot`.
 fn current_effective(inner: &Inner) -> Result<CalcResult, CoreError> {
     let store = inner.slots.lock().unwrap();
@@ -530,6 +553,7 @@ fn write_effective(
     clipping_warning: bool,
 ) -> Result<Applied, CoreError> {
     let device_config = DeviceConfig { device: effective.device, preamp_db, filters: effective.filters };
+    space_out_write(inner); // §5.3: never land a reload inside EqAPO's running crossfade
     let hash = cw::apply(&inner.config_dir, std::slice::from_ref(&device_config))?;
     inner.applied_count.fetch_add(1, Ordering::SeqCst);
     Ok(Applied {

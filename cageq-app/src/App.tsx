@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Band } from "./biquad";
 import { EqChart } from "./EqChart";
@@ -53,6 +53,7 @@ const measurementRank = (h: Headphone) => (h.source === "oratory1990" ? 0 : 1);
 // Slot A = goldenrod, Slot B = blue, Dry = neutral (filter.md §5.2 accent colours).
 const SLOT_COLOR: Record<SlotName, string> = { A: "#daa520", B: "#3b82f6", Dry: "#9ca3af" };
 const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
+const TONE_COLOR = "#16a34a"; // the editable tone layer
 
 function App() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -211,20 +212,22 @@ function App() {
     setMeasurementPath(ms ? ms[0].path : "");
   }
 
-  async function apply() {
+  /** `auto` = triggered by a live tone edit: no button spinner, no error nagging. */
+  async function apply(auto = false) {
     if (activeSlot === "Dry") return; // Dry is a fixed reference, not editable
     if (!measurementPath) {
-      setError("Pick a headphone model and measurement first.");
+      if (!auto) setError("Pick a headphone model and measurement first.");
       return;
     }
     const dev = devices.find((d) => d.id === deviceId);
     if (!dev) {
-      setError("Pick an output device first.");
+      if (!auto) setError("Pick an output device first.");
       return;
     }
     try {
       setError("");
-      setApplying(true);
+      inFlight.current = true;
+      if (!auto) setApplying(true);
       setResult(
         await invoke<ApplyResult>("apply", {
           device: dev.eqapo_pattern, // the EqAPO-matchable device pattern, not the headphone
@@ -238,13 +241,39 @@ function App() {
         ...prev,
         [activeSlot]: { model: query, measurementPath, targetPath, customFilters },
       }));
-      setStatus(await invoke<Status>("status"));
+      if (!auto) setStatus(await invoke<Status>("status"));
     } catch (e) {
       setError(String(e));
-      setResult(null);
+      if (!auto) setResult(null);
     } finally {
-      setApplying(false);
+      inFlight.current = false;
+      if (!auto) setApplying(false);
     }
+  }
+
+  // --- live tone editing -----------------------------------------------------
+  // Tone changes auto-apply so they're audible immediately. A coalescing throttle
+  // keeps a drag streaming updates (rather than only firing when you let go) without
+  // flooding IPC; the Core separately enforces the §5.3 >=15 ms write spacing.
+  const inFlight = useRef(false);
+  const applyTimer = useRef<number | null>(null);
+  const autoApplyRef = useRef<() => void>(() => {});
+
+  // Refreshed every render so a queued timer never fires against stale state.
+  autoApplyRef.current = () => {
+    if (inFlight.current) {
+      requestApply(60); // a write is in progress — retry shortly
+      return;
+    }
+    void apply(true);
+  };
+
+  function requestApply(delay = 60) {
+    if (applyTimer.current != null) return; // fold into the already-scheduled write
+    applyTimer.current = window.setTimeout(() => {
+      applyTimer.current = null;
+      autoApplyRef.current();
+    }, delay);
   }
 
   // Switch the active comparison slot. Populated A/B and Dry write instantly (cached,
@@ -303,18 +332,31 @@ function App() {
   // hand-made filter that happens to sit near 105 Hz isn't hijacked by the slider.
   const macroGain = (spec: typeof MACRO_BASS) =>
     customFilters.find((f) => f.kind === spec.kind && Math.abs(f.freq_hz - spec.freq_hz) < 1)?.gain_db ?? 0;
-  const setMacro = (spec: typeof MACRO_BASS, gain_db: number) =>
+  const setMacro = (spec: typeof MACRO_BASS, gain_db: number) => {
     setCustomFilters((cf) => {
       const i = cf.findIndex((f) => f.kind === spec.kind && Math.abs(f.freq_hz - spec.freq_hz) < 1);
       return i >= 0 ? cf.map((f, j) => (j === i ? { ...f, gain_db } : f)) : [...cf, { ...spec, gain_db }];
     });
+    requestApply(60); // sliders stream, so throttle like a drag
+  };
 
-  // Custom-filter (§3.4) editing — changes take effect on the next Apply.
-  const addFilter = () =>
+  // §3.4 tone editing — every change auto-applies (throttled).
+  const addFilter = () => {
     setCustomFilters((cf) => [...cf, { kind: "Peaking", freq_hz: 1000, gain_db: 0, q: 1 }]);
-  const updateFilter = (i: number, patch: Partial<CustomFilter>) =>
+    requestApply(0);
+  };
+  const updateFilter = (i: number, patch: Partial<CustomFilter>, delay = 0) => {
     setCustomFilters((cf) => cf.map((f, j) => (j === i ? { ...f, ...patch } : f)));
-  const removeFilter = (i: number) => setCustomFilters((cf) => cf.filter((_, j) => j !== i));
+    requestApply(delay);
+  };
+  const removeFilter = (i: number) => {
+    setCustomFilters((cf) => cf.filter((_, j) => j !== i));
+    requestApply(0);
+  };
+  const setTonePreset = (filters: CustomFilter[]) => {
+    setCustomFilters(filters.map((f) => ({ ...f })));
+    requestApply(0);
+  };
 
   // A/S/D switch slots, W toggles loudness mode — but not while typing in a field
   // (filter.md §5.2 blind-comparison shortcuts).
@@ -520,7 +562,7 @@ function App() {
                     </option>
                   ))}
                 </select>
-                <button type="button" onClick={apply} disabled={applying || dryActive} style={{ marginLeft: "auto" }}>
+                <button type="button" onClick={() => apply()} disabled={applying || dryActive} style={{ marginLeft: "auto" }}>
                   {applying ? "Fitting…" : dryActive ? "Dry (pick A or B)" : `Apply → Slot ${activeSlot}`}
                 </button>
               </div>
@@ -560,8 +602,15 @@ function App() {
                   <EqChart
                     series={[
                       { bands: result.filters, color: SLOT_COLOR[activeSlot], label: "Applied total", muted: true },
-                      { bands: customFilters, color: "#16a34a", label: "Tone (your offset)" },
+                      { bands: customFilters, color: TONE_COLOR, label: "Tone (your offset)" },
                     ]}
+                    nodes={{
+                      bands: customFilters,
+                      color: TONE_COLOR,
+                      disabled: dryActive,
+                      onChange: (i, patch) => updateFilter(i, patch, 70),
+                      onDragEnd: () => requestApply(0),
+                    }}
                   />
                   <p style={{ fontSize: "0.8em", opacity: 0.75, margin: "0.2em 0 0" }}>
                     Preamp <code>{result.preamp_db.toFixed(1)} dB</code>{" "}
@@ -757,7 +806,7 @@ function App() {
                     key={p.name}
                     type="button"
                     disabled={dryActive}
-                    onClick={() => setCustomFilters(p.filters.map((f) => ({ ...f })))}
+                    onClick={() => setTonePreset(p.filters)}
                     style={{ fontSize: "0.8em" }}
                   >
                     {p.name}
