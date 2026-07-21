@@ -188,13 +188,18 @@ def loudness_target_db(f, g_eq_db):
     perceived loudness of pink noise, negated so applying it is level-neutral vs. dry.
 
     NOT a measurement of real audio and NOT an absolute LUFS level — a per-curve
-    broadband offset so A/B/Dry comparisons judge timbre, not level. `f` must be a
-    log-spaced grid (constant ratio per octave) so P_pink = 1/f is constant energy
-    per octave (see the §4.1 grid note)."""
+    broadband offset so A/B/Dry comparisons judge timbre, not level."""
     w_k = _k_weight_power(f)
-    p_pink = 1.0 / f
-    p_dry = np.sum(p_pink * w_k)
-    p_wet = np.sum(p_pink * w_k * 10.0 ** (g_eq_db / 10.0))
+    # Pink noise's power *density* is 1/f, but the energy in a bin is density x bin
+    # width — so the Jacobian matters. np.gradient gives the local spacing, making
+    # this correct on any grid: on a log grid dF is proportional to f, the 1/f
+    # cancels, and every bin carries equal energy (i.e. constant energy per octave);
+    # on a linear grid it reduces to plain 1/f. Using 1/f directly as a per-bin
+    # weight on a log grid double-counts the pink slope (it models ~1/f^2) and
+    # massively over-weights the bottom octaves — the bug this replaces.
+    bin_energy = np.gradient(f) / f
+    p_dry = np.sum(bin_energy * w_k)
+    p_wet = np.sum(bin_energy * w_k * 10.0 ** (g_eq_db / 10.0))
     delta_l = 10.0 * np.log10(p_wet / p_dry)
     return -delta_l
 

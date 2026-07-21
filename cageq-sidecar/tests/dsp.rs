@@ -122,6 +122,46 @@ fn real_dsp_appends_custom_filters() {
     );
 }
 
+/// Regression guard for the pink-noise Jacobian bug (§4.1).
+///
+/// A *uniform* gain can't catch a mis-weighted loudness integral — it factors out of
+/// the weighting entirely, which is why "broadband +6 → −6" passed while the weighting
+/// was inverted. Only a band-limited change exposes it. K-weighting discounts deep bass
+/// (≈ −13 dB at 20 Hz) and lifts treble (+4 dB), so an equal-gain treble shelf must move
+/// the compensation *more* than a bass shelf.
+#[test]
+fn real_dsp_loudness_weights_treble_above_bass() {
+    let Some(python) = venv_python() else {
+        eprintln!("skipping loudness-weighting test: no .venv");
+        return;
+    };
+    let mut sc = Sidecar::spawn(&python, &dsp_script()).expect("spawn dsp sidecar");
+    sc.ping().expect("ping");
+
+    let mut g_target_with = |filter: Value| -> f64 {
+        sc.call(
+            "calculate_filters",
+            json!({
+                "device": "Test DAC",
+                "measurement": synthetic_measurement(),
+                "custom_filters": [filter],
+            }),
+        )
+        .expect("calculate_filters")["g_target_db"]
+            .as_f64()
+            .expect("g_target_db")
+    };
+
+    let bass = g_target_with(json!({ "kind": "LowShelf", "freq_hz": 105.0, "gain_db": 6.0, "q": 0.7 }));
+    let treble = g_target_with(json!({ "kind": "HighShelf", "freq_hz": 2500.0, "gain_db": 6.0, "q": 0.7 }));
+
+    assert!(
+        treble < bass,
+        "an equal-gain treble shelf must compensate more than a bass shelf (K-weighting); \
+         got treble={treble} bass={bass}"
+    );
+}
+
 #[test]
 fn real_dsp_lists_the_autoeq_catalogue() {
     let Some(python) = venv_python() else {
