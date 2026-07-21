@@ -126,6 +126,59 @@ fn slots_switch_by_rewrite_without_refitting() {
     assert!(matches!(fresh.activate_slot(Slot::B), Err(CoreError::EmptySlot(Slot::B))));
 }
 
+/// filter.md §5.3a: a big tonal jump is slewed over several writes instead of landing
+/// in one, while a small one still goes straight out (EqAPO's own 10 ms crossfade
+/// already covers those, and slewing every node drag would feel laggy).
+#[test]
+fn large_tonal_changes_morph_across_several_writes() {
+    let tmp = TempDir::new("morph");
+    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+
+    let with_custom = |bands: serde_json::Value| {
+        let mut req = CalcRequest::for_device("DAC");
+        req.inputs.insert("custom_filters".into(), bands);
+        req
+    };
+
+    // A: bass-boosted. B: treble-boosted. Two curves far enough apart to be the
+    // "harsh" case the morph exists for.
+    core.apply_to_slot(
+        Slot::A,
+        with_custom(json!([{ "kind": "LowShelf", "freq_hz": 105.0, "gain_db": 6.0, "q": 0.7 }])),
+    )
+    .expect("apply A");
+    core.apply_to_slot(
+        Slot::B,
+        with_custom(json!([{ "kind": "HighShelf", "freq_hz": 2500.0, "gain_db": 6.0, "q": 0.7 }])),
+    )
+    .expect("apply B");
+
+    // Switching A <-> B must take more than one write, and must actually take time.
+    let before = core.applied_count();
+    let started = Instant::now();
+    let applied = core.activate_slot(Slot::A).expect("activate A");
+    let writes = core.applied_count() - before;
+    assert!(writes >= 2, "a bass<->treble swap should morph, got {writes} write(s)");
+    assert!(started.elapsed() >= Duration::from_millis(50), "morph should span real time");
+
+    // It still lands exactly on A: the final write is the real config, not a frame.
+    assert_eq!(applied.device, "DAC");
+    let bands = applied.filters;
+    assert!(
+        bands.iter().any(|f| (f.gain_db - 6.0).abs() < 1e-9 && (f.freq_hz - 105.0).abs() < 1e-9),
+        "final write must be A's own curve, not an interpolated frame: {bands:?}"
+    );
+    assert!(
+        !bands.iter().any(|f| (f.freq_hz - 2500.0).abs() < 1e-9 && f.gain_db > 0.0),
+        "B's treble shelf must be gone once the morph completes: {bands:?}"
+    );
+
+    // A no-op switch (A -> A) has zero distance, so it stays a single write.
+    let before = core.applied_count();
+    core.activate_slot(Slot::A).expect("re-activate A");
+    assert_eq!(core.applied_count() - before, 1, "an unchanged curve must not morph");
+}
+
 #[test]
 fn copy_slot_duplicates_a_fit_and_activates_the_target() {
     let tmp = TempDir::new("copy");

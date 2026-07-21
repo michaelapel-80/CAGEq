@@ -33,6 +33,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+mod morph;
+
 use cageq_config_writer::{self as cw, WriteError};
 use cageq_watchdog::{Supervisor, SupervisorError};
 use serde::{Deserialize, Serialize};
@@ -222,6 +224,20 @@ const RAMP_STEP: Duration = Duration::from_millis(25);
 /// otherwise fire writes far faster than this.
 const MIN_WRITE_SPACING: Duration = Duration::from_millis(15);
 
+/// §5.3a tonal-morph rate. Deliberately *not* §7.5's 6 dB/s: that figure is a
+/// hearing-protection envelope on absolute level, whereas a morph is level-neutral by
+/// construction (the §4.1 match holds loudness across it) and only has to avoid
+/// abruptness. Different purpose, different constant.
+const TONE_MORPH_RATE_DB_PER_SEC: f64 = 40.0;
+
+/// Hard ceiling on a morph, whatever the distance. This is the constraint people
+/// forget: timbral auditory memory is short, so a slow morph destroys the A/B
+/// comparison it was meant to smooth — by the time B arrives you no longer hold A.
+/// At §7.5's 6 dB/s a bass↔treble preset swap would take ~830 ms and an extreme pair
+/// over 2 s; capping here keeps every transition inside the window where both curves
+/// can still be held at once.
+const TONE_MORPH_MAX: Duration = Duration::from_millis(300);
+
 // ---------------------------------------------------------------------------
 // Core
 // ---------------------------------------------------------------------------
@@ -286,6 +302,17 @@ struct Inner {
     startup: StartupDecision,
     /// §4.0 loudness settings (base pre-gain + mode) applied to every composed preamp.
     loudness: Mutex<LoudnessSettings>,
+    /// What was last written to cageq.txt — the true *starting* curve for a §5.3a
+    /// morph. Taken from here rather than from the previously-active slot so that a
+    /// morph interrupted half-way resumes from the curve actually on disk, not from
+    /// wherever the abandoned transition began.
+    last_written: Mutex<Option<CalcResult>>,
+    /// The [`Applied`] describing that same write, so a superseded morph can report the
+    /// real on-disk state (hash included) without writing again.
+    last_applied: Mutex<Option<Applied>>,
+    /// Bumped by every action that initiates a write. An in-flight morph that sees this
+    /// change knows a newer intention has superseded it and stops writing (§5.3a).
+    morph_gen: AtomicU32,
 }
 
 /// The orchestrator handle.
@@ -327,6 +354,9 @@ impl Core {
             last_write: Mutex::new(Instant::now() - MIN_WRITE_SPACING),
             startup,
             loudness: Mutex::new(LoudnessSettings::default()),
+            last_written: Mutex::new(None),
+            last_applied: Mutex::new(None),
+            morph_gen: AtomicU32::new(0),
         });
 
         let reconciler = {
@@ -358,12 +388,16 @@ impl Core {
     /// file write (no sidecar), so A/B/Dry switching is instant. Errors with
     /// [`CoreError::EmptySlot`] if the target slot has nothing to write yet.
     pub fn activate_slot(&self, slot: Slot) -> Result<Applied, CoreError> {
-        let _guard = self.inner.apply_lock.lock().unwrap();
-        if !self.inner.slots.lock().unwrap().has(slot) {
-            return Err(CoreError::EmptySlot(slot));
+        let ticket = claim_write(&self.inner);
+        {
+            let _guard = self.inner.apply_lock.lock().unwrap();
+            let mut store = self.inner.slots.lock().unwrap();
+            if !store.has(slot) {
+                return Err(CoreError::EmptySlot(slot));
+            }
+            store.active = slot;
         }
-        self.inner.slots.lock().unwrap().active = slot;
-        write_active_locked(&self.inner)
+        morph_to_active(&self.supervisor, &self.inner, ticket)
     }
 
     /// Copy slot `from`'s cached fit into slot `to` and make `to` active (filter.md
@@ -374,14 +408,17 @@ impl Core {
         if from == Slot::Dry || to == Slot::Dry {
             return Err(CoreError::DryNotEditable);
         }
-        let _guard = self.inner.apply_lock.lock().unwrap();
+        let ticket = claim_write(&self.inner);
         {
+            let _guard = self.inner.apply_lock.lock().unwrap();
             let mut store = self.inner.slots.lock().unwrap();
             let src = store.slot_mut(from).clone().ok_or(CoreError::EmptySlot(from))?;
             *store.slot_mut(to) = Some(src);
             store.active = to;
         }
-        write_active_locked(&self.inner)
+        // Reproduces `from`'s config exactly, so the morph is a no-op distance — but
+        // routing through it keeps every write path on one mechanism.
+        morph_to_active(&self.supervisor, &self.inner, ticket)
     }
 
     /// The currently active slot.
@@ -444,6 +481,7 @@ impl Core {
     /// cached fit (no sidecar). `None` if the active slot has nothing to write yet;
     /// otherwise the fresh [`Applied`] (or a write error).
     pub fn reapply(&self) -> Option<Result<Applied, CoreError>> {
+        claim_write(&self.inner);
         let _guard = self.inner.apply_lock.lock().unwrap();
         self.inner.slots.lock().unwrap().effective()?; // nothing active to rewrite yet
         Some(write_active_locked(&self.inner))
@@ -466,6 +504,10 @@ impl Core {
         let effective = self.inner.slots.lock().unwrap().effective()?;
         let start = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &prev).db;
         let target = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &settings).db;
+
+        // A level change supersedes any in-flight tonal morph (§5.3a) — the two would
+        // otherwise fight over the preamp.
+        claim_write(&self.inner);
 
         // Ramp only a real increase; a decrease/no-change writes directly.
         if target > start + 0.05 {
@@ -511,19 +553,26 @@ fn do_apply_to_slot(
     slot: Slot,
     request: CalcRequest,
 ) -> Result<Applied, CoreError> {
-    let _guard = inner.apply_lock.lock().unwrap();
-
-    let params = serde_json::to_value(&request)?;
-    let reply = supervisor.call("calculate_filters", params)?;
-    let result: CalcResult = serde_json::from_value(reply)?;
-
+    let ticket = claim_write(inner);
     {
+        let _guard = inner.apply_lock.lock().unwrap();
+
+        let params = serde_json::to_value(&request)?;
+        let reply = supervisor.call("calculate_filters", params)?;
+        let result: CalcResult = serde_json::from_value(reply)?;
+
         let mut store = inner.slots.lock().unwrap();
         store.device = Some(result.device.clone());
         *store.slot_mut(slot) = Some(result);
         store.active = slot;
     }
-    write_active_locked(inner)
+    morph_to_active(supervisor, inner, ticket)
+}
+
+/// Take a ticket for a new write intention (§5.3a). Any morph still running against an
+/// older ticket will notice and stand down at its next frame.
+fn claim_write(inner: &Inner) -> u32 {
+    inner.morph_gen.fetch_add(1, Ordering::SeqCst) + 1
 }
 
 /// Block until at least [`MIN_WRITE_SPACING`] has passed since the previous write
@@ -552,17 +601,23 @@ fn write_effective(
     preamp_db: f64,
     clipping_warning: bool,
 ) -> Result<Applied, CoreError> {
-    let device_config = DeviceConfig { device: effective.device, preamp_db, filters: effective.filters };
+    let device_config =
+        DeviceConfig { device: effective.device.clone(), preamp_db, filters: effective.filters.clone() };
     space_out_write(inner); // §5.3: never land a reload inside EqAPO's running crossfade
     let hash = cw::apply(&inner.config_dir, std::slice::from_ref(&device_config))?;
     inner.applied_count.fetch_add(1, Ordering::SeqCst);
-    Ok(Applied {
+    let applied = Applied {
         hash,
         device: device_config.device,
         preamp_db,
         clipping_warning,
         filters: device_config.filters,
-    })
+    };
+    // Remember what landed: the curve is the next morph's start point (§5.3a), the
+    // Applied is what a superseded morph reports.
+    *inner.last_written.lock().unwrap() = Some(effective);
+    *inner.last_applied.lock().unwrap() = Some(applied.clone());
+    Ok(applied)
 }
 
 /// Compose the active slot's cached fit with the current loudness settings and write
@@ -574,6 +629,86 @@ fn write_active_locked(inner: &Inner) -> Result<Applied, CoreError> {
     let loudness = *inner.loudness.lock().unwrap();
     let preamp = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &loudness);
     write_effective(inner, effective, preamp.db, preamp.clipping_warning)
+}
+
+/// How many intermediate frames a change of `distance_db` deserves (§5.3a). Zero means
+/// "just write it" — EqAPO's own 10 ms crossfade already covers changes that small,
+/// which is every ordinary node drag.
+fn morph_frames(distance_db: f64) -> usize {
+    let secs = (distance_db / TONE_MORPH_RATE_DB_PER_SEC).min(TONE_MORPH_MAX.as_secs_f64());
+    let frames = (secs / RAMP_STEP.as_secs_f64()).round() as usize;
+    frames.saturating_sub(1) // the final, exact write is the last frame
+}
+
+/// §5.3a: slew from the curve currently on disk to the active slot's, instead of
+/// swapping it in one write. Takes the caller's `ticket`: if a newer intention
+/// arrives mid-morph this abandons quietly and reports the last state it wrote, so the
+/// newer caller can pick up from the *interpolated* curve rather than a stale endpoint.
+///
+/// Unlike [`ramp_preamp`], `apply_lock` is taken per frame rather than held throughout —
+/// a 300 ms lock per change would make live node-dragging feel glued. The generation
+/// check happens under that lock, so once superseded this writes nothing further and
+/// the two callers cannot interleave.
+fn morph_to_active(supervisor: &Supervisor, inner: &Inner, ticket: u32) -> Result<Applied, CoreError> {
+    let superseded = |inner: &Inner| inner.morph_gen.load(Ordering::SeqCst) != ticket;
+
+    let to = current_effective(inner)?;
+    let from = inner.last_written.lock().unwrap().clone();
+    // Nothing written yet (first apply), or the sidecar is not healthy: no morph. A
+    // safe state must be left immediately, not eased out of.
+    let can_morph = from.is_some() && matches!(supervisor.health(), Health::Running);
+    let from = from.unwrap_or_else(|| CalcResult {
+        device: to.device.clone(),
+        filters: Vec::new(),
+        g_target_db: 0.0,
+        g_max_peak_db: 0.0,
+    });
+
+    let frames = if can_morph { morph_frames(morph::tonal_distance_db(&from.filters, &to.filters)) } else { 0 };
+
+    if frames > 0 {
+        // Our own §4.1 model and the sidecar's agree in form but not to the last
+        // decimal (different grids). Carrying the endpoint residuals across the morph
+        // keeps intermediate frames level-matched *and* lands exactly on the DSP's own
+        // number, so there's no small step at the finish.
+        let residual = |c: &CalcResult| c.g_target_db - morph::loudness_target_db(&morph::curve_db(&c.filters));
+        let (res_from, res_to) = (residual(&from), residual(&to));
+        let loudness = *inner.loudness.lock().unwrap();
+
+        for i in 1..=frames {
+            let t = i as f64 / (frames + 1) as f64;
+            let guard = inner.apply_lock.lock().unwrap();
+            if superseded(inner) {
+                drop(guard);
+                return last_applied(inner);
+            }
+            let bands = morph::lerp_bands(&from.filters, &to.filters, t);
+            let curve = morph::curve_db(&bands);
+            let frame = CalcResult {
+                device: to.device.clone(),
+                filters: bands,
+                g_target_db: morph::loudness_target_db(&curve) + res_from + (res_to - res_from) * t,
+                g_max_peak_db: morph::curve_peak_db(&curve),
+            };
+            let preamp = compose_preamp(frame.g_target_db, frame.g_max_peak_db, &loudness);
+            write_effective(inner, frame, preamp.db, preamp.clipping_warning)?;
+            drop(guard);
+            thread::sleep(RAMP_STEP);
+        }
+    }
+
+    let _guard = inner.apply_lock.lock().unwrap();
+    if superseded(inner) {
+        return last_applied(inner);
+    }
+    write_active_locked(inner)
+}
+
+/// The config currently on disk — what a superseded morph reports, so an abandoned
+/// transition surfaces as a state rather than as an error the UI would have to explain.
+fn last_applied(inner: &Inner) -> Result<Applied, CoreError> {
+    let applied = inner.last_applied.lock().unwrap().clone();
+    applied.ok_or_else(|| CoreError::EmptySlot(inner.slots.lock().unwrap().active))
 }
 
 /// §7.5 controlled preamp increase: step from `start` up to the composed target at
@@ -618,7 +753,9 @@ fn reconcile_loop(supervisor: Arc<Supervisor>, inner: Arc<Inner>, poll: Duration
             continue;
         }
         // A fresh sidecar is up. Re-write the active slot's cached config; if the write
-        // fails, leave `handled` unchanged so we retry on the next poll.
+        // fails, leave `handled` unchanged so we retry on the next poll. Written
+        // directly, never morphed: a safe state is left at once, not eased out of.
+        claim_write(&inner);
         let _guard = inner.apply_lock.lock().unwrap();
         if inner.slots.lock().unwrap().effective().is_none() {
             handled = recoveries; // nothing applied yet, nothing to restore
