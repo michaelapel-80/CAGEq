@@ -451,10 +451,15 @@ fn sidecar_root() -> PathBuf {
 }
 
 /// Resolve how to launch the sidecar, plus a human label for the UI. Precedence:
-///   1. `CAGEQ_PYTHON` / `CAGEQ_SIDECAR_SCRIPT` env override (dev/tests/other machine),
-///   2. the bundled frozen executable (self-contained release),
-///   3. the dev venv + `sidecar_dsp.py`,
-///   4. a `py`-resolved interpreter + the dependency-free stub.
+///   1. `CAGEQ_PYTHON` / `CAGEQ_SIDECAR_SCRIPT` env override (tests / other machine),
+///   2. **debug build:** the dev venv + `sidecar_dsp.py`, else the bundled exe;
+///      **release build:** the bundled frozen exe, else the dev venv,
+///   3. a `py`-resolved interpreter + the dependency-free stub.
+///
+/// The profile-dependent order matters: Tauri stages bundled resources into
+/// `target/debug/` for `tauri dev` too, so a frozen bundle would otherwise shadow the
+/// live script and silently ignore every edit to `sidecar_dsp.py`. In a dev build the
+/// live script must win; in a release build (no source tree) the bundle must.
 fn resolve_sidecar(bundled: Option<&Path>) -> (SidecarSource, String) {
     let root = sidecar_root();
     let env_python = env::var("CAGEQ_PYTHON").ok();
@@ -469,19 +474,19 @@ fn resolve_sidecar(bundled: Option<&Path>) -> (SidecarSource, String) {
         return (SidecarSource::Python { python, script }, label);
     }
 
-    // 2. Bundled frozen executable (release).
-    if let Some(exe) = bundled {
-        if exe.exists() {
-            return (SidecarSource::Frozen(exe.to_path_buf()), format!("AutoEq DSP, bundled ({})", exe.display()));
-        }
-    }
-
-    // 3. Dev venv + real script.
+    // 2. Bundled frozen exe vs live dev venv, ordered by build profile.
     let venv = root.join(".venv").join("Scripts").join("python.exe");
     let dsp = root.join("python").join("sidecar_dsp.py");
-    if venv.exists() && dsp.exists() {
+    let frozen = bundled.filter(|e| e.exists()).map(|e| {
+        (SidecarSource::Frozen(e.to_path_buf()), format!("AutoEq DSP, bundled ({})", e.display()))
+    });
+    let dev = (venv.exists() && dsp.exists()).then(|| {
         let label = format!("AutoEq DSP, dev venv ({})", venv.display());
-        return (SidecarSource::Python { python: venv, script: dsp }, label);
+        (SidecarSource::Python { python: venv.clone(), script: dsp.clone() }, label)
+    });
+    let picked = if cfg!(debug_assertions) { dev.or(frozen) } else { frozen.or(dev) };
+    if let Some(picked) = picked {
+        return picked;
     }
 
     // 4. Fallback: the dependency-free stub.
