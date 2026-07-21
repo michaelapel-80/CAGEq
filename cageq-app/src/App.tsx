@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Band } from "./biquad";
+import { EqChart } from "./EqChart";
 import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
@@ -12,6 +14,7 @@ type ApplyResult = {
   cageq_text: string;
   preamp_db: number;
   clipping_warning: boolean;
+  filters: Band[]; // bands written (AutoEq fit + custom) — drawn by the §5.2 chart
 };
 type Status = {
   startup: string;
@@ -672,6 +675,10 @@ function App() {
               extreme peak.
             </p>
           )}
+          <EqChart
+            bands={result.filters}
+            color={activeSlot === "Dry" ? SLOT_COLOR.Dry : SLOT_COLOR[activeSlot]}
+          />
           <pre
             style={{
               textAlign: "left",

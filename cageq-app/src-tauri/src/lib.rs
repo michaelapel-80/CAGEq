@@ -29,6 +29,8 @@ struct ApplyResult {
     preamp_db: f64,
     /// §4.2 emergency ceiling bound the level instead of the §4.1 loudness match.
     clipping_warning: bool,
+    /// The bands written (AutoEq fit + custom filters) — the §5.2 chart draws these.
+    filters: Vec<Filter>,
 }
 
 #[derive(serde::Serialize)]
@@ -149,6 +151,7 @@ fn apply_result(applied: Applied, config_dir: &Path) -> ApplyResult {
         cageq_text,
         preamp_db: applied.preamp_db,
         clipping_warning: applied.clipping_warning,
+        filters: applied.filters,
     }
 }
 

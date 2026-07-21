@@ -82,6 +82,9 @@ pub struct Applied {
     /// True when the §4.2 emergency clipping ceiling bound the level instead of the
     /// §4.1 loudness match — surfaced to the UI as the §5.1 per-slot clipping warning.
     pub clipping_warning: bool,
+    /// The bands actually written (AutoEq fit + custom filters), so the §5.2 chart can
+    /// draw the composed curve without re-parsing cageq.txt.
+    pub filters: Vec<Filter>,
 }
 
 /// filter.md §4.0 default base pre-gain (user headroom), in dB. A conservative,
@@ -529,7 +532,13 @@ fn write_effective(
     let device_config = DeviceConfig { device: effective.device, preamp_db, filters: effective.filters };
     let hash = cw::apply(&inner.config_dir, std::slice::from_ref(&device_config))?;
     inner.applied_count.fetch_add(1, Ordering::SeqCst);
-    Ok(Applied { hash, device: device_config.device, preamp_db, clipping_warning })
+    Ok(Applied {
+        hash,
+        device: device_config.device,
+        preamp_db,
+        clipping_warning,
+        filters: device_config.filters,
+    })
 }
 
 /// Compose the active slot's cached fit with the current loudness settings and write

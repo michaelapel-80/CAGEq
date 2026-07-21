@@ -1,0 +1,92 @@
+/**
+ * Biquad response maths for the §5.2 chart.
+ *
+ * This is a deliberate, exact mirror of AutoEq's `autoeq/peq.py` — both
+ * `biquad_coefficients()` and `PEQFilter.fr` (its numerically-stable `phi` form).
+ * Keeping the same model matters: the DSP fits with it and the config-writer exports
+ * the same Fc/Gain/Q to EqAPO, so a curve drawn with different conventions (shelf Q in
+ * particular) would quietly lie about what you're hearing.
+ *
+ * Computing this client-side is what makes dragging instant — no IPC round-trip per
+ * frame (filter.md §5.2 performance rule: a drag recomputes only the additive curve).
+ */
+
+export type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
+export type Band = { kind: FilterKind; freq_hz: number; gain_db: number; q: number };
+
+/** Sample rate the filters are defined against (matches the sidecar's `fs` default). */
+export const FS = 48000;
+
+/**
+ * AutoEq's `biquad_coefficients()`: `[a0, a1, a2, b0, b1, b2]`, with `a1`/`a2` already
+ * negated (its `fr` re-negates them — mirrored in {@link filterResponseDb}).
+ */
+function coefficients(kind: FilterKind, fc: number, gainDb: number, q: number, fs: number) {
+  const a = Math.pow(10, gainDb / 40);
+  const w0 = (2 * Math.PI * fc) / fs;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cosw = Math.cos(w0);
+  const sqrtA = Math.sqrt(a);
+
+  let a0: number, a1: number, a2: number, b0: number, b1: number, b2: number;
+  if (kind === "Peaking") {
+    a0 = 1 + alpha / a;
+    a1 = -(-2 * cosw) / a0;
+    a2 = -(1 - alpha / a) / a0;
+    b0 = (1 + alpha * a) / a0;
+    b1 = (-2 * cosw) / a0;
+    b2 = (1 - alpha * a) / a0;
+  } else if (kind === "LowShelf") {
+    a0 = a + 1 + (a - 1) * cosw + 2 * sqrtA * alpha;
+    a1 = -(-2 * (a - 1 + (a + 1) * cosw)) / a0;
+    a2 = -(a + 1 + (a - 1) * cosw - 2 * sqrtA * alpha) / a0;
+    b0 = (a * (a + 1 - (a - 1) * cosw + 2 * sqrtA * alpha)) / a0;
+    b1 = (2 * a * (a - 1 - (a + 1) * cosw)) / a0;
+    b2 = (a * (a + 1 - (a - 1) * cosw - 2 * sqrtA * alpha)) / a0;
+  } else {
+    a0 = a + 1 - (a - 1) * cosw + 2 * sqrtA * alpha;
+    a1 = -(2 * (a - 1 - (a + 1) * cosw)) / a0;
+    a2 = -(a + 1 - (a - 1) * cosw - 2 * sqrtA * alpha) / a0;
+    b0 = (a * (a + 1 + (a - 1) * cosw + 2 * sqrtA * alpha)) / a0;
+    b1 = (-2 * a * (a - 1 + (a + 1) * cosw)) / a0;
+    b2 = (a * (a + 1 + (a - 1) * cosw - 2 * sqrtA * alpha)) / a0;
+  }
+  return [1.0, a1, a2, b0, b1, b2] as const;
+}
+
+/** One band's magnitude response in dB over `freqs` (mirrors `PEQFilter.fr`). */
+export function filterResponseDb(band: Band, freqs: Float64Array, fs = FS): Float64Array {
+  let [a0, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);
+  a1 = -a1; // AutoEq flips these back before evaluating
+  a2 = -a2;
+
+  const bSum = (b0 + b1 + b2) ** 2;
+  const aSum = (a0 + a1 + a2) ** 2;
+  const out = new Float64Array(freqs.length);
+  for (let i = 0; i < freqs.length; i++) {
+    const w = (2 * Math.PI * freqs[i]) / fs;
+    const phi = 4 * Math.sin(w / 2) ** 2;
+    const num = bSum + (b0 * b2 * phi - (b1 * (b0 + b2) + 4 * b0 * b2)) * phi;
+    const den = aSum + (a0 * a2 * phi - (a1 * (a0 + a2) + 4 * a0 * a2)) * phi;
+    out[i] = 10 * Math.log10(num) - 10 * Math.log10(den);
+  }
+  return out;
+}
+
+/** The composed EQ curve: every band summed (a biquad cascade adds in dB). */
+export function composedCurveDb(bands: Band[], freqs: Float64Array, fs = FS): Float64Array {
+  const total = new Float64Array(freqs.length);
+  for (const band of bands) {
+    const r = filterResponseDb(band, freqs, fs);
+    for (let i = 0; i < total.length; i++) total[i] += r[i];
+  }
+  return total;
+}
+
+/** Log-spaced frequency grid (constant ratio per octave), the audio-standard axis. */
+export function logGrid(points = 480, fMin = 20, fMax = 20000): Float64Array {
+  const out = new Float64Array(points);
+  const ratio = Math.log(fMax / fMin);
+  for (let i = 0; i < points; i++) out[i] = fMin * Math.exp((ratio * i) / (points - 1));
+  return out;
+}
