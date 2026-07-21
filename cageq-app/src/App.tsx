@@ -35,6 +35,19 @@ type SlotInputs = { model: string; measurementPath: string; targetPath: string; 
 type Selection = { headphone: string | null; target: string | null };
 const FILTER_KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
 
+// §3.4 tone layer. The macro shelves use AutoEq's own constants (105 Hz / 10 kHz, Q 0.7)
+// so a "bass boost" here means the same thing it does in AutoEq.
+const MACRO_BASS = { kind: "LowShelf" as FilterKind, freq_hz: 105, q: 0.7 };
+const MACRO_TREBLE = { kind: "HighShelf" as FilterKind, freq_hz: 10000, q: 0.7 };
+const TONE_PRESETS: { name: string; filters: CustomFilter[] }[] = [
+  { name: "Flat", filters: [] },
+  { name: "Bass boost", filters: [{ ...MACRO_BASS, gain_db: 6 }] },
+  { name: "Treble boost", filters: [{ ...MACRO_TREBLE, gain_db: 5 }] },
+  { name: "V-shape", filters: [{ ...MACRO_BASS, gain_db: 5 }, { ...MACRO_TREBLE, gain_db: 4 }] },
+  { name: "Warm", filters: [{ ...MACRO_BASS, gain_db: 4 }, { ...MACRO_TREBLE, gain_db: -3 }] },
+  { name: "Bright", filters: [{ ...MACRO_BASS, gain_db: -2 }, { ...MACRO_TREBLE, gain_db: 4 }] },
+];
+
 // oratory1990 is the common reference measurement — default to it when a model has it.
 const measurementRank = (h: Headphone) => (h.source === "oratory1990" ? 0 : 1);
 // Slot A = goldenrod, Slot B = blue, Dry = neutral (filter.md §5.2 accent colours).
@@ -285,6 +298,16 @@ function App() {
     const dev = devices.find((d) => d.id === id);
     if (dev) await invoke("set_device", { device: dev.eqapo_pattern });
   }
+
+  // §3.4 macro shelves. Matching on kind AND frequency (not frequency alone) so a
+  // hand-made filter that happens to sit near 105 Hz isn't hijacked by the slider.
+  const macroGain = (spec: typeof MACRO_BASS) =>
+    customFilters.find((f) => f.kind === spec.kind && Math.abs(f.freq_hz - spec.freq_hz) < 1)?.gain_db ?? 0;
+  const setMacro = (spec: typeof MACRO_BASS, gain_db: number) =>
+    setCustomFilters((cf) => {
+      const i = cf.findIndex((f) => f.kind === spec.kind && Math.abs(f.freq_hz - spec.freq_hz) < 1);
+      return i >= 0 ? cf.map((f, j) => (j === i ? { ...f, gain_db } : f)) : [...cf, { ...spec, gain_db }];
+    });
 
   // Custom-filter (§3.4) editing — changes take effect on the next Apply.
   const addFilter = () =>
@@ -544,10 +567,57 @@ function App() {
         <fieldset
           style={{ marginTop: "1em", textAlign: "left", border: "1px solid #0003", borderRadius: 6, opacity: dryActive ? 0.5 : 1 }}
         >
-          <legend>Custom filters (§3.4)</legend>
+          <legend>Tone (§3.4)</legend>
+          <p style={{ fontSize: "0.78em", opacity: 0.7, margin: "0 0 0.6em" }}>
+            Your tonal preference, layered on top of the AutoEq correction. Starts flat — everything
+            here is an offset from the corrected sound.
+          </p>
+
+          {/* curated presets */}
+          <div className="row" style={{ gap: "0.35em", flexWrap: "wrap", marginBottom: "0.6em" }}>
+            {TONE_PRESETS.map((p) => (
+              <button
+                key={p.name}
+                type="button"
+                disabled={dryActive}
+                onClick={() => setCustomFilters(p.filters.map((f) => ({ ...f })))}
+                style={{ fontSize: "0.8em" }}
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+
+          {/* macro shelves */}
+          {(
+            [
+              ["Bass", MACRO_BASS],
+              ["Treble", MACRO_TREBLE],
+            ] as const
+          ).map(([label, spec]) => (
+            <div key={label} className="row" style={{ gap: "0.5em", alignItems: "center", marginBottom: "0.25em" }}>
+              <span style={{ fontSize: "0.8em", width: "3.5em" }}>{label}</span>
+              <input
+                type="range"
+                min={-12}
+                max={12}
+                step={0.5}
+                value={macroGain(spec)}
+                disabled={dryActive}
+                onChange={(e) => setMacro(spec, Number(e.currentTarget.value))}
+                style={{ flex: 1, maxWidth: "16em" }}
+              />
+              <span style={{ fontSize: "0.8em", width: "4em", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                {macroGain(spec) > 0 ? "+" : ""}
+                {macroGain(spec).toFixed(1)} dB
+              </span>
+            </div>
+          ))}
+
+          <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.6em 0 0.3em" }}>Bands</p>
           {customFilters.length === 0 && (
             <p style={{ fontSize: "0.8em", opacity: 0.7, margin: "0 0 0.5em" }}>
-              No manual filters — the AutoEq fit is used as-is. Add one to shape it further.
+              No tone filters — the AutoEq correction is used as-is.
             </p>
           )}
           {customFilters.map((f, i) => (
@@ -676,8 +746,10 @@ function App() {
             </p>
           )}
           <EqChart
-            bands={result.filters}
-            color={activeSlot === "Dry" ? SLOT_COLOR.Dry : SLOT_COLOR[activeSlot]}
+            series={[
+              { bands: result.filters, color: SLOT_COLOR[activeSlot], label: "Applied total", muted: true },
+              { bands: customFilters, color: "#16a34a", label: "Tone (your offset)" },
+            ]}
           />
           <pre
             style={{
