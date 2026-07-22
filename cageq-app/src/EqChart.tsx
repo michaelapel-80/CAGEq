@@ -9,16 +9,28 @@ import { Band, composedCurveDb, logGrid } from "./biquad";
  * exact biquad model (see biquad.ts), so they match the fit and what EqAPO applies —
  * and so drag interactions can recompute locally without an IPC round-trip.
  *
- * Takes a list of series so it can show the editable **tone** layer against a flat
- * baseline plus the applied total as dimmed context (and, later, Dry/A/B overlays).
+ * Takes a list of series (curves) plus optional markers (fixed band handles, e.g. the
+ * AutoEq fit shown as diamonds) so it can overlay the editable tone layer, the applied
+ * total, and the other comparison slots (Dry/A/B) at once. Any series or marker set can
+ * be toggled from the legend — a click hides it, so a busy overlay stays legible.
  */
 
 export type Series = {
+  /** Stable identity for the legend toggle and React keys. */
+  id: string;
   bands: Band[];
   color: string;
   label: string;
-  /** Dimmed, thinner context line (not the layer being edited). */
+  /** Dimmed, thinner context line (not the layer being edited / not the active slot). */
   muted?: boolean;
+};
+
+/** A fixed (non-draggable) set of band handles drawn as diamonds — e.g. the AutoEq fit. */
+export type Marker = {
+  id: string;
+  bands: Band[];
+  color: string;
+  label: string;
 };
 
 /** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). */
@@ -40,10 +52,12 @@ const fmtHz = (f: number) => (f >= 1000 ? `${f / 1000}k` : `${f}`);
 
 export function EqChart({
   series,
+  markers = [],
   nodes,
   height = 210,
 }: {
   series: Series[];
+  markers?: Marker[];
   nodes?: Nodes;
   height?: number;
 }) {
@@ -53,23 +67,37 @@ export function EqChart({
   const svgRef = useRef<SVGSVGElement>(null);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  // Legend visibility, keyed by series/marker id. Absent = visible (default on).
+  const [hidden, setHidden] = useState<Record<string, boolean>>({});
+  const isHidden = (id: string) => hidden[id] === true;
+  const toggle = (id: string) => setHidden((h) => ({ ...h, [id]: !h[id] }));
 
   const { freqs, curves, yMin, yMax, step } = useMemo(() => {
     const freqs = logGrid(480, F_MIN, F_MAX);
     const curves = series.map((s) => composedCurveDb(s.bands, freqs));
     let lo = 0;
     let hi = 0;
-    for (const c of curves) {
-      for (const v of c) {
+    // Auto-range over visible curves and visible marker gains only, so hiding a
+    // spiky layer lets the rest breathe.
+    series.forEach((s, i) => {
+      if (isHidden(s.id)) return;
+      for (const v of curves[i]) {
         if (v < lo) lo = v;
         if (v > hi) hi = v;
+      }
+    });
+    for (const m of markers) {
+      if (isHidden(m.id)) continue;
+      for (const b of m.bands) {
+        if (b.gain_db < lo) lo = b.gain_db;
+        if (b.gain_db > hi) hi = b.gain_db;
       }
     }
     // Symmetric range with a sane floor so a flat curve isn't wildly zoomed.
     const span = Math.max(6, Math.ceil(Math.max(Math.abs(lo), Math.abs(hi)) + 1));
     const step = span <= 9 ? 3 : span <= 18 ? 6 : 12;
     return { freqs, curves, yMin: -span, yMax: span, step };
-  }, [series]);
+  }, [series, markers, hidden]);
 
   const lnMin = Math.log(F_MIN);
   const lnSpan = Math.log(F_MAX) - lnMin;
@@ -118,6 +146,12 @@ export function EqChart({
   const dbTicks: number[] = [];
   for (let v = -Math.floor(yMax / step) * step; v <= yMax; v += step) dbTicks.push(v);
 
+  // Legend rows: every series then every marker, in draw order.
+  const legend = [
+    ...series.map((s) => ({ id: s.id, color: s.color, label: s.label, dashed: !!s.muted, diamond: false })),
+    ...markers.map((m) => ({ id: m.id, color: m.color, label: m.label, dashed: false, diamond: true })),
+  ];
+
   return (
     <svg
       ref={svgRef}
@@ -153,11 +187,11 @@ export function EqChart({
         </g>
       ))}
 
-      {/* curves — muted context lines first so the edited layer draws on top */}
+      {/* curves — muted context lines first so the edited/active layer draws on top */}
       {series.map((s, i) =>
-        s.muted ? (
+        s.muted && !isHidden(s.id) ? (
           <path
-            key={`c${i}`}
+            key={`c${s.id}`}
             d={paths[i]}
             fill="none"
             stroke={s.color}
@@ -169,9 +203,31 @@ export function EqChart({
         ) : null,
       )}
       {series.map((s, i) =>
-        s.muted ? null : (
-          <path key={`c${i}`} d={paths[i]} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" />
-        ),
+        !s.muted && !isHidden(s.id) ? (
+          <path key={`c${s.id}`} d={paths[i]} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" />
+        ) : null,
+      )}
+
+      {/* fixed band markers (e.g. the AutoEq fit) as small diamonds */}
+      {markers.map((m) =>
+        isHidden(m.id)
+          ? null
+          : m.bands.map((b, i) => {
+              const cx = x(clamp(b.freq_hz, F_MIN, F_MAX));
+              const cy = y(clamp(b.gain_db, yMin, yMax));
+              const r = 3.4;
+              return (
+                <path
+                  key={`m${m.id}-${i}`}
+                  d={`M${cx},${cy - r}L${cx + r},${cy}L${cx},${cy + r}L${cx - r},${cy}Z`}
+                  fill={m.color}
+                  fillOpacity={0.7}
+                  stroke="currentColor"
+                  strokeOpacity={0.25}
+                  style={{ pointerEvents: "none" }}
+                />
+              );
+            }),
       )}
 
       {/* draggable band handles (§5.2): X = fc, Y = gain, wheel = Q */}
@@ -224,15 +280,45 @@ export function EqChart({
         );
       })}
 
-      {/* legend */}
-      {series.map((s, i) => (
-        <g key={`l${i}`} transform={`translate(${PAD.l + 6}, ${PAD.t + 12 + i * 13})`}>
-          <line x1={0} x2={16} y1={-3.5} y2={-3.5} stroke={s.color} strokeWidth={s.muted ? 1.25 : 2} strokeOpacity={s.muted ? 0.45 : 1} strokeDasharray={s.muted ? "4 3" : undefined} />
-          <text x={21} y={0} fontSize="10" fill="currentColor" opacity={s.muted ? 0.5 : 0.75}>
-            {s.label}
-          </text>
-        </g>
-      ))}
+      {/* legend — click a row to hide/show that series or marker set */}
+      {legend.map((row, i) => {
+        const off = isHidden(row.id);
+        return (
+          <g
+            key={`l${row.id}`}
+            transform={`translate(${PAD.l + 6}, ${PAD.t + 12 + i * 13})`}
+            style={{ cursor: "pointer" }}
+            onClick={() => toggle(row.id)}
+          >
+            {/* a wide invisible hit area so the whole row is clickable */}
+            <rect x={-3} y={-9} width={150} height={12} fill="transparent" />
+            {row.diamond ? (
+              <path d="M8,-6.5L11,-3.5L8,-0.5L5,-3.5Z" fill={row.color} fillOpacity={off ? 0.3 : 0.7} />
+            ) : (
+              <line
+                x1={0}
+                x2={16}
+                y1={-3.5}
+                y2={-3.5}
+                stroke={row.color}
+                strokeWidth={row.dashed ? 1.25 : 2}
+                strokeOpacity={off ? 0.3 : row.dashed ? 0.45 : 1}
+                strokeDasharray={row.dashed ? "4 3" : undefined}
+              />
+            )}
+            <text
+              x={21}
+              y={0}
+              fontSize="10"
+              fill="currentColor"
+              opacity={off ? 0.35 : row.dashed ? 0.5 : 0.75}
+              textDecoration={off ? "line-through" : undefined}
+            >
+              {row.label}
+            </text>
+          </g>
+        );
+      })}
     </svg>
   );
 }
