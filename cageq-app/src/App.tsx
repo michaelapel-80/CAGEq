@@ -36,10 +36,13 @@ type SlotInputs = { model: string; measurementPath: string; targetPath: string; 
 type Selection = { headphone: string | null; target: string | null };
 const FILTER_KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
 
-// §3.4 tone layer. The macro shelves use AutoEq's own constants (105 Hz / 10 kHz, Q 0.7)
-// so a "bass boost" here means the same thing it does in AutoEq.
+// §3.4 tone layer. Bass keeps AutoEq's own 105 Hz shelf constant. Treble deliberately
+// does NOT: AutoEq's "treble" shelf sits at 10 kHz (an "air"/brilliance lift that is
+// barely a loudness event and not what most listeners mean by "treble"). A 4 kHz corner
+// covers the presence+brilliance band people actually reach for, and — being where
+// K-weighting peaks — makes the §4.1 loudness match respond meaningfully to it.
 const MACRO_BASS = { kind: "LowShelf" as FilterKind, freq_hz: 105, q: 0.7 };
-const MACRO_TREBLE = { kind: "HighShelf" as FilterKind, freq_hz: 10000, q: 0.7 };
+const MACRO_TREBLE = { kind: "HighShelf" as FilterKind, freq_hz: 4000, q: 0.7 };
 const TONE_PRESETS: { name: string; filters: CustomFilter[] }[] = [
   { name: "Flat", filters: [] },
   { name: "Bass boost", filters: [{ ...MACRO_BASS, gain_db: 6 }] },
