@@ -153,17 +153,23 @@ fn coefficients(band: &Filter) -> [f64; 6] {
     [1.0, a1, a2, b0, b1, b2]
 }
 
-/// The composed EQ curve of `bands` in dB on the shared grid (a biquad cascade adds in
-/// dB). Mirrors `PEQFilter.fr`'s numerically-stable `phi` form.
+/// The composed EQ curve of `bands` in dB on the module's shared grid (a biquad cascade
+/// adds in dB). Mirrors `PEQFilter.fr`'s numerically-stable `phi` form.
 pub(crate) fn curve_db(bands: &[Filter]) -> Vec<f64> {
-    let g = grid();
-    let mut total = vec![0.0; g.f.len()];
+    curve_db_on(bands, &grid().f)
+}
+
+/// The same curve on an arbitrary frequency grid. Split out so a cross-language test can
+/// evaluate it on exactly the grid it feeds the reference Python (`peq.py`) and compare
+/// point-for-point — the guard against the three biquad copies drifting apart.
+pub(crate) fn curve_db_on(bands: &[Filter], freqs: &[f64]) -> Vec<f64> {
+    let mut total = vec![0.0; freqs.len()];
     for band in bands {
         let [a0, a1, a2, b0, b1, b2] = coefficients(band);
         let (a1, a2) = (-a1, -a2); // AutoEq flips these back before evaluating
         let b_sum = (b0 + b1 + b2).powi(2);
         let a_sum = (a0 + a1 + a2).powi(2);
-        for (i, &f) in g.f.iter().enumerate() {
+        for (i, &f) in freqs.iter().enumerate() {
             let w = 2.0 * std::f64::consts::PI * f / FS;
             let phi = 4.0 * (w / 2.0).sin().powi(2);
             let num = b_sum + (b0 * b2 * phi - (b1 * (b0 + b2) + 4.0 * b0 * b2)) * phi;

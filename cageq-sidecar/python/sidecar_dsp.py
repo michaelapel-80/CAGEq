@@ -334,6 +334,19 @@ def _autoeq_fit(params):
     return result
 
 
+def filter_response(params):
+    """The combined dB response of `filters` on the given `freqs`, via the exact same
+    AutoEq PEQ model the fit uses (`_custom_filters`). Test-support only: it exists so a
+    cross-language check can pin the Rust (`morph.rs`) and TypeScript (`biquad.ts`)
+    copies of the biquad math against this reference implementation — three copies exist
+    (a slot switch must draw curves without the sidecar), and silent divergence between
+    them would make the chart, the fit and the tonal-morph disagree (§5.2/§5.3a)."""
+    fs = int(params.get("fs", 48000))
+    f = np.array(params["freqs"], dtype=float)
+    _, curve = _custom_filters({"custom_filters": params.get("filters") or []}, f, fs)
+    return {"db": [round(float(v), 6) for v in curve]}
+
+
 def calculate_filters(params):
     device = params.get("device", "Unknown")
     # cached; no re-fit on custom-filter changes
@@ -399,6 +412,8 @@ def main():
                 reply(rid, result={"targets": list_targets(refresh=bool(params.get("refresh")))})
             elif method == "calculate_filters":
                 reply(rid, result=calculate_filters(params))
+            elif method == "filter_response":
+                reply(rid, result=filter_response(params))
             else:
                 reply(rid, error={"code": -32601, "message": f"unknown method: {method}"})
         except Exception as e:  # keep the loop alive; report the failure

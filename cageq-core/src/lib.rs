@@ -133,6 +133,14 @@ pub enum Slot {
     Dry,
 }
 
+/// The composed dB response of `bands` on `freqs`, via the core's biquad model
+/// (`morph.rs`, the copy that lets a slot switch draw curves without the sidecar). This
+/// is the same math the tonal-morph metric (§5.3a) runs on; exposed so a cross-language
+/// test can pin it against the reference AutoEq implementation in the Python sidecar.
+pub fn filter_curve_db(bands: &[Filter], freqs: &[f64]) -> Vec<f64> {
+    morph::curve_db_on(bands, freqs)
+}
+
 /// A point on a UI reference curve (filter.md §5.2): frequency in Hz, level in dB.
 /// Passes straight from the DSP to the chart; never written to EqAPO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
