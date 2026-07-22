@@ -33,6 +33,18 @@ export type Marker = {
   label: string;
 };
 
+/**
+ * A pre-sampled reference curve given as raw (frequency, dB) points rather than bands —
+ * e.g. AutoEq's ideal correction, which isn't a biquad cascade. Drawn as a thin dotted
+ * line so it reads as context the fitted curve is chasing, not another EQ layer.
+ */
+export type RefCurve = {
+  id: string;
+  points: { f: number; db: number }[];
+  color: string;
+  label: string;
+};
+
 /** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). */
 export type Nodes = {
   bands: Band[];
@@ -53,11 +65,13 @@ const fmtHz = (f: number) => (f >= 1000 ? `${f / 1000}k` : `${f}`);
 export function EqChart({
   series,
   markers = [],
+  refs = [],
   nodes,
   height = 210,
 }: {
   series: Series[];
   markers?: Marker[];
+  refs?: RefCurve[];
   nodes?: Nodes;
   height?: number;
 }) {
@@ -93,11 +107,18 @@ export function EqChart({
         if (b.gain_db > hi) hi = b.gain_db;
       }
     }
+    for (const rc of refs) {
+      if (isHidden(rc.id)) continue;
+      for (const p of rc.points) {
+        if (p.db < lo) lo = p.db;
+        if (p.db > hi) hi = p.db;
+      }
+    }
     // Symmetric range with a sane floor so a flat curve isn't wildly zoomed.
     const span = Math.max(6, Math.ceil(Math.max(Math.abs(lo), Math.abs(hi)) + 1));
     const step = span <= 9 ? 3 : span <= 18 ? 6 : 12;
     return { freqs, curves, yMin: -span, yMax: span, step };
-  }, [series, markers, hidden]);
+  }, [series, markers, refs, hidden]);
 
   const lnMin = Math.log(F_MIN);
   const lnSpan = Math.log(F_MAX) - lnMin;
@@ -143,14 +164,27 @@ export function EqChart({
     [freqs, curves, yMin, yMax, H],
   );
 
+  // Reference curves live on the same axes but come as raw (f, db) points; clip each to
+  // the plotting area so an out-of-range dip doesn't shoot off the chart.
+  const refPaths = refs.map((rc) => {
+    let d = "";
+    rc.points.forEach((p, i) => {
+      const px = x(clamp(p.f, F_MIN, F_MAX));
+      const py = y(clamp(p.db, yMin, yMax));
+      d += `${i ? "L" : "M"}${px.toFixed(2)},${py.toFixed(2)}`;
+    });
+    return d;
+  });
+
   const dbTicks: number[] = [];
   for (let v = -Math.floor(yMax / step) * step; v <= yMax; v += step) dbTicks.push(v);
 
-  // Legend rows: every series then every marker, in draw order.
+  // Legend rows: every series, then reference curves, then markers, in draw order.
   const legend = [
-    ...series.map((s) => ({ id: s.id, color: s.color, label: s.label, dashed: !!s.muted, diamond: false })),
-    ...markers.map((m) => ({ id: m.id, color: m.color, label: m.label, dashed: false, diamond: true })),
-  ];
+    ...series.map((s) => ({ id: s.id, color: s.color, label: s.label, style: s.muted ? "dashed" : "solid" })),
+    ...refs.map((rc) => ({ id: rc.id, color: rc.color, label: rc.label, style: "dotted" })),
+    ...markers.map((m) => ({ id: m.id, color: m.color, label: m.label, style: "diamond" })),
+  ] as const;
 
   return (
     <svg
@@ -206,6 +240,23 @@ export function EqChart({
         !s.muted && !isHidden(s.id) ? (
           <path key={`c${s.id}`} d={paths[i]} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" />
         ) : null,
+      )}
+
+      {/* reference curves (e.g. AutoEq's ideal correction) — thin dotted context */}
+      {refs.map((rc, i) =>
+        isHidden(rc.id) ? null : (
+          <path
+            key={`r${rc.id}`}
+            d={refPaths[i]}
+            fill="none"
+            stroke={rc.color}
+            strokeWidth={1.4}
+            strokeOpacity={0.7}
+            strokeDasharray="1 3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ),
       )}
 
       {/* fixed band markers (e.g. the AutoEq fit) as small diamonds */}
@@ -280,9 +331,10 @@ export function EqChart({
         );
       })}
 
-      {/* legend — click a row to hide/show that series or marker set */}
+      {/* legend — click a row to hide/show that series, reference, or marker set */}
       {legend.map((row, i) => {
         const off = isHidden(row.id);
+        const dim = row.style === "dashed" || row.style === "dotted";
         return (
           <g
             key={`l${row.id}`}
@@ -292,7 +344,7 @@ export function EqChart({
           >
             {/* a wide invisible hit area so the whole row is clickable */}
             <rect x={-3} y={-9} width={150} height={12} fill="transparent" />
-            {row.diamond ? (
+            {row.style === "diamond" ? (
               <path d="M8,-6.5L11,-3.5L8,-0.5L5,-3.5Z" fill={row.color} fillOpacity={off ? 0.3 : 0.7} />
             ) : (
               <line
@@ -301,9 +353,10 @@ export function EqChart({
                 y1={-3.5}
                 y2={-3.5}
                 stroke={row.color}
-                strokeWidth={row.dashed ? 1.25 : 2}
-                strokeOpacity={off ? 0.3 : row.dashed ? 0.45 : 1}
-                strokeDasharray={row.dashed ? "4 3" : undefined}
+                strokeWidth={row.style === "solid" ? 2 : row.style === "dotted" ? 1.4 : 1.25}
+                strokeOpacity={off ? 0.3 : row.style === "solid" ? 1 : row.style === "dotted" ? 0.7 : 0.45}
+                strokeDasharray={row.style === "dotted" ? "1 3" : row.style === "dashed" ? "4 3" : undefined}
+                strokeLinecap={row.style === "dotted" ? "round" : undefined}
               />
             )}
             <text
@@ -311,7 +364,7 @@ export function EqChart({
               y={0}
               fontSize="10"
               fill="currentColor"
-              opacity={off ? 0.35 : row.dashed ? 0.5 : 0.75}
+              opacity={off ? 0.35 : dim ? 0.5 : 0.75}
               textDecoration={off ? "line-through" : undefined}
             >
               {row.label}

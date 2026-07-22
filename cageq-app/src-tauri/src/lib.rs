@@ -4,8 +4,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use cageq_core::{
-    Applied, AudioDevice, CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, Filter, Health,
-    LoudnessSettings, Sidecar, Slot, WatchdogConfig, detect_eqapo_config_dir, list_render_devices,
+    Applied, AudioDevice, CalcRequest, Core, CoreError, CurvePoint, DEFAULT_BASE_PREGAIN_DB, Filter,
+    Health, LoudnessSettings, Sidecar, Slot, WatchdogConfig, detect_eqapo_config_dir,
+    list_render_devices,
 };
 use serde_json::{json, Map, Value};
 use tauri::State;
@@ -31,6 +32,8 @@ struct ApplyResult {
     clipping_warning: bool,
     /// The bands written (AutoEq fit + custom filters) — the §5.2 chart draws these.
     filters: Vec<Filter>,
+    /// §5.2 chart reference: the ideal correction the AutoEq fit targets (empty for Dry).
+    reference_curve: Vec<CurvePoint>,
 }
 
 #[derive(serde::Serialize)]
@@ -152,6 +155,7 @@ fn apply_result(applied: Applied, config_dir: &Path) -> ApplyResult {
         preamp_db: applied.preamp_db,
         clipping_warning: applied.clipping_warning,
         filters: applied.filters,
+        reference_curve: applied.reference_curve,
     }
 }
 

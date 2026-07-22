@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Band } from "./biquad";
-import { EqChart, Marker, Series } from "./EqChart";
+import { EqChart, Marker, RefCurve, Series } from "./EqChart";
 import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
@@ -15,6 +15,7 @@ type ApplyResult = {
   preamp_db: number;
   clipping_warning: boolean;
   filters: Band[]; // bands written (AutoEq fit + custom) — drawn by the §5.2 chart
+  reference_curve: { f: number; db: number }[]; // §5.2 ideal-correction overlay (empty for Dry)
 };
 type Status = {
   startup: string;
@@ -54,6 +55,7 @@ const measurementRank = (h: Headphone) => (h.source === "oratory1990" ? 0 : 1);
 const SLOT_COLOR: Record<SlotName, string> = { A: "#daa520", B: "#3b82f6", Dry: "#9ca3af" };
 const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
 const TONE_COLOR = "#16a34a"; // the editable tone layer
+const REF_COLOR = "#a855f7"; // AutoEq's ideal-correction reference (target the fit chases)
 
 function App() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -419,6 +421,16 @@ function App() {
     [autoEqBands, activeSlot],
   );
 
+  // The ideal correction the active slot's fit chases (§5.2): the AutoEq curve should
+  // hug it; the gap is the residual the parametric fit couldn't capture. Off for Dry.
+  const chartRefs: RefCurve[] = useMemo(
+    () =>
+      !dryActive && result?.reference_curve?.length
+        ? [{ id: "ideal", points: result.reference_curve, color: REF_COLOR, label: "Ideal correction (target)" }]
+        : [],
+    [result, dryActive],
+  );
+
   // Fail-safe / startup banner (§5.1). Watchdog states are live; the startup verdicts
   // only matter until the user applies something (they describe the state at launch).
   const banner = (() => {
@@ -644,6 +656,7 @@ function App() {
                   <EqChart
                     series={chartSeries}
                     markers={chartMarkers}
+                    refs={chartRefs}
                     nodes={{
                       bands: customFilters,
                       color: TONE_COLOR,

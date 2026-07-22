@@ -268,10 +268,28 @@ def _fit_key(params):
             float(params.get("max_gain", 6.0)), int(params.get("peaking_filters", 8)), int(params.get("fs", 48000)))
 
 
+def _subsample_curve(f, db, n=140):
+    """A compact [{f, db}, ...] sampling of a dense curve for the UI chart (§5.2). The
+    grid is already log-spaced, so picking evenly-spaced indices keeps it log-even; ~140
+    points is smooth at chart width while keeping the JSON-RPC message small."""
+    m = len(f)
+    if m <= n:
+        idx = list(range(m))
+    else:
+        step = m / n
+        idx = [int(i * step) for i in range(n)]
+        if idx[-1] != m - 1:
+            idx.append(m - 1)
+    return [{"f": round(float(f[i]), 2), "db": round(float(db[i]), 3)} for i in idx]
+
+
 def _autoeq_fit(params):
     """Run (or reuse from cache) the AutoEq parametric fit. Returns
-    (filter_dicts, f_grid, response_db) — response_db is the AutoEq bands' combined
-    response on f_grid. Cached by [`_fit_key`]; custom filters never enter here."""
+    (filter_dicts, f_grid, response_db, reference_curve) — response_db is the AutoEq
+    bands' combined response on f_grid, reference_curve is the *ideal* correction
+    (AutoEq's gain-limited target-minus-measured, `fr.equalization`) that the parametric
+    fit chases, subsampled for the chart. Cached by [`_fit_key`]; custom filters never
+    enter here."""
     key = _fit_key(params)
     cached = _FIT_CACHE.get(key)
     if cached is not None:
@@ -284,6 +302,11 @@ def _autoeq_fit(params):
     fr.compensate(target)
     fr.smoothen()
     fr.equalize(max_gain=float(params.get("max_gain", 6.0)))
+
+    # The ideal correction curve the parametric fit targets (§5.2 chart reference): the
+    # gain-limited inverse of the smoothed deviation from target. The fitted bands should
+    # hug it; the visible gap is the residual the 10-band parametric couldn't capture.
+    reference_curve = _subsample_curve(fr.frequency, fr.equalization)
 
     peaking = int(params.get("peaking_filters", 8))
     fs = int(params.get("fs", 48000))
@@ -304,7 +327,7 @@ def _autoeq_fit(params):
         }
         for f in peq.filters
     ]
-    result = (filters, peq.f, peq.fr)
+    result = (filters, peq.f, peq.fr, reference_curve)
     if len(_FIT_CACHE) >= _FIT_CACHE_MAX:
         _FIT_CACHE.pop(next(iter(_FIT_CACHE)))  # evict oldest (dicts keep insertion order)
     _FIT_CACHE[key] = result
@@ -313,7 +336,8 @@ def _autoeq_fit(params):
 
 def calculate_filters(params):
     device = params.get("device", "Unknown")
-    autoeq_filters, f, autoeq_curve = _autoeq_fit(params)  # cached; no re-fit on custom-filter changes
+    # cached; no re-fit on custom-filter changes
+    autoeq_filters, f, autoeq_curve, reference_curve = _autoeq_fit(params)
 
     # Append the user's custom filters (§3.4) and combine their response with the
     # AutoEq curve; the *combined* curve drives the level policy.
@@ -333,6 +357,9 @@ def calculate_filters(params):
         "filters": filters,
         "g_target_db": round(g_target, 2),
         "g_max_peak_db": round(g_max_peak, 2),
+        # §5.2 chart: the ideal correction the fit chases (independent of custom filters,
+        # so it rides along with the cached fit). Never written to EqAPO.
+        "reference_curve": reference_curve,
     }
 
 

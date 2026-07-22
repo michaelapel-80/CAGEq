@@ -79,6 +79,23 @@ fn real_dsp_fits_parametric_filters() {
     let g_target = reply["g_target_db"].as_f64().expect("g_target_db");
     let g_max_peak = reply["g_max_peak_db"].as_f64().expect("g_max_peak_db");
     assert!(g_target.is_finite() && g_max_peak.is_finite());
+
+    // §5.2 reference curve: a compact, finite, log-ordered (f, db) sampling of the ideal
+    // correction. For this cut-dominated bump the target near 3 kHz should be a cut.
+    let reference = reply["reference_curve"].as_array().expect("reference_curve");
+    assert!((100..=200).contains(&reference.len()), "expected a subsampled curve, got {}", reference.len());
+    let mut last_f = 0.0;
+    let mut near_3k = None;
+    for p in reference {
+        let (f, db) = (p["f"].as_f64().unwrap(), p["db"].as_f64().unwrap());
+        assert!(f.is_finite() && db.is_finite());
+        assert!(f > last_f, "reference curve must be strictly ascending in f");
+        last_f = f;
+        if (2500.0..3500.0).contains(&f) && near_3k.is_none_or(|(pf, _): (f64, f64)| (f - 3000.0).abs() < (pf - 3000.0).abs()) {
+            near_3k = Some((f, db));
+        }
+    }
+    assert!(near_3k.unwrap().1 < 0.0, "ideal correction should cut near the 3 kHz bump: {near_3k:?}");
     // This curve is dominated by a cut, so correcting it lowers loudness → the
     // level-neutral compensation is a (small) boost: G_target >= 0.
     assert!(g_target >= 0.0, "cut-dominated curve should want a non-negative G_target, got {g_target}");

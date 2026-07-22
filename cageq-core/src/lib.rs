@@ -87,6 +87,9 @@ pub struct Applied {
     /// The bands actually written (AutoEq fit + custom filters), so the §5.2 chart can
     /// draw the composed curve without re-parsing cageq.txt.
     pub filters: Vec<Filter>,
+    /// §5.2 chart reference: the ideal correction the AutoEq fit targets (empty for Dry
+    /// and for the stub). Not part of the written config — a UI overlay only.
+    pub reference_curve: Vec<CurvePoint>,
 }
 
 /// filter.md §4.0 default base pre-gain (user headroom), in dB. A conservative,
@@ -130,6 +133,14 @@ pub enum Slot {
     Dry,
 }
 
+/// A point on a UI reference curve (filter.md §5.2): frequency in Hz, level in dB.
+/// Passes straight from the DSP to the chart; never written to EqAPO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurvePoint {
+    pub f: f64,
+    pub db: f64,
+}
+
 /// The sidecar's `calculate_filters` reply: the fitted filters plus the two
 /// curve-derived quantities the core composes the preamp from. The DSP reports these
 /// physical quantities; the *policy* (base pre-gain, clipping ceiling) lives here.
@@ -145,6 +156,10 @@ struct CalcResult {
     /// The composed EQ curve's positive peak, for the §4.2 clipping ceiling.
     #[serde(default)]
     g_max_peak_db: f64,
+    /// §5.2 chart: the ideal correction curve the AutoEq fit chases (target minus
+    /// measured, gain-limited), independent of custom filters. Empty from the stub.
+    #[serde(default)]
+    reference_curve: Vec<CurvePoint>,
 }
 
 /// The composed preamp for one curve (filter.md §4.0 + §4.2).
@@ -282,6 +297,7 @@ impl SlotStore {
                 filters: Vec::new(),
                 g_target_db: 0.0,
                 g_max_peak_db: 0.0,
+                reference_curve: Vec::new(),
             }),
         }
     }
@@ -612,6 +628,7 @@ fn write_effective(
         preamp_db,
         clipping_warning,
         filters: device_config.filters,
+        reference_curve: effective.reference_curve.clone(),
     };
     // Remember what landed: the curve is the next morph's start point (§5.3a), the
     // Applied is what a superseded morph reports.
@@ -662,6 +679,7 @@ fn morph_to_active(supervisor: &Supervisor, inner: &Inner, ticket: u32) -> Resul
         filters: Vec::new(),
         g_target_db: 0.0,
         g_max_peak_db: 0.0,
+        reference_curve: Vec::new(),
     });
 
     let frames = if can_morph { morph_frames(morph::tonal_distance_db(&from.filters, &to.filters)) } else { 0 };
@@ -689,6 +707,9 @@ fn morph_to_active(supervisor: &Supervisor, inner: &Inner, ticket: u32) -> Resul
                 filters: bands,
                 g_target_db: morph::loudness_target_db(&curve) + res_from + (res_to - res_from) * t,
                 g_max_peak_db: morph::curve_peak_db(&curve),
+                // The reference is the *destination* fit's; intermediate frames aren't
+                // returned to the UI, so carrying `to`'s keeps last_written coherent.
+                reference_curve: to.reference_curve.clone(),
             };
             let preamp = compose_preamp(frame.g_target_db, frame.g_max_peak_db, &loudness);
             write_effective(inner, frame, preamp.db, preamp.clipping_warning)?;
