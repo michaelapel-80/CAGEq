@@ -176,6 +176,38 @@ button {
   gap: 0.4rem;
 }
 
+/* --- §5.2 chart legend: chips below the plot (not overlapping it) ---------- */
+.eq-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.35rem;
+  margin-top: 0.35rem;
+}
+.eq-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.12rem 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  box-shadow: none;
+  color: inherit;
+  cursor: pointer;
+}
+.eq-legend-item:hover {
+  border-color: rgba(128, 128, 128, 0.35);
+}
+.eq-legend-item.off {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+.eq-swatch {
+  flex: 0 0 auto;
+}
+
 /* --- §5.2 tone grid (stage 3): graphic-EQ columns ------------------------- */
 .tg-grid {
   display: flex;
@@ -287,6 +319,19 @@ button {
   opacity: 1;
   border-color: #c0392b;
   color: #c0392b;
+}
+/* Fixed Bass/Treble macro bands: a faint tint + a label where the remove ✕ would be. */
+.tg-col-fixed {
+  background: rgba(22, 163, 74, 0.07);
+}
+.tg-fixed {
+  height: 20px;
+  display: flex;
+  align-items: center;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.6;
 }
 
 /* The trailing "add" column matches a band column's footprint. */

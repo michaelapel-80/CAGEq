@@ -180,13 +180,15 @@ export function EqChart({
   for (let v = -Math.floor(yMax / step) * step; v <= yMax; v += step) dbTicks.push(v);
 
   // Legend rows: every series, then reference curves, then markers, in draw order.
-  const legend = [
-    ...series.map((s) => ({ id: s.id, color: s.color, label: s.label, style: s.muted ? "dashed" : "solid" })),
-    ...refs.map((rc) => ({ id: rc.id, color: rc.color, label: rc.label, style: "dotted" })),
-    ...markers.map((m) => ({ id: m.id, color: m.color, label: m.label, style: "diamond" })),
-  ] as const;
+  type LegendStyle = "solid" | "dashed" | "dotted" | "diamond";
+  const legend: { id: string; color: string; label: string; style: LegendStyle }[] = [
+    ...series.map((s) => ({ id: s.id, color: s.color, label: s.label, style: (s.muted ? "dashed" : "solid") as LegendStyle })),
+    ...refs.map((rc) => ({ id: rc.id, color: rc.color, label: rc.label, style: "dotted" as LegendStyle })),
+    ...markers.map((m) => ({ id: m.id, color: m.color, label: m.label, style: "diamond" as LegendStyle })),
+  ];
 
   return (
+    <div className="eq-chart">
     <svg
       ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
@@ -331,47 +333,42 @@ export function EqChart({
         );
       })}
 
-      {/* legend — click a row to hide/show that series, reference, or marker set */}
-      {legend.map((row, i) => {
-        const off = isHidden(row.id);
-        const dim = row.style === "dashed" || row.style === "dotted";
-        return (
-          <g
-            key={`l${row.id}`}
-            transform={`translate(${PAD.l + 6}, ${PAD.t + 12 + i * 13})`}
-            style={{ cursor: "pointer" }}
-            onClick={() => toggle(row.id)}
-          >
-            {/* a wide invisible hit area so the whole row is clickable */}
-            <rect x={-3} y={-9} width={150} height={12} fill="transparent" />
-            {row.style === "diamond" ? (
-              <path d="M8,-6.5L11,-3.5L8,-0.5L5,-3.5Z" fill={row.color} fillOpacity={off ? 0.3 : 0.7} />
-            ) : (
-              <line
-                x1={0}
-                x2={16}
-                y1={-3.5}
-                y2={-3.5}
-                stroke={row.color}
-                strokeWidth={row.style === "solid" ? 2 : row.style === "dotted" ? 1.4 : 1.25}
-                strokeOpacity={off ? 0.3 : row.style === "solid" ? 1 : row.style === "dotted" ? 0.7 : 0.45}
-                strokeDasharray={row.style === "dotted" ? "1 3" : row.style === "dashed" ? "4 3" : undefined}
-                strokeLinecap={row.style === "dotted" ? "round" : undefined}
-              />
-            )}
-            <text
-              x={21}
-              y={0}
-              fontSize="10"
-              fill="currentColor"
-              opacity={off ? 0.35 : dim ? 0.5 : 0.75}
-              textDecoration={off ? "line-through" : undefined}
-            >
-              {row.label}
-            </text>
-          </g>
-        );
-      })}
     </svg>
+
+      {/* legend — below the plot (not overlapping it); click a chip to hide/show */}
+      <div className="eq-legend">
+        {legend.map((row) => {
+          const off = isHidden(row.id);
+          return (
+            <button
+              type="button"
+              key={`l${row.id}`}
+              className={`eq-legend-item${off ? " off" : ""}`}
+              aria-pressed={!off}
+              onClick={() => toggle(row.id)}
+              title={off ? `Show ${row.label}` : `Hide ${row.label}`}
+            >
+              <svg className="eq-swatch" viewBox="0 0 18 10" width="18" height="10" aria-hidden="true">
+                {row.style === "diamond" ? (
+                  <path d="M9,1.5L13,5L9,8.5L5,5Z" fill={row.color} fillOpacity={0.8} />
+                ) : (
+                  <line
+                    x1={1}
+                    x2={17}
+                    y1={5}
+                    y2={5}
+                    stroke={row.color}
+                    strokeWidth={row.style === "solid" ? 2.4 : row.style === "dotted" ? 1.6 : 1.6}
+                    strokeDasharray={row.style === "dotted" ? "1.5 2.5" : row.style === "dashed" ? "4 3" : undefined}
+                    strokeLinecap={row.style === "dotted" ? "round" : undefined}
+                  />
+                )}
+              </svg>
+              <span>{row.label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }

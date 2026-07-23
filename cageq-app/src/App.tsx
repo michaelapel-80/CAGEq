@@ -32,7 +32,7 @@ type LoudnessSettings = { base_pregain_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 type SlotName = "A" | "B" | "Dry";
 type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
-type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number };
+type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean };
 type SlotInputs = { model: string; measurementPath: string; targetPath: string; customFilters: CustomFilter[] };
 type Selection = { headphone: string | null; target: string | null };
 
@@ -41,15 +41,24 @@ type Selection = { headphone: string | null; target: string | null };
 // barely a loudness event and not what most listeners mean by "treble"). A 4 kHz corner
 // covers the presence+brilliance band people actually reach for, and — being where
 // K-weighting peaks — makes the §4.1 loudness match respond meaningfully to it.
-const MACRO_BASS = { kind: "LowShelf" as FilterKind, freq_hz: 105, q: 0.7 };
-const MACRO_TREBLE = { kind: "HighShelf" as FilterKind, freq_hz: 4000, q: 0.7 };
-const TONE_PRESETS: { name: string; filters: CustomFilter[] }[] = [
-  { name: "Flat", filters: [] },
-  { name: "Bass boost", filters: [{ ...MACRO_BASS, gain_db: 6 }] },
-  { name: "Treble boost", filters: [{ ...MACRO_TREBLE, gain_db: 5 }] },
-  { name: "V-shape", filters: [{ ...MACRO_BASS, gain_db: 5 }, { ...MACRO_TREBLE, gain_db: 4 }] },
-  { name: "Warm", filters: [{ ...MACRO_BASS, gain_db: 4 }, { ...MACRO_TREBLE, gain_db: -3 }] },
-  { name: "Bright", filters: [{ ...MACRO_BASS, gain_db: -2 }, { ...MACRO_TREBLE, gain_db: 4 }] },
+//
+// Bass and Treble are always-present **fixed** grid bands (0 dB by default, non-removable,
+// type locked) — they replace the old separate macro sliders: adjust bass/treble by their
+// faders in the tone grid, no redundant second control. Everything else is a normal band.
+const macroBass = (gain_db = 0): CustomFilter => ({ kind: "LowShelf", freq_hz: 105, gain_db, q: 0.7, fixed: true });
+const macroTreble = (gain_db = 0): CustomFilter => ({ kind: "HighShelf", freq_hz: 4000, gain_db, q: 0.7, fixed: true });
+/** A fresh tone layer: just the two 0 dB macro bands (level-neutral). */
+const defaultTone = (): CustomFilter[] => [macroBass(), macroTreble()];
+
+// Presets are bass/treble gain pairs applied to the two fixed macro bands (they only ever
+// used those); picking one resets the tone to exactly those two bands at the given gains.
+const TONE_PRESETS: { name: string; bass: number; treble: number }[] = [
+  { name: "Flat", bass: 0, treble: 0 },
+  { name: "Bass boost", bass: 6, treble: 0 },
+  { name: "Treble boost", bass: 0, treble: 5 },
+  { name: "V-shape", bass: 5, treble: 4 },
+  { name: "Warm", bass: 4, treble: -3 },
+  { name: "Bright", bass: -2, treble: 4 },
 ];
 
 // oratory1990 is the common reference measurement — default to it when a model has it.
@@ -69,7 +78,7 @@ function App() {
   const [query, setQuery] = useState(""); // headphone-model search / selected model name
   const [measurementPath, setMeasurementPath] = useState(""); // chosen measurement (source) path
   const [targetPath, setTargetPath] = useState("");
-  const [customFilters, setCustomFilters] = useState<CustomFilter[]>([]); // §3.4 manual filters
+  const [customFilters, setCustomFilters] = useState<CustomFilter[]>(defaultTone()); // §3.4 tone bands (seeded with the fixed Bass/Treble macros)
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
   const [confirmFinalVolume, setConfirmFinalVolume] = useState(true); // §7.5 point 1
@@ -340,18 +349,6 @@ function App() {
     if (dev) await invoke("set_device", { device: dev.eqapo_pattern });
   }
 
-  // §3.4 macro shelves. Matching on kind AND frequency (not frequency alone) so a
-  // hand-made filter that happens to sit near 105 Hz isn't hijacked by the slider.
-  const macroGain = (spec: typeof MACRO_BASS) =>
-    customFilters.find((f) => f.kind === spec.kind && Math.abs(f.freq_hz - spec.freq_hz) < 1)?.gain_db ?? 0;
-  const setMacro = (spec: typeof MACRO_BASS, gain_db: number) => {
-    setCustomFilters((cf) => {
-      const i = cf.findIndex((f) => f.kind === spec.kind && Math.abs(f.freq_hz - spec.freq_hz) < 1);
-      return i >= 0 ? cf.map((f, j) => (j === i ? { ...f, gain_db } : f)) : [...cf, { ...spec, gain_db }];
-    });
-    requestApply(60); // sliders stream, so throttle like a drag
-  };
-
   // §3.4 tone editing — every change auto-applies (throttled).
   const addFilter = () => {
     setCustomFilters((cf) => [...cf, { kind: "Peaking", freq_hz: 1000, gain_db: 0, q: 1 }]);
@@ -365,8 +362,9 @@ function App() {
     setCustomFilters((cf) => cf.filter((_, j) => j !== i));
     requestApply(0);
   };
-  const setTonePreset = (filters: CustomFilter[]) => {
-    setCustomFilters(filters.map((f) => ({ ...f })));
+  // A preset resets the tone to just the two fixed macro bands at its bass/treble gains.
+  const setTonePreset = (p: { bass: number; treble: number }) => {
+    setCustomFilters([macroBass(p.bass), macroTreble(p.treble)]);
     requestApply(0);
   };
 
@@ -605,7 +603,7 @@ function App() {
       {loading && <p>Loading AutoEq catalogue…</p>}
 
       <div className="app-main">
-        {/* ================= LEFT: target + macros + chart + bands ================= */}
+        {/* ================= LEFT: target + chart + bands ================= */}
         <section>
           {!loading && (
             <div className="panel">
@@ -622,36 +620,6 @@ function App() {
                 <button type="button" onClick={() => apply()} disabled={applying || dryActive} style={{ marginLeft: "auto" }}>
                   {applying ? "Fitting…" : dryActive ? "Dry (pick A or B)" : `Apply → Slot ${activeSlot}`}
                 </button>
-              </div>
-
-              {/* macro shelves sit directly above the diagram (§5.1) */}
-              <div style={{ marginTop: "0.7em", opacity: dryActive ? 0.5 : 1 }}>
-                {(
-                  [
-                    ["Bass", MACRO_BASS],
-                    ["Treble", MACRO_TREBLE],
-                  ] as const
-                ).map(([label, spec]) => (
-                  <div key={label} className="row" style={{ gap: "0.5em", marginBottom: "0.25em" }}>
-                    <span style={{ fontSize: "0.8em", width: "3.5em" }}>{label}</span>
-                    <input
-                      type="range"
-                      min={-12}
-                      max={12}
-                      step={0.5}
-                      value={macroGain(spec)}
-                      disabled={dryActive}
-                      onChange={(e) => setMacro(spec, Number(e.currentTarget.value))}
-                      style={{ flex: 1, maxWidth: "18em" }}
-                    />
-                    <span
-                      style={{ fontSize: "0.8em", width: "4em", textAlign: "right", fontVariantNumeric: "tabular-nums" }}
-                    >
-                      {macroGain(spec) > 0 ? "+" : ""}
-                      {macroGain(spec).toFixed(1)} dB
-                    </span>
-                  </div>
-                ))}
               </div>
 
               {result && (
@@ -826,7 +794,7 @@ function App() {
                     key={p.name}
                     type="button"
                     disabled={dryActive}
-                    onClick={() => setTonePreset(p.filters)}
+                    onClick={() => setTonePreset(p)}
                     style={{ fontSize: "0.8em" }}
                   >
                     {p.name}

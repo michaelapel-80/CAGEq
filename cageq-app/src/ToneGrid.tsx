@@ -20,8 +20,12 @@ import { ScrubNumber } from "./ScrubNumber";
  * to hand-guard against, so no neighbour-clamping is needed here.
  */
 
+/** A tone band, plus a frontend-only flag marking the always-present Bass/Treble macro
+ *  bands: those can't be removed and their type is locked, but gain/Fc/Q stay editable. */
+export type ToneBand = Band & { fixed?: boolean };
+
 export type ToneGridProps = {
-  filters: Band[];
+  filters: ToneBand[];
   disabled?: boolean;
   /** Live, throttled — every scrub frame / fader move / keystroke. */
   onInput: (index: number, patch: Partial<Band>) => void;
@@ -64,27 +68,19 @@ export function ToneGrid({ filters, disabled, onInput, onCommit, onAdd, onRemove
     onCommit(i, { kind: next });
   };
 
-  if (filters.length === 0) {
-    return (
-      <p className="tg-empty">
-        No tone filters yet — “+ Add filter” starts one, or drop a preset in from the right. The AutoEq
-        correction is used as-is until then.
-      </p>
-    );
-  }
-
   return (
     <div className="tg-grid" role="group" aria-label="Tone filter bands">
       {order.map((i) => {
         const f = filters[i];
+        const macroLabel = f.fixed ? (f.kind === "LowShelf" ? "Bass" : "Treble") : null;
         return (
-          <div className="tg-col" key={i}>
+          <div className={`tg-col${f.fixed ? " tg-col-fixed" : ""}`} key={i}>
             <button
               type="button"
               className="tg-kind"
-              disabled={disabled}
-              title={`${f.kind} — click to change type`}
-              aria-label={`Filter type: ${f.kind}. Activate to cycle.`}
+              disabled={disabled || f.fixed}
+              title={f.fixed ? `${macroLabel} macro (${f.kind}) — type is fixed` : `${f.kind} — click to change type`}
+              aria-label={f.fixed ? `${macroLabel} macro band (${f.kind})` : `Filter type: ${f.kind}. Activate to cycle.`}
               onClick={() => cycleKind(i, f.kind)}
             >
               <KindGlyph kind={f.kind} />
@@ -96,7 +92,7 @@ export function ToneGrid({ filters, disabled, onInput, onCommit, onAdd, onRemove
               min={GAIN_MIN}
               max={GAIN_MAX}
               mode="add"
-              arrowStep={0.5}
+              arrowStep={0.1}
               decimals={1}
               format={fmtGain}
               disabled={disabled}
@@ -155,16 +151,22 @@ export function ToneGrid({ filters, disabled, onInput, onCommit, onAdd, onRemove
               />
             </label>
 
-            <button
-              type="button"
-              className="tg-remove"
-              disabled={disabled}
-              title="Remove this band"
-              aria-label={`Remove band at ${fmtHz(f.freq_hz)} hertz`}
-              onClick={() => onRemove(i)}
-            >
-              ✕
-            </button>
+            {f.fixed ? (
+              <span className="tg-fixed" title={`${macroLabel} macro — always available, can't be removed`}>
+                {macroLabel}
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="tg-remove"
+                disabled={disabled}
+                title="Remove this band"
+                aria-label={`Remove band at ${fmtHz(f.freq_hz)} hertz`}
+                onClick={() => onRemove(i)}
+              >
+                ✕
+              </button>
+            )}
           </div>
         );
       })}
