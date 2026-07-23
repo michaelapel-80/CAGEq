@@ -101,6 +101,20 @@ fn get_selection() -> Selection {
     load_settings().selection
 }
 
+/// The §3.5 resume blob (active slot, device, per-slot inputs) saved last session, or
+/// `null` on a clean install. The frontend owns its shape; we return it verbatim.
+#[tauri::command]
+fn get_resume() -> Option<Value> {
+    load_settings().resume
+}
+
+/// Persist the §3.5 resume blob. Called by the frontend whenever the editable session
+/// state changes, so the next launch can restore and re-apply it.
+#[tauri::command]
+fn set_resume(resume: Value) {
+    update_settings(|s| s.resume = Some(resume));
+}
+
 /// Switch the active comparison slot (A/B/Dry) and write its cached config — instant,
 /// no re-fit (filter.md §5.2). Returns the newly-written config for the UI.
 #[tauri::command]
@@ -311,6 +325,12 @@ struct AppSettings {
     /// Defaults on; the dialog's "don't ask again" clears it, a UI checkbox re-enables.
     #[serde(default = "default_true")]
     confirm_final_volume: bool,
+    /// §3.5 resume state — the last editable session (active slot, device, per-slot
+    /// inputs) so the app restores and re-applies on the next launch. An opaque,
+    /// UI-owned JSON blob (shape defined by the frontend): the backend only persists and
+    /// returns it, so adding a field there never needs a Rust change.
+    #[serde(default)]
+    resume: Option<Value>,
 }
 
 fn default_true() -> bool {
@@ -324,6 +344,7 @@ impl Default for AppSettings {
             selection: Selection::default(),
             last_hash: None,
             confirm_final_volume: true,
+            resume: None,
         }
     }
 }
@@ -562,6 +583,8 @@ pub fn run() {
             get_confirm_final_volume,
             set_confirm_final_volume,
             get_selection,
+            get_resume,
+            set_resume,
             retry
         ])
         .run(tauri::generate_context!())
@@ -703,6 +726,7 @@ mod tests {
                 selection: selection.clone(),
                 last_hash: Some("abc123".into()),
                 confirm_final_volume: false,
+                resume: Some(serde_json::json!({ "activeSlot": "B", "deviceId": "dev-1" })),
             },
         )
         .expect("save");
@@ -712,6 +736,8 @@ mod tests {
         assert_eq!(reloaded.selection.target, selection.target, "reloaded target should match");
         assert_eq!(reloaded.last_hash.as_deref(), Some("abc123"), "reloaded hash should match");
         assert!(!reloaded.confirm_final_volume, "reloaded confirm flag should match saved (false)");
+        // The resume blob round-trips verbatim (UI-owned shape).
+        assert_eq!(reloaded.resume.as_ref().and_then(|r| r["activeSlot"].as_str()), Some("B"), "resume blob should round-trip");
         // A missing field (old settings.json) defaults the confirm flag ON.
         std::fs::write(&path, r#"{"loudness":{"base_pregain_db":-9.0,"mode":"Comparison"}}"#).unwrap();
         assert!(load_settings_from(&path).confirm_final_volume, "missing confirm flag defaults to true");

@@ -35,6 +35,8 @@ type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
 type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean; enabled?: boolean };
 type SlotInputs = { model: string; measurementPath: string; targetPath: string; customFilters: CustomFilter[] };
 type Selection = { headphone: string | null; target: string | null };
+// §3.5 resume blob (UI-owned shape; the backend stores/returns it verbatim).
+type Resume = { activeSlot: SlotName; deviceId: string; slots: { A: SlotInputs | null; B: SlotInputs | null } };
 
 // §3.4 tone layer. Bass keeps AutoEq's own 105 Hz shelf constant. Treble deliberately
 // does NOT: AutoEq's "treble" shelf sits at 10 kHz (an "air"/brilliance lift that is
@@ -91,9 +93,33 @@ function App() {
   // inactive slot's curve for a visual A/B alongside the active one (the active slot's
   // bands come from `result`; Dry is flat).
   const [slotCurves, setSlotCurves] = useState<Record<"A" | "B", Band[] | null>>({ A: null, B: null });
+  // Which editable slots have a fit cached in the backend *this session*. After a
+  // restart-restore the frontend has each slot's inputs but the backend cache is empty,
+  // so switching to a not-yet-hydrated slot must re-fit rather than a pure re-write.
+  const [hydrated, setHydrated] = useState<Record<"A" | "B", boolean>>({ A: false, B: false });
+  // Gate resume-persistence until the initial restore has run, so we don't overwrite the
+  // saved session with fresh defaults on the very first render.
+  const [restored, setRestored] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [applying, setApplying] = useState(false);
+
+  // Fit `inp` into `slot` via the sidecar and record it (cached bands, hydrated flag).
+  // The single place a slot is (re)fitted; callers set `result` from the return value.
+  async function writeFit(slot: "A" | "B", inp: SlotInputs, dev: AudioDevice): Promise<ApplyResult> {
+    const applied = await invoke<ApplyResult>("apply", {
+      device: dev.eqapo_pattern, // the EqAPO-matchable device pattern, not the headphone
+      headphone: inp.measurementPath,
+      target: inp.targetPath || null,
+      slot,
+      // Bypassed bands stay in the UI but are excluded from what's written (§3.4).
+      customFilters: inp.customFilters.filter((f) => f.enabled !== false),
+    });
+    setSlotInputs((prev) => ({ ...prev, [slot]: inp }));
+    setSlotCurves((prev) => ({ ...prev, [slot]: applied.filters }));
+    setHydrated((prev) => ({ ...prev, [slot]: true }));
+    return applied;
+  }
 
   useEffect(() => {
     (async () => {
@@ -111,26 +137,65 @@ function App() {
         setDevices(dev);
         // Prefer a device EqAPO is actually installed on, so the default selection works.
         const initial = dev.find((d) => d.eqapo_enabled) ?? dev[0];
-        setDeviceId(initial?.id ?? "");
-        if (initial) await invoke("set_device", { device: initial.eqapo_pattern });
-        // Restore the last-used headphone/target (backfilled by path); fall back to the
-        // Harman default target when nothing was saved.
-        const sel = await invoke<Selection>("get_selection");
-        const savedHp = sel.headphone ? hp.headphones.find((h) => h.path === sel.headphone) : undefined;
-        if (savedHp) {
-          setQuery(savedHp.name);
-          setMeasurementPath(savedHp.path);
+
+        // §3.5 resume: restore the last session and re-apply the active slot, so the app
+        // matches reality on launch without a manual "Apply". Falls back to the older
+        // selection-only restore when there's no resume blob (clean install / first run
+        // after the feature landed).
+        const resume = await invoke<Resume | null>("get_resume");
+        const rdev = resume?.deviceId ? dev.find((d) => d.id === resume.deviceId) : undefined;
+        const useDev = rdev ?? initial;
+        setDeviceId(useDev?.id ?? "");
+        if (useDev) await invoke("set_device", { device: useDev.eqapo_pattern });
+
+        const activeInp = resume && resume.activeSlot !== "Dry" ? resume.slots?.[resume.activeSlot] : null;
+        if (resume?.slots) {
+          setSlotInputs({ A: resume.slots.A ?? null, B: resume.slots.B ?? null });
+          setActiveSlot(resume.activeSlot ?? "A");
         }
-        const savedTarget = sel.target && tg.targets.some((t) => t.path === sel.target) ? sel.target : undefined;
-        const harman = tg.targets.find((t) => /harman over-ear 2018$/i.test(t.name));
-        setTargetPath(savedTarget ?? harman?.path ?? tg.targets[0]?.path ?? "");
+        if (resume && activeInp && useDev) {
+          // Load the active slot's inputs into the controls, then re-fit + write it.
+          setQuery(activeInp.model);
+          setMeasurementPath(activeInp.measurementPath);
+          setTargetPath(activeInp.targetPath);
+          setCustomFilters(activeInp.customFilters);
+          try {
+            setResult(await writeFit(resume.activeSlot as "A" | "B", activeInp, useDev));
+          } catch (e) {
+            setError(String(e));
+          }
+        } else {
+          // No resume (or active slot was empty/Dry): pre-fill the pickers from the older
+          // last-selection, Harman as the default target.
+          const sel = await invoke<Selection>("get_selection");
+          const savedHp = sel.headphone ? hp.headphones.find((h) => h.path === sel.headphone) : undefined;
+          if (savedHp) {
+            setQuery(savedHp.name);
+            setMeasurementPath(savedHp.path);
+          }
+          const savedTarget = sel.target && tg.targets.some((t) => t.path === sel.target) ? sel.target : undefined;
+          const harman = tg.targets.find((t) => /harman over-ear 2018$/i.test(t.name));
+          setTargetPath(savedTarget ?? harman?.path ?? tg.targets[0]?.path ?? "");
+        }
       } catch (e) {
         setError(String(e));
       } finally {
+        setRestored(true); // from here on, session changes persist to the resume blob
         setLoading(false);
       }
     })();
   }, []);
+
+  // §3.5: persist the resume blob whenever the editable session changes (debounced).
+  // Gated on `restored` so the initial defaults don't clobber the saved session first.
+  useEffect(() => {
+    if (!restored) return;
+    const id = window.setTimeout(() => {
+      const resume: Resume = { activeSlot, deviceId, slots: { A: slotInputs.A, B: slotInputs.B } };
+      invoke("set_resume", { resume }).catch(() => {});
+    }, 400);
+    return () => window.clearTimeout(id);
+  }, [restored, activeSlot, deviceId, slotInputs]);
 
   // Poll status so the fail-safe banner reflects live watchdog health (trip/recover).
   useEffect(() => {
@@ -246,20 +311,8 @@ function App() {
       setError("");
       inFlight.current = true;
       if (!auto) setApplying(true);
-      const applied = await invoke<ApplyResult>("apply", {
-        device: dev.eqapo_pattern, // the EqAPO-matchable device pattern, not the headphone
-        headphone: measurementPath,
-        target: targetPath || null,
-        slot: activeSlot,
-        // Bypassed bands stay in the UI but are excluded from what's written (§3.4).
-        customFilters: customFilters.filter((f) => f.enabled !== false),
-      });
-      setResult(applied);
-      setSlotInputs((prev) => ({
-        ...prev,
-        [activeSlot]: { model: query, measurementPath, targetPath, customFilters },
-      }));
-      setSlotCurves((prev) => ({ ...prev, [activeSlot]: applied.filters }));
+      const inp: SlotInputs = { model: query, measurementPath, targetPath, customFilters };
+      setResult(await writeFit(activeSlot as "A" | "B", inp, dev));
       if (!auto) setStatus(await invoke<Status>("status"));
     } catch (e) {
       setError(String(e));
@@ -295,8 +348,10 @@ function App() {
     }, delay);
   }
 
-  // Switch the active comparison slot. Populated A/B and Dry write instantly (cached,
-  // no re-fit); switching to an empty A/B just makes it the editable target.
+  // Switch the active comparison slot. A hydrated A/B (fit cached this session) and Dry
+  // write instantly (pure re-write, no re-fit); a slot whose inputs were restored from a
+  // previous session but not yet fitted this session is re-fitted on first switch; an
+  // empty A/B just becomes the editable target.
   async function switchSlot(slot: SlotName) {
     if (slot === activeSlot) return;
     setActiveSlot(slot);
@@ -309,6 +364,22 @@ function App() {
         setCustomFilters(s.customFilters);
       }
       if (!s) return; // empty slot: nothing written yet, user will configure + apply
+      if (!hydrated[slot]) {
+        // Restored-but-not-fitted this session — re-fit it (a one-time cost per slot).
+        const dev = devices.find((d) => d.id === deviceId);
+        if (dev) {
+          try {
+            setError("");
+            setApplying(true);
+            setResult(await writeFit(slot, s, dev));
+          } catch (e) {
+            setError(String(e));
+          } finally {
+            setApplying(false);
+          }
+          return;
+        }
+      }
     }
     try {
       setError("");
@@ -333,6 +404,7 @@ function App() {
       const applied = await invoke<ApplyResult>("copy_slot", { from, to });
       setSlotInputs((prev) => ({ ...prev, [to]: src }));
       setSlotCurves((prev) => ({ ...prev, [to]: applied.filters }));
+      setHydrated((prev) => ({ ...prev, [to]: true }));
       setActiveSlot(to);
       setQuery(src.model);
       setMeasurementPath(src.measurementPath);
