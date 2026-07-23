@@ -175,3 +175,146 @@ button {
   flex-wrap: wrap;
   gap: 0.4rem;
 }
+
+/* --- §5.2 tone grid (stage 3): graphic-EQ columns ------------------------- */
+.tg-grid {
+  display: flex;
+  align-items: stretch;
+  gap: 0.35rem;
+  overflow-x: auto;
+  padding: 0.2rem 0.1rem 0.4rem;
+}
+.tg-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+  width: 58px;
+  padding: 0.35rem 0.2rem;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 6px;
+}
+
+/* Compact controls: undo the chunky global input/button padding + shadow. */
+.tg-col button,
+.tg-col input,
+.tg-add {
+  padding: 0;
+  box-shadow: none;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.tg-kind {
+  width: 30px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: transparent;
+  color: inherit;
+}
+.tg-num {
+  width: 100%;
+  text-align: center;
+  background: transparent;
+  border: 1px solid transparent;
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 0;
+}
+.tg-num:hover:not(:disabled) {
+  border-color: rgba(128, 128, 128, 0.35);
+}
+.tg-num:focus {
+  border-color: #396cd8;
+  background: rgba(128, 128, 128, 0.12);
+}
+.tg-gain {
+  font-weight: 600;
+}
+
+/* Vertical gain fader. A horizontal range rotated -90deg is orientation-deterministic
+   across browser versions (min→bottom, max→top), unlike writing-mode which flips between
+   Chromium releases. The wrapper reserves the vertical space the rotated slider occupies. */
+.tg-fader-wrap {
+  height: 132px;
+  width: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0.1rem 0;
+}
+.tg-fader {
+  width: 130px;
+  transform: rotate(-90deg);
+  accent-color: #16a34a; /* the tone-layer colour */
+  background: transparent;
+  border: none;
+  cursor: ns-resize;
+}
+.tg-fader:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.tg-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  gap: 1px;
+}
+.tg-lbl {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.55;
+}
+.tg-remove {
+  width: 22px;
+  height: 20px;
+  line-height: 1;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  opacity: 0.55;
+}
+.tg-remove:hover:not(:disabled) {
+  opacity: 1;
+  border-color: #c0392b;
+  color: #c0392b;
+}
+
+/* The trailing "add" column matches a band column's footprint. */
+.tg-add {
+  flex: 0 0 auto;
+  width: 46px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  border: 1px dashed rgba(128, 128, 128, 0.5);
+  background: transparent;
+  color: inherit;
+  opacity: 0.8;
+}
+.tg-add:hover:not(:disabled) {
+  opacity: 1;
+}
+.tg-add span[aria-hidden] {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.tg-add-lbl {
+  font-size: 0.7rem;
+}
+.tg-empty {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  margin: 0.2rem 0 0.5rem;
+}

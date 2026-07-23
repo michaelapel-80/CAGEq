@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Band } from "./biquad";
 import { EqChart, Marker, RefCurve, Series } from "./EqChart";
+import { ToneGrid } from "./ToneGrid";
 import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
@@ -34,7 +35,6 @@ type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
 type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number };
 type SlotInputs = { model: string; measurementPath: string; targetPath: string; customFilters: CustomFilter[] };
 type Selection = { headphone: string | null; target: string | null };
-const FILTER_KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
 
 // §3.4 tone layer. Bass keeps AutoEq's own 105 Hz shelf constant. Treble deliberately
 // does NOT: AutoEq's "treble" shelf sits at 10 kHz (an "air"/brilliance lift that is
@@ -683,66 +683,30 @@ function App() {
             </div>
           )}
 
-          {/* ---- tone bands (the detailed editor, §5.2 filter list) ---- */}
+          {/* ---- tone bands: the keyboard-first graphic-EQ grid (§5.2 stage 3) ---- */}
           {!loading && (
             <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
               <h2>Tone bands (§3.4)</h2>
-              {customFilters.length === 0 && (
-                <p style={{ fontSize: "0.8em", opacity: 0.7, margin: "0 0 0.5em" }}>
-                  No tone filters — the AutoEq correction is used as-is.
+              {dryActive ? (
+                <p className="tg-empty">
+                  Dry is the fixed reference — pick Slot A or B to edit tone bands.
                 </p>
-              )}
-              {customFilters.map((f, i) => (
-                <div key={i} className="row" style={{ gap: "0.4em", marginBottom: "0.3em" }}>
-                  <select
-                    value={f.kind}
+              ) : (
+                <>
+                  <ToneGrid
+                    filters={customFilters}
                     disabled={dryActive}
-                    onChange={(e) => updateFilter(i, { kind: e.currentTarget.value as FilterKind })}
-                  >
-                    {FILTER_KINDS.map((k) => (
-                      <option key={k} value={k}>
-                        {k}
-                      </option>
-                    ))}
-                  </select>
-                  <label style={{ fontSize: "0.8em" }}>
-                    Fc{" "}
-                    <input
-                      type="number" min={20} max={20000} step={10} value={f.freq_hz} disabled={dryActive}
-                      onChange={(e) => updateFilter(i, { freq_hz: Number(e.currentTarget.value) })}
-                      style={{ width: "5.5em" }}
-                    />{" "}
-                    Hz
-                  </label>
-                  <label style={{ fontSize: "0.8em" }}>
-                    Gain{" "}
-                    <input
-                      type="number" min={-20} max={20} step={0.5} value={f.gain_db} disabled={dryActive}
-                      onChange={(e) => updateFilter(i, { gain_db: Number(e.currentTarget.value) })}
-                      style={{ width: "4em" }}
-                    />{" "}
-                    dB
-                  </label>
-                  <label style={{ fontSize: "0.8em" }}>
-                    Q{" "}
-                    <input
-                      type="number" min={0.1} max={20} step={0.1} value={f.q} disabled={dryActive}
-                      onChange={(e) => updateFilter(i, { q: Number(e.currentTarget.value) })}
-                      style={{ width: "4em" }}
-                    />
-                  </label>
-                  <button type="button" onClick={() => removeFilter(i)} disabled={dryActive} title="Remove">
-                    ✕
-                  </button>
-                </div>
-              ))}
-              <button type="button" onClick={addFilter} disabled={dryActive} style={{ fontSize: "0.85em" }}>
-                + Add filter
-              </button>
-              {customFilters.length > 0 && (
-                <span style={{ fontSize: "0.75em", opacity: 0.6, marginLeft: "0.6em" }}>
-                  takes effect on Apply → Slot {activeSlot}
-                </span>
+                    onInput={(i, patch) => updateFilter(i, patch, 70)}
+                    onCommit={(i, patch) => updateFilter(i, patch, 0)}
+                    onAdd={addFilter}
+                    onRemove={removeFilter}
+                  />
+                  {customFilters.length > 0 && (
+                    <p style={{ fontSize: "0.72em", opacity: 0.55, margin: "0.1rem 0 0" }}>
+                      Drag a value to scrub, click to type, ↑/↓ to fine-tune · changes apply live.
+                    </p>
+                  )}
+                </>
               )}
             </div>
           )}
