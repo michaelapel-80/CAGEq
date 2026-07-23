@@ -334,6 +334,38 @@ button {
   opacity: 0.6;
 }
 
+/* Per-band enable/bypass toggle: a small LED at the top of the column. */
+.tg-enable {
+  width: 18px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+}
+.tg-led {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(128, 128, 128, 0.6);
+  background: transparent;
+}
+.tg-enable.on .tg-led {
+  background: #16a34a;
+  border-color: #16a34a;
+  box-shadow: 0 0 3px rgba(22, 163, 74, 0.6);
+}
+/* Bypassed column: dim everything but keep the LED toggle prominent so it can be re-armed. */
+.tg-col-off .tg-kind,
+.tg-col-off .tg-num,
+.tg-col-off .tg-fader,
+.tg-col-off .tg-cell,
+.tg-col-off .tg-remove,
+.tg-col-off .tg-fixed {
+  opacity: 0.4;
+}
+
 /* The trailing "add" column matches a band column's footprint. */
 .tg-add {
   flex: 0 0 auto;

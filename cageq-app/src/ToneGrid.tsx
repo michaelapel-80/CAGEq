@@ -20,17 +20,19 @@ import { ScrubNumber } from "./ScrubNumber";
  * to hand-guard against, so no neighbour-clamping is needed here.
  */
 
-/** A tone band, plus a frontend-only flag marking the always-present Bass/Treble macro
- *  bands: those can't be removed and their type is locked, but gain/Fc/Q stay editable. */
-export type ToneBand = Band & { fixed?: boolean };
+/** A tone band, plus two frontend-only flags:
+ *  - `fixed`: the always-present Bass/Treble macro bands (non-removable, type locked);
+ *  - `enabled`: `false` bypasses the band (kept in the grid, excluded from what's applied).
+ *  Both default off/true when absent. */
+export type ToneBand = Band & { fixed?: boolean; enabled?: boolean };
 
 export type ToneGridProps = {
   filters: ToneBand[];
   disabled?: boolean;
   /** Live, throttled — every scrub frame / fader move / keystroke. */
-  onInput: (index: number, patch: Partial<Band>) => void;
-  /** Final, un-throttled — drag release / blur / Enter. */
-  onCommit: (index: number, patch: Partial<Band>) => void;
+  onInput: (index: number, patch: Partial<ToneBand>) => void;
+  /** Final, un-throttled — drag release / blur / Enter / enable toggle. */
+  onCommit: (index: number, patch: Partial<ToneBand>) => void;
   onAdd: () => void;
   onRemove: (index: number) => void;
 };
@@ -73,8 +75,23 @@ export function ToneGrid({ filters, disabled, onInput, onCommit, onAdd, onRemove
       {order.map((i) => {
         const f = filters[i];
         const macroLabel = f.fixed ? (f.kind === "LowShelf" ? "Bass" : "Treble") : null;
+        const on = f.enabled !== false;
+        const name = macroLabel ?? `band at ${fmtHz(f.freq_hz)} hertz`;
         return (
-          <div className={`tg-col${f.fixed ? " tg-col-fixed" : ""}`} key={i}>
+          <div className={`tg-col${f.fixed ? " tg-col-fixed" : ""}${on ? "" : " tg-col-off"}`} key={i}>
+            <button
+              type="button"
+              className={`tg-enable${on ? " on" : ""}`}
+              disabled={disabled}
+              role="switch"
+              aria-checked={on}
+              title={on ? `Bypass ${name}` : `Enable ${name}`}
+              aria-label={`${on ? "Bypass" : "Enable"} ${name}`}
+              onClick={() => onCommit(i, { enabled: !on })}
+            >
+              <span className="tg-led" aria-hidden="true" />
+            </button>
+
             <button
               type="button"
               className="tg-kind"

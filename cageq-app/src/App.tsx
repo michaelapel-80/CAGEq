@@ -32,7 +32,7 @@ type LoudnessSettings = { base_pregain_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 type SlotName = "A" | "B" | "Dry";
 type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
-type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean };
+type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean; enabled?: boolean };
 type SlotInputs = { model: string; measurementPath: string; targetPath: string; customFilters: CustomFilter[] };
 type Selection = { headphone: string | null; target: string | null };
 
@@ -251,7 +251,8 @@ function App() {
         headphone: measurementPath,
         target: targetPath || null,
         slot: activeSlot,
-        customFilters,
+        // Bypassed bands stay in the UI but are excluded from what's written (§3.4).
+        customFilters: customFilters.filter((f) => f.enabled !== false),
       });
       setResult(applied);
       setSlotInputs((prev) => ({
@@ -387,14 +388,18 @@ function App() {
   const selectedDevice = devices.find((d) => d.id === deviceId);
   const dryActive = activeSlot === "Dry";
 
+  // The tone bands actually applied (bypassed ones are excluded from the write).
+  const activeTone = useMemo(() => customFilters.filter((f) => f.enabled !== false), [customFilters]);
+
   // The active slot's composed bands split into its AutoEq fit and the tone offset. The
   // sidecar appends custom filters after the AutoEq bands, so the fit is everything
-  // before the tone tail (§3.4). Drawn as fixed diamonds; the tone bands stay draggable.
+  // before the tone tail (§3.4) — and only the *enabled* tone bands were sent. Drawn as
+  // fixed diamonds; the tone bands stay draggable.
   const autoEqBands = useMemo(() => {
     if (!result || dryActive) return [];
-    const n = Math.max(0, result.filters.length - customFilters.length);
+    const n = Math.max(0, result.filters.length - activeTone.length);
     return result.filters.slice(0, n);
-  }, [result, customFilters, dryActive]);
+  }, [result, activeTone, dryActive]);
 
   // §5.2 chart overlays: every populated slot's curve at once (inactive ones muted, the
   // active one prominent), plus the editable tone offset. Slot ids are stable across
@@ -413,9 +418,10 @@ function App() {
       color: SLOT_COLOR[activeSlot],
       label: dryActive ? "Dry (flat)" : `Slot ${activeSlot} total`,
     });
-    if (!dryActive) out.push({ id: "tone", bands: customFilters, color: TONE_COLOR, label: "Tone (your offset)" });
+    // The tone offset curve reflects only enabled bands (what's actually applied).
+    if (!dryActive) out.push({ id: "tone", bands: activeTone, color: TONE_COLOR, label: "Tone (your offset)" });
     return out;
-  }, [result, activeSlot, dryActive, slotCurves, customFilters]);
+  }, [result, activeSlot, dryActive, slotCurves, activeTone]);
 
   const chartMarkers: Marker[] = useMemo(
     () => (autoEqBands.length ? [{ id: "autoeq", bands: autoEqBands, color: SLOT_COLOR[activeSlot], label: "AutoEq fit" }] : []),
