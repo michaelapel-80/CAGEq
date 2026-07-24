@@ -17,6 +17,8 @@ type ApplyResult = {
   clipping_warning: boolean;
   filters: Band[]; // bands written (AutoEq fit + custom) — drawn by the §5.2 chart
   reference_curve: { f: number; db: number }[]; // §5.2 ideal-correction overlay (empty for Dry)
+  g_target_db: number; // §4.1 loudness target the curve wants
+  g_max_peak_db: number; // §4.2 composed-curve peak
 };
 type Status = {
   startup: string;
@@ -285,6 +287,16 @@ function App() {
   async function toggleConfirmFinalVolume(enabled: boolean) {
     setConfirmFinalVolume(enabled);
     await invoke("set_confirm_final_volume", { enabled });
+  }
+
+  // §4.2 clipping "add headroom": the base pre-gain that just clears the ceiling is
+  // `-g_target - g_max_peak` (below that, the §4.1 loudness match binds again); round
+  // down to the nearest 3 dB for a bit of margin, clamped to the input's -40..0 range.
+  const headroomPregain =
+    result && loudness ? Math.max(-40, Math.floor((-result.g_target_db - result.g_max_peak_db) / 3) * 3) : null;
+  function addHeadroom() {
+    if (!loudness || headroomPregain == null) return;
+    void updateLoudness({ ...loudness, base_pregain_db: headroomPregain }); // a drop → direct write, no ramp
   }
 
   // Group measurements by model name, so the same model measured by several sources
@@ -764,6 +776,16 @@ function App() {
                   {result.clipping_warning && (
                     <p style={{ color: "#b8860b", fontSize: "0.8em", margin: "0.2em 0 0" }}>
                       ⚠ Emergency clipping protection active instead of the loudness match — extreme peak.
+                      {loudness?.mode === "Comparison" && headroomPregain != null && headroomPregain < loudness.base_pregain_db && (
+                        <button
+                          type="button"
+                          onClick={addHeadroom}
+                          style={{ marginLeft: "0.5em", fontSize: "0.9em", padding: "0.1em 0.5em" }}
+                          title="Lower the base pre-gain so the loudness match fits instead of the clipping ceiling"
+                        >
+                          Add headroom → {headroomPregain} dB
+                        </button>
+                      )}
                     </p>
                   )}
                 </>

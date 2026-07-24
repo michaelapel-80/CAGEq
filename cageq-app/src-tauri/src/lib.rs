@@ -34,6 +34,10 @@ struct ApplyResult {
     filters: Vec<Filter>,
     /// §5.2 chart reference: the ideal correction the AutoEq fit targets (empty for Dry).
     reference_curve: Vec<CurvePoint>,
+    /// §4.1 loudness target + §4.2 curve peak — so the UI can compute the pre-gain
+    /// that gives the loudness match headroom when the clipping ceiling binds.
+    g_target_db: f64,
+    g_max_peak_db: f64,
 }
 
 #[derive(serde::Serialize)]
@@ -170,6 +174,8 @@ fn apply_result(applied: Applied, config_dir: &Path) -> ApplyResult {
         clipping_warning: applied.clipping_warning,
         filters: applied.filters,
         reference_curve: applied.reference_curve,
+        g_target_db: applied.g_target_db,
+        g_max_peak_db: applied.g_max_peak_db,
     }
 }
 

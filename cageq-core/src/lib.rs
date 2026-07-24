@@ -90,6 +90,12 @@ pub struct Applied {
     /// §5.2 chart reference: the ideal correction the AutoEq fit targets (empty for Dry
     /// and for the stub). Not part of the written config — a UI overlay only.
     pub reference_curve: Vec<CurvePoint>,
+    /// §4.1 loudness compensation this curve wants, and §4.2 curve peak — the two
+    /// quantities the preamp is composed from. Surfaced so the UI can compute the
+    /// base pre-gain needed to give the loudness match headroom (the §4.2 clipping
+    /// "add headroom" action) without re-deriving them.
+    pub g_target_db: f64,
+    pub g_max_peak_db: f64,
 }
 
 /// filter.md §4.0 default base pre-gain (user headroom), in dB. A conservative,
@@ -637,6 +643,8 @@ fn write_effective(
         clipping_warning,
         filters: device_config.filters,
         reference_curve: effective.reference_curve.clone(),
+        g_target_db: effective.g_target_db,
+        g_max_peak_db: effective.g_max_peak_db,
     };
     // Remember what landed: the curve is the next morph's start point (§5.3a), the
     // Applied is what a superseded morph reports.
