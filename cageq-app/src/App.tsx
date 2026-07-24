@@ -589,10 +589,7 @@ function App() {
             zIndex: 10,
           }}
         >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{ background: "var(--bg, #fff)", color: "inherit", border: "1px solid #0003", borderRadius: 8, padding: "1.2em", maxWidth: "26em", textAlign: "left" }}
-          >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <p style={{ marginTop: 0 }}>
               Switching to <b>Final volume</b> raises the volume by{" "}
               <b>+{pendingFinal.jump.toFixed(1)} dB</b> (ramped in at 6 dB/s). Continue?
@@ -700,10 +697,13 @@ function App() {
           </>
         )}
         {status && (
-          <span style={{ fontSize: "0.72em", opacity: 0.6, marginLeft: "auto", textAlign: "right" }}>
-            {status.sidecar} · {status.health}
-            <br />
-            {status.config_source}
+          <span className="info-chip" tabIndex={0} role="button" aria-label="Diagnostics">
+            ⓘ
+            <span className="info-pop">
+              {status.sidecar} · {status.health}
+              <br />
+              {status.config_source}
+            </span>
           </span>
         )}
       </header>
@@ -743,7 +743,7 @@ function App() {
                     series={chartSeries}
                     markers={chartMarkers}
                     refs={chartRefs}
-                    height={180}
+                    height={215}
                     nodes={{
                       bands: customFilters,
                       color: TONE_COLOR,

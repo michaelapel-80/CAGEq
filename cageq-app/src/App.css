@@ -14,6 +14,13 @@
   color: #0f0f0f;
   background-color: #f6f6f6;
 
+  /* Theme tokens — used by form controls, the modal card, and popovers so they
+     stay readable in both light and dark (the confirm dialog was hard-coded white). */
+  --fg: #0f0f0f;
+  --surface: #ffffff;
+  --border: rgba(0, 0, 0, 0.22);
+  --accent: #396cd8;
+
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -60,58 +67,57 @@ h1 {
   text-align: center;
 }
 
-input,
+/* Unified, compact form controls — one look for text inputs, selects and buttons
+   (previously `select` was unstyled while `input` had the chunky starter style). */
+select,
+input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
 button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  padding: 0.3em 0.55em;
+  font-size: 0.9rem;
   font-weight: 500;
   font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
+  color: var(--fg);
+  background-color: var(--surface);
+  transition: border-color 0.2s;
+  box-shadow: none;
   outline: none;
 }
-
-#greet-input {
-  margin-right: 5px;
+button {
+  cursor: pointer;
+  padding: 0.3em 0.7em;
+}
+select:hover,
+input:not([type="range"]):hover,
+button:hover {
+  border-color: var(--accent);
+}
+select:focus,
+input:focus {
+  border-color: var(--accent);
+}
+button:active {
+  border-color: var(--accent);
+}
+button:disabled,
+input:disabled,
+select:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     color: #f6f6f6;
     background-color: #2f2f2f;
+    --fg: #f6f6f6;
+    --surface: #262626;
+    --border: rgba(255, 255, 255, 0.2);
   }
 
   a:hover {
     color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
   }
 }
 
@@ -394,4 +400,54 @@ button {
   font-size: 0.8rem;
   opacity: 0.7;
   margin: 0.2rem 0 0.5rem;
+}
+
+/* --- theme-aware modal card (the §7.5 confirm dialog was hard-coded white) --- */
+.modal-card {
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.1rem 1.2rem;
+  max-width: 26em;
+  text-align: left;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+}
+
+/* --- header diagnostics tucked behind a small info chip (reclaims the top row) --- */
+.info-chip {
+  margin-left: auto;
+  position: relative;
+  cursor: help;
+  opacity: 0.5;
+  font-size: 0.95rem;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  padding: 0.2em;
+}
+.info-chip:hover,
+.info-chip:focus {
+  opacity: 0.9;
+}
+.info-pop {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: 1.6em;
+  z-index: 6;
+  white-space: nowrap;
+  text-align: right;
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.4em 0.6em;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
+}
+.info-chip:hover .info-pop,
+.info-chip:focus-within .info-pop {
+  display: block;
 }
