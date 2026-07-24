@@ -24,7 +24,7 @@ import { ScrubNumber } from "./ScrubNumber";
  *  - `fixed`: the always-present Bass/Treble macro bands (non-removable, type locked);
  *  - `enabled`: `false` bypasses the band (kept in the grid, excluded from what's applied).
  *  Both default off/true when absent. */
-export type ToneBand = Band & { fixed?: boolean; enabled?: boolean };
+export type ToneBand = Band & { fixed?: boolean; enabled?: boolean; macro?: string };
 
 export type ToneGridProps = {
   filters: ToneBand[];
@@ -74,7 +74,7 @@ export function ToneGrid({ filters, disabled, onInput, onCommit, onAdd, onRemove
     <div className="tg-grid" role="group" aria-label="Tone filter bands">
       {order.map((i) => {
         const f = filters[i];
-        const macroLabel = f.fixed ? (f.kind === "LowShelf" ? "Bass" : "Treble") : null;
+        const macroLabel = f.fixed ? (f.macro ?? (f.kind === "LowShelf" ? "Bass" : "Treble")) : null;
         const on = f.enabled !== false;
         const name = macroLabel ?? `band at ${fmtHz(f.freq_hz)} hertz`;
         return (

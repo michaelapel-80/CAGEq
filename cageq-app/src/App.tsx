@@ -32,35 +32,56 @@ type LoudnessSettings = { base_pregain_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 type SlotName = "A" | "B" | "Dry";
 type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
-type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean; enabled?: boolean };
+type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean; enabled?: boolean; macro?: string };
 type SlotInputs = { model: string; measurementPath: string; targetPath: string; customFilters: CustomFilter[] };
 type Selection = { headphone: string | null; target: string | null };
 // §3.5 resume blob (UI-owned shape; the backend stores/returns it verbatim).
 type Resume = { activeSlot: SlotName; deviceId: string; slots: { A: SlotInputs | null; B: SlotInputs | null } };
 
-// §3.4 tone layer. Bass keeps AutoEq's own 105 Hz shelf constant. Treble deliberately
-// does NOT: AutoEq's "treble" shelf sits at 10 kHz (an "air"/brilliance lift that is
-// barely a loudness event and not what most listeners mean by "treble"). A 4 kHz corner
-// covers the presence+brilliance band people actually reach for, and — being where
-// K-weighting peaks — makes the §4.1 loudness match respond meaningfully to it.
-//
-// Bass and Treble are always-present **fixed** grid bands (0 dB by default, non-removable,
-// type locked) — they replace the old separate macro sliders: adjust bass/treble by their
-// faders in the tone grid, no redundant second control. Everything else is a normal band.
-const macroBass = (gain_db = 0): CustomFilter => ({ kind: "LowShelf", freq_hz: 105, gain_db, q: 0.7, fixed: true });
-const macroTreble = (gain_db = 0): CustomFilter => ({ kind: "HighShelf", freq_hz: 4000, gain_db, q: 0.7, fixed: true });
-/** A fresh tone layer: just the two 0 dB macro bands (level-neutral). */
-const defaultTone = (): CustomFilter[] => [macroBass(), macroTreble()];
+// §3.4 tone layer — three always-present **fixed** grid bands (0 dB by default,
+// non-removable, type locked), the classic warmth/brightness/air triad. They replace the
+// old separate macro sliders; everything else is a normal, removable band.
+//   • Bass   — LowShelf 105 Hz  (AutoEq's own constant): warmth / body.
+//   • Treble — HighShelf 4 kHz: brightness / presence. Deliberately NOT AutoEq's 10 kHz
+//     ("air") shelf — 10 kHz is barely a loudness event; 4 kHz sits at the K-weighting
+//     peak, so it's the impactful control and the §4.1 match responds to it.
+//   • Air    — HighShelf 12 kHz: the subtle top-octave sparkle the 4 kHz Treble gives up.
+//     Splitting it off lets Treble stay impactful without reaching into the harsh
+//     presence region, and gives "air" back as its own taste control.
+// Each carries a frontend-only `macro` id so the grid can label the two high-shelves
+// apart (Treble vs Air) and a restart-restore can re-seed the right band by identity.
+const macroBass = (gain_db = 0): CustomFilter => ({ kind: "LowShelf", freq_hz: 105, gain_db, q: 0.7, fixed: true, macro: "Bass" });
+const macroTreble = (gain_db = 0): CustomFilter => ({ kind: "HighShelf", freq_hz: 4000, gain_db, q: 0.7, fixed: true, macro: "Treble" });
+const macroAir = (gain_db = 0): CustomFilter => ({ kind: "HighShelf", freq_hz: 12000, gain_db, q: 0.7, fixed: true, macro: "Air" });
+/** A fresh tone layer: the three 0 dB macro bands (level-neutral). */
+const defaultTone = (): CustomFilter[] => [macroBass(), macroTreble(), macroAir()];
 
-// Presets are bass/treble gain pairs applied to the two fixed macro bands (they only ever
-// used those); picking one resets the tone to exactly those two bands at the given gains.
-const TONE_PRESETS: { name: string; bass: number; treble: number }[] = [
-  { name: "Flat", bass: 0, treble: 0 },
-  { name: "Bass boost", bass: 6, treble: 0 },
-  { name: "Treble boost", bass: 0, treble: 5 },
-  { name: "V-shape", bass: 5, treble: 4 },
-  { name: "Warm", bass: 4, treble: -3 },
-  { name: "Bright", bass: -2, treble: 4 },
+/** Guarantee the three fixed macros are present (0 dB if absent), preserving any existing
+ *  gain/Fc/Q/bypass — by `macro` id, or by shape for pre-Air saved slots (no id). Keeps
+ *  non-fixed bands. Applied when loading tone from persisted/slot data. */
+function ensureMacros(cf: CustomFilter[]): CustomFilter[] {
+  const find = (macro: string, kind: FilterKind, freq: number) =>
+    cf.find((f) => f.fixed && (f.macro === macro || (!f.macro && f.kind === kind && Math.abs(f.freq_hz - freq) < 1000)));
+  const seed = (fresh: CustomFilter, found?: CustomFilter): CustomFilter =>
+    found ? { ...fresh, gain_db: found.gain_db, freq_hz: found.freq_hz, q: found.q, enabled: found.enabled } : fresh;
+  return [
+    seed(macroBass(), find("Bass", "LowShelf", 105)),
+    seed(macroTreble(), find("Treble", "HighShelf", 4000)),
+    seed(macroAir(), find("Air", "HighShelf", 12000)),
+    ...cf.filter((f) => !f.fixed),
+  ];
+}
+
+// Presets are bass/treble/air gain triples applied to the three fixed macro bands;
+// picking one resets the tone to exactly those three bands at the given gains.
+const TONE_PRESETS: { name: string; bass: number; treble: number; air: number }[] = [
+  { name: "Flat", bass: 0, treble: 0, air: 0 },
+  { name: "Bass boost", bass: 6, treble: 0, air: 0 },
+  { name: "Treble boost", bass: 0, treble: 5, air: 0 },
+  { name: "Airy", bass: 0, treble: 0, air: 5 },
+  { name: "V-shape", bass: 5, treble: 4, air: 2 },
+  { name: "Warm", bass: 4, treble: -3, air: -3 },
+  { name: "Bright", bass: -2, treble: 4, air: 3 },
 ];
 
 // oratory1990 is the common reference measurement — default to it when a model has it.
@@ -155,12 +176,14 @@ function App() {
         }
         if (resume && activeInp && useDev) {
           // Load the active slot's inputs into the controls, then re-fit + write it.
-          setQuery(activeInp.model);
-          setMeasurementPath(activeInp.measurementPath);
-          setTargetPath(activeInp.targetPath);
-          setCustomFilters(activeInp.customFilters);
+          // ensureMacros backfills the Air band for slots saved before it existed.
+          const inp: SlotInputs = { ...activeInp, customFilters: ensureMacros(activeInp.customFilters) };
+          setQuery(inp.model);
+          setMeasurementPath(inp.measurementPath);
+          setTargetPath(inp.targetPath);
+          setCustomFilters(inp.customFilters);
           try {
-            setResult(await writeFit(resume.activeSlot as "A" | "B", activeInp, useDev));
+            setResult(await writeFit(resume.activeSlot as "A" | "B", inp, useDev));
           } catch (e) {
             setError(String(e));
           }
@@ -356,7 +379,8 @@ function App() {
     if (slot === activeSlot) return;
     setActiveSlot(slot);
     if (slot !== "Dry") {
-      const s = slotInputs[slot];
+      const raw = slotInputs[slot];
+      const s = raw && { ...raw, customFilters: ensureMacros(raw.customFilters) }; // backfill Air
       if (s) {
         setQuery(s.model);
         setMeasurementPath(s.measurementPath);
@@ -394,7 +418,8 @@ function App() {
   // Copy one editable slot onto the other and make it active — a starting point for
   // a variant (the target's cageq.txt is identical until you tweak it).
   async function copySlot(from: "A" | "B", to: "A" | "B") {
-    const src = slotInputs[from];
+    const raw = slotInputs[from];
+    const src = raw && { ...raw, customFilters: ensureMacros(raw.customFilters) };
     if (!src) {
       setError(`Slot ${from} is empty — apply something to it first.`);
       return;
@@ -452,9 +477,9 @@ function App() {
     setCustomFilters((cf) => cf.filter((_, j) => j !== i));
     requestApply(0);
   };
-  // A preset resets the tone to just the two fixed macro bands at its bass/treble gains.
-  const setTonePreset = (p: { bass: number; treble: number }) => {
-    setCustomFilters([macroBass(p.bass), macroTreble(p.treble)]);
+  // A preset resets the tone to the three fixed macro bands at its bass/treble/air gains.
+  const setTonePreset = (p: { bass: number; treble: number; air: number }) => {
+    setCustomFilters([macroBass(p.bass), macroTreble(p.treble), macroAir(p.air)]);
     requestApply(0);
   };
 
