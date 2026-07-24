@@ -13,8 +13,12 @@
     "windows": [
       {
         "title": "CAGEq",
-        "width": 800,
-        "height": 600
+        "width": 1180,
+        "height": 900,
+        "minWidth": 700,
+        "minHeight": 560,
+        "center": true,
+        "resizable": true
       }
     ],
     "security": {

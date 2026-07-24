@@ -453,23 +453,6 @@ function App() {
     }
   }
 
-  // §5.3 null switch: re-apply the *current* slot unchanged, forcing an EqAPO reload with
-  // no curve change. EqAPO cold-restarts the whole biquad cascade on every reload, and
-  // its 10 ms crossfade briefly blends in that cold-start transient (a low-frequency
-  // "bloom") — which on an A/B of very *similar* curves can be mistaken for a real
-  // difference. This is the control trial: it produces the transition alone, so a genuine
-  // A/B difference is whatever you hear *beyond* it. Not a fix (EqAPO can't warm-start),
-  // a measurement aid. No-op for an empty slot (nothing applied yet to re-trigger).
-  async function nullSwitch() {
-    if (activeSlot !== "Dry" && !hydrated[activeSlot]) return;
-    try {
-      setError("");
-      setResult(await invoke<ApplyResult>("activate_slot", { slot: activeSlot }));
-    } catch (e) {
-      setError(String(e));
-    }
-  }
-
   async function changeDevice(id: string) {
     setDeviceId(id);
     const dev = devices.find((d) => d.id === id);
@@ -495,15 +478,15 @@ function App() {
     requestApply(0);
   };
 
-  // A/S/D switch slots (pressing the *already-active* slot's key is a null switch, §5.3),
-  // W toggles loudness mode — but not while typing in a field (§5.2 blind-comparison).
+  // A/S/D switch slots, W toggles loudness mode — but not while typing in a field
+  // (§5.2 blind-comparison shortcuts).
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const el = document.activeElement;
       if (el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) return;
-      if (e.key === "a") activeSlot === "A" ? nullSwitch() : switchSlot("A");
-      else if (e.key === "s") activeSlot === "B" ? nullSwitch() : switchSlot("B");
-      else if (e.key === "d") activeSlot === "Dry" ? nullSwitch() : switchSlot("Dry");
+      if (e.key === "a") switchSlot("A");
+      else if (e.key === "s") switchSlot("B");
+      else if (e.key === "d") switchSlot("Dry");
       else if (e.key === "w" && loudness)
         requestLoudness({ ...loudness, mode: loudness.mode === "Comparison" ? "FinalVolume" : "Comparison" });
     }
@@ -760,6 +743,7 @@ function App() {
                     series={chartSeries}
                     markers={chartMarkers}
                     refs={chartRefs}
+                    height={180}
                     nodes={{
                       bands: customFilters,
                       color: TONE_COLOR,
@@ -860,23 +844,9 @@ function App() {
                 <button type="button" onClick={() => copySlot("B", "A")} disabled={!slotInputs.B} style={{ fontSize: "0.8em" }}>
                   B→A
                 </button>
-                <button
-                  type="button"
-                  onClick={nullSwitch}
-                  disabled={activeSlot !== "Dry" && !hydrated[activeSlot as "A" | "B"]}
-                  style={{ fontSize: "0.8em", marginLeft: "auto" }}
-                  title="Re-apply the current slot unchanged — hear the switch transition alone, to tell a real A/B difference from EqAPO's reload artifact (§5.3). Also: tap the active slot's key."
-                >
-                  ↻ Null switch
-                </button>
               </div>
               <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.5em 0 0" }}>
-                A / S / D switch slots (tap the active one to <em>null-switch</em>), W toggles the loudness mode —
-                even without looking at the screen.
-              </p>
-              <p style={{ fontSize: "0.72em", opacity: 0.55, margin: "0.3em 0 0" }}>
-                Null switch reloads the current slot with no change: if A→B sounds different but this doesn't, the
-                difference is real — not just the reload's low-frequency bloom.
+                A / S / D switch slots, W toggles the loudness mode — even without looking at the screen.
               </p>
               {loudness?.mode === "FinalVolume" && (slotInputs.A !== null || slotInputs.B !== null) && (
                 <p style={{ color: "#b8860b", fontSize: "0.78em", margin: "0.4em 0 0" }}>

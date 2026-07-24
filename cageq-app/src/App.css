@@ -121,13 +121,13 @@ button {
 
 .app {
   margin: 0 auto;
-  padding: 1rem 1.25rem 2rem;
+  padding: 0.7rem 1.1rem 1rem;
   max-width: 1400px;
   text-align: left;
 }
 .app h1 {
   text-align: left;
-  font-size: 1.4rem;
+  font-size: 1.25rem;
   margin: 0;
 }
 
@@ -135,10 +135,10 @@ button {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.6rem 1.1rem;
-  padding-bottom: 0.7rem;
+  gap: 0.5rem 1.1rem;
+  padding-bottom: 0.55rem;
   border-bottom: 1px solid rgba(128, 128, 128, 0.3);
-  margin-bottom: 1rem;
+  margin-bottom: 0.7rem;
 }
 
 .app-main {
@@ -156,15 +156,15 @@ button {
 .panel {
   border: 1px solid rgba(128, 128, 128, 0.35);
   border-radius: 6px;
-  padding: 0.7rem 0.85rem;
-  margin: 0 0 1rem;
+  padding: 0.55rem 0.75rem;
+  margin: 0 0 0.7rem;
 }
 .panel > h2 {
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   opacity: 0.6;
-  margin: 0 0 0.6rem;
+  margin: 0 0 0.45rem;
 }
 
 /* Dashboard rows read left-to-right, not centred like the starter template. */
@@ -273,7 +273,7 @@ button {
    across browser versions (min→bottom, max→top), unlike writing-mode which flips between
    Chromium releases. The wrapper reserves the vertical space the rotated slider occupies. */
 .tg-fader-wrap {
-  height: 132px;
+  height: 110px;
   width: 22px;
   display: flex;
   align-items: center;
@@ -281,7 +281,7 @@ button {
   margin: 0.1rem 0;
 }
 .tg-fader {
-  width: 130px;
+  width: 108px;
   transform: rotate(-90deg);
   accent-color: #16a34a; /* the tone-layer colour */
   background: transparent;
