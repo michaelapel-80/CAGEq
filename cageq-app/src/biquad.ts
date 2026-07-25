@@ -83,6 +83,65 @@ export function composedCurveDb(bands: Band[], freqs: Float64Array, fs = FS): Fl
   return total;
 }
 
+/** Composed **phase** response in degrees over `freqs` — the phase shift the filter chain
+ *  introduces (a nerd overlay; the magnitude is what you hear). A cascade multiplies, so
+ *  phases add: sum each biquad's arg(H(e^jω)) = arg(numerator) − arg(denominator). Not
+ *  wrapped — a minimum-phase EQ stays bounded and wrapping would add fake ±180° jumps.
+ *  Uses the same coefficients as {@link filterResponseDb}; the denominator's true a1/a2 are
+ *  the negation of what `coefficients()` returns (that helper pre-negates them, a0 = 1). */
+export function phaseDeg(bands: Band[], freqs: Float64Array, fs = FS): Float64Array {
+  const out = new Float64Array(freqs.length);
+  for (const band of bands) {
+    const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);
+    const a1t = -a1;
+    const a2t = -a2;
+    for (let i = 0; i < freqs.length; i++) {
+      const w = (2 * Math.PI * freqs[i]) / fs;
+      const c1 = Math.cos(w);
+      const s1 = Math.sin(w);
+      const c2 = Math.cos(2 * w);
+      const s2 = Math.sin(2 * w);
+      // e^{-jω} = c1 − j·s1, e^{-2jω} = c2 − j·s2
+      const nRe = b0 + b1 * c1 + b2 * c2;
+      const nIm = -(b1 * s1 + b2 * s2);
+      const dRe = 1 + a1t * c1 + a2t * c2;
+      const dIm = -(a1t * s1 + a2t * s2);
+      out[i] += Math.atan2(nIm, nRe) - Math.atan2(dIm, dRe);
+    }
+  }
+  for (let i = 0; i < out.length; i++) out[i] *= 180 / Math.PI;
+  return out;
+}
+
+/** The filter chain's **impulse response** h[n] — a unit impulse cascaded through each
+ *  biquad's difference equation (Direct Form I): the time-domain "ring" of the EQ. Exact
+ *  (no FFT). `n` samples at `fs`. Same coefficient convention as above. */
+export function impulseResponse(bands: Band[], n = 480, fs = FS): Float64Array {
+  let sig = new Float64Array(n);
+  sig[0] = 1;
+  for (const band of bands) {
+    const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);
+    const a1t = -a1;
+    const a2t = -a2;
+    const out = new Float64Array(n);
+    let x1 = 0;
+    let x2 = 0;
+    let y1 = 0;
+    let y2 = 0;
+    for (let i = 0; i < n; i++) {
+      const x = sig[i];
+      const y = b0 * x + b1 * x1 + b2 * x2 - a1t * y1 - a2t * y2;
+      out[i] = y;
+      x2 = x1;
+      x1 = x;
+      y2 = y1;
+      y1 = y;
+    }
+    sig = out;
+  }
+  return sig;
+}
+
 /** Log-spaced frequency grid (constant ratio per octave), the audio-standard axis. */
 export function logGrid(points = 480, fMin = 20, fMax = 20000): Float64Array {
   const out = new Float64Array(points);

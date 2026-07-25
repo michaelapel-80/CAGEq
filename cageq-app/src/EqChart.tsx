@@ -23,6 +23,8 @@ export type Series = {
   label: string;
   /** Dimmed, thinner context line (not the layer being edited / not the active slot). */
   muted?: boolean;
+  /** Start hidden (user can reveal via the legend) — for opt-in "nerd" layers. */
+  defaultHidden?: boolean;
 };
 
 /** A fixed (non-draggable) set of band handles drawn as diamonds — e.g. the AutoEq fit. */
@@ -31,6 +33,7 @@ export type Marker = {
   bands: Band[];
   color: string;
   label: string;
+  defaultHidden?: boolean;
 };
 
 /**
@@ -43,6 +46,7 @@ export type RefCurve = {
   points: { f: number; db: number }[];
   color: string;
   label: string;
+  defaultHidden?: boolean;
 };
 
 /** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). */
@@ -81,10 +85,19 @@ export function EqChart({
   const svgRef = useRef<SVGSVGElement>(null);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  // Legend visibility, keyed by series/marker id. Absent = visible (default on).
-  const [hidden, setHidden] = useState<Record<string, boolean>>({});
-  const isHidden = (id: string) => hidden[id] === true;
-  const toggle = (id: string) => setHidden((h) => ({ ...h, [id]: !h[id] }));
+  // Legend visibility: `overrides` holds only ids the user has clicked; everything else
+  // falls back to its `defaultHidden` prop (so opt-in "nerd" layers start off, and a fresh
+  // series obeys its default). Absent from both = visible.
+  const [overrides, setOverrides] = useState<Record<string, boolean>>({});
+  const defaultHidden = useMemo(() => {
+    const m: Record<string, boolean> = {};
+    for (const s of series) if (s.defaultHidden) m[s.id] = true;
+    for (const r of refs) if (r.defaultHidden) m[r.id] = true;
+    for (const mk of markers) if (mk.defaultHidden) m[mk.id] = true;
+    return m;
+  }, [series, refs, markers]);
+  const isHidden = (id: string) => (id in overrides ? overrides[id] : defaultHidden[id] === true);
+  const toggle = (id: string) => setOverrides((o) => ({ ...o, [id]: !isHidden(id) }));
 
   const { freqs, curves, yMin, yMax, step } = useMemo(() => {
     const freqs = logGrid(480, F_MIN, F_MAX);
@@ -118,7 +131,8 @@ export function EqChart({
     const span = Math.max(6, Math.ceil(Math.max(Math.abs(lo), Math.abs(hi)) + 1));
     const step = span <= 9 ? 3 : span <= 18 ? 6 : 12;
     return { freqs, curves, yMin: -span, yMax: span, step };
-  }, [series, markers, refs, hidden]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [series, markers, refs, overrides, defaultHidden]);
 
   const lnMin = Math.log(F_MIN);
   const lnSpan = Math.log(F_MAX) - lnMin;

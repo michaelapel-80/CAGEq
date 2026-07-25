@@ -211,6 +211,39 @@ select:disabled {
   opacity: 0.6;
 }
 
+/* --- §5.2 nerd overlays: phase / impulse strips (off by default) ------------ */
+.nerd-diag {
+  display: flex;
+  align-items: center;
+  gap: 0.9em;
+  margin: 0.4rem 0 0;
+  font-size: 0.78rem;
+}
+.nerd-diag-lbl {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.5;
+}
+.nerd-diag label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  opacity: 0.85;
+  cursor: pointer;
+}
+.nerd-strip {
+  margin-top: 0.35rem;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 6px;
+  padding: 0.15rem 0.2rem 0;
+}
+.nerd-strip-lbl {
+  font-size: 0.68rem;
+  opacity: 0.55;
+  padding: 0.15rem 0 0 0.4rem;
+}
+
 /* --- footer: AutoEq attribution (MIT) + acknowledgement --------------------- */
 .app-footer {
   margin-top: 1rem;

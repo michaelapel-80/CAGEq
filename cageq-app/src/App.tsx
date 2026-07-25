@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Band } from "./biquad";
 import { EqChart, Marker, RefCurve, Series } from "./EqChart";
+import { ImpulseStrip, PhaseStrip } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import "./App.css";
 
@@ -228,6 +229,8 @@ function App() {
   const [stages, setStages] = useState<Stages>(defaultStages()); // §3.4 the three per-slot filter stages
   const [activeStage, setActiveStage] = useState<StageId>("tone"); // which stage the grid/chart edits
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
+  const [showPhase, setShowPhase] = useState(false); // §5.2 nerd overlays — off by default
+  const [showImpulse, setShowImpulse] = useState(false);
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
   const [confirmFinalVolume, setConfirmFinalVolume] = useState(true); // §7.5 point 1
@@ -832,7 +835,8 @@ function App() {
   }, [result, activeSlot, dryActive, stages, activeStage]);
 
   const chartMarkers: Marker[] = useMemo(
-    () => (autoEqBands.length ? [{ id: "autoeq", bands: autoEqBands, color: SLOT_COLOR[activeSlot], label: "AutoEq fit" }] : []),
+    // Off by default — a nerd overlay revealed from the legend.
+    () => (autoEqBands.length ? [{ id: "autoeq", bands: autoEqBands, color: SLOT_COLOR[activeSlot], label: "AutoEq fit", defaultHidden: true }] : []),
     [autoEqBands, activeSlot],
   );
 
@@ -1104,6 +1108,33 @@ function App() {
                         </button>
                       )}
                     </p>
+                  )}
+                  {/* Nerd overlays — off by default; the phase/impulse strips are a different
+                      domain than the magnitude chart, so they live below it, not on it. */}
+                  {!dryActive && (
+                    <>
+                      <div className="nerd-diag">
+                        <span className="nerd-diag-lbl">Nerd view</span>
+                        <label>
+                          <input type="checkbox" checked={showPhase} onChange={(e) => setShowPhase(e.currentTarget.checked)} /> Phase
+                        </label>
+                        <label>
+                          <input type="checkbox" checked={showImpulse} onChange={(e) => setShowImpulse(e.currentTarget.checked)} /> Impulse
+                        </label>
+                      </div>
+                      {showPhase && (
+                        <div className="nerd-strip">
+                          <div className="nerd-strip-lbl">Phase — filter chain</div>
+                          <PhaseStrip bands={result.filters} color={SLOT_COLOR[activeSlot]} />
+                        </div>
+                      )}
+                      {showImpulse && (
+                        <div className="nerd-strip">
+                          <div className="nerd-strip-lbl">Impulse response — filter chain</div>
+                          <ImpulseStrip bands={result.filters} color={SLOT_COLOR[activeSlot]} />
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
               )}
