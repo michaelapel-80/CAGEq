@@ -267,9 +267,13 @@ select:disabled {
   border-radius: 6px;
   overflow: hidden;
 }
+/* One segment = label + count + power icon, all inline and centred (no inner divider —
+   the power reads as part of the segment, not a pinned right cell). */
 .stage-seg {
   display: flex;
-  align-items: stretch;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.34em 0.7em;
 }
 .stage-seg + .stage-seg {
   border-left: 1px solid rgba(128, 128, 128, 0.28);
@@ -281,7 +285,7 @@ select:disabled {
   color: inherit;
   font-size: 0.82rem;
   font-weight: 500;
-  padding: 0.3em 0.7em;
+  padding: 0;
   display: inline-flex;
   align-items: center;
   gap: 0.4em;
@@ -302,22 +306,21 @@ select:disabled {
   min-width: 1.4em;
   text-align: center;
 }
-/* Per-stage enable: the power glyph, inheriting the segment colour (stage colour when
-   active, neutral otherwise); dimmed when the stage is off. */
+/* Per-stage enable: the power glyph inline with the label, inheriting the segment colour
+   (stage colour when active, neutral otherwise); dimmed when the stage is off. */
 .stage-seg-power {
   border: none;
-  border-radius: 0;
-  border-left: 1px solid rgba(128, 128, 128, 0.22);
+  border-radius: 4px;
   background: transparent;
   color: inherit;
-  padding: 0 0.45em;
+  padding: 0.05em;
   display: flex;
   align-items: center;
-  opacity: 0.7;
+  opacity: 0.65;
 }
 .stage-seg-power:hover {
   opacity: 1;
-  background: rgba(128, 128, 128, 0.1);
+  background: rgba(128, 128, 128, 0.14);
 }
 .stage-seg.off .stage-seg-power {
   opacity: 0.4;
