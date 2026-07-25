@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Band, composedCurveDb, logGrid, phaseDeg } from "./biquad";
 
 /**
@@ -68,9 +68,9 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
 const F_MAX = 20000;
-// The Y auto-scale only considers 20 Hz–12 kHz: the target/raw curves diverge sharply in
-// the top octaves (measurement noise + the treble roll-off), which would otherwise blow the
-// scale out to ±24 dB. The curves are still *drawn* full-range, just not counted here.
+// Reference curves (measured raw / target) only count toward the Y auto-scale up to this
+// frequency: they diverge sharply in the top octaves (measurement noise + treble roll-off),
+// which would otherwise blow the scale out to ±24 dB. Still drawn full-range (then clipped).
 const RANGE_F_MAX = 12000;
 const fmtHz = (f: number) => (f >= 1000 ? `${f / 1000}k` : `${f}`);
 
@@ -92,6 +92,7 @@ export function EqChart({
   const W = 720;
   const H = height;
   const svgRef = useRef<SVGSVGElement>(null);
+  const clipId = useId(); // clips the plotted curves to the plot rect (see refPaths)
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   // Legend visibility: `overrides` holds only ids the user has clicked; everything else
@@ -120,12 +121,13 @@ export function EqChart({
     let lo = 0;
     let hi = 0;
     // Auto-range over visible curves and visible marker gains only (hiding a spiky layer
-    // lets the rest breathe), and only within 20 Hz–12 kHz (see RANGE_F_MAX).
+    // lets the rest breathe). The user's own EQ (series) and the fit (markers) use the full
+    // range — a deliberate HF boost should be visible. Reference curves (measured raw /
+    // target), though, diverge noisily in the top octaves, so those only count up to
+    // RANGE_F_MAX; the rest of each ref is still drawn, just clipped to the frame.
     series.forEach((s, i) => {
       if (isHidden(s.id)) return;
-      for (let j = 0; j < freqs.length; j++) {
-        if (freqs[j] > RANGE_F_MAX) break;
-        const v = curves[i][j];
+      for (const v of curves[i]) {
         if (v < lo) lo = v;
         if (v > hi) hi = v;
       }
@@ -133,7 +135,6 @@ export function EqChart({
     for (const m of markers) {
       if (isHidden(m.id)) continue;
       for (const b of m.bands) {
-        if (b.freq_hz > RANGE_F_MAX) continue;
         if (b.gain_db < lo) lo = b.gain_db;
         if (b.gain_db > hi) hi = b.gain_db;
       }
@@ -208,13 +209,14 @@ export function EqChart({
     [freqs, curves, yMin, yMax, H],
   );
 
-  // Reference curves live on the same axes but come as raw (f, db) points; clip each to
-  // the plotting area so an out-of-range dip doesn't shoot off the chart.
+  // Reference curves come as raw (f, db) points. Use *real* y values (not clamped to the
+  // range) and let the SVG clip mask hide the out-of-plot part — clamping would draw a
+  // bogus flat line pinned to the top/bottom edge instead of the line exiting the frame.
   const refPaths = refs.map((rc) => {
     let d = "";
     rc.points.forEach((p, i) => {
       const px = x(clamp(p.f, F_MIN, F_MAX));
-      const py = y(clamp(p.db, yMin, yMax));
+      const py = y(p.db);
       d += `${i ? "L" : "M"}${px.toFixed(2)},${py.toFixed(2)}`;
     });
     return d;
@@ -249,6 +251,11 @@ export function EqChart({
       role="img"
       aria-label="Equalizer response curve"
     >
+      <defs>
+        <clipPath id={clipId}>
+          <rect x={PAD.l} y={PAD.t} width={W - PAD.l - PAD.r} height={H - PAD.t - PAD.b} />
+        </clipPath>
+      </defs>
       {/* dB gridlines + labels */}
       {dbTicks.map((db) => (
         <g key={`db${db}`}>
@@ -287,6 +294,9 @@ export function EqChart({
         </g>
       )}
 
+      {/* plotted curves/refs/phase/markers, clipped to the plot rect so out-of-range parts
+          leave the frame instead of flattening against the edge */}
+      <g clipPath={`url(#${clipId})`}>
       {/* curves — muted context lines first so the edited/active layer draws on top */}
       {series.map((s, i) =>
         s.muted && !isHidden(s.id) ? (
@@ -336,7 +346,7 @@ export function EqChart({
           ? null
           : m.bands.map((b, i) => {
               const cx = x(clamp(b.freq_hz, F_MIN, F_MAX));
-              const cy = y(clamp(b.gain_db, yMin, yMax));
+              const cy = y(b.gain_db); // real y; the clip hides an out-of-range diamond
               const r = 3.4;
               return (
                 <path
@@ -351,6 +361,7 @@ export function EqChart({
               );
             }),
       )}
+      </g>
 
       {/* draggable band handles (§5.2): X = fc, Y = gain, wheel = Q. Hidden entirely when
           disabled (e.g. Dry active) — stale handles from the last slot shouldn't linger. */}
