@@ -536,10 +536,15 @@ select:disabled {
   font-size: 0.75rem;
   padding: 0.15em 0.5em;
 }
+.pl-upd,
 .pl-del {
   border-color: transparent;
   opacity: 0.55;
   padding: 0.15em 0.35em;
+}
+.pl-upd:hover:not(:disabled) {
+  opacity: 1;
+  border-color: var(--accent);
 }
 .pl-del:hover:not(:disabled) {
   opacity: 1;

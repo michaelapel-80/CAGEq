@@ -637,8 +637,39 @@ function App() {
     }
   }
 
-  const deletePreset = (id: string) => setLibrary((lib) => ({ ...lib, presets: lib.presets.filter((p) => p.id !== id) }));
-  const deleteTemplate = (id: string) => setLibrary((lib) => ({ ...lib, templates: lib.templates.filter((t) => t.id !== id) }));
+  // Overwrite an existing saved entry in place with the *current* controls (same id +
+  // name) — the per-row "update" button, so tweaking a loaded preset and saving it back
+  // doesn't mean retyping the name. Confirms first (reusing the overwrite dialog).
+  const updatePreset = (p: UserPreset) =>
+    setConfirmBox({
+      message: `Overwrite the preset “${p.name}” with the current headphone, target and tone?`,
+      confirmLabel: "Overwrite",
+      onConfirm: () =>
+        setLibrary((lib) => ({
+          ...lib,
+          presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, customFilters }),
+        })),
+    });
+  const updateTemplate = (t: FilterTemplate) =>
+    setConfirmBox({
+      message: `Overwrite the filter template “${t.name}” with the current tone?`,
+      confirmLabel: "Overwrite",
+      onConfirm: () => setLibrary((lib) => ({ ...lib, templates: upsert(lib.templates, { id: t.id, name: t.name, customFilters }) })),
+    });
+
+  // Delete asks first — same confirm overlay as the other destructive actions.
+  const deletePreset = (p: UserPreset) =>
+    setConfirmBox({
+      message: `Delete the preset “${p.name}”? This can't be undone.`,
+      confirmLabel: "Delete",
+      onConfirm: () => setLibrary((lib) => ({ ...lib, presets: lib.presets.filter((x) => x.id !== p.id) })),
+    });
+  const deleteTemplate = (t: FilterTemplate) =>
+    setConfirmBox({
+      message: `Delete the filter template “${t.name}”? This can't be undone.`,
+      confirmLabel: "Delete",
+      onConfirm: () => setLibrary((lib) => ({ ...lib, templates: lib.templates.filter((x) => x.id !== t.id) })),
+    });
 
   // A/S/D switch slots, W toggles loudness mode — but not while typing in a field
   // (§5.2 blind-comparison shortcuts).
@@ -1176,7 +1207,16 @@ function App() {
                       <button type="button" disabled={dryActive} onClick={() => loadTemplate(t)}>
                         Load
                       </button>
-                      <button type="button" className="pl-del" title="Delete" onClick={() => deleteTemplate(t.id)}>
+                      <button
+                        type="button"
+                        className="pl-upd"
+                        title="Overwrite with the current tone"
+                        disabled={dryActive}
+                        onClick={() => updateTemplate(t)}
+                      >
+                        💾
+                      </button>
+                      <button type="button" className="pl-del" title="Delete" onClick={() => deleteTemplate(t)}>
                         🗑
                       </button>
                     </li>
@@ -1197,7 +1237,16 @@ function App() {
                       <button type="button" disabled={dryActive} onClick={() => loadPreset(p)}>
                         Load
                       </button>
-                      <button type="button" className="pl-del" title="Delete" onClick={() => deletePreset(p.id)}>
+                      <button
+                        type="button"
+                        className="pl-upd"
+                        title={measurementPath ? "Overwrite with the current setup" : "Pick a headphone to overwrite this preset"}
+                        disabled={dryActive || !measurementPath}
+                        onClick={() => updatePreset(p)}
+                      >
+                        💾
+                      </button>
+                      <button type="button" className="pl-del" title="Delete" onClick={() => deletePreset(p)}>
                         🗑
                       </button>
                     </li>
