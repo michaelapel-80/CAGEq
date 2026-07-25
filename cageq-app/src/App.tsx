@@ -216,6 +216,7 @@ const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
 // Content pink, Tone green. (Content was amber — too close to Slot A's goldenrod.)
 const STAGE_COLOR: Record<StageId, string> = { fit: "#0ea5e9", content: "#ec4899", tone: "#16a34a" };
 const REF_COLOR = "#a855f7"; // AutoEq's ideal-correction reference (target the fit chases)
+const RAW_COLOR = "#94a3b8"; // the raw headphone measurement (nerd overlay)
 
 function App() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -231,6 +232,7 @@ function App() {
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
   const [showPhase, setShowPhase] = useState(false); // §5.2 nerd overlays — off by default
   const [showImpulse, setShowImpulse] = useState(false);
+  const [rawCurve, setRawCurve] = useState<{ f: number; db: number }[] | null>(null); // raw measured FR (nerd overlay)
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
   const [confirmFinalVolume, setConfirmFinalVolume] = useState(true); // §7.5 point 1
@@ -427,6 +429,22 @@ function App() {
     }, 3000);
     return () => clearInterval(id);
   }, []);
+
+  // §5.2 raw-measurement nerd overlay: fetch the measured curve when the measurement
+  // changes (it's measurement-only, independent of target/tone). Cleared on Dry / none.
+  useEffect(() => {
+    if (activeSlot === "Dry" || !measurementPath) {
+      setRawCurve(null);
+      return;
+    }
+    let cancelled = false;
+    invoke<{ raw_curve: { f: number; db: number }[] }>("raw_measurement", { headphone: measurementPath })
+      .then((r) => !cancelled && setRawCurve(r.raw_curve))
+      .catch(() => !cancelled && setRawCurve(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [measurementPath, activeSlot]);
 
   async function retry() {
     try {
@@ -842,13 +860,16 @@ function App() {
 
   // The ideal correction the active slot's fit chases (§5.2): the AutoEq curve should
   // hug it; the gap is the residual the parametric fit couldn't capture. Off for Dry.
-  const chartRefs: RefCurve[] = useMemo(
-    () =>
-      !dryActive && result?.reference_curve?.length
-        ? [{ id: "ideal", points: result.reference_curve, color: REF_COLOR, label: "Ideal correction (target)" }]
-        : [],
-    [result, dryActive],
-  );
+  const chartRefs: RefCurve[] = useMemo(() => {
+    if (dryActive) return [];
+    const out: RefCurve[] = [];
+    if (result?.reference_curve?.length)
+      out.push({ id: "ideal", points: result.reference_curve, color: REF_COLOR, label: "Ideal correction (target)" });
+    // Raw measured FR — a nerd overlay, off by default.
+    if (rawCurve?.length)
+      out.push({ id: "raw", points: rawCurve, color: RAW_COLOR, label: "Raw measurement", defaultHidden: true });
+    return out;
+  }, [result, dryActive, rawCurve]);
 
   // Fail-safe / startup banner (§5.1). Watchdog states are live; the startup verdicts
   // only matter until the user applies something (they describe the state at launch).

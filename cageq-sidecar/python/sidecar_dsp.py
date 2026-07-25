@@ -370,6 +370,17 @@ def filter_response(params):
     return {"db": [round(float(v), 6) for v in curve]}
 
 
+def raw_measurement(params):
+    """The raw headphone measurement as a subsampled curve for the §5.2 nerd overlay:
+    AutoEq's standard log grid, centered (mean ~0 dB), *before* any target compensation —
+    so it reads as the headphone's own frequency-response shape. Depends only on the
+    measurement, so it's independent of target/tone/slot. Never written to EqAPO."""
+    fr = _measurement_fr(params)
+    fr.interpolate()
+    fr.center()
+    return {"raw_curve": _subsample_curve(fr.frequency, fr.raw)}
+
+
 def calculate_filters(params):
     device = params.get("device", "Unknown")
     # cached; no re-fit on custom-filter changes
@@ -435,6 +446,8 @@ def main():
                 reply(rid, result={"targets": list_targets(refresh=bool(params.get("refresh")))})
             elif method == "calculate_filters":
                 reply(rid, result=calculate_filters(params))
+            elif method == "raw_measurement":
+                reply(rid, result=raw_measurement(params))
             elif method == "filter_response":
                 reply(rid, result=filter_response(params))
             else:
