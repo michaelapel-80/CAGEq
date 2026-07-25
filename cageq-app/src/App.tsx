@@ -97,6 +97,30 @@ const TONE_PRESETS: { name: string; bass: number; treble: number; air: number }[
   { name: "Bright", bass: -2, treble: 4, air: 3 },
 ];
 
+// §3.5 preset library. Two kinds, deliberately different in scope (filter.md §5.2):
+//   • FilterTemplate — only the tone (custom filters); loading keeps measurement/target.
+//   • UserPreset     — a full setup (measurement + target + tone); loading replaces all.
+// Both persist in settings.json's opaque `library` blob (get_library/set_library), the
+// same UI-owned-blob treatment as the resume state — no per-field Rust change.
+type FilterTemplate = { id: string; name: string; customFilters: CustomFilter[] };
+type UserPreset = { id: string; name: string; model: string; measurementPath: string; targetPath: string; customFilters: CustomFilter[] };
+type Library = { presets: UserPreset[]; templates: FilterTemplate[] };
+
+// The curated (built-in, read-only) filter templates: the classic tone shapes, expressed
+// as the three fixed macro bands. These are the tone-only quick presets; a full session
+// preset is inherently user-specific (it names a headphone), so there are no curated ones.
+const CURATED_TEMPLATES: FilterTemplate[] = TONE_PRESETS.map((p) => ({
+  id: `curated:${p.name}`,
+  name: p.name,
+  customFilters: [macroBass(p.bass), macroTreble(p.treble), macroAir(p.air)],
+}));
+
+// Replace the entry sharing `entry.id`, or append it if new — so editing a saved item
+// stays in place (no duplicate) while a fresh save lands at the end.
+function upsert<T extends { id: string }>(list: T[], entry: T): T[] {
+  return list.some((e) => e.id === entry.id) ? list.map((e) => (e.id === entry.id ? entry : e)) : [...list, entry];
+}
+
 // oratory1990 is the common reference measurement — default to it when a model has it.
 const measurementRank = (h: Headphone) => (h.source === "oratory1990" ? 0 : 1);
 // Slot A = goldenrod, Slot B = blue, Dry = neutral (filter.md §5.2 accent colours).
@@ -120,6 +144,11 @@ function App() {
   const [confirmFinalVolume, setConfirmFinalVolume] = useState(true); // §7.5 point 1
   const [pendingFinal, setPendingFinal] = useState<{ next: LoudnessSettings; jump: number } | null>(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
+  // §3.5 preset library + the inline save form and a generic confirm dialog (reused for
+  // the "overwrite existing?" prompt, mirroring the destructive-slot-action confirm).
+  const [library, setLibrary] = useState<Library>({ presets: [], templates: [] });
+  const [saveForm, setSaveForm] = useState<{ kind: "preset" | "template"; name: string; error: boolean } | null>(null);
+  const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
   const [activeSlot, setActiveSlot] = useState<SlotName>("A");
   // Last-applied inputs per editable slot (for display + reloading the controls).
   const [slotInputs, setSlotInputs] = useState<Record<"A" | "B", SlotInputs | null>>({ A: null, B: null });
@@ -175,6 +204,8 @@ function App() {
         setStatus(await invoke<Status>("status"));
         setLoudness(await invoke<LoudnessSettings>("get_loudness"));
         setConfirmFinalVolume(await invoke<boolean>("get_confirm_final_volume"));
+        const lib = await invoke<Library | null>("get_library");
+        if (lib) setLibrary({ presets: lib.presets ?? [], templates: lib.templates ?? [] });
         const [hp, tg, dev] = await Promise.all([
           invoke<{ headphones: Headphone[] }>("list_headphones"),
           invoke<{ targets: Target[] }>("list_targets"),
@@ -291,6 +322,16 @@ function App() {
     }, 400);
     return () => window.clearTimeout(id);
   }, [restored, activeSlot, deviceId, slotInputs, slotFits]);
+
+  // §3.5: persist the preset library (saved presets + filter templates) on change, same
+  // debounce + `restored` gate as the resume blob.
+  useEffect(() => {
+    if (!restored) return;
+    const id = window.setTimeout(() => {
+      invoke("set_library", { library }).catch(() => {});
+    }, 400);
+    return () => window.clearTimeout(id);
+  }, [restored, library]);
 
   // Poll status so the fail-safe banner reflects live watchdog health (trip/recover).
   useEffect(() => {
@@ -542,11 +583,62 @@ function App() {
     setCustomFilters((cf) => cf.filter((_, j) => j !== i));
     requestApply(0);
   };
-  // A preset resets the tone to the three fixed macro bands at its bass/treble/air gains.
-  const setTonePreset = (p: { bass: number; treble: number; air: number }) => {
-    setCustomFilters([macroBass(p.bass), macroTreble(p.treble), macroAir(p.air)]);
+  // --- §3.5 preset library: load / save / delete -----------------------------
+  // Loading always targets the *active* slot (like every other change), so it's disabled
+  // while Dry is active. A filter template replaces only the tone; a full preset replaces
+  // measurement + target + tone. ensureMacros keeps the three fixed macro bands present.
+  const loadTemplate = (t: FilterTemplate) => {
+    if (activeSlot === "Dry") return;
+    setCustomFilters(ensureMacros(t.customFilters));
     requestApply(0);
   };
+  const loadPreset = (p: UserPreset) => {
+    if (activeSlot === "Dry") return;
+    setQuery(p.model);
+    setMeasurementPath(p.measurementPath);
+    setTargetPath(p.targetPath);
+    setCustomFilters(ensureMacros(p.customFilters));
+    requestApply(0);
+  };
+
+  // Save the current controls as a preset or template. Empty name → inline field error.
+  // A name collision with the user's own entry of the same kind asks before overwriting
+  // (replacing that entry in place, same id), so re-saving a tweaked preset doesn't spawn
+  // a confusing duplicate; curated built-ins live in a separate namespace and never collide.
+  function commitSave() {
+    if (!saveForm) return;
+    const name = saveForm.name.trim();
+    if (!name) return setSaveForm({ ...saveForm, error: true });
+    const kind = saveForm.kind;
+    const existing =
+      kind === "preset"
+        ? library.presets.find((p) => p.name.toLowerCase() === name.toLowerCase())
+        : library.templates.find((t) => t.name.toLowerCase() === name.toLowerCase());
+    const id = existing?.id ?? crypto.randomUUID();
+    const write = () => {
+      setLibrary((lib) =>
+        kind === "preset"
+          ? {
+              ...lib,
+              presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, customFilters }),
+            }
+          : { ...lib, templates: upsert(lib.templates, { id, name, customFilters }) },
+      );
+      setSaveForm(null);
+    };
+    if (existing) {
+      setConfirmBox({
+        message: `A ${kind === "preset" ? "preset" : "filter template"} named “${name}” already exists. Overwrite it?`,
+        confirmLabel: "Overwrite",
+        onConfirm: write,
+      });
+    } else {
+      write();
+    }
+  }
+
+  const deletePreset = (id: string) => setLibrary((lib) => ({ ...lib, presets: lib.presets.filter((p) => p.id !== id) }));
+  const deleteTemplate = (id: string) => setLibrary((lib) => ({ ...lib, templates: lib.templates.filter((t) => t.id !== id) }));
 
   // A/S/D switch slots, W toggles loudness mode — but not while typing in a field
   // (§5.2 blind-comparison shortcuts).
@@ -674,6 +766,31 @@ function App() {
               </button>
               <button type="button" onClick={confirmFinal}>
                 Switch to Final volume
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmBox && (
+        <div
+          onClick={() => setConfirmBox(null)}
+          style={{ position: "fixed", inset: 0, background: "#0006", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10 }}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <p style={{ marginTop: 0 }}>{confirmBox.message}</p>
+            <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
+              <button type="button" onClick={() => setConfirmBox(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  confirmBox.onConfirm();
+                  setConfirmBox(null);
+                }}
+              >
+                {confirmBox.confirmLabel}
               </button>
             </div>
           </div>
@@ -980,23 +1097,115 @@ function App() {
 
           {!loading && (
             <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
-              <h2>Tone presets</h2>
-              <p style={{ fontSize: "0.75em", opacity: 0.7, margin: "0 0 0.6em" }}>
-                Your tonal preference on top of the correction — starts flat, everything here is an offset.
-              </p>
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
+                <h2 style={{ margin: 0 }}>Presets &amp; filters</h2>
+                <button
+                  type="button"
+                  className="pl-save"
+                  disabled={dryActive}
+                  onClick={() =>
+                    setSaveForm(saveForm ? null : { kind: measurementPath ? "preset" : "template", name: "", error: false })
+                  }
+                  title="Save the current setup or tone"
+                >
+                  <span aria-hidden>💾</span> Save
+                </button>
+              </div>
+
+              {saveForm && (
+                <div className="pl-saveform">
+                  <div className="pl-toggle">
+                    <button type="button" className={saveForm.kind === "template" ? "on" : ""} onClick={() => setSaveForm({ ...saveForm, kind: "template" })}>
+                      Filter template
+                    </button>
+                    <button
+                      type="button"
+                      className={saveForm.kind === "preset" ? "on" : ""}
+                      disabled={!measurementPath}
+                      title={measurementPath ? undefined : "Pick a headphone to save a full preset"}
+                      onClick={() => setSaveForm({ ...saveForm, kind: "preset" })}
+                    >
+                      Full preset
+                    </button>
+                  </div>
+                  <p className="pl-hint">
+                    {saveForm.kind === "preset"
+                      ? "Saves the measurement, target curve and tone — loading replaces the whole setup."
+                      : "Saves only the tone (custom filters) — loading keeps the current measurement & target."}
+                  </p>
+                  <div className="row" style={{ gap: "0.3em" }}>
+                    <input
+                      type="text"
+                      placeholder="Name"
+                      autoFocus
+                      value={saveForm.name}
+                      onChange={(e) => setSaveForm({ ...saveForm, name: e.currentTarget.value, error: false })}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitSave();
+                        else if (e.key === "Escape") setSaveForm(null);
+                      }}
+                      style={{ flex: 1, borderColor: saveForm.error ? "#c0392b" : undefined }}
+                    />
+                    <button type="button" onClick={commitSave}>
+                      Save
+                    </button>
+                    <button type="button" onClick={() => setSaveForm(null)}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <h3 className="pl-group">
+                Filter templates <span>tone only</span>
+              </h3>
               <div className="row" style={{ gap: "0.35em" }}>
-                {TONE_PRESETS.map((p) => (
-                  <button
-                    key={p.name}
-                    type="button"
-                    disabled={dryActive}
-                    onClick={() => setTonePreset(p)}
-                    style={{ fontSize: "0.8em" }}
-                  >
-                    {p.name}
+                {CURATED_TEMPLATES.map((t) => (
+                  <button key={t.id} type="button" disabled={dryActive} onClick={() => loadTemplate(t)} style={{ fontSize: "0.8em" }}>
+                    {t.name}
                   </button>
                 ))}
               </div>
+              {library.templates.length > 0 && (
+                <ul className="pl-list">
+                  {library.templates.map((t) => (
+                    <li key={t.id} className="pl-item">
+                      <span className="pl-name" title={t.name}>
+                        {t.name}
+                      </span>
+                      <button type="button" disabled={dryActive} onClick={() => loadTemplate(t)}>
+                        Load
+                      </button>
+                      <button type="button" className="pl-del" title="Delete" onClick={() => deleteTemplate(t.id)}>
+                        🗑
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <h3 className="pl-group">
+                Presets <span>measurement + target + tone</span>
+              </h3>
+              {library.presets.length > 0 ? (
+                <ul className="pl-list">
+                  {library.presets.map((p) => (
+                    <li key={p.id} className="pl-item">
+                      <span className="pl-name" title={`${p.name} — ${p.model || "no measurement"}`}>
+                        {p.name}
+                      </span>
+                      <button type="button" disabled={dryActive} onClick={() => loadPreset(p)}>
+                        Load
+                      </button>
+                      <button type="button" className="pl-del" title="Delete" onClick={() => deletePreset(p.id)}>
+                        🗑
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="pl-empty">Pick a headphone + target, then 💾 Save a full preset to recall the whole setup.</p>
+              )}
             </div>
           )}
         </aside>

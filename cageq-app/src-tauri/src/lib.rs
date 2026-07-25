@@ -119,6 +119,21 @@ fn set_resume(resume: Value) {
     update_settings(|s| s.resume = Some(resume));
 }
 
+/// The §3.5 preset library (saved session presets + filter templates) from a previous
+/// run, or `null` on a clean install. Like the resume blob, an opaque UI-owned shape the
+/// backend stores and returns verbatim.
+#[tauri::command]
+fn get_library() -> Option<Value> {
+    load_settings().library
+}
+
+/// Persist the §3.5 preset library. Called by the frontend whenever the user saves or
+/// deletes a preset / filter template.
+#[tauri::command]
+fn set_library(library: Value) {
+    update_settings(|s| s.library = Some(library));
+}
+
 /// Seed a slot with a fit **persisted from a previous session** (§3.5), no sidecar call.
 /// The launch-from-cache path: the frontend saved each slot's last composed bands + curve
 /// quantities, so startup can restore the exact EQ without waiting on the ~1–2 s cold fit.
@@ -382,6 +397,10 @@ struct AppSettings {
     /// returns it, so adding a field there never needs a Rust change.
     #[serde(default)]
     resume: Option<Value>,
+    /// §3.5 preset library — the user's saved session presets and filter templates. Same
+    /// opaque UI-owned-blob treatment as `resume` (persist + return verbatim).
+    #[serde(default)]
+    library: Option<Value>,
 }
 
 fn default_true() -> bool {
@@ -396,6 +415,7 @@ impl Default for AppSettings {
             last_hash: None,
             confirm_final_volume: true,
             resume: None,
+            library: None,
         }
     }
 }
@@ -638,6 +658,8 @@ pub fn run() {
             get_selection,
             get_resume,
             set_resume,
+            get_library,
+            set_library,
             retry
         ])
         .run(tauri::generate_context!())
@@ -780,6 +802,7 @@ mod tests {
                 last_hash: Some("abc123".into()),
                 confirm_final_volume: false,
                 resume: Some(serde_json::json!({ "activeSlot": "B", "deviceId": "dev-1" })),
+                library: Some(serde_json::json!({ "presets": [{ "id": "p1", "name": "Warm & Relaxed" }], "templates": [] })),
             },
         )
         .expect("save");
@@ -791,6 +814,12 @@ mod tests {
         assert!(!reloaded.confirm_final_volume, "reloaded confirm flag should match saved (false)");
         // The resume blob round-trips verbatim (UI-owned shape).
         assert_eq!(reloaded.resume.as_ref().and_then(|r| r["activeSlot"].as_str()), Some("B"), "resume blob should round-trip");
+        // The preset library round-trips verbatim too.
+        assert_eq!(
+            reloaded.library.as_ref().and_then(|l| l["presets"][0]["name"].as_str()),
+            Some("Warm & Relaxed"),
+            "library blob should round-trip"
+        );
         // A missing field (old settings.json) defaults the confirm flag ON.
         std::fs::write(&path, r#"{"loudness":{"base_pregain_db":-9.0,"mode":"Comparison"}}"#).unwrap();
         assert!(load_settings_from(&path).confirm_final_volume, "missing confirm flag defaults to true");
