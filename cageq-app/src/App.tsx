@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Band } from "./biquad";
-import { EqChart, Marker, RefCurve, Series } from "./EqChart";
-import { ImpulseStrip, PhaseStrip } from "./NerdCharts";
+import { EqChart, Marker, PhaseCurve, RefCurve, Series } from "./EqChart";
+import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import "./App.css";
 
@@ -217,6 +217,7 @@ const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
 const STAGE_COLOR: Record<StageId, string> = { fit: "#0ea5e9", content: "#ec4899", tone: "#16a34a" };
 const REF_COLOR = "#a855f7"; // AutoEq's ideal-correction reference (target the fit chases)
 const RAW_COLOR = "#94a3b8"; // the raw headphone measurement (nerd overlay)
+const PHASE_COLOR = "#f59e0b"; // the filter chain's phase, on the secondary axis (nerd overlay)
 
 function App() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -230,8 +231,7 @@ function App() {
   const [stages, setStages] = useState<Stages>(defaultStages()); // §3.4 the three per-slot filter stages
   const [activeStage, setActiveStage] = useState<StageId>("tone"); // which stage the grid/chart edits
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
-  const [showPhase, setShowPhase] = useState(false); // §5.2 nerd overlays — off by default
-  const [showImpulse, setShowImpulse] = useState(false);
+  const [impulseView, setImpulseView] = useState(false); // §5.2: swap the chart for the impulse response
   const [rawCurve, setRawCurve] = useState<{ f: number; db: number }[] | null>(null); // raw measured FR (nerd overlay)
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
@@ -871,6 +871,12 @@ function App() {
     return out;
   }, [result, dryActive, rawCurve]);
 
+  // Phase of the applied filter chain, on the secondary axis — a nerd overlay, off by default.
+  const chartPhase: PhaseCurve | undefined = useMemo(
+    () => (!dryActive && result ? { id: "phase", bands: result.filters, color: PHASE_COLOR, label: "Phase (°)", defaultHidden: true } : undefined),
+    [result, dryActive],
+  );
+
   // Fail-safe / startup banner (§5.1). Watchdog states are live; the startup verdicts
   // only matter until the user applies something (they describe the state at launch).
   const banner = (() => {
@@ -1089,20 +1095,38 @@ function App() {
 
               {result && (
                 <>
+                  {/* View swap: the magnitude response, or the impulse response in its place
+                      (so it doesn't cost extra vertical space). Phase rides the magnitude
+                      chart's secondary axis (legend toggle), so it isn't a view here. */}
+                  {!dryActive && (
+                    <div className="chart-view">
+                      <button type="button" className={!impulseView ? "on" : ""} onClick={() => setImpulseView(false)}>
+                        Response
+                      </button>
+                      <button type="button" className={impulseView ? "on" : ""} onClick={() => setImpulseView(true)}>
+                        Impulse
+                      </button>
+                    </div>
+                  )}
                   <div className="chart-wrap">
-                    <EqChart
-                      series={chartSeries}
-                      markers={chartMarkers}
-                      refs={chartRefs}
-                      height={215}
-                      nodes={{
-                        bands: activeBands,
-                        color: STAGE_COLOR[activeStage],
-                        disabled: dryActive,
-                        onChange: (i, patch) => updateFilter(i, patch, 70),
-                        onDragEnd: () => requestApply(0),
-                      }}
-                    />
+                    {impulseView && !dryActive ? (
+                      <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} />
+                    ) : (
+                      <EqChart
+                        series={chartSeries}
+                        markers={chartMarkers}
+                        refs={chartRefs}
+                        phase={chartPhase}
+                        height={215}
+                        nodes={{
+                          bands: activeBands,
+                          color: STAGE_COLOR[activeStage],
+                          disabled: dryActive,
+                          onChange: (i, patch) => updateFilter(i, patch, 70),
+                          onDragEnd: () => requestApply(0),
+                        }}
+                      />
+                    )}
                     <div
                       className="chart-preamp"
                       title={
@@ -1129,33 +1153,6 @@ function App() {
                         </button>
                       )}
                     </p>
-                  )}
-                  {/* Nerd overlays — off by default; the phase/impulse strips are a different
-                      domain than the magnitude chart, so they live below it, not on it. */}
-                  {!dryActive && (
-                    <>
-                      <div className="nerd-diag">
-                        <span className="nerd-diag-lbl">Nerd view</span>
-                        <label>
-                          <input type="checkbox" checked={showPhase} onChange={(e) => setShowPhase(e.currentTarget.checked)} /> Phase
-                        </label>
-                        <label>
-                          <input type="checkbox" checked={showImpulse} onChange={(e) => setShowImpulse(e.currentTarget.checked)} /> Impulse
-                        </label>
-                      </div>
-                      {showPhase && (
-                        <div className="nerd-strip">
-                          <div className="nerd-strip-lbl">Phase — filter chain</div>
-                          <PhaseStrip bands={result.filters} color={SLOT_COLOR[activeSlot]} />
-                        </div>
-                      )}
-                      {showImpulse && (
-                        <div className="nerd-strip">
-                          <div className="nerd-strip-lbl">Impulse response — filter chain</div>
-                          <ImpulseStrip bands={result.filters} color={SLOT_COLOR[activeSlot]} />
-                        </div>
-                      )}
-                    </>
                   )}
                 </>
               )}

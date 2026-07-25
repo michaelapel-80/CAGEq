@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Band, composedCurveDb, logGrid } from "./biquad";
+import { Band, composedCurveDb, logGrid, phaseDeg } from "./biquad";
 
 /**
  * §5.2 interactive diagram.
@@ -49,6 +49,10 @@ export type RefCurve = {
   defaultHidden?: boolean;
 };
 
+/** The filter chain's phase response, drawn on a **secondary right axis** (degrees) — a
+ *  Bode-style overlay, off by default. Computed from bands, so it tracks live edits. */
+export type PhaseCurve = { id: string; bands: Band[]; color: string; label: string; defaultHidden?: boolean };
+
 /** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). */
 export type Nodes = {
   bands: Band[];
@@ -70,18 +74,19 @@ export function EqChart({
   series,
   markers = [],
   refs = [],
+  phase,
   nodes,
   height = 210,
 }: {
   series: Series[];
   markers?: Marker[];
   refs?: RefCurve[];
+  phase?: PhaseCurve;
   nodes?: Nodes;
   height?: number;
 }) {
   const W = 720;
   const H = height;
-  const PAD = { l: 40, r: 12, t: 12, b: 24 };
   const svgRef = useRef<SVGSVGElement>(null);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -94,10 +99,16 @@ export function EqChart({
     for (const s of series) if (s.defaultHidden) m[s.id] = true;
     for (const r of refs) if (r.defaultHidden) m[r.id] = true;
     for (const mk of markers) if (mk.defaultHidden) m[mk.id] = true;
+    if (phase?.defaultHidden) m[phase.id] = true;
     return m;
-  }, [series, refs, markers]);
+  }, [series, refs, markers, phase]);
   const isHidden = (id: string) => (id in overrides ? overrides[id] : defaultHidden[id] === true);
   const toggle = (id: string) => setOverrides((o) => ({ ...o, [id]: !isHidden(id) }));
+
+  // The phase overlay needs a right axis (degrees) — reserve room for its labels only when
+  // it's actually shown, so the plot doesn't lose width when it isn't.
+  const phaseOn = !!phase && !isHidden(phase.id);
+  const PAD = { l: 40, r: phaseOn ? 34 : 12, t: 12, b: 24 };
 
   const { freqs, curves, yMin, yMax, step } = useMemo(() => {
     const freqs = logGrid(480, F_MIN, F_MAX);
@@ -134,10 +145,21 @@ export function EqChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [series, markers, refs, overrides, defaultHidden]);
 
+  // Phase curve on the secondary axis (computed on the same freq grid). Its degrees range
+  // is symmetric and snapped to 45°, independent of the dB axis.
+  const { phaseCurve, phaseRange } = useMemo(() => {
+    if (!phase) return { phaseCurve: null as Float64Array | null, phaseRange: 90 };
+    const p = phaseDeg(phase.bands, freqs);
+    let m = 45;
+    for (const v of p) m = Math.max(m, Math.abs(v));
+    return { phaseCurve: p, phaseRange: Math.ceil(m / 45) * 45 };
+  }, [phase, freqs]);
+
   const lnMin = Math.log(F_MIN);
   const lnSpan = Math.log(F_MAX) - lnMin;
   const x = (f: number) => PAD.l + ((Math.log(f) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
   const y = (db: number) => PAD.t + ((yMax - db) / (yMax - yMin)) * (H - PAD.t - PAD.b);
+  const yPhase = (deg: number) => PAD.t + ((phaseRange - deg) / (2 * phaseRange)) * (H - PAD.t - PAD.b);
   // Inverse scales, for turning a pointer position back into (frequency, gain).
   const invX = (vx: number) => Math.exp(lnMin + ((vx - PAD.l) / (W - PAD.l - PAD.r)) * lnSpan);
   const invY = (vy: number) => yMax - ((vy - PAD.t) / (H - PAD.t - PAD.b)) * (yMax - yMin);
@@ -190,14 +212,23 @@ export function EqChart({
     return d;
   });
 
+  const phasePath = useMemo(() => {
+    if (!phaseCurve) return "";
+    let d = "";
+    for (let i = 0; i < freqs.length; i++) d += `${i ? "L" : "M"}${x(freqs[i]).toFixed(2)},${yPhase(phaseCurve[i]).toFixed(2)}`;
+    return d;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phaseCurve, freqs, phaseRange, PAD.r, H]);
+
   const dbTicks: number[] = [];
   for (let v = -Math.floor(yMax / step) * step; v <= yMax; v += step) dbTicks.push(v);
 
-  // Legend rows: every series, then reference curves, then markers, in draw order.
+  // Legend rows: every series, then reference curves, phase, then markers, in draw order.
   type LegendStyle = "solid" | "dashed" | "dotted" | "diamond";
   const legend: { id: string; color: string; label: string; style: LegendStyle }[] = [
     ...series.map((s) => ({ id: s.id, color: s.color, label: s.label, style: (s.muted ? "dashed" : "solid") as LegendStyle })),
     ...refs.map((rc) => ({ id: rc.id, color: rc.color, label: rc.label, style: "dotted" as LegendStyle })),
+    ...(phase ? [{ id: phase.id, color: phase.color, label: phase.label, style: "dashed" as LegendStyle }] : []),
     ...markers.map((m) => ({ id: m.id, color: m.color, label: m.label, style: "diamond" as LegendStyle })),
   ];
 
@@ -237,6 +268,17 @@ export function EqChart({
         </g>
       ))}
 
+      {/* secondary phase axis (degrees), right side — only when the phase overlay is shown */}
+      {phaseOn && phase && (
+        <g>
+          {[phaseRange, 0, -phaseRange].map((deg) => (
+            <text key={deg} x={W - PAD.r + 4} y={yPhase(deg) + 3.5} textAnchor="start" fontSize="10" fill={phase.color} opacity={0.85}>
+              {deg > 0 ? `+${deg}` : deg}°
+            </text>
+          ))}
+        </g>
+      )}
+
       {/* curves — muted context lines first so the edited/active layer draws on top */}
       {series.map((s, i) =>
         s.muted && !isHidden(s.id) ? (
@@ -273,6 +315,11 @@ export function EqChart({
             strokeLinejoin="round"
           />
         ),
+      )}
+
+      {/* phase overlay (right axis) — dashed so it doesn't read as a magnitude curve */}
+      {phaseOn && phasePath && (
+        <path d={phasePath} fill="none" stroke={phase!.color} strokeWidth={1.5} strokeOpacity={0.85} strokeDasharray="6 3" strokeLinejoin="round" />
       )}
 
       {/* fixed band markers (e.g. the AutoEq fit) as small diamonds */}
