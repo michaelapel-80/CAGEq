@@ -491,7 +491,8 @@ select:disabled {
   border: 1.5px solid rgba(128, 128, 128, 0.6);
   background: transparent;
 }
-.tg-enable.on .tg-led {
+.tg-enable.on .tg-led,
+.stage-enable.on .tg-led {
   background: #16a34a;
   border-color: #16a34a;
   box-shadow: 0 0 3px rgba(22, 163, 74, 0.6);
