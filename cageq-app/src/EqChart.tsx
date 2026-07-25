@@ -68,6 +68,10 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
 const F_MAX = 20000;
+// The Y auto-scale only considers 20 Hz–12 kHz: the target/raw curves diverge sharply in
+// the top octaves (measurement noise + the treble roll-off), which would otherwise blow the
+// scale out to ±24 dB. The curves are still *drawn* full-range, just not counted here.
+const RANGE_F_MAX = 12000;
 const fmtHz = (f: number) => (f >= 1000 ? `${f / 1000}k` : `${f}`);
 
 export function EqChart({
@@ -115,11 +119,13 @@ export function EqChart({
     const curves = series.map((s) => composedCurveDb(s.bands, freqs));
     let lo = 0;
     let hi = 0;
-    // Auto-range over visible curves and visible marker gains only, so hiding a
-    // spiky layer lets the rest breathe.
+    // Auto-range over visible curves and visible marker gains only (hiding a spiky layer
+    // lets the rest breathe), and only within 20 Hz–12 kHz (see RANGE_F_MAX).
     series.forEach((s, i) => {
       if (isHidden(s.id)) return;
-      for (const v of curves[i]) {
+      for (let j = 0; j < freqs.length; j++) {
+        if (freqs[j] > RANGE_F_MAX) break;
+        const v = curves[i][j];
         if (v < lo) lo = v;
         if (v > hi) hi = v;
       }
@@ -127,6 +133,7 @@ export function EqChart({
     for (const m of markers) {
       if (isHidden(m.id)) continue;
       for (const b of m.bands) {
+        if (b.freq_hz > RANGE_F_MAX) continue;
         if (b.gain_db < lo) lo = b.gain_db;
         if (b.gain_db > hi) hi = b.gain_db;
       }
@@ -134,6 +141,7 @@ export function EqChart({
     for (const rc of refs) {
       if (isHidden(rc.id)) continue;
       for (const p of rc.points) {
+        if (p.f > RANGE_F_MAX) continue;
         if (p.db < lo) lo = p.db;
         if (p.db > hi) hi = p.db;
       }
