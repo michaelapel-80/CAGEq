@@ -41,6 +41,23 @@ const KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
 const GAIN_MIN = -20;
 const GAIN_MAX = 20;
 
+// A fixed macro band's Fc is constrained to a sensible window around its corner so its
+// label stays meaningful (a "Bass" shelf dragged to 8 kHz is no longer bass). Free bands
+// span the whole audible range.
+const fcBounds = (f: ToneBand): [number, number] => {
+  if (!f.fixed) return [20, 20000];
+  switch (f.macro) {
+    case "Bass":
+      return [40, 250];
+    case "Treble":
+      return [1500, 8000];
+    case "Air":
+      return [8000, 16000];
+    default:
+      return [20, 20000];
+  }
+};
+
 const fmtHz = (v: number) => (v >= 1000 ? `${+(v / 1000).toFixed(2)}k` : `${Math.round(v)}`);
 const fmtGain = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
 
@@ -138,8 +155,8 @@ export function ToneGrid({ filters, disabled, onInput, onCommit, onAdd, onRemove
               <ScrubNumber
                 className="tg-num"
                 value={f.freq_hz}
-                min={20}
-                max={20000}
+                min={fcBounds(f)[0]}
+                max={fcBounds(f)[1]}
                 mode="mult"
                 arrowStep={1.02}
                 decimals={0}

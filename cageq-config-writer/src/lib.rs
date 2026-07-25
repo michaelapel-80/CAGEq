@@ -574,12 +574,32 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     target.parent().ok_or(WriteError::NoParentDir)?;
     let tmp = temp_sibling(target);
     fs::write(&tmp, bytes)?;
-    if let Err(e) = fs::rename(&tmp, target) {
-        let _ = fs::remove_file(&tmp); // best-effort cleanup
-        return Err(e.into());
+    // The replace-rename can transiently fail on Windows if EqAPO's directory watcher or an
+    // AV scanner holds cageq.txt open for reading at that instant — a sharing violation /
+    // access-denied that clears within milliseconds (the next write always went through).
+    // Retry a few times with a short backoff so a single unlucky write doesn't surface as
+    // an error; a genuine failure (e.g. a read-only dir) still errors after the attempts.
+    let mut attempt = 1u32;
+    loop {
+        match fs::rename(&tmp, target) {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < RENAME_ATTEMPTS => {
+                std::thread::sleep(RENAME_BACKOFF * attempt);
+                attempt += 1;
+                let _ = e;
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&tmp); // best-effort cleanup
+                return Err(e.into());
+            }
+        }
     }
-    Ok(())
 }
+
+/// Replace-rename retry budget for the transient-reader race above: 5 tries with a
+/// growing backoff (15/30/45/60 ms ≈ 150 ms worst case) before giving up.
+const RENAME_ATTEMPTS: u32 = 5;
+const RENAME_BACKOFF: std::time::Duration = std::time::Duration::from_millis(15);
 
 /// A temp path next to the target so the rename stays on one volume. The PID
 /// suffix suffices — §2's single-instance lock precludes a second concurrent

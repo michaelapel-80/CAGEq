@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Band } from "./biquad";
 import { EqChart, Marker, RefCurve, Series } from "./EqChart";
 import { ToneGrid } from "./ToneGrid";
@@ -894,6 +895,7 @@ function App() {
                   <option key={name} value={name} />
                 ))}
               </datalist>
+              <label style={{ fontSize: "0.85em", opacity: 0.75 }}>Measurement</label>
               <select
                 value={measurementPath}
                 onChange={(e) => setMeasurementPath(e.currentTarget.value)}
@@ -957,24 +959,32 @@ function App() {
 
               {result && (
                 <>
-                  <EqChart
-                    series={chartSeries}
-                    markers={chartMarkers}
-                    refs={chartRefs}
-                    height={215}
-                    nodes={{
-                      bands: customFilters,
-                      color: TONE_COLOR,
-                      disabled: dryActive,
-                      onChange: (i, patch) => updateFilter(i, patch, 70),
-                      onDragEnd: () => requestApply(0),
-                    }}
-                  />
-                  <p style={{ fontSize: "0.8em", opacity: 0.75, margin: "0.2em 0 0" }}>
-                    Preamp <code>{result.preamp_db.toFixed(1)} dB</code>{" "}
-                    {loudness?.mode === "FinalVolume" ? "(max clipping-free)" : "(Auto-LUFS)"} · hash{" "}
-                    <code>{result.hash}</code>
-                  </p>
+                  <div className="chart-wrap">
+                    <EqChart
+                      series={chartSeries}
+                      markers={chartMarkers}
+                      refs={chartRefs}
+                      height={215}
+                      nodes={{
+                        bands: customFilters,
+                        color: TONE_COLOR,
+                        disabled: dryActive,
+                        onChange: (i, patch) => updateFilter(i, patch, 70),
+                        onDragEnd: () => requestApply(0),
+                      }}
+                    />
+                    <div
+                      className="chart-preamp"
+                      title={
+                        loudness?.mode === "FinalVolume"
+                          ? "Preamp for maximum clipping-free volume"
+                          : "Preamp for the loudness-matched level (Auto-LUFS)"
+                      }
+                    >
+                      Preamp <b>{result.preamp_db.toFixed(1)} dB</b>
+                      <span className="chart-preamp-mode">{loudness?.mode === "FinalVolume" ? "max" : "matched"}</span>
+                    </div>
+                  </div>
                   {result.clipping_warning && (
                     <p style={{ color: "#b8860b", fontSize: "0.8em", margin: "0.2em 0 0" }}>
                       ⚠ Emergency clipping protection active instead of the loudness match — extreme peak.
@@ -998,7 +1008,7 @@ function App() {
           {/* ---- tone bands: the keyboard-first graphic-EQ grid (§5.2 stage 3) ---- */}
           {!loading && (
             <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
-              <h2>Tone bands (§3.4)</h2>
+              <h2>Filter bands</h2>
               {dryActive ? (
                 <p className="tg-empty">
                   Dry is the fixed reference — pick Slot A or B to edit tone bands.
@@ -1077,7 +1087,7 @@ function App() {
 
           {loudness && (
             <div className="panel">
-              <h2>Loudness (§4.0)</h2>
+              <h2>Loudness</h2>
               <label style={{ display: "block", marginBottom: "0.2em" }}>
                 <input
                   type="radio"
@@ -1270,6 +1280,20 @@ function App() {
           </pre>
         </details>
       )}
+
+      <footer className="app-footer">
+        Headphone corrections and target curves from{" "}
+        <a
+          href="https://github.com/jaakkopasanen/AutoEq"
+          onClick={(e) => {
+            e.preventDefault();
+            void openUrl("https://github.com/jaakkopasanen/AutoEq").catch(() => {});
+          }}
+        >
+          AutoEq
+        </a>{" "}
+        by Jaakko Pasanen, MIT-licensed. CAGEq is an independent project, not affiliated with AutoEq.
+      </footer>
     </main>
   );
 }

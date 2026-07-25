@@ -283,8 +283,9 @@ export function EqChart({
             }),
       )}
 
-      {/* draggable band handles (§5.2): X = fc, Y = gain, wheel = Q */}
-      {nodes?.bands.map((b, i) => {
+      {/* draggable band handles (§5.2): X = fc, Y = gain, wheel = Q. Hidden entirely when
+          disabled (e.g. Dry active) — stale handles from the last slot shouldn't linger. */}
+      {nodes && !nodes.disabled && nodes.bands.map((b, i) => {
         const cx = x(clamp(b.freq_hz, F_MIN, F_MAX));
         const cy = y(clamp(b.gain_db, yMin, yMax));
         const active = dragIdx === i || hoverIdx === i;
@@ -310,6 +311,18 @@ export function EqChart({
               }}
               onPointerMove={(e) => {
                 if (dragIdx !== i) return;
+                // A missed pointerup would otherwise drag the node on plain hover; if no
+                // button is held, end the drag instead.
+                if (e.buttons === 0) {
+                  try {
+                    (e.target as Element).releasePointerCapture(e.pointerId);
+                  } catch {
+                    /* capture may already be gone */
+                  }
+                  setDragIdx(null);
+                  nodes.onDragEnd?.();
+                  return;
+                }
                 const { vx, vy } = toViewBox(e.clientX, e.clientY);
                 nodes.onChange(i, {
                   freq_hz: Math.round(clamp(invX(vx), F_MIN, F_MAX)),
@@ -318,7 +331,16 @@ export function EqChart({
               }}
               onPointerUp={(e) => {
                 if (dragIdx !== i) return;
-                (e.target as Element).releasePointerCapture(e.pointerId);
+                try {
+                  (e.target as Element).releasePointerCapture(e.pointerId);
+                } catch {
+                  /* capture may already be gone */
+                }
+                setDragIdx(null);
+                nodes.onDragEnd?.();
+              }}
+              onPointerCancel={() => {
+                if (dragIdx !== i) return;
                 setDragIdx(null);
                 nodes.onDragEnd?.();
               }}
