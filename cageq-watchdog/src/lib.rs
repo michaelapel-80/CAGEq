@@ -335,6 +335,21 @@ fn driver_loop<F>(spawn_fn: F, mut sidecar: Sidecar, cmd_rx: Receiver<Command>, 
 where
     F: Fn() -> Result<Sidecar, SidecarError>,
 {
+    // Warm-up: a freshly spawned interpreter pays a one-time import cost (numpy/scipy/
+    // autoeq, ~0.4 s) on its first request. Pay it here — this thread starts during app
+    // setup, before the window is shown — so the import overlaps webview boot instead of
+    // landing on the user's first real request (the catalogue load / initial re-fit).
+    // No `begin`, so the monitor ignores it (a slow import must not look like a hang);
+    // a genuine failure still feeds the normal fault path, exactly like the heartbeat.
+    // The respawn path already confirms replacements with a ping (`run_recovery`); this
+    // gives the initial spawn the same warming round-trip.
+    if !shared.lock().unwrap().shutdown {
+        let outcome = classify(&sidecar.ping());
+        if !shared.lock().unwrap().shutdown {
+            after_interaction(outcome, &spawn_fn, &mut sidecar, &shared, &cfg);
+        }
+    }
+
     loop {
         let health = {
             let s = shared.lock().unwrap();

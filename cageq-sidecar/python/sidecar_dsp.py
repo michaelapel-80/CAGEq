@@ -16,6 +16,7 @@ matplotlib, so we force the headless Agg backend before importing it.
 """
 import sys
 import os
+import types
 import json
 import hashlib
 import tempfile
@@ -23,6 +24,28 @@ import urllib.request
 import urllib.parse
 
 os.environ.setdefault("MPLBACKEND", "Agg")  # headless subprocess: no GUI backend
+
+# Stub matplotlib before AutoEq imports it. autoeq.peq does a module-level
+# `from matplotlib import pyplot as plt, ticker` purely to support its plotting
+# methods, which this sidecar never calls — but importing the real matplotlib costs
+# ~0.17 s of the ~0.4 s cold start (measured), paid on the very first request and thus
+# on app launch. A permissive no-op stub makes the import free and turns any stray
+# plotting call into a silent no-op (behaviour-neutral: we compute curves, never render).
+class _NoopModule(types.ModuleType):
+    __path__ = []                       # look like a package for `from matplotlib import ...`
+
+    def __getattr__(self, _name):       # every attribute is a no-op callable...
+        return _noop
+
+
+def _noop(*_a, **_k):                   # ...that also returns a no-op when called/chained
+    return _noop
+
+
+for _m in ("matplotlib", "matplotlib.pyplot", "matplotlib.ticker"):
+    sys.modules[_m] = _NoopModule(_m)
+sys.modules["matplotlib"].pyplot = sys.modules["matplotlib.pyplot"]
+sys.modules["matplotlib"].ticker = sys.modules["matplotlib.ticker"]
 
 import numpy as np  # noqa: E402
 import autoeq.peq as autoeq_peq  # noqa: E402
