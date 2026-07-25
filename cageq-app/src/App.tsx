@@ -217,6 +217,7 @@ const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
 const STAGE_COLOR: Record<StageId, string> = { fit: "#0ea5e9", content: "#ec4899", tone: "#16a34a" };
 const REF_COLOR = "#a855f7"; // AutoEq's ideal-correction reference (target the fit chases)
 const RAW_COLOR = "#94a3b8"; // the raw headphone measurement (nerd overlay)
+const TARGET_COLOR = "#7dd3fc"; // the target curve — pale blue, à la AutoEq (nerd overlay)
 const PHASE_COLOR = "#f59e0b"; // the filter chain's phase, on the secondary axis (nerd overlay)
 
 function App() {
@@ -233,6 +234,7 @@ function App() {
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
   const [impulseView, setImpulseView] = useState(false); // §5.2: swap the chart for the impulse response
   const [rawCurve, setRawCurve] = useState<{ f: number; db: number }[] | null>(null); // raw measured FR (nerd overlay)
+  const [targetCurve, setTargetCurve] = useState<{ f: number; db: number }[] | null>(null); // the target curve (nerd overlay)
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
   const [confirmFinalVolume, setConfirmFinalVolume] = useState(true); // §7.5 point 1
@@ -430,21 +432,33 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
-  // §5.2 raw-measurement nerd overlay: fetch the measured curve when the measurement
-  // changes (it's measurement-only, independent of target/tone). Cleared on Dry / none.
+  // §5.2 measurement nerd overlays: fetch the raw + target curves when the measurement or
+  // target changes (they share the dBr reference). Cleared on Dry / no measurement.
   useEffect(() => {
     if (activeSlot === "Dry" || !measurementPath) {
       setRawCurve(null);
+      setTargetCurve(null);
       return;
     }
     let cancelled = false;
-    invoke<{ raw_curve: { f: number; db: number }[] }>("raw_measurement", { headphone: measurementPath })
-      .then((r) => !cancelled && setRawCurve(r.raw_curve))
-      .catch(() => !cancelled && setRawCurve(null));
+    invoke<{ raw_curve: { f: number; db: number }[]; target_curve: { f: number; db: number }[] }>("measurement_curves", {
+      headphone: measurementPath,
+      target: targetPath || null,
+    })
+      .then((r) => {
+        if (cancelled) return;
+        setRawCurve(r.raw_curve);
+        setTargetCurve(r.target_curve?.length ? r.target_curve : null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRawCurve(null);
+        setTargetCurve(null);
+      });
     return () => {
       cancelled = true;
     };
-  }, [measurementPath, activeSlot]);
+  }, [measurementPath, targetPath, activeSlot]);
 
   async function retry() {
     try {
@@ -835,7 +849,7 @@ function App() {
         id: `slot-${activeSlot}`,
         bands: result.filters,
         color: SLOT_COLOR[activeSlot],
-        label: dryActive ? "Dry (flat)" : `Slot ${activeSlot} total`,
+        label: dryActive ? "Dry" : `Slot ${activeSlot}`,
       },
     ];
     if (!dryActive) {
@@ -843,7 +857,7 @@ function App() {
         const st = stages[id];
         const bands = st.bands.filter((b) => b.enabled !== false);
         if (id === activeStage) {
-          out.push({ id: `stage-${id}`, bands, color: STAGE_COLOR[id], label: `${STAGE_META[id].label} (editing)` });
+          out.push({ id: `stage-${id}`, bands, color: STAGE_COLOR[id], label: STAGE_META[id].label });
         } else if (st.enabled && bands.length) {
           out.push({ id: `stage-${id}`, bands, color: STAGE_COLOR[id], label: STAGE_META[id].label, muted: true });
         }
@@ -854,7 +868,7 @@ function App() {
 
   const chartMarkers: Marker[] = useMemo(
     // Off by default — a nerd overlay revealed from the legend.
-    () => (autoEqBands.length ? [{ id: "autoeq", bands: autoEqBands, color: SLOT_COLOR[activeSlot], label: "AutoEq fit", defaultHidden: true }] : []),
+    () => (autoEqBands.length ? [{ id: "autoeq", bands: autoEqBands, color: SLOT_COLOR[activeSlot], label: "AutoEq", defaultHidden: true }] : []),
     [autoEqBands, activeSlot],
   );
 
@@ -864,16 +878,18 @@ function App() {
     if (dryActive) return [];
     const out: RefCurve[] = [];
     if (result?.reference_curve?.length)
-      out.push({ id: "ideal", points: result.reference_curve, color: REF_COLOR, label: "Ideal correction (target)" });
-    // Raw measured FR — a nerd overlay, off by default.
+      out.push({ id: "ideal", points: result.reference_curve, color: REF_COLOR, label: "Ideal EQ" });
+    // Target + raw measurement — nerd overlays, off by default (share the dBr reference).
+    if (targetCurve?.length)
+      out.push({ id: "target", points: targetCurve, color: TARGET_COLOR, label: "Target", defaultHidden: true });
     if (rawCurve?.length)
-      out.push({ id: "raw", points: rawCurve, color: RAW_COLOR, label: "Raw measurement", defaultHidden: true });
+      out.push({ id: "raw", points: rawCurve, color: RAW_COLOR, label: "Raw", defaultHidden: true });
     return out;
-  }, [result, dryActive, rawCurve]);
+  }, [result, dryActive, rawCurve, targetCurve]);
 
   // Phase of the applied filter chain, on the secondary axis — a nerd overlay, off by default.
   const chartPhase: PhaseCurve | undefined = useMemo(
-    () => (!dryActive && result ? { id: "phase", bands: result.filters, color: PHASE_COLOR, label: "Phase (°)", defaultHidden: true } : undefined),
+    () => (!dryActive && result ? { id: "phase", bands: result.filters, color: PHASE_COLOR, label: "Phase", defaultHidden: true } : undefined),
     [result, dryActive],
   );
 
@@ -1078,7 +1094,19 @@ function App() {
         <section>
           {!loading && (
             <div className="panel">
-              <h2>Correction</h2>
+              <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.35rem" }}>
+                <h2 style={{ margin: 0 }}>Correction</h2>
+                {result && !dryActive && (
+                  <div className="chart-view" style={{ margin: 0 }}>
+                    <button type="button" className={!impulseView ? "on" : ""} onClick={() => setImpulseView(false)}>
+                      Response
+                    </button>
+                    <button type="button" className={impulseView ? "on" : ""} onClick={() => setImpulseView(true)}>
+                      Impulse
+                    </button>
+                  </div>
+                )}
+              </div>
               <div className="row" style={{ gap: "0.5em" }}>
                 <label style={{ fontSize: "0.85em", opacity: 0.75 }}>Target</label>
                 <select value={targetPath} onChange={(e) => setTargetPath(e.currentTarget.value)} disabled={dryActive}>
@@ -1095,19 +1123,8 @@ function App() {
 
               {result && (
                 <>
-                  {/* View swap: the magnitude response, or the impulse response in its place
-                      (so it doesn't cost extra vertical space). Phase rides the magnitude
-                      chart's secondary axis (legend toggle), so it isn't a view here. */}
-                  {!dryActive && (
-                    <div className="chart-view">
-                      <button type="button" className={!impulseView ? "on" : ""} onClick={() => setImpulseView(false)}>
-                        Response
-                      </button>
-                      <button type="button" className={impulseView ? "on" : ""} onClick={() => setImpulseView(true)}>
-                        Impulse
-                      </button>
-                    </div>
-                  )}
+                  {/* The Response/Impulse view swap lives in the panel header row (above).
+                      Phase rides the magnitude chart's secondary axis (legend toggle). */}
                   <div className="chart-wrap">
                     {impulseView && !dryActive ? (
                       <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} />

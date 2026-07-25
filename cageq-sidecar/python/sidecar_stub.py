@@ -63,9 +63,12 @@ def handle(method, params):
             + list(params.get("custom_filters") or []),
         }
 
-    if method == "raw_measurement":
-        # A canned raw curve so the nerd overlay degrades gracefully without a DSP install.
-        return {"raw_curve": [{"f": 20.0, "db": 4.0}, {"f": 1000.0, "db": 0.0}, {"f": 20000.0, "db": -5.0}]}
+    if method == "measurement_curves":
+        # Canned curves so the nerd overlays degrade gracefully without a DSP install.
+        return {
+            "raw_curve": [{"f": 20.0, "db": 4.0}, {"f": 1000.0, "db": 0.0}, {"f": 20000.0, "db": -5.0}],
+            "target_curve": [{"f": 20.0, "db": 6.0}, {"f": 1000.0, "db": 0.0}, {"f": 3000.0, "db": 9.0}, {"f": 20000.0, "db": -4.0}],
+        }
 
     raise KeyError(method)
 

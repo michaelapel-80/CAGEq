@@ -370,15 +370,23 @@ def filter_response(params):
     return {"db": [round(float(v), 6) for v in curve]}
 
 
-def raw_measurement(params):
-    """The raw headphone measurement as a subsampled curve for the §5.2 nerd overlay:
-    AutoEq's standard log grid, centered (mean ~0 dB), *before* any target compensation —
-    so it reads as the headphone's own frequency-response shape. Depends only on the
-    measurement, so it's independent of target/tone/slot. Never written to EqAPO."""
+def measurement_curves(params):
+    """Raw headphone measurement + target curve for the §5.2 nerd overlays, both on AutoEq's
+    log grid and **centered the same way** so they share one relative-dB (dBr) reference —
+    like the AutoEq site's graph (raw vs target). Raw is *before* target compensation (the
+    headphone's own FR shape); target is the named AutoEq target (empty ⇒ flat 0). UI-only,
+    never written to EqAPO."""
     fr = _measurement_fr(params)
     fr.interpolate()
     fr.center()
-    return {"raw_curve": _subsample_curve(fr.frequency, fr.raw)}
+    raw_curve = _subsample_curve(fr.frequency, fr.raw)
+    if params.get("target"):
+        tfr = FrequencyResponse(name="target", frequency=fr.frequency, raw=_target_raw(params, fr.frequency))
+        tfr.center()  # same centering as the raw → shared reference
+        target_curve = _subsample_curve(fr.frequency, tfr.raw)
+    else:
+        target_curve = []
+    return {"raw_curve": raw_curve, "target_curve": target_curve}
 
 
 def calculate_filters(params):
@@ -446,8 +454,8 @@ def main():
                 reply(rid, result={"targets": list_targets(refresh=bool(params.get("refresh")))})
             elif method == "calculate_filters":
                 reply(rid, result=calculate_filters(params))
-            elif method == "raw_measurement":
-                reply(rid, result=raw_measurement(params))
+            elif method == "measurement_curves":
+                reply(rid, result=measurement_curves(params))
             elif method == "filter_response":
                 reply(rid, result=filter_response(params))
             else:

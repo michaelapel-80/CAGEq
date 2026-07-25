@@ -127,7 +127,7 @@ select:disabled {
 
 .app {
   margin: 0 auto;
-  padding: 0.7rem 1.1rem 1rem;
+  padding: 0.6rem 1.1rem 0.6rem;
   max-width: 1400px;
   text-align: left;
 }
@@ -162,8 +162,8 @@ select:disabled {
 .panel {
   border: 1px solid rgba(128, 128, 128, 0.35);
   border-radius: 6px;
-  padding: 0.55rem 0.75rem;
-  margin: 0 0 0.7rem;
+  padding: 0.5rem 0.75rem;
+  margin: 0 0 0.55rem;
 }
 .panel > h2 {
   font-size: 0.72rem;
@@ -358,8 +358,8 @@ select:disabled {
 .stage-hint {
   font-size: 0.72rem;
   opacity: 0.6;
-  margin: 0 0 0.5rem;
-  line-height: 1.4;
+  margin: 0 0 0.35rem;
+  line-height: 1.35;
 }
 .stage-hint b {
   color: #c0392b;
@@ -455,7 +455,7 @@ select:disabled {
    across browser versions (min→bottom, max→top), unlike writing-mode which flips between
    Chromium releases. The wrapper reserves the vertical space the rotated slider occupies. */
 .tg-fader-wrap {
-  height: 110px;
+  height: 92px;
   width: 22px;
   display: flex;
   align-items: center;
@@ -463,7 +463,7 @@ select:disabled {
   margin: 0.1rem 0;
 }
 .tg-fader {
-  width: 108px;
+  width: 90px;
   transform: rotate(-90deg);
   accent-color: #16a34a; /* the tone-layer colour */
   background: transparent;
@@ -554,9 +554,9 @@ select:disabled {
   width: 46px;
   /* Reserve a full band-column's height so an *empty* stage doesn't collapse the grid —
      switching to/from an empty stage would otherwise shift the whole panel by ~300 px.
-     When bands exist the button stretches to the column anyway (align-items: stretch), so
-     this only takes effect when the stage is empty. */
-  min-height: 342px;
+     Kept in sync with a column's natural height (fader + cells); when bands exist the
+     button stretches to the column anyway (align-items: stretch). */
+  min-height: 324px;
   display: flex;
   flex-direction: column;
   align-items: center;

@@ -255,16 +255,21 @@ fn list_devices() -> Vec<AudioDevice> {
     list_render_devices()
 }
 
-/// The raw headphone measurement curve (centered, pre-compensation) for the §5.2 nerd
-/// overlay. Measurement-only, so it's fetched on its own rather than threaded through the
-/// apply/slot pipeline. Relayed as-is (`{ raw_curve: [{f, db}] }`).
+/// The raw headphone measurement + target curves (centered, shared dBr reference) for the
+/// §5.2 nerd overlays. Measurement/target-only, so it's fetched on its own rather than
+/// threaded through the apply/slot pipeline. Relayed as-is (`{ raw_curve, target_curve }`).
 #[tauri::command]
-fn raw_measurement(headphone: String, state: State<Backend>) -> Result<Value, String> {
+fn measurement_curves(headphone: String, target: Option<String>, state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, .. } => core
-            .request("raw_measurement", json!({ "headphone": headphone }))
-            .map_err(|e| e.to_string()),
+        Backend::Ready { core, .. } => {
+            let mut params = Map::new();
+            params.insert("headphone".into(), Value::String(headphone));
+            if let Some(t) = target {
+                params.insert("target".into(), Value::String(t));
+            }
+            core.request("measurement_curves", Value::Object(params)).map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -663,7 +668,7 @@ pub fn run() {
             list_headphones,
             list_devices,
             list_targets,
-            raw_measurement,
+            measurement_curves,
             get_loudness,
             set_loudness,
             preview_loudness,
