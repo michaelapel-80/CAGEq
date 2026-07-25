@@ -200,9 +200,9 @@ function upsert<T extends { id: string }>(list: T[], entry: T): T[] {
 // The IEC power glyph (line through an open arc) for the per-stage enable toggle — the app
 // has no icon font, so it's inline SVG; inherits colour via currentColor.
 const PowerGlyph = () => (
-  <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-    <path d="M8 2.4 L8 7.6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    <path d="M4.9 4.9 A4.3 4.3 0 1 1 11.1 4.9" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+  <svg viewBox="0 0 16 16" width="17" height="17" aria-hidden="true">
+    <path d="M8 3 L8 8.6" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+    <path d="M5.1 5.3 A4.4 4.4 0 1 0 10.9 5.3" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
   </svg>
 );
 
