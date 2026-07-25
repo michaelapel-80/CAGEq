@@ -572,42 +572,64 @@ fn read_utf8_or_empty(path: &Path) -> Result<String, WriteError> {
 /// reload + native crossfade.
 fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     target.parent().ok_or(WriteError::NoParentDir)?;
-    let tmp = temp_sibling(target);
-    fs::write(&tmp, bytes)?;
-    // The replace-rename can transiently fail on Windows if EqAPO's directory watcher or an
-    // AV scanner holds cageq.txt open for reading at that instant — a sharing violation /
-    // access-denied that clears within milliseconds (the next write always went through).
-    // Retry a few times with a short backoff so a single unlucky write doesn't surface as
-    // an error; a genuine failure (e.g. a read-only dir) still errors after the attempts.
+    // Both steps can transiently fail on Windows while another process holds the file open:
+    // EqAPO's directory watcher opens cageq.txt to read it right after our previous write
+    // (and a `MoveFileExW` replace must *delete* the currently-open target — ERROR_ACCESS_
+    // DENIED / os error 5 — until that reader closes), and an AV scanner can grab the freshly
+    // written temp file for the same reason. It clears within milliseconds (the user's next
+    // write always went through). Retry the *whole* write+rename on those transient lock
+    // errors, with a fresh temp name each attempt (so a scanner still holding the previous
+    // temp doesn't block the retry). A genuine failure (read-only dir, bad path) is not
+    // transient, so it surfaces immediately without burning the budget.
     let mut attempt = 1u32;
     loop {
-        match fs::rename(&tmp, target) {
+        match try_atomic_write(target, bytes) {
             Ok(()) => return Ok(()),
-            Err(e) if attempt < RENAME_ATTEMPTS => {
-                std::thread::sleep(RENAME_BACKOFF * attempt);
+            Err(e) if attempt < WRITE_ATTEMPTS && is_transient_lock(&e) => {
+                std::thread::sleep(WRITE_BACKOFF * attempt);
                 attempt += 1;
-                let _ = e;
             }
-            Err(e) => {
-                let _ = fs::remove_file(&tmp); // best-effort cleanup
-                return Err(e.into());
-            }
+            Err(e) => return Err(e.into()),
         }
     }
 }
 
-/// Replace-rename retry budget for the transient-reader race above: 5 tries with a
-/// growing backoff (15/30/45/60 ms ≈ 150 ms worst case) before giving up.
-const RENAME_ATTEMPTS: u32 = 5;
-const RENAME_BACKOFF: std::time::Duration = std::time::Duration::from_millis(15);
+/// One write+rename to a fresh sibling temp. Cleans up its temp on a failed rename.
+fn try_atomic_write(target: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = temp_sibling(target);
+    fs::write(&tmp, bytes)?;
+    if let Err(e) = fs::rename(&tmp, target) {
+        let _ = fs::remove_file(&tmp); // best-effort cleanup
+        return Err(e);
+    }
+    Ok(())
+}
 
-/// A temp path next to the target so the rename stays on one volume. The PID
-/// suffix suffices — §2's single-instance lock precludes a second concurrent
-/// writer. TODO: a crash between write and rename can leave a stale `.cageq-tmp-*`;
-/// a real impl would sweep these on startup.
+/// Is this the kind of Windows "another process has the file open" error that clears on
+/// its own? Covers `PermissionDenied` (ERROR_ACCESS_DENIED, 5) plus the raw sharing/lock
+/// violations (32/33) that don't map to a named `ErrorKind`. Non-Windows: only the kind.
+fn is_transient_lock(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::PermissionDenied || matches!(e.raw_os_error(), Some(5 | 32 | 33))
+}
+
+/// Retry budget for the transient-reader race above: up to 8 tries with a growing backoff
+/// (20/40/…/140 ms ≈ 0.56 s worst case) before giving up. Generous because EqAPO can hold
+/// the file across its whole reload, but still bounded so a real failure isn't masked long.
+const WRITE_ATTEMPTS: u32 = 8;
+const WRITE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Monotonic suffix so each attempt/write uses a *distinct* temp name — a scanner still
+/// holding a previous temp can't collide with the next one.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A temp path next to the target so the rename stays on one volume. PID (§2's
+/// single-instance lock precludes a second concurrent writer) + a monotonic counter for a
+/// unique name per write. TODO: a crash between write and rename can leave a stale
+/// `.cageq-tmp-*`; a real impl would sweep these on startup.
 fn temp_sibling(target: &Path) -> PathBuf {
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut name = target.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(format!(".cageq-tmp-{}", std::process::id()));
+    name.push(format!(".cageq-tmp-{}-{}", std::process::id(), seq));
     target.with_file_name(name)
 }
 
@@ -618,6 +640,18 @@ fn temp_sibling(target: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_lock_errors_are_retried_but_real_failures_are_not() {
+        // The Windows "another process has it open" family retries…
+        assert!(is_transient_lock(&io::Error::from_raw_os_error(5))); // ERROR_ACCESS_DENIED
+        assert!(is_transient_lock(&io::Error::from_raw_os_error(32))); // ERROR_SHARING_VIOLATION
+        assert!(is_transient_lock(&io::Error::from_raw_os_error(33))); // ERROR_LOCK_VIOLATION
+        assert!(is_transient_lock(&io::Error::new(io::ErrorKind::PermissionDenied, "x")));
+        // …while genuine, non-transient failures surface immediately (no wasted budget).
+        assert!(!is_transient_lock(&io::Error::from(io::ErrorKind::NotFound)));
+        assert!(!is_transient_lock(&io::Error::from(io::ErrorKind::InvalidData)));
+    }
 
     fn sample() -> Vec<DeviceConfig> {
         vec![DeviceConfig {
