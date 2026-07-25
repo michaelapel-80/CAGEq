@@ -511,6 +511,11 @@ select:disabled {
 .tg-add {
   flex: 0 0 auto;
   width: 46px;
+  /* Reserve a full band-column's height so an *empty* stage doesn't collapse the grid —
+     switching to/from an empty stage would otherwise shift the whole panel by ~300 px.
+     When bands exist the button stretches to the column anyway (align-items: stretch), so
+     this only takes effect when the stage is empty. */
+  min-height: 342px;
   display: flex;
   flex-direction: column;
   align-items: center;

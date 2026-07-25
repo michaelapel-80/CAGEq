@@ -202,7 +202,9 @@ const measurementRank = (h: Headphone) => (h.source === "oratory1990" ? 0 : 1);
 // Slot A = goldenrod, Slot B = blue, Dry = neutral (filter.md §5.2 accent colours).
 const SLOT_COLOR: Record<SlotName, string> = { A: "#daa520", B: "#3b82f6", Dry: "#9ca3af" };
 const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
-const STAGE_COLOR: Record<StageId, string> = { fit: "#0ea5e9", content: "#f59e0b", tone: "#16a34a" };
+// Distinct from the slot colours (A gold, B blue, Dry grey) and the ref purple: Fit cyan,
+// Content pink, Tone green. (Content was amber — too close to Slot A's goldenrod.)
+const STAGE_COLOR: Record<StageId, string> = { fit: "#0ea5e9", content: "#ec4899", tone: "#16a34a" };
 const REF_COLOR = "#a855f7"; // AutoEq's ideal-correction reference (target the fit chases)
 
 function App() {
