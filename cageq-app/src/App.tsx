@@ -232,10 +232,6 @@ function App() {
   const [activeSlot, setActiveSlot] = useState<SlotName>("A");
   // Last-applied inputs per editable slot (for display + reloading the controls).
   const [slotInputs, setSlotInputs] = useState<Record<"A" | "B", SlotInputs | null>>({ A: null, B: null });
-  // Last-applied composed bands per editable slot, so the §5.2 chart can overlay the
-  // inactive slot's curve for a visual A/B alongside the active one (the active slot's
-  // bands come from `result`; Dry is flat).
-  const [slotCurves, setSlotCurves] = useState<Record<"A" | "B", Band[] | null>>({ A: null, B: null });
   // Last computed fit per editable slot, persisted into the resume blob so the next launch
   // writes EQ immediately from cache instead of waiting on the cold sidecar fit (§3.5).
   const [slotFits, setSlotFits] = useState<Record<"A" | "B", PersistedFit | null>>({ A: null, B: null });
@@ -263,7 +259,6 @@ function App() {
       customFilters: appliedBands(inp.stages),
     });
     setSlotInputs((prev) => ({ ...prev, [slot]: inp }));
-    setSlotCurves((prev) => ({ ...prev, [slot]: applied.filters }));
     setHydrated((prev) => ({ ...prev, [slot]: true }));
     // Remember the composed fit so the next launch can restore this slot from cache (§3.5).
     setSlotFits((prev) => ({
@@ -333,7 +328,6 @@ function App() {
               gMaxPeakDb: f.g_max_peak_db,
               referenceCurve: f.reference_curve,
             });
-            setSlotCurves((prev) => ({ ...prev, [s]: f.filters }));
             setHydrated((prev) => ({ ...prev, [s]: true }));
           }
         }
@@ -613,7 +607,6 @@ function App() {
       setError("");
       const applied = await invoke<ApplyResult>("activate_slot", { slot });
       setResult(applied);
-      if (slot !== "Dry") setSlotCurves((prev) => ({ ...prev, [slot]: applied.filters }));
     } catch (e) {
       setError(String(e));
     }
@@ -632,7 +625,6 @@ function App() {
       setError("");
       const applied = await invoke<ApplyResult>("copy_slot", { from, to });
       setSlotInputs((prev) => ({ ...prev, [to]: src }));
-      setSlotCurves((prev) => ({ ...prev, [to]: applied.filters }));
       setHydrated((prev) => ({ ...prev, [to]: true }));
       setActiveSlot(to);
       setQuery(src.model);
@@ -802,24 +794,20 @@ function App() {
     return result.filters.slice(0, n);
   }, [result, appliedCustom, dryActive]);
 
-  // §5.2 chart overlays: every populated slot's curve at once (inactive ones muted, the
-  // active one prominent), plus a line per enabled stage — the *active* stage prominent
-  // (it carries the drag nodes), the others muted context. Stable ids so legend toggles
-  // survive switching slots/stages.
+  // §5.2 chart: only the *active* slot's total (drawing every slot at once crowded the
+  // legend once the per-stage lines were added — the A/B comparison is primarily by ear).
+  // Plus a line per enabled stage — the active stage prominent (it carries the drag nodes),
+  // the others muted context. Stable ids so legend toggles survive switching slots/stages.
   const chartSeries: Series[] = useMemo(() => {
     if (!result) return [];
-    const out: Series[] = [];
-    for (const s of SLOT_ORDER) {
-      if (s === activeSlot) continue;
-      if (s === "Dry") out.push({ id: "slot-Dry", bands: [], color: SLOT_COLOR.Dry, label: "Dry (flat)", muted: true });
-      else if (slotCurves[s]) out.push({ id: `slot-${s}`, bands: slotCurves[s]!, color: SLOT_COLOR[s], label: `Slot ${s}`, muted: true });
-    }
-    out.push({
-      id: `slot-${activeSlot}`,
-      bands: result.filters,
-      color: SLOT_COLOR[activeSlot],
-      label: dryActive ? "Dry (flat)" : `Slot ${activeSlot} total`,
-    });
+    const out: Series[] = [
+      {
+        id: `slot-${activeSlot}`,
+        bands: result.filters,
+        color: SLOT_COLOR[activeSlot],
+        label: dryActive ? "Dry (flat)" : `Slot ${activeSlot} total`,
+      },
+    ];
     if (!dryActive) {
       for (const id of STAGE_ORDER) {
         const st = stages[id];
@@ -832,7 +820,7 @@ function App() {
       }
     }
     return out;
-  }, [result, activeSlot, dryActive, slotCurves, stages, activeStage]);
+  }, [result, activeSlot, dryActive, stages, activeStage]);
 
   const chartMarkers: Marker[] = useMemo(
     () => (autoEqBands.length ? [{ id: "autoeq", bands: autoEqBands, color: SLOT_COLOR[activeSlot], label: "AutoEq fit" }] : []),
