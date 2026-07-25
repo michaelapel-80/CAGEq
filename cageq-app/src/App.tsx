@@ -197,6 +197,15 @@ function upsert<T extends { id: string }>(list: T[], entry: T): T[] {
   return list.some((e) => e.id === entry.id) ? list.map((e) => (e.id === entry.id ? entry : e)) : [...list, entry];
 }
 
+// The IEC power glyph (line through an open arc) for the per-stage enable toggle — the app
+// has no icon font, so it's inline SVG; inherits colour via currentColor.
+const PowerGlyph = () => (
+  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+    <path d="M8 2.6 L8 7.6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    <path d="M5 5 A4.2 4.2 0 1 1 11 5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+  </svg>
+);
+
 // oratory1990 is the common reference measurement — default to it when a model has it.
 const measurementRank = (h: Headphone) => (h.source === "oratory1990" ? 0 : 1);
 // Slot A = goldenrod, Slot B = blue, Dry = neutral (filter.md §5.2 accent colours).
@@ -1109,20 +1118,25 @@ function App() {
                 <p className="tg-empty">Dry is the fixed reference — pick Slot A or B to edit filter bands.</p>
               ) : (
                 <>
-                  {/* Stage tabs: pick the stage to edit; the LED toggles the whole stage on/off. */}
+                  {/* Stage selector (segmented): the name button picks the stage to edit; the
+                      power icon toggles the whole stage on/off. Active = tinted in the stage colour. */}
                   <div className="stage-tabs" role="tablist" aria-label="Filter stages">
                     {STAGE_ORDER.map((id) => {
                       const st = stages[id];
                       const isActive = id === activeStage;
                       const count = st.bands.filter((b) => b.enabled !== false).length;
+                      const color = STAGE_COLOR[id];
                       return (
-                        <div key={id} className={`stage-tab${isActive ? " active" : ""}${st.enabled ? "" : " off"}`}>
+                        <div
+                          key={id}
+                          className={`stage-seg${isActive ? " active" : ""}${st.enabled ? "" : " off"}`}
+                          style={isActive ? { background: `color-mix(in srgb, ${color} 15%, transparent)`, boxShadow: `inset 0 -2px 0 ${color}`, color } : undefined}
+                        >
                           <button
                             type="button"
                             role="tab"
                             aria-selected={isActive}
-                            className="stage-tab-btn"
-                            style={isActive ? { borderColor: STAGE_COLOR[id], color: STAGE_COLOR[id] } : undefined}
+                            className="stage-seg-select"
                             title={STAGE_META[id].hint}
                             onClick={() => setActiveStage(id)}
                           >
@@ -1131,14 +1145,14 @@ function App() {
                           </button>
                           <button
                             type="button"
-                            className={`stage-enable${st.enabled ? " on" : ""}`}
+                            className="stage-seg-power"
                             role="switch"
                             aria-checked={st.enabled}
                             title={st.enabled ? `Disable the ${STAGE_META[id].label} stage` : `Enable the ${STAGE_META[id].label} stage`}
                             aria-label={`${st.enabled ? "Disable" : "Enable"} the ${STAGE_META[id].label} stage`}
                             onClick={() => toggleStage(id)}
                           >
-                            <span className="tg-led" aria-hidden="true" />
+                            <PowerGlyph />
                           </button>
                         </div>
                       );

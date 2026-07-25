@@ -257,61 +257,73 @@ select:disabled {
   flex: 0 0 auto;
 }
 
-/* --- §3.4 filter stages: tabs + whole-stage enable ------------------------- */
+/* --- §3.4 filter stages: segmented selector (name = select, power = enable) --- */
 .stage-tabs {
   display: flex;
-  gap: 0.3rem;
-  margin-bottom: 0.35rem;
-  flex-wrap: wrap;
-}
-.stage-tab {
-  display: flex;
-  align-items: stretch;
-  border: 1px solid rgba(128, 128, 128, 0.3);
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: 0.4rem;
+  border: 1px solid rgba(128, 128, 128, 0.32);
   border-radius: 6px;
   overflow: hidden;
 }
-.stage-tab.active {
-  border-color: currentColor;
+.stage-seg {
+  display: flex;
+  align-items: stretch;
 }
-.stage-tab-btn {
+.stage-seg + .stage-seg {
+  border-left: 1px solid rgba(128, 128, 128, 0.28);
+}
+.stage-seg-select {
   border: none;
   border-radius: 0;
   background: transparent;
-  font-size: 0.8rem;
-  font-weight: 600;
-  padding: 0.25em 0.6em;
+  color: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  padding: 0.3em 0.7em;
   display: inline-flex;
   align-items: center;
-  gap: 0.35em;
-  opacity: 0.75;
+  gap: 0.4em;
+  opacity: 0.72;
 }
-.stage-tab.active .stage-tab-btn {
+.stage-seg.active .stage-seg-select {
   opacity: 1;
 }
-.stage-tab.off .stage-tab-btn {
-  text-decoration: line-through;
+.stage-seg.off .stage-seg-select {
   opacity: 0.45;
 }
 .stage-count {
   font-size: 0.7em;
   font-weight: 500;
-  opacity: 0.65;
   background: rgba(128, 128, 128, 0.22);
   border-radius: 999px;
-  padding: 0 0.4em;
+  padding: 0 0.45em;
   min-width: 1.4em;
   text-align: center;
 }
-/* Per-stage enable LED, reusing the band-bypass LED look. */
-.stage-enable {
+/* Per-stage enable: the power glyph, inheriting the segment colour (stage colour when
+   active, neutral otherwise); dimmed when the stage is off. */
+.stage-seg-power {
   border: none;
-  border-left: 1px solid rgba(128, 128, 128, 0.3);
   border-radius: 0;
+  border-left: 1px solid rgba(128, 128, 128, 0.22);
   background: transparent;
-  padding: 0 0.4em;
+  color: inherit;
+  padding: 0 0.45em;
   display: flex;
   align-items: center;
+  opacity: 0.7;
+}
+.stage-seg-power:hover {
+  opacity: 1;
+  background: rgba(128, 128, 128, 0.1);
+}
+.stage-seg.off .stage-seg-power {
+  opacity: 0.4;
+}
+.stage-seg-power svg {
+  display: block;
 }
 .stage-hint {
   font-size: 0.72rem;
@@ -491,8 +503,7 @@ select:disabled {
   border: 1.5px solid rgba(128, 128, 128, 0.6);
   background: transparent;
 }
-.tg-enable.on .tg-led,
-.stage-enable.on .tg-led {
+.tg-enable.on .tg-led {
   background: #16a34a;
   border-color: #16a34a;
   box-shadow: 0 0 3px rgba(22, 163, 74, 0.6);
