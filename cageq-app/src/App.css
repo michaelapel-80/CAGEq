@@ -257,6 +257,91 @@ select:disabled {
   flex: 0 0 auto;
 }
 
+/* --- §3.4 filter stages: tabs + whole-stage enable ------------------------- */
+.stage-tabs {
+  display: flex;
+  gap: 0.3rem;
+  margin-bottom: 0.35rem;
+  flex-wrap: wrap;
+}
+.stage-tab {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.stage-tab.active {
+  border-color: currentColor;
+}
+.stage-tab-btn {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.25em 0.6em;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  opacity: 0.75;
+}
+.stage-tab.active .stage-tab-btn {
+  opacity: 1;
+}
+.stage-tab.off .stage-tab-btn {
+  text-decoration: line-through;
+  opacity: 0.45;
+}
+.stage-count {
+  font-size: 0.7em;
+  font-weight: 500;
+  opacity: 0.65;
+  background: rgba(128, 128, 128, 0.22);
+  border-radius: 999px;
+  padding: 0 0.4em;
+  min-width: 1.4em;
+  text-align: center;
+}
+/* Per-stage enable LED, reusing the band-bypass LED look. */
+.stage-enable {
+  border: none;
+  border-left: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 0;
+  background: transparent;
+  padding: 0 0.4em;
+  display: flex;
+  align-items: center;
+}
+.stage-hint {
+  font-size: 0.72rem;
+  opacity: 0.6;
+  margin: 0 0 0.5rem;
+  line-height: 1.4;
+}
+.stage-hint b {
+  color: #c0392b;
+  opacity: 0.85;
+}
+/* Stage badge on a template row (only in "show all stages" mode). */
+.stage-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex: 0 0 auto;
+}
+/* "show all / active stage" toggle in the templates group heading. */
+.pl-showall {
+  margin-left: auto;
+  font-size: 0.68rem;
+  padding: 0.05em 0.45em;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  opacity: 0.8;
+}
+
 /* --- §5.2 tone grid (stage 3): graphic-EQ columns ------------------------- */
 .tg-grid {
   display: flex;
@@ -545,6 +630,9 @@ select:disabled {
 
 /* Group heading with a muted "scope" caption. */
 .pl-group {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4em;
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;

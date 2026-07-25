@@ -36,7 +36,14 @@ type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null 
 type SlotName = "A" | "B" | "Dry";
 type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
 type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean; enabled?: boolean; macro?: string };
-type SlotInputs = { model: string; measurementPath: string; targetPath: string; customFilters: CustomFilter[] };
+// §3.4 custom EQ is split into three per-slot **stages** — organizational groups of bands
+// that all sum into the one biquad cascade (EqAPO flattens everything; the Rust core still
+// receives a single combined list, so it's unchanged). Each stage toggles on/off as a whole.
+// The fixed Bass/Treble/Air macros live in `tone`.
+type StageId = "fit" | "content" | "tone";
+type Stage = { enabled: boolean; bands: CustomFilter[] };
+type Stages = { fit: Stage; content: Stage; tone: Stage };
+type SlotInputs = { model: string; measurementPath: string; targetPath: string; stages: Stages };
 type Selection = { headphone: string | null; target: string | null };
 // A slot's last computed fit, persisted so launch can write cageq.txt immediately without
 // waiting on the ~1–2 s cold AutoEq fit (§3.5 launch-from-cache). Exactly the fields the
@@ -86,6 +93,73 @@ function ensureMacros(cf: CustomFilter[]): CustomFilter[] {
   ];
 }
 
+// --- §3.4 stages -----------------------------------------------------------
+// Three fixed, well-named stages (deliberately not user-definable — arbitrary stages lose
+// the semantic grouping that's their whole point, and EqAPO sums them anyway). Order is
+// display-only; the summed response is order-independent.
+const STAGE_ORDER: StageId[] = ["fit", "content", "tone"];
+const STAGE_META: Record<StageId, { label: string; hint: string }> = {
+  fit: { label: "Fit", hint: "Personal correction on top of the target — pads, seal, your own ears." },
+  content: { label: "Content", hint: "Adjustments for what you're playing — dialogue lift, a bright master." },
+  tone: { label: "Tone", hint: "Your permanent taste. The fixed Bass / Treble / Air macros live here." },
+};
+
+/** A fresh three-stage set: Fit/Content empty, Tone seeded with the 0 dB fixed macros. */
+const defaultStages = (): Stages => ({
+  fit: { enabled: true, bands: [] },
+  content: { enabled: true, bands: [] },
+  tone: { enabled: true, bands: defaultTone() },
+});
+
+/** Coerce a persisted/partial stage set to the full shape: all three present, Tone's fixed
+ *  macros guaranteed. Used on every load from slot / preset / resume data. */
+function normalizeStages(raw?: Partial<Stages> | null): Stages {
+  const stage = (s: Partial<Stage> | undefined, isTone: boolean): Stage => ({
+    enabled: s?.enabled ?? true,
+    bands: isTone ? ensureMacros(s?.bands ?? defaultTone()) : (s?.bands ?? []),
+  });
+  return { fit: stage(raw?.fit, false), content: stage(raw?.content, false), tone: stage(raw?.tone, true) };
+}
+
+/** The custom bands actually written: every enabled stage's enabled bands, in stage order —
+ *  what rides to the sidecar (appended to the AutoEq fit) and drives the §4.1/§4.2 policy. */
+const appliedBands = (st: Stages): CustomFilter[] =>
+  STAGE_ORDER.flatMap((id) => (st[id].enabled ? st[id].bands.filter((b) => b.enabled !== false) : []));
+
+/** Migrate a slot's inputs to the stages shape — new blobs already carry `stages`; a
+ *  pre-stages blob had a single `customFilters` list, which becomes the Tone stage. */
+function migrateInputs(inp: SlotInputs & { customFilters?: CustomFilter[] }): SlotInputs {
+  const stages = inp.stages
+    ? normalizeStages(inp.stages)
+    : normalizeStages({ tone: { enabled: true, bands: inp.customFilters ?? defaultTone() } });
+  return { model: inp.model, measurementPath: inp.measurementPath, targetPath: inp.targetPath, stages };
+}
+
+/** Migrate the saved library to the stages shape: pre-stages templates carried
+ *  `customFilters` (→ a Tone-stage template), presets carried `customFilters` (→ all
+ *  stages with just Tone filled). New-shape entries pass through normalized. */
+type LegacyTemplate = { id: string; name: string; stage?: StageId; bands?: CustomFilter[]; customFilters?: CustomFilter[] };
+type LegacyPreset = {
+  id: string; name: string; model: string; measurementPath: string; targetPath: string;
+  stages?: Partial<Stages>; customFilters?: CustomFilter[];
+};
+function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyPreset[] } | null): Library {
+  const templates: FilterTemplate[] = (lib?.templates ?? []).map((t) =>
+    t.stage
+      ? { id: t.id, name: t.name, stage: t.stage, bands: t.bands ?? [] }
+      : { id: t.id, name: t.name, stage: "tone", bands: ensureMacros(t.customFilters ?? []) },
+  );
+  const presets: UserPreset[] = (lib?.presets ?? []).map((p) => ({
+    id: p.id,
+    name: p.name,
+    model: p.model,
+    measurementPath: p.measurementPath,
+    targetPath: p.targetPath,
+    stages: p.stages ? normalizeStages(p.stages) : normalizeStages({ tone: { enabled: true, bands: p.customFilters ?? defaultTone() } }),
+  }));
+  return { presets, templates };
+}
+
 // Presets are bass/treble/air gain triples applied to the three fixed macro bands;
 // picking one resets the tone to exactly those three bands at the given gains.
 const TONE_PRESETS: { name: string; bass: number; treble: number; air: number }[] = [
@@ -99,21 +173,22 @@ const TONE_PRESETS: { name: string; bass: number; treble: number; air: number }[
 ];
 
 // §3.5 preset library. Two kinds, deliberately different in scope (filter.md §5.2):
-//   • FilterTemplate — only the tone (custom filters); loading keeps measurement/target.
-//   • UserPreset     — a full setup (measurement + target + tone); loading replaces all.
+//   • FilterTemplate — one **stage's** bands; loading drops them into that stage only.
+//   • UserPreset     — a full setup (measurement + target + all stages); loading replaces all.
 // Both persist in settings.json's opaque `library` blob (get_library/set_library), the
 // same UI-owned-blob treatment as the resume state — no per-field Rust change.
-type FilterTemplate = { id: string; name: string; customFilters: CustomFilter[] };
-type UserPreset = { id: string; name: string; model: string; measurementPath: string; targetPath: string; customFilters: CustomFilter[] };
+type FilterTemplate = { id: string; name: string; stage: StageId; bands: CustomFilter[] };
+type UserPreset = { id: string; name: string; model: string; measurementPath: string; targetPath: string; stages: Stages };
 type Library = { presets: UserPreset[]; templates: FilterTemplate[] };
 
-// The curated (built-in, read-only) filter templates: the classic tone shapes, expressed
-// as the three fixed macro bands. These are the tone-only quick presets; a full session
-// preset is inherently user-specific (it names a headphone), so there are no curated ones.
+// The curated (built-in, read-only) filter templates: the classic tone shapes as the three
+// fixed macro bands, all tagged to the Tone stage. A full session preset is inherently
+// user-specific (it names a headphone), so there are no curated ones.
 const CURATED_TEMPLATES: FilterTemplate[] = TONE_PRESETS.map((p) => ({
   id: `curated:${p.name}`,
   name: p.name,
-  customFilters: [macroBass(p.bass), macroTreble(p.treble), macroAir(p.air)],
+  stage: "tone",
+  bands: [macroBass(p.bass), macroTreble(p.treble), macroAir(p.air)],
 }));
 
 // Replace the entry sharing `entry.id`, or append it if new — so editing a saved item
@@ -127,7 +202,7 @@ const measurementRank = (h: Headphone) => (h.source === "oratory1990" ? 0 : 1);
 // Slot A = goldenrod, Slot B = blue, Dry = neutral (filter.md §5.2 accent colours).
 const SLOT_COLOR: Record<SlotName, string> = { A: "#daa520", B: "#3b82f6", Dry: "#9ca3af" };
 const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
-const TONE_COLOR = "#16a34a"; // the editable tone layer
+const STAGE_COLOR: Record<StageId, string> = { fit: "#0ea5e9", content: "#f59e0b", tone: "#16a34a" };
 const REF_COLOR = "#a855f7"; // AutoEq's ideal-correction reference (target the fit chases)
 
 function App() {
@@ -139,7 +214,9 @@ function App() {
   const [query, setQuery] = useState(""); // headphone-model search / selected model name
   const [measurementPath, setMeasurementPath] = useState(""); // chosen measurement (source) path
   const [targetPath, setTargetPath] = useState("");
-  const [customFilters, setCustomFilters] = useState<CustomFilter[]>(defaultTone()); // §3.4 tone bands (seeded with the fixed Bass/Treble macros)
+  const [stages, setStages] = useState<Stages>(defaultStages()); // §3.4 the three per-slot filter stages
+  const [activeStage, setActiveStage] = useState<StageId>("tone"); // which stage the grid/chart edits
+  const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
   const [result, setResult] = useState<ApplyResult | null>(null);
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
   const [confirmFinalVolume, setConfirmFinalVolume] = useState(true); // §7.5 point 1
@@ -179,8 +256,9 @@ function App() {
       headphone: inp.measurementPath,
       target: inp.targetPath || null,
       slot,
-      // Bypassed bands stay in the UI but are excluded from what's written (§3.4).
-      customFilters: inp.customFilters.filter((f) => f.enabled !== false),
+      // Every enabled stage's enabled bands, summed into one list (§3.4). Bypassed bands and
+      // disabled stages stay in the UI but are excluded from what's written.
+      customFilters: appliedBands(inp.stages),
     });
     setSlotInputs((prev) => ({ ...prev, [slot]: inp }));
     setSlotCurves((prev) => ({ ...prev, [slot]: applied.filters }));
@@ -205,8 +283,8 @@ function App() {
         setStatus(await invoke<Status>("status"));
         setLoudness(await invoke<LoudnessSettings>("get_loudness"));
         setConfirmFinalVolume(await invoke<boolean>("get_confirm_final_volume"));
-        const lib = await invoke<Library | null>("get_library");
-        if (lib) setLibrary({ presets: lib.presets ?? [], templates: lib.templates ?? [] });
+        const lib = await invoke<Parameters<typeof normalizeLibrary>[0]>("get_library");
+        if (lib) setLibrary(normalizeLibrary(lib));
         const [hp, tg, dev] = await Promise.all([
           invoke<{ headphones: Headphone[] }>("list_headphones"),
           invoke<{ targets: Target[] }>("list_targets"),
@@ -260,13 +338,13 @@ function App() {
         const activeFit = activeSlotName !== "Dry" ? fits?.[activeSlotName] : null;
 
         if (resume && activeInp && useDev) {
-          // Load the active slot's inputs into the controls. ensureMacros backfills the Air
-          // band for slots saved before it existed.
-          const inp: SlotInputs = { ...activeInp, customFilters: ensureMacros(activeInp.customFilters) };
+          // Load the active slot's inputs into the controls. migrateInputs upgrades a
+          // pre-stages blob (single customFilters → Tone stage) and backfills fixed macros.
+          const inp = migrateInputs(activeInp);
           setQuery(inp.model);
           setMeasurementPath(inp.measurementPath);
           setTargetPath(inp.targetPath);
-          setCustomFilters(inp.customFilters);
+          setStages(inp.stages);
           try {
             if (activeFit) {
               // Fast path: the active slot was just seeded → write it from cache (instant),
@@ -458,7 +536,7 @@ function App() {
       setError("");
       inFlight.current = true;
       if (!auto) setApplying(true);
-      const inp: SlotInputs = { model: query, measurementPath, targetPath, customFilters };
+      const inp: SlotInputs = { model: query, measurementPath, targetPath, stages };
       setResult(await writeFit(activeSlot as "A" | "B", inp, dev));
       if (!auto) setStatus(await invoke<Status>("status"));
     } catch (e) {
@@ -504,12 +582,12 @@ function App() {
     setActiveSlot(slot);
     if (slot !== "Dry") {
       const raw = slotInputs[slot];
-      const s = raw && { ...raw, customFilters: ensureMacros(raw.customFilters) }; // backfill Air
+      const s = raw && migrateInputs(raw); // upgrade pre-stages blob + backfill macros
       if (s) {
         setQuery(s.model);
         setMeasurementPath(s.measurementPath);
         setTargetPath(s.targetPath);
-        setCustomFilters(s.customFilters);
+        setStages(s.stages);
       }
       if (!s) return; // empty slot: nothing written yet, user will configure + apply
       if (!hydrated[slot]) {
@@ -543,7 +621,7 @@ function App() {
   // a variant (the target's cageq.txt is identical until you tweak it).
   async function copySlot(from: "A" | "B", to: "A" | "B") {
     const raw = slotInputs[from];
-    const src = raw && { ...raw, customFilters: ensureMacros(raw.customFilters) };
+    const src = raw && migrateInputs(raw);
     if (!src) {
       setError(`Slot ${from} is empty — apply something to it first.`);
       return;
@@ -558,7 +636,7 @@ function App() {
       setQuery(src.model);
       setMeasurementPath(src.measurementPath);
       setTargetPath(src.targetPath);
-      setCustomFilters(src.customFilters);
+      setStages(src.stages);
       setResult(applied);
     } catch (e) {
       setError(String(e));
@@ -571,26 +649,36 @@ function App() {
     if (dev) await invoke("set_device", { device: dev.eqapo_pattern });
   }
 
-  // §3.4 tone editing — every change auto-applies (throttled).
+  // §3.4 tone editing — every change auto-applies (throttled). Edits target the *active
+  // stage's* band list (the grid + chart nodes show only that stage); indices are into it.
+  const setStageBands = (stage: StageId, updater: (bands: CustomFilter[]) => CustomFilter[]) =>
+    setStages((st) => ({ ...st, [stage]: { ...st[stage], bands: updater(st[stage].bands) } }));
   const addFilter = () => {
-    setCustomFilters((cf) => [...cf, { kind: "Peaking", freq_hz: 1000, gain_db: 0, q: 1 }]);
+    setStageBands(activeStage, (cf) => [...cf, { kind: "Peaking", freq_hz: 1000, gain_db: 0, q: 1 }]);
     requestApply(0);
   };
   const updateFilter = (i: number, patch: Partial<CustomFilter>, delay = 0) => {
-    setCustomFilters((cf) => cf.map((f, j) => (j === i ? { ...f, ...patch } : f)));
+    setStageBands(activeStage, (cf) => cf.map((f, j) => (j === i ? { ...f, ...patch } : f)));
     requestApply(delay);
   };
   const removeFilter = (i: number) => {
-    setCustomFilters((cf) => cf.filter((_, j) => j !== i));
+    setStageBands(activeStage, (cf) => cf.filter((_, j) => j !== i));
+    requestApply(0);
+  };
+  // Enable/disable a whole stage — a big tonal jump the §5.3a morph smooths.
+  const toggleStage = (id: StageId) => {
+    setStages((st) => ({ ...st, [id]: { ...st[id], enabled: !st[id].enabled } }));
     requestApply(0);
   };
   // --- §3.5 preset library: load / save / delete -----------------------------
-  // Loading always targets the *active* slot (like every other change), so it's disabled
-  // while Dry is active. A filter template replaces only the tone; a full preset replaces
-  // measurement + target + tone. ensureMacros keeps the three fixed macro bands present.
+  // Loading always targets the *active* slot (disabled on Dry). A filter template drops its
+  // bands into *its* stage (and switches to that tab); a full preset replaces measurement +
+  // target + all stages.
   const loadTemplate = (t: FilterTemplate) => {
     if (activeSlot === "Dry") return;
-    setCustomFilters(ensureMacros(t.customFilters));
+    const bands = t.stage === "tone" ? ensureMacros(t.bands) : t.bands;
+    setStages((st) => ({ ...st, [t.stage]: { enabled: true, bands } }));
+    setActiveStage(t.stage);
     requestApply(0);
   };
   const loadPreset = (p: UserPreset) => {
@@ -598,7 +686,7 @@ function App() {
     setQuery(p.model);
     setMeasurementPath(p.measurementPath);
     setTargetPath(p.targetPath);
-    setCustomFilters(ensureMacros(p.customFilters));
+    setStages(normalizeStages(p.stages));
     requestApply(0);
   };
 
@@ -611,25 +699,27 @@ function App() {
     const name = saveForm.name.trim();
     if (!name) return setSaveForm({ ...saveForm, error: true });
     const kind = saveForm.kind;
+    // A template collides only with an own template of the same name *in the same stage*
+    // (a "Warm" Fit and a "Warm" Tone template are distinct); a preset collides by name.
     const existing =
       kind === "preset"
         ? library.presets.find((p) => p.name.toLowerCase() === name.toLowerCase())
-        : library.templates.find((t) => t.name.toLowerCase() === name.toLowerCase());
+        : library.templates.find((t) => t.stage === activeStage && t.name.toLowerCase() === name.toLowerCase());
     const id = existing?.id ?? crypto.randomUUID();
     const write = () => {
       setLibrary((lib) =>
         kind === "preset"
-          ? {
-              ...lib,
-              presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, customFilters }),
-            }
-          : { ...lib, templates: upsert(lib.templates, { id, name, customFilters }) },
+          ? { ...lib, presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, stages }) }
+          : { ...lib, templates: upsert(lib.templates, { id, name, stage: activeStage, bands: stages[activeStage].bands }) },
       );
       setSaveForm(null);
     };
     if (existing) {
       setConfirmBox({
-        message: `A ${kind === "preset" ? "preset" : "filter template"} named “${name}” already exists. Overwrite it?`,
+        message:
+          kind === "preset"
+            ? `A preset named “${name}” already exists. Overwrite it?`
+            : `A ${STAGE_META[activeStage].label} template named “${name}” already exists. Overwrite it?`,
         confirmLabel: "Overwrite",
         onConfirm: write,
       });
@@ -643,19 +733,21 @@ function App() {
   // doesn't mean retyping the name. Confirms first (reusing the overwrite dialog).
   const updatePreset = (p: UserPreset) =>
     setConfirmBox({
-      message: `Overwrite the preset “${p.name}” with the current headphone, target and tone?`,
+      message: `Overwrite the preset “${p.name}” with the current headphone, target and all stages?`,
       confirmLabel: "Overwrite",
       onConfirm: () =>
         setLibrary((lib) => ({
           ...lib,
-          presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, customFilters }),
+          presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, stages }),
         })),
     });
+  // A template row's "update" saves the current bands of *that template's* stage.
   const updateTemplate = (t: FilterTemplate) =>
     setConfirmBox({
-      message: `Overwrite the filter template “${t.name}” with the current tone?`,
+      message: `Overwrite the ${STAGE_META[t.stage].label} template “${t.name}” with the current ${STAGE_META[t.stage].label} bands?`,
       confirmLabel: "Overwrite",
-      onConfirm: () => setLibrary((lib) => ({ ...lib, templates: upsert(lib.templates, { id: t.id, name: t.name, customFilters }) })),
+      onConfirm: () =>
+        setLibrary((lib) => ({ ...lib, templates: upsert(lib.templates, { id: t.id, name: t.name, stage: t.stage, bands: stages[t.stage].bands }) })),
     });
 
   // Delete asks first — same confirm overlay as the other destructive actions.
@@ -691,22 +783,27 @@ function App() {
   const selectedDevice = devices.find((d) => d.id === deviceId);
   const dryActive = activeSlot === "Dry";
 
-  // The tone bands actually applied (bypassed ones are excluded from the write).
-  const activeTone = useMemo(() => customFilters.filter((f) => f.enabled !== false), [customFilters]);
+  // The active stage's bands (the grid/nodes edit these) and the full applied custom set.
+  const activeBands = stages[activeStage].bands;
+  const appliedCustom = useMemo(() => appliedBands(stages), [stages]);
+  // Library filtering: templates for the active stage unless "show all" is on; curated
+  // shapes are all Tone-staged, so they only show on the Tone tab (or with show-all).
+  const visibleTemplates = showAllStages ? library.templates : library.templates.filter((t) => t.stage === activeStage);
+  const showCurated = showAllStages || activeStage === "tone";
 
-  // The active slot's composed bands split into its AutoEq fit and the tone offset. The
-  // sidecar appends custom filters after the AutoEq bands, so the fit is everything
-  // before the tone tail (§3.4) — and only the *enabled* tone bands were sent. Drawn as
-  // fixed diamonds; the tone bands stay draggable.
+  // The active slot's composed bands split into its AutoEq fit and the custom tail. The
+  // sidecar appends the (summed) custom filters after the AutoEq bands, so the fit is
+  // everything before that tail. Drawn as fixed diamonds; the tone bands stay draggable.
   const autoEqBands = useMemo(() => {
     if (!result || dryActive) return [];
-    const n = Math.max(0, result.filters.length - activeTone.length);
+    const n = Math.max(0, result.filters.length - appliedCustom.length);
     return result.filters.slice(0, n);
-  }, [result, activeTone, dryActive]);
+  }, [result, appliedCustom, dryActive]);
 
   // §5.2 chart overlays: every populated slot's curve at once (inactive ones muted, the
-  // active one prominent), plus the editable tone offset. Slot ids are stable across
-  // active/inactive so a legend hide-toggle survives switching slots.
+  // active one prominent), plus a line per enabled stage — the *active* stage prominent
+  // (it carries the drag nodes), the others muted context. Stable ids so legend toggles
+  // survive switching slots/stages.
   const chartSeries: Series[] = useMemo(() => {
     if (!result) return [];
     const out: Series[] = [];
@@ -721,10 +818,19 @@ function App() {
       color: SLOT_COLOR[activeSlot],
       label: dryActive ? "Dry (flat)" : `Slot ${activeSlot} total`,
     });
-    // The tone offset curve reflects only enabled bands (what's actually applied).
-    if (!dryActive) out.push({ id: "tone", bands: activeTone, color: TONE_COLOR, label: "Tone (your offset)" });
+    if (!dryActive) {
+      for (const id of STAGE_ORDER) {
+        const st = stages[id];
+        const bands = st.bands.filter((b) => b.enabled !== false);
+        if (id === activeStage) {
+          out.push({ id: `stage-${id}`, bands, color: STAGE_COLOR[id], label: `${STAGE_META[id].label} (editing)` });
+        } else if (st.enabled && bands.length) {
+          out.push({ id: `stage-${id}`, bands, color: STAGE_COLOR[id], label: STAGE_META[id].label, muted: true });
+        }
+      }
+    }
     return out;
-  }, [result, activeSlot, dryActive, slotCurves, activeTone]);
+  }, [result, activeSlot, dryActive, slotCurves, stages, activeStage]);
 
   const chartMarkers: Marker[] = useMemo(
     () => (autoEqBands.length ? [{ id: "autoeq", bands: autoEqBands, color: SLOT_COLOR[activeSlot], label: "AutoEq fit" }] : []),
@@ -966,8 +1072,8 @@ function App() {
                       refs={chartRefs}
                       height={215}
                       nodes={{
-                        bands: customFilters,
-                        color: TONE_COLOR,
+                        bands: activeBands,
+                        color: STAGE_COLOR[activeStage],
                         disabled: dryActive,
                         onChange: (i, patch) => updateFilter(i, patch, 70),
                         onDragEnd: () => requestApply(0),
@@ -1005,25 +1111,63 @@ function App() {
             </div>
           )}
 
-          {/* ---- tone bands: the keyboard-first graphic-EQ grid (§5.2 stage 3) ---- */}
+          {/* ---- filter bands: per-stage keyboard-first graphic-EQ grid (§5.2 stage 3) ---- */}
           {!loading && (
             <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
               <h2>Filter bands</h2>
               {dryActive ? (
-                <p className="tg-empty">
-                  Dry is the fixed reference — pick Slot A or B to edit tone bands.
-                </p>
+                <p className="tg-empty">Dry is the fixed reference — pick Slot A or B to edit filter bands.</p>
               ) : (
                 <>
+                  {/* Stage tabs: pick the stage to edit; the LED toggles the whole stage on/off. */}
+                  <div className="stage-tabs" role="tablist" aria-label="Filter stages">
+                    {STAGE_ORDER.map((id) => {
+                      const st = stages[id];
+                      const isActive = id === activeStage;
+                      const count = st.bands.filter((b) => b.enabled !== false).length;
+                      return (
+                        <div key={id} className={`stage-tab${isActive ? " active" : ""}${st.enabled ? "" : " off"}`}>
+                          <button
+                            type="button"
+                            role="tab"
+                            aria-selected={isActive}
+                            className="stage-tab-btn"
+                            style={isActive ? { borderColor: STAGE_COLOR[id], color: STAGE_COLOR[id] } : undefined}
+                            title={STAGE_META[id].hint}
+                            onClick={() => setActiveStage(id)}
+                          >
+                            {STAGE_META[id].label}
+                            {count > 0 && <span className="stage-count">{count}</span>}
+                          </button>
+                          <button
+                            type="button"
+                            className={`stage-enable${st.enabled ? " on" : ""}`}
+                            role="switch"
+                            aria-checked={st.enabled}
+                            title={st.enabled ? `Disable the ${STAGE_META[id].label} stage` : `Enable the ${STAGE_META[id].label} stage`}
+                            aria-label={`${st.enabled ? "Disable" : "Enable"} the ${STAGE_META[id].label} stage`}
+                            onClick={() => toggleStage(id)}
+                          >
+                            <span className="tg-led" aria-hidden="true" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="stage-hint">
+                    {STAGE_META[activeStage].hint}
+                    {!stages[activeStage].enabled && <b> · stage disabled (not applied)</b>}
+                  </p>
+
                   <ToneGrid
-                    filters={customFilters}
+                    filters={activeBands}
                     disabled={dryActive}
                     onInput={(i, patch) => updateFilter(i, patch, 70)}
                     onCommit={(i, patch) => updateFilter(i, patch, 0)}
                     onAdd={addFilter}
                     onRemove={removeFilter}
                   />
-                  {customFilters.length > 0 && (
+                  {activeBands.length > 0 && (
                     <p style={{ fontSize: "0.72em", opacity: 0.55, margin: "0.1rem 0 0" }}>
                       Drag a value to scrub, click to type, ↑/↓ to fine-tune · changes apply live.
                     </p>
@@ -1171,8 +1315,8 @@ function App() {
                   </div>
                   <p className="pl-hint">
                     {saveForm.kind === "preset"
-                      ? "Saves the measurement, target curve and tone — loading replaces the whole setup."
-                      : "Saves only the tone (custom filters) — loading keeps the current measurement & target."}
+                      ? "Saves the measurement, target curve and all filter stages — loading replaces the whole setup."
+                      : `Saves the current ${STAGE_META[activeStage].label} stage's bands — loading drops them into ${STAGE_META[activeStage].label}, keeping measurement & target.`}
                   </p>
                   <div className="row" style={{ gap: "0.3em" }}>
                     <input
@@ -1198,19 +1342,29 @@ function App() {
               )}
 
               <h3 className="pl-group">
-                Filter templates <span>tone only</span>
+                Filter templates <span>{showAllStages ? "all stages" : STAGE_META[activeStage].label}</span>
+                <button type="button" className="pl-showall" onClick={() => setShowAllStages((v) => !v)}>
+                  {showAllStages ? "active stage" : "show all"}
+                </button>
               </h3>
-              <div className="row" style={{ gap: "0.35em" }}>
-                {CURATED_TEMPLATES.map((t) => (
-                  <button key={t.id} type="button" disabled={dryActive} onClick={() => loadTemplate(t)} style={{ fontSize: "0.8em" }}>
-                    {t.name}
-                  </button>
-                ))}
-              </div>
-              {library.templates.length > 0 && (
+              {showCurated && (
+                <div className="row" style={{ gap: "0.35em" }}>
+                  {CURATED_TEMPLATES.map((t) => (
+                    <button key={t.id} type="button" disabled={dryActive} onClick={() => loadTemplate(t)} style={{ fontSize: "0.8em" }}>
+                      {t.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {visibleTemplates.length > 0 && (
                 <ul className="pl-list">
-                  {library.templates.map((t) => (
+                  {visibleTemplates.map((t) => (
                     <li key={t.id} className="pl-item">
+                      {showAllStages && (
+                        <span className="stage-badge" style={{ color: STAGE_COLOR[t.stage] }}>
+                          {STAGE_META[t.stage].label}
+                        </span>
+                      )}
                       <span className="pl-name" title={t.name}>
                         {t.name}
                       </span>
@@ -1220,7 +1374,7 @@ function App() {
                       <button
                         type="button"
                         className="pl-upd"
-                        title="Overwrite with the current tone"
+                        title={`Overwrite with the current ${STAGE_META[t.stage].label} bands`}
                         disabled={dryActive}
                         onClick={() => updateTemplate(t)}
                       >
@@ -1235,7 +1389,7 @@ function App() {
               )}
 
               <h3 className="pl-group">
-                Presets <span>measurement + target + tone</span>
+                Presets <span>measurement + target + all stages</span>
               </h3>
               {library.presets.length > 0 ? (
                 <ul className="pl-list">
