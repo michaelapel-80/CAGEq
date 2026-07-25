@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use cageq_config_writer::{self as cw, BlockState, StartupDecision};
 use cageq_core::{
-    CalcRequest, Core, CoreError, DEFAULT_BASE_PREGAIN_DB, LoudnessMode, LoudnessSettings, Slot,
+    CalcRequest, Core, CoreError, CurvePoint, DEFAULT_BASE_PREGAIN_DB, Filter, FilterType,
+    LoudnessMode, LoudnessSettings, Slot,
 };
 use cageq_sidecar::{Sidecar, SidecarError};
 use cageq_watchdog::{Health, WatchdogConfig};
@@ -124,6 +125,54 @@ fn slots_switch_by_rewrite_without_refitting() {
     let empty = TempDir::new("empty");
     let fresh = Core::start(empty.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
     assert!(matches!(fresh.activate_slot(Slot::B), Err(CoreError::EmptySlot(Slot::B))));
+}
+
+/// filter.md §3.5 launch-from-cache: a fit persisted from a previous session is seeded
+/// into a slot **without the sidecar** and written immediately by activating it — so
+/// startup restores the exact EQ without paying the ~1–2 s cold fit. The seed alone must
+/// not write; the activate must, composing the preamp from the seeded curve quantities.
+#[test]
+fn seeded_slot_writes_without_a_sidecar_fit() {
+    let tmp = TempDir::new("seed");
+    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+
+    let filters = vec![
+        Filter { kind: FilterType::LowShelf, freq_hz: 105.0, gain_db: 4.0, q: 0.7 },
+        Filter { kind: FilterType::Peaking, freq_hz: 3000.0, gain_db: -3.0, q: 1.5 },
+    ];
+    let reference = vec![CurvePoint { f: 100.0, db: 2.0 }, CurvePoint { f: 1000.0, db: -1.0 }];
+
+    // Seeding only fills the cache — nothing is written yet.
+    let before = core.applied_count();
+    core.seed_slot(Slot::A, "Seeded DAC".into(), filters.clone(), -3.5, 4.0, reference)
+        .expect("seed A");
+    assert_eq!(core.applied_count(), before, "seeding must not write to disk");
+    assert!(tmp.cageq().is_empty(), "no cageq.txt until the slot is activated");
+
+    // Activating the seeded slot writes it — a pure file write, no sidecar call.
+    let applied = core.activate_slot(Slot::A).expect("activate seeded A");
+    assert_eq!(core.active_slot(), Slot::A);
+    assert_eq!(applied.device, "Seeded DAC");
+    assert_eq!(applied.filters.len(), 2);
+    assert_eq!(applied.g_target_db, -3.5);
+    assert_eq!(applied.g_max_peak_db, 4.0);
+    // Preamp composed from the seeded quantities (§4.0/§4.2, default base pre-gain):
+    // Comparison mode, base=-9, G_max_allowed=-4-(-9)=5 >= G_target=-3.5 → Preamp=base+G_target.
+    assert!((applied.preamp_db - (DEFAULT_BASE_PREGAIN_DB + -3.5)).abs() < 1e-9, "{}", applied.preamp_db);
+    assert!(!applied.clipping_warning);
+    let cageq = tmp.cageq();
+    assert!(cageq.contains("Device: Seeded DAC"), "{cageq}");
+    assert!(cageq.contains("Filter 1:") && cageq.contains("Filter 2:"), "seeded bands written: {cageq}");
+
+    // A seeded slot behaves like any other: it's a real cache, so switching away and back
+    // is a pure re-write, and Dry cannot be seeded.
+    core.seed_slot(Slot::B, "Seeded DAC".into(), filters, 0.0, 0.0, Vec::new()).expect("seed B");
+    assert!(core.activate_slot(Slot::B).is_ok());
+    assert!(core.activate_slot(Slot::A).is_ok(), "switch back to seeded A is a pure re-write");
+    assert!(matches!(
+        core.seed_slot(Slot::Dry, "x".into(), Vec::new(), 0.0, 0.0, Vec::new()),
+        Err(CoreError::DryNotEditable)
+    ));
 }
 
 /// filter.md §5.3a: a big tonal jump is slewed over several writes instead of landing

@@ -119,6 +119,51 @@ fn set_resume(resume: Value) {
     update_settings(|s| s.resume = Some(resume));
 }
 
+/// Seed a slot with a fit **persisted from a previous session** (§3.5), no sidecar call.
+/// The launch-from-cache path: the frontend saved each slot's last composed bands + curve
+/// quantities, so startup can restore the exact EQ without waiting on the ~1–2 s cold fit.
+/// Seeds the cache only (no write, no activation) — the caller seeds both slots, then
+/// `activate_slot` on the last-active slot writes it instantly. `filters`/`reference_curve`
+/// round-trip the same shapes `apply` returns.
+#[tauri::command]
+fn seed_slot(
+    slot: Slot,
+    device: String,
+    filters: Vec<Filter>,
+    g_target_db: f64,
+    g_max_peak_db: f64,
+    reference_curve: Vec<CurvePoint>,
+    state: State<Backend>,
+) -> Result<(), String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => core
+            .seed_slot(slot, device, filters, g_target_db, g_max_peak_db, reference_curve)
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// Warm the sidecar's AutoEq fit cache for `headphone`/`target` (§5.2 cache) in the
+/// background, so the first tone edit after a launch-from-cache seed (§3.5) is instant
+/// rather than paying the cold fit. Fire-and-forget: the reply is discarded (populating
+/// the sidecar's in-process cache is the whole point). No write and no slot change, so it
+/// can never race with a user edit.
+#[tauri::command]
+fn warm_fit(device: String, headphone: String, target: Option<String>, state: State<Backend>) -> Result<(), String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => {
+            let mut inputs = Map::new();
+            inputs.insert("headphone".into(), Value::String(headphone));
+            if let Some(t) = target {
+                inputs.insert("target".into(), Value::String(t));
+            }
+            let _ = core.request("calculate_filters", serde_json::to_value(CalcRequest { device, inputs }).map_err(|e| e.to_string())?);
+            Ok(())
+        }
+    }
+}
+
 /// Switch the active comparison slot (A/B/Dry) and write its cached config — instant,
 /// no re-fit (filter.md §5.2). Returns the newly-written config for the UI.
 #[tauri::command]
@@ -576,6 +621,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             apply,
+            seed_slot,
+            warm_fit,
             activate_slot,
             copy_slot,
             set_device,

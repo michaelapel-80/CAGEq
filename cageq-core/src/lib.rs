@@ -414,6 +414,40 @@ impl Core {
         self.apply_to_slot(Slot::A, request)
     }
 
+    /// Load a **pre-computed** fit (persisted from a previous session, §3.5) into `slot`
+    /// *without* calling the sidecar. This is the launch-from-cache path: the frontend
+    /// saved the last fit's composed bands + the two curve quantities, so at startup the
+    /// app can restore the exact EQ it had — writing cageq.txt immediately via
+    /// [`Core::activate_slot`] — instead of waiting on the ~1–2 s cold AutoEq fit. It
+    /// only seeds the cache (and the shared device); it does **not** activate or write, so
+    /// seeding both slots is safe and order-independent. The caller then activates the
+    /// slot that was active last session, and may warm the sidecar's own fit cache in the
+    /// background so the first tone edit is instant. `Slot::Dry` has no fit to seed.
+    ///
+    /// Correctness rests on the AutoEq fit being deterministic in its inputs (measurement
+    /// CSV + target CSV + max_gain/peaking/fs): the persisted bands equal what a fresh fit
+    /// would produce, so the immediate write matches, and a later re-fit (on the first
+    /// edit) is a byte-identical no-op EqAPO silently dedups — unless an input genuinely
+    /// changed, in which case that edit's fit corrects it.
+    pub fn seed_slot(
+        &self,
+        slot: Slot,
+        device: String,
+        filters: Vec<Filter>,
+        g_target_db: f64,
+        g_max_peak_db: f64,
+        reference_curve: Vec<CurvePoint>,
+    ) -> Result<(), CoreError> {
+        if slot == Slot::Dry {
+            return Err(CoreError::DryNotEditable);
+        }
+        let result = CalcResult { device: device.clone(), filters, g_target_db, g_max_peak_db, reference_curve };
+        let mut store = self.inner.slots.lock().unwrap();
+        store.device = Some(device);
+        *store.slot_mut(slot) = Some(result);
+        Ok(())
+    }
+
     /// Make `slot` active and write its already-computed config to cageq.txt — a pure
     /// file write (no sidecar), so A/B/Dry switching is instant. Errors with
     /// [`CoreError::EmptySlot`] if the target slot has nothing to write yet.

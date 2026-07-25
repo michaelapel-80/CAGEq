@@ -37,8 +37,19 @@ type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
 type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean; enabled?: boolean; macro?: string };
 type SlotInputs = { model: string; measurementPath: string; targetPath: string; customFilters: CustomFilter[] };
 type Selection = { headphone: string | null; target: string | null };
+// A slot's last computed fit, persisted so launch can write cageq.txt immediately without
+// waiting on the ~1–2 s cold AutoEq fit (§3.5 launch-from-cache). Exactly the fields the
+// core needs to seed a slot and compose the preamp: the composed bands + the two curve
+// quantities (+ the chart reference). The fit is deterministic in its inputs, so the
+// cached bands equal a fresh fit's; a background re-fit reconciles/​warms the sidecar.
+type PersistedFit = { device: string; filters: Band[]; g_target_db: number; g_max_peak_db: number; reference_curve: { f: number; db: number }[] };
 // §3.5 resume blob (UI-owned shape; the backend stores/returns it verbatim).
-type Resume = { activeSlot: SlotName; deviceId: string; slots: { A: SlotInputs | null; B: SlotInputs | null } };
+type Resume = {
+  activeSlot: SlotName;
+  deviceId: string;
+  slots: { A: SlotInputs | null; B: SlotInputs | null };
+  fits?: { A: PersistedFit | null; B: PersistedFit | null };
+};
 
 // §3.4 tone layer — three always-present **fixed** grid bands (0 dB by default,
 // non-removable, type locked), the classic warmth/brightness/air triad. They replace the
@@ -116,6 +127,9 @@ function App() {
   // inactive slot's curve for a visual A/B alongside the active one (the active slot's
   // bands come from `result`; Dry is flat).
   const [slotCurves, setSlotCurves] = useState<Record<"A" | "B", Band[] | null>>({ A: null, B: null });
+  // Last computed fit per editable slot, persisted into the resume blob so the next launch
+  // writes EQ immediately from cache instead of waiting on the cold sidecar fit (§3.5).
+  const [slotFits, setSlotFits] = useState<Record<"A" | "B", PersistedFit | null>>({ A: null, B: null });
   // Which editable slots have a fit cached in the backend *this session*. After a
   // restart-restore the frontend has each slot's inputs but the backend cache is empty,
   // so switching to a not-yet-hydrated slot must re-fit rather than a pure re-write.
@@ -141,6 +155,17 @@ function App() {
     setSlotInputs((prev) => ({ ...prev, [slot]: inp }));
     setSlotCurves((prev) => ({ ...prev, [slot]: applied.filters }));
     setHydrated((prev) => ({ ...prev, [slot]: true }));
+    // Remember the composed fit so the next launch can restore this slot from cache (§3.5).
+    setSlotFits((prev) => ({
+      ...prev,
+      [slot]: {
+        device: applied.device,
+        filters: applied.filters,
+        g_target_db: applied.g_target_db,
+        g_max_peak_db: applied.g_max_peak_db,
+        reference_curve: applied.reference_curve,
+      },
+    }));
     return applied;
   }
 
@@ -171,21 +196,61 @@ function App() {
         setDeviceId(useDev?.id ?? "");
         if (useDev) await invoke("set_device", { device: useDev.eqapo_pattern });
 
+        const activeSlotName = resume?.activeSlot ?? "A";
         const activeInp = resume && resume.activeSlot !== "Dry" ? resume.slots?.[resume.activeSlot] : null;
         if (resume?.slots) {
           setSlotInputs({ A: resume.slots.A ?? null, B: resume.slots.B ?? null });
-          setActiveSlot(resume.activeSlot ?? "A");
+          setActiveSlot(activeSlotName);
         }
+
+        // §3.5 launch-from-cache: seed each slot's persisted fit into the backend so both
+        // slots are hydrated (A/B switching is instant) and the active one can be written
+        // *immediately*, skipping the ~1–2 s cold AutoEq fit. Falls back to a fresh fit
+        // below when a slot has no cached fit (older resume blob / first run after update).
+        const fits = resume?.fits;
+        if (fits && useDev) {
+          setSlotFits({ A: fits.A ?? null, B: fits.B ?? null });
+          for (const s of ["A", "B"] as const) {
+            const f = fits[s];
+            if (!f) continue;
+            await invoke("seed_slot", {
+              slot: s,
+              device: f.device,
+              filters: f.filters,
+              gTargetDb: f.g_target_db,
+              gMaxPeakDb: f.g_max_peak_db,
+              referenceCurve: f.reference_curve,
+            });
+            setSlotCurves((prev) => ({ ...prev, [s]: f.filters }));
+            setHydrated((prev) => ({ ...prev, [s]: true }));
+          }
+        }
+        const activeFit = activeSlotName !== "Dry" ? fits?.[activeSlotName] : null;
+
         if (resume && activeInp && useDev) {
-          // Load the active slot's inputs into the controls, then re-fit + write it.
-          // ensureMacros backfills the Air band for slots saved before it existed.
+          // Load the active slot's inputs into the controls. ensureMacros backfills the Air
+          // band for slots saved before it existed.
           const inp: SlotInputs = { ...activeInp, customFilters: ensureMacros(activeInp.customFilters) };
           setQuery(inp.model);
           setMeasurementPath(inp.measurementPath);
           setTargetPath(inp.targetPath);
           setCustomFilters(inp.customFilters);
           try {
-            setResult(await writeFit(resume.activeSlot as "A" | "B", inp, useDev));
+            if (activeFit) {
+              // Fast path: the active slot was just seeded → write it from cache (instant),
+              // then warm the sidecar's fit cache in the background so the first tone edit
+              // doesn't pay the cold fit. The warm is fire-and-forget (no write, no race).
+              const applied = await invoke<ApplyResult>("activate_slot", { slot: activeSlotName });
+              setResult(applied);
+              void invoke("warm_fit", {
+                device: useDev.eqapo_pattern,
+                headphone: inp.measurementPath,
+                target: inp.targetPath || null,
+              }).catch(() => {});
+            } else {
+              // No cached fit for the active slot: re-fit + write as before.
+              setResult(await writeFit(activeSlotName as "A" | "B", inp, useDev));
+            }
           } catch (e) {
             setError(String(e));
           }
@@ -216,11 +281,16 @@ function App() {
   useEffect(() => {
     if (!restored) return;
     const id = window.setTimeout(() => {
-      const resume: Resume = { activeSlot, deviceId, slots: { A: slotInputs.A, B: slotInputs.B } };
+      const resume: Resume = {
+        activeSlot,
+        deviceId,
+        slots: { A: slotInputs.A, B: slotInputs.B },
+        fits: { A: slotFits.A, B: slotFits.B }, // §3.5: persist the fits for launch-from-cache
+      };
       invoke("set_resume", { resume }).catch(() => {});
     }, 400);
     return () => window.clearTimeout(id);
-  }, [restored, activeSlot, deviceId, slotInputs]);
+  }, [restored, activeSlot, deviceId, slotInputs, slotFits]);
 
   // Poll status so the fail-safe banner reflects live watchdog health (trip/recover).
   useEffect(() => {
