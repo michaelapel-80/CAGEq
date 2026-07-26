@@ -146,6 +146,17 @@ impl Sidecar {
     fn spawn_command(mut cmd: Command) -> Result<Self, SidecarError> {
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
+        // Windows: the frozen sidecar is a console-subsystem exe, so launching it would pop a
+        // console window next to the (windowed) main app in a release build. CREATE_NO_WINDOW
+        // runs it without one; stdio still flows through the pipes configured above. (In dev
+        // the child just shared the app's existing console, so this was invisible.)
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
         // SharedChild wraps the process so kill()/wait() work from ANY thread via a
         // shared OS handle — the capability the watchdog needs to force-unblock a
         // hung read, and that std's Child (kill takes &mut self) cannot provide.
