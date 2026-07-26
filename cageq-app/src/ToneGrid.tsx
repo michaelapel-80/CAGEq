@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Band, FilterKind } from "./biquad";
 import { ScrubNumber } from "./ScrubNumber";
 
@@ -35,6 +36,10 @@ export type ToneGridProps = {
   onCommit: (index: number, patch: Partial<ToneBand>) => void;
   onAdd: () => void;
   onRemove: (index: number) => void;
+  /** Storage index of a just-added band to reveal + focus (its Fc), or null. */
+  focusIndex?: number | null;
+  /** Bumped per add so the focus fires again even when the index repeats. */
+  focusNonce?: number;
 };
 
 const KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
@@ -77,10 +82,26 @@ function KindGlyph({ kind }: { kind: FilterKind }) {
   );
 }
 
-export function ToneGrid({ filters, disabled, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
+export function ToneGrid({ filters, disabled, focusIndex, focusNonce, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
   // Display order: sort indices by Fc; storage order (and thus the indices we pass back)
   // never changes here, so focus survives a visual reorder.
   const order = filters.map((_, i) => i).sort((a, b) => filters[a].freq_hz - filters[b].freq_hz);
+
+  // A newly-added band is "born selected": scroll its column into view, flash it, and focus
+  // its Fc field so a frequency can be typed / stepped at once. Keyed on the nonce so it
+  // re-fires per add; the storage index (= data-idx) survives the fc sort.
+  const gridRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (focusIndex == null) return;
+    const col = gridRef.current?.querySelector<HTMLElement>(`[data-idx="${focusIndex}"]`);
+    if (!col) return;
+    col.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+    col.querySelector<HTMLInputElement>(".tg-cell .tg-num")?.focus(); // the Fc field (first tg-cell)
+    col.classList.add("tg-col-flash");
+    const t = window.setTimeout(() => col.classList.remove("tg-col-flash"), 900);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusNonce]);
 
   const cycleKind = (i: number, kind: FilterKind) => {
     const next = KINDS[(KINDS.indexOf(kind) + 1) % KINDS.length];
@@ -88,14 +109,14 @@ export function ToneGrid({ filters, disabled, onInput, onCommit, onAdd, onRemove
   };
 
   return (
-    <div className="tg-grid" role="group" aria-label="Tone filter bands">
+    <div className="tg-grid" ref={gridRef} role="group" aria-label="Tone filter bands">
       {order.map((i) => {
         const f = filters[i];
         const macroLabel = f.fixed ? (f.macro ?? (f.kind === "LowShelf" ? "Bass" : "Treble")) : null;
         const on = f.enabled !== false;
         const name = macroLabel ?? `band at ${fmtHz(f.freq_hz)} hertz`;
         return (
-          <div className={`tg-col${f.fixed ? " tg-col-fixed" : ""}${on ? "" : " tg-col-off"}`} key={i}>
+          <div className={`tg-col${f.fixed ? " tg-col-fixed" : ""}${on ? "" : " tg-col-off"}`} key={i} data-idx={i}>
             <button
               type="button"
               className={`tg-enable${on ? " on" : ""}`}
@@ -205,7 +226,7 @@ export function ToneGrid({ filters, disabled, onInput, onCommit, onAdd, onRemove
         );
       })}
 
-      <button type="button" className="tg-add" disabled={disabled} onClick={onAdd} title="Add a tone filter">
+      <button type="button" className="tg-add" disabled={disabled} onClick={onAdd} title="Add a band in the widest gap (or double-click the chart to place one)">
         <span aria-hidden="true">＋</span>
         <span className="tg-add-lbl">Add</span>
       </button>

@@ -198,6 +198,24 @@ function upsert<T extends { id: string }>(list: T[], entry: T): T[] {
   return list.some((e) => e.id === entry.id) ? list.map((e) => (e.id === entry.id ? entry : e)) : [...list, entry];
 }
 
+// Centre frequency of the widest empty gap between existing bands, in *log* space (matching
+// the chart's log axis) — with the 20 Hz–20 kHz edges as virtual neighbours so a lone band
+// still gets a sensible slot. Used by the Add button so a new band never lands on a node.
+function widestGapHz(bands: { freq_hz: number }[]): number {
+  if (bands.length === 0) return 1000;
+  const pts = [Math.log10(20), ...bands.map((b) => Math.log10(b.freq_hz)), Math.log10(20000)].sort((a, b) => a - b);
+  let best = -1;
+  let mid = Math.log10(1000);
+  for (let i = 1; i < pts.length; i++) {
+    const gap = pts[i] - pts[i - 1];
+    if (gap > best) {
+      best = gap;
+      mid = (pts[i] + pts[i - 1]) / 2;
+    }
+  }
+  return Math.round(10 ** mid);
+}
+
 // The IEC power glyph (line through an open arc) for the per-stage enable toggle — the app
 // has no icon font, so it's inline SVG; inherits colour via currentColor.
 const PowerGlyph = () => (
@@ -231,6 +249,10 @@ function App() {
   const [targetPath, setTargetPath] = useState("");
   const [stages, setStages] = useState<Stages>(defaultStages()); // §3.4 the three per-slot filter stages
   const [activeStage, setActiveStage] = useState<StageId>("tone"); // which stage the grid/chart edits
+  // A just-added band, so the chart pulses its node and the grid scrolls+focuses its column
+  // (born highlighted, never hunted for). `nonce` re-fires the grid focus even for the same idx.
+  const [newBand, setNewBand] = useState<{ stage: StageId; idx: number; nonce: number } | null>(null);
+  const newBandNonce = useRef(0);
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
   const [impulseView, setImpulseView] = useState(false); // §5.2: swap the chart for the impulse response
   const [rawCurve, setRawCurve] = useState<{ f: number; db: number }[] | null>(null); // raw measured FR (nerd overlay)
@@ -691,8 +713,27 @@ function App() {
   // stage's* band list (the grid + chart nodes show only that stage); indices are into it.
   const setStageBands = (stage: StageId, updater: (bands: CustomFilter[]) => CustomFilter[]) =>
     setStages((st) => ({ ...st, [stage]: { ...st[stage], bands: updater(st[stage].bands) } }));
+  // Mark a freshly-appended band (its storage index is the pre-append length) so the chart
+  // pulses it and the grid focuses it — then it auto-clears (see the effect below).
+  const markNewBand = (idx: number) => {
+    newBandNonce.current += 1;
+    setNewBand({ stage: activeStage, idx, nonce: newBandNonce.current });
+  };
+  // Double-click on the chart: create a peaking band exactly at the cursor (x → fc, y → gain),
+  // so it lands where you're looking rather than at a fixed 1 kHz you then have to find.
+  const addFilterAt = (freq_hz: number, gain_db: number) => {
+    const idx = stages[activeStage].bands.length;
+    setStageBands(activeStage, (cf) => [...cf, { kind: "Peaking", freq_hz, gain_db, q: 1 }]);
+    markNewBand(idx);
+    requestApply(0);
+  };
+  // The Add button (keyboard/discoverability path): drop a flat band into the widest empty
+  // gap between existing bands (in log-frequency), so it never lands on top of a neighbour.
   const addFilter = () => {
-    setStageBands(activeStage, (cf) => [...cf, { kind: "Peaking", freq_hz: 1000, gain_db: 0, q: 1 }]);
+    const bands = stages[activeStage].bands;
+    const idx = bands.length;
+    setStageBands(activeStage, (cf) => [...cf, { kind: "Peaking", freq_hz: widestGapHz(bands), gain_db: 0, q: 1 }]);
+    markNewBand(idx);
     requestApply(0);
   };
   const updateFilter = (i: number, patch: Partial<CustomFilter>, delay = 0) => {
@@ -700,9 +741,20 @@ function App() {
     requestApply(delay);
   };
   const removeFilter = (i: number) => {
+    // The fixed Bass/Treble/Air macros are never removable (the grid hides their ✕; the
+    // chart's double-click-to-remove would otherwise slip past that). Guard at the source.
+    if (stages[activeStage].bands[i]?.fixed) return;
     setStageBands(activeStage, (cf) => cf.filter((_, j) => j !== i));
+    setNewBand(null); // storage indices shift on removal — drop any stale highlight
     requestApply(0);
   };
+  // The born-highlighted state is a one-shot cue: let the pulse play, then clear it (also
+  // avoids a stale index lingering after later edits/reorders).
+  useEffect(() => {
+    if (!newBand) return;
+    const t = window.setTimeout(() => setNewBand(null), 1500);
+    return () => window.clearTimeout(t);
+  }, [newBand]);
   // Enable/disable a whole stage — a big tonal jump the §5.3a morph smooths.
   const toggleStage = (id: StageId) => {
     setStages((st) => ({ ...st, [id]: { ...st[id], enabled: !st[id].enabled } }));
@@ -1151,6 +1203,9 @@ function App() {
                           disabled: dryActive,
                           onChange: (i, patch) => updateFilter(i, patch, 70),
                           onDragEnd: () => requestApply(0),
+                          onAdd: addFilterAt,
+                          onRemove: removeFilter,
+                          highlightIdx: newBand?.stage === activeStage ? newBand.idx : undefined,
                         }}
                       />
                     )}
@@ -1242,6 +1297,8 @@ function App() {
                   <ToneGrid
                     filters={activeBands}
                     disabled={dryActive}
+                    focusIndex={newBand?.stage === activeStage ? newBand.idx : null}
+                    focusNonce={newBand?.nonce}
                     onInput={(i, patch) => updateFilter(i, patch, 70)}
                     onCommit={(i, patch) => updateFilter(i, patch, 0)}
                     onAdd={addFilter}
@@ -1249,7 +1306,7 @@ function App() {
                   />
                   {activeBands.length > 0 && (
                     <p style={{ fontSize: "0.72em", opacity: 0.55, margin: "0.1rem 0 0" }}>
-                      Drag a value to scrub, click to type, ↑/↓ to fine-tune · changes apply live.
+                      Drag a value to scrub, click to type, ↑/↓ to fine-tune · double-click the chart to add a band (or a node to remove it) · changes apply live.
                     </p>
                   )}
                 </>

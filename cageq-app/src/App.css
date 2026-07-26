@@ -404,6 +404,39 @@ select:disabled {
   border-radius: 6px;
 }
 
+/* A just-added band flashes so the eye lands on the column that appeared. */
+.tg-col-flash {
+  animation: tgColFlash 0.9s ease-out;
+}
+@keyframes tgColFlash {
+  0% {
+    border-color: var(--accent, #4c8bf5);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #4c8bf5) 55%, transparent);
+  }
+  100% {
+    border-color: rgba(128, 128, 128, 0.3);
+    box-shadow: none;
+  }
+}
+
+/* The matching cue on the chart: a ring that expands and fades out from the new node. */
+.eq-node-pulse {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: eqNodePulse 0.85s ease-out 2 forwards;
+  pointer-events: none;
+}
+@keyframes eqNodePulse {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(3.4);
+    opacity: 0;
+  }
+}
+
 /* Compact controls: undo the chunky global input/button padding + shadow. */
 .tg-col button,
 .tg-col input,

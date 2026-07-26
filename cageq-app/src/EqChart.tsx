@@ -60,6 +60,12 @@ export type Nodes = {
   onChange: (index: number, patch: Partial<Band>) => void;
   /** Fired once when a drag finishes (for a final, un-throttled commit). */
   onDragEnd?: () => void;
+  /** Double-click empty plot space to create a band there (x → fc, y → gain). */
+  onAdd?: (freq_hz: number, gain_db: number) => void;
+  /** Double-click a node to remove that band (the symmetric gesture to onAdd). */
+  onRemove?: (index: number) => void;
+  /** Index of a just-added band to pulse-highlight so the eye catches it. */
+  highlightIdx?: number;
   disabled?: boolean;
 };
 
@@ -93,6 +99,13 @@ export function EqChart({
   const H = height;
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = useId(); // clips the plotted curves to the plot rect (see refPaths)
+  // Manual double-click detection from bubbled `click` events. The native `dblclick` is
+  // unreliable here: pointer-capture/preventDefault on a node disrupts its synthesis, and on
+  // empty space the two clicks often land on *different* thin children (a gridline vs a
+  // curve), so the browser fires no dblclick at all. Bubbled clicks always reach the SVG.
+  const lastTap = useRef<{ t: number; vx: number; vy: number } | null>(null);
+  const DBL_MS = 450;
+  const DBL_DIST = 16; // viewBox px (≈ screen px, the plot renders ~1:1)
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   // Legend visibility: `overrides` holds only ids the user has clicked; everything else
@@ -250,6 +263,31 @@ export function EqChart({
       style={{ width: "100%", height: "auto", userSelect: "none", touchAction: "none" }}
       role="img"
       aria-label="Equalizer response curve"
+      onClick={(e) => {
+        // Symmetric double-click gestures (detected manually — see lastTap): a second click
+        // near the first within the window → over a node, remove that band; over empty space,
+        // create one right at the cursor (x → fc, y → gain), never lost, never on a neighbour.
+        if (!nodes || nodes.disabled) return;
+        const { vx, vy } = toViewBox(e.clientX, e.clientY);
+        const prev = lastTap.current;
+        const isDouble = prev != null && e.timeStamp - prev.t < DBL_MS && Math.hypot(vx - prev.vx, vy - prev.vy) < DBL_DIST;
+        if (!isDouble) {
+          lastTap.current = { t: e.timeStamp, vx, vy };
+          return;
+        }
+        lastTap.current = null; // consume, so a third click doesn't immediately re-fire
+        if (hoverIdx != null) {
+          nodes.onRemove?.(hoverIdx);
+          setHoverIdx(null); // the hovered index is about to shift under us
+          return;
+        }
+        if (!nodes.onAdd) return;
+        if (vx < PAD.l || vx > W - PAD.r || vy < PAD.t || vy > H - PAD.b) return; // in the margins
+        nodes.onAdd(
+          Math.round(clamp(invX(vx), F_MIN, F_MAX)),
+          Math.round(clamp(invY(vy), -20, 20) * 10) / 10,
+        );
+      }}
     >
       <defs>
         <clipPath id={clipId}>
@@ -369,8 +407,16 @@ export function EqChart({
         const cx = x(clamp(b.freq_hz, F_MIN, F_MAX));
         const cy = y(clamp(b.gain_db, yMin, yMax));
         const active = dragIdx === i || hoverIdx === i;
+        const isNew = nodes.highlightIdx === i;
+        // Fixed macro bands (Bass/Treble/Air) ride along at runtime even though the type is
+        // Band; they can't be removed, so don't promise it in the tooltip.
+        const isFixed = (b as { fixed?: boolean }).fixed === true;
         return (
           <g key={`n${i}`}>
+            <title>{isFixed ? "Macro band — drag to edit · wheel for Q (not removable)" : "Drag to edit · wheel for Q · double-click to remove"}</title>
+            {isNew && (
+              <circle cx={cx} cy={cy} r={6} fill="none" stroke={nodes.color} strokeWidth={2} className="eq-node-pulse" />
+            )}
             <circle
               cx={cx}
               cy={cy}
