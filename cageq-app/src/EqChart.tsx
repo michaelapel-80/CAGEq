@@ -103,9 +103,12 @@ export function EqChart({
   // unreliable here: pointer-capture/preventDefault on a node disrupts its synthesis, and on
   // empty space the two clicks often land on *different* thin children (a gridline vs a
   // curve), so the browser fires no dblclick at all. Bubbled clicks always reach the SVG.
-  const lastTap = useRef<{ t: number; vx: number; vy: number } | null>(null);
+  // Records the previous click's time, *screen* position (so the tolerance is a real pixel
+  // distance regardless of how wide the 720-unit viewBox is drawn), and what it was over
+  // (node index or null) — the second click must match to count as that gesture's double.
+  const lastTap = useRef<{ t: number; x: number; y: number; overIdx: number | null } | null>(null);
   const DBL_MS = 450;
-  const DBL_DIST = 16; // viewBox px (≈ screen px, the plot renders ~1:1)
+  const DBL_DIST = 16; // screen px — did the pointer barely move between the two clicks?
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   // Legend visibility: `overrides` holds only ids the user has clicked; everything else
@@ -265,28 +268,29 @@ export function EqChart({
       aria-label="Equalizer response curve"
       onClick={(e) => {
         // Symmetric double-click gestures (detected manually — see lastTap): a second click
-        // near the first within the window → over a node, remove that band; over empty space,
-        // create one right at the cursor (x → fc, y → gain), never lost, never on a neighbour.
+        // close to the first (time + screen distance) *and over the same target* → over that
+        // node, remove it; over empty space, create a band at the cursor (x → fc, y → gain).
+        // The same-target gate stops an empty click then a nearby node click (or vice versa)
+        // from being misread as a delete/add.
         if (!nodes || nodes.disabled) return;
-        const { vx, vy } = toViewBox(e.clientX, e.clientY);
         const prev = lastTap.current;
-        const isDouble = prev != null && e.timeStamp - prev.t < DBL_MS && Math.hypot(vx - prev.vx, vy - prev.vy) < DBL_DIST;
-        if (!isDouble) {
-          lastTap.current = { t: e.timeStamp, vx, vy };
-          return;
-        }
-        lastTap.current = null; // consume, so a third click doesn't immediately re-fire
-        if (hoverIdx != null) {
+        const isDouble = prev != null && e.timeStamp - prev.t < DBL_MS && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < DBL_DIST;
+        if (isDouble && hoverIdx != null && prev!.overIdx === hoverIdx) {
+          lastTap.current = null; // consume, so a third click doesn't immediately re-fire
           nodes.onRemove?.(hoverIdx);
           setHoverIdx(null); // the hovered index is about to shift under us
           return;
         }
-        if (!nodes.onAdd) return;
-        if (vx < PAD.l || vx > W - PAD.r || vy < PAD.t || vy > H - PAD.b) return; // in the margins
-        nodes.onAdd(
-          Math.round(clamp(invX(vx), F_MIN, F_MAX)),
-          Math.round(clamp(invY(vy), -20, 20) * 10) / 10,
-        );
+        if (isDouble && hoverIdx == null && prev!.overIdx == null && nodes.onAdd) {
+          lastTap.current = null;
+          const { vx, vy } = toViewBox(e.clientX, e.clientY);
+          if (vx >= PAD.l && vx <= W - PAD.r && vy >= PAD.t && vy <= H - PAD.b) {
+            nodes.onAdd(Math.round(clamp(invX(vx), F_MIN, F_MAX)), Math.round(clamp(invY(vy), -20, 20) * 10) / 10);
+          }
+          return;
+        }
+        // First click, timed out, moved too far, or a cross-gesture pair → (re)start from here.
+        lastTap.current = { t: e.timeStamp, x: e.clientX, y: e.clientY, overIdx: hoverIdx };
       }}
     >
       <defs>

@@ -249,9 +249,11 @@ function App() {
   const [targetPath, setTargetPath] = useState("");
   const [stages, setStages] = useState<Stages>(defaultStages()); // §3.4 the three per-slot filter stages
   const [activeStage, setActiveStage] = useState<StageId>("tone"); // which stage the grid/chart edits
-  // A just-added band, so the chart pulses its node and the grid scrolls+focuses its column
-  // (born highlighted, never hunted for). `nonce` re-fires the grid focus even for the same idx.
-  const [newBand, setNewBand] = useState<{ stage: StageId; idx: number; nonce: number } | null>(null);
+  // A just-added band, born highlighted so it's never hunted for. The chart always pulses its
+  // node; `focusGrid` additionally scrolls the grid column in and enters its Fc edit mode —
+  // set only for the keyboard/Add path, so a mouse double-click on the chart isn't yanked off
+  // the chart into the grid. `nonce` re-fires the effects even when the storage idx repeats.
+  const [newBand, setNewBand] = useState<{ stage: StageId; idx: number; nonce: number; focusGrid: boolean } | null>(null);
   const newBandNonce = useRef(0);
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
   const [impulseView, setImpulseView] = useState(false); // §5.2: swap the chart for the impulse response
@@ -714,26 +716,28 @@ function App() {
   const setStageBands = (stage: StageId, updater: (bands: CustomFilter[]) => CustomFilter[]) =>
     setStages((st) => ({ ...st, [stage]: { ...st[stage], bands: updater(st[stage].bands) } }));
   // Mark a freshly-appended band (its storage index is the pre-append length) so the chart
-  // pulses it and the grid focuses it — then it auto-clears (see the effect below).
-  const markNewBand = (idx: number) => {
+  // pulses it — and, when `focusGrid`, the grid reveals + edit-focuses it. Auto-clears below.
+  const markNewBand = (idx: number, focusGrid: boolean) => {
     newBandNonce.current += 1;
-    setNewBand({ stage: activeStage, idx, nonce: newBandNonce.current });
+    setNewBand({ stage: activeStage, idx, nonce: newBandNonce.current, focusGrid });
   };
   // Double-click on the chart: create a peaking band exactly at the cursor (x → fc, y → gain),
-  // so it lands where you're looking rather than at a fixed 1 kHz you then have to find.
+  // so it lands where you're looking rather than at a fixed 1 kHz you then have to find. Mouse
+  // path → pulse only, no grid focus-steal (you stay on the chart to drag/wheel it).
   const addFilterAt = (freq_hz: number, gain_db: number) => {
     const idx = stages[activeStage].bands.length;
     setStageBands(activeStage, (cf) => [...cf, { kind: "Peaking", freq_hz, gain_db, q: 1 }]);
-    markNewBand(idx);
+    markNewBand(idx, false);
     requestApply(0);
   };
   // The Add button (keyboard/discoverability path): drop a flat band into the widest empty
-  // gap between existing bands (in log-frequency), so it never lands on top of a neighbour.
+  // gap between existing bands (in log-frequency), so it never lands on top of a neighbour,
+  // and open its Fc for typing straight away (keyboard-first).
   const addFilter = () => {
     const bands = stages[activeStage].bands;
     const idx = bands.length;
     setStageBands(activeStage, (cf) => [...cf, { kind: "Peaking", freq_hz: widestGapHz(bands), gain_db: 0, q: 1 }]);
-    markNewBand(idx);
+    markNewBand(idx, true);
     requestApply(0);
   };
   const updateFilter = (i: number, patch: Partial<CustomFilter>, delay = 0) => {
@@ -1297,7 +1301,7 @@ function App() {
                   <ToneGrid
                     filters={activeBands}
                     disabled={dryActive}
-                    focusIndex={newBand?.stage === activeStage ? newBand.idx : null}
+                    focusIndex={newBand?.stage === activeStage && newBand.focusGrid ? newBand.idx : null}
                     focusNonce={newBand?.nonce}
                     onInput={(i, patch) => updateFilter(i, patch, 70)}
                     onCommit={(i, patch) => updateFilter(i, patch, 0)}

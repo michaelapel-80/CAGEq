@@ -87,16 +87,16 @@ export function ToneGrid({ filters, disabled, focusIndex, focusNonce, onInput, o
   // never changes here, so focus survives a visual reorder.
   const order = filters.map((_, i) => i).sort((a, b) => filters[a].freq_hz - filters[b].freq_hz);
 
-  // A newly-added band is "born selected": scroll its column into view, flash it, and focus
-  // its Fc field so a frequency can be typed / stepped at once. Keyed on the nonce so it
-  // re-fires per add; the storage index (= data-idx) survives the fc sort.
+  // A newly-added band (keyboard/Add path) is "born selected": scroll its column into view and
+  // flash it. Its Fc field additionally enters edit mode via `beginEditSignal` below, so a
+  // frequency can be typed at once (a plain focus wouldn't — the field is readOnly until then).
+  // Keyed on the nonce so it re-fires per add; the storage index (= data-idx) survives the sort.
   const gridRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (focusIndex == null) return;
     const col = gridRef.current?.querySelector<HTMLElement>(`[data-idx="${focusIndex}"]`);
     if (!col) return;
     col.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
-    col.querySelector<HTMLInputElement>(".tg-cell .tg-num")?.focus(); // the Fc field (first tg-cell)
     col.classList.add("tg-col-flash");
     const t = window.setTimeout(() => col.classList.remove("tg-col-flash"), 900);
     return () => window.clearTimeout(t);
@@ -184,6 +184,7 @@ export function ToneGrid({ filters, disabled, focusIndex, focusNonce, onInput, o
                 format={fmtHz}
                 disabled={disabled}
                 ariaLabel={`Centre frequency, ${f.kind} band`}
+                beginEditSignal={focusIndex === i ? focusNonce : undefined}
                 onInput={(v) => onInput(i, { freq_hz: v })}
                 onCommit={(v) => onCommit(i, { freq_hz: v })}
               />

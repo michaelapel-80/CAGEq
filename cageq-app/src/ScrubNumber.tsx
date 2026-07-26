@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * A numeric value that is **scrubbable, typeable, and arrow-steppable** — the control
@@ -33,6 +33,9 @@ export type ScrubNumberProps = {
   disabled?: boolean;
   ariaLabel: string;
   className?: string;
+  /** Bump to programmatically enter type-in-place mode (value selected, ready to type) —
+   *  e.g. a freshly-added band focusing its Fc. `readOnly` otherwise swallows keystrokes. */
+  beginEditSignal?: number;
 };
 
 const DRAG_THRESHOLD_PX = 3;
@@ -66,6 +69,7 @@ export function ScrubNumber({
   disabled,
   ariaLabel,
   className,
+  beginEditSignal,
 }: ScrubNumberProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [editing, setEditing] = useState(false);
@@ -105,6 +109,13 @@ export function ScrubNumber({
     setEditing(true);
     requestAnimationFrame(() => inputRef.current?.select());
   };
+
+  // Enter edit mode when the caller bumps the signal (a just-added band made keyboard-ready).
+  useEffect(() => {
+    if (beginEditSignal == null || disabled) return;
+    beginEdit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [beginEditSignal]);
 
   const endDrag = (e?: React.PointerEvent<HTMLInputElement>) => {
     const d = drag.current;

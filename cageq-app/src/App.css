@@ -419,11 +419,12 @@ select:disabled {
   }
 }
 
-/* The matching cue on the chart: a ring that expands and fades out from the new node. */
+/* The matching cue on the chart: a ring that expands and fades out from the new node. One
+   pass (~1s), comfortably inside the 1.5s highlight window so it never truncates mid-expand. */
 .eq-node-pulse {
   transform-box: fill-box;
   transform-origin: center;
-  animation: eqNodePulse 0.85s ease-out 2 forwards;
+  animation: eqNodePulse 1s ease-out forwards;
   pointer-events: none;
 }
 @keyframes eqNodePulse {
