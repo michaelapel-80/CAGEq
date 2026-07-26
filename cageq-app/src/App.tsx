@@ -1097,12 +1097,22 @@ function App() {
               <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.35rem" }}>
                 <h2 style={{ margin: 0 }}>Correction</h2>
                 {result && !dryActive && (
-                  <div className="chart-view" style={{ margin: 0 }}>
-                    <button type="button" className={!impulseView ? "on" : ""} onClick={() => setImpulseView(false)}>
-                      Response
+                  <div className="chart-view" style={{ margin: 0 }} role="group" aria-label="Chart domain">
+                    <button
+                      type="button"
+                      className={!impulseView ? "on" : ""}
+                      title="Frequency domain — magnitude (and phase)"
+                      onClick={() => setImpulseView(false)}
+                    >
+                      Frequency
                     </button>
-                    <button type="button" className={impulseView ? "on" : ""} onClick={() => setImpulseView(true)}>
-                      Impulse
+                    <button
+                      type="button"
+                      className={impulseView ? "on" : ""}
+                      title="Time domain — impulse-response decay"
+                      onClick={() => setImpulseView(true)}
+                    >
+                      Time
                     </button>
                   </div>
                 )}
@@ -1123,8 +1133,8 @@ function App() {
 
               {result && (
                 <>
-                  {/* The Response/Impulse view swap lives in the panel header row (above).
-                      Phase rides the magnitude chart's secondary axis (legend toggle). */}
+                  {/* The Frequency/Time (domain) view swap lives in the panel header row
+                      (above). Phase rides the frequency chart's secondary axis (legend). */}
                   <div className="chart-wrap">
                     {impulseView && !dryActive ? (
                       <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} />
