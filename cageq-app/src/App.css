@@ -616,6 +616,15 @@ select:disabled {
   opacity: 0.7;
   margin: 0.2rem 0 0.5rem;
 }
+/* Grid help line — always present with a reserved height so switching between a populated
+   and an empty stage (short vs long hint, 1 vs 2 wrapped lines) never shifts the panel. */
+.tg-hint {
+  font-size: 0.72rem;
+  line-height: 1.35;
+  opacity: 0.55;
+  margin: 0.1rem 0 0;
+  min-height: 2rem;
+}
 
 /* --- theme-aware modal card (the §7.5 confirm dialog was hard-coded white) --- */
 .modal-card {

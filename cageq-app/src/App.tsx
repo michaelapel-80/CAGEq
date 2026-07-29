@@ -58,6 +58,7 @@ type Resume = {
   deviceId: string;
   slots: { A: SlotInputs | null; B: SlotInputs | null };
   fits?: { A: PersistedFit | null; B: PersistedFit | null };
+  activeStage?: StageId; // which stage tab was last selected (defaults to fit on first run)
 };
 
 // §3.4 tone layer — three always-present **fixed** grid bands (0 dB by default,
@@ -248,7 +249,7 @@ function App() {
   const [measurementPath, setMeasurementPath] = useState(""); // chosen measurement (source) path
   const [targetPath, setTargetPath] = useState("");
   const [stages, setStages] = useState<Stages>(defaultStages()); // §3.4 the three per-slot filter stages
-  const [activeStage, setActiveStage] = useState<StageId>("tone"); // which stage the grid/chart edits
+  const [activeStage, setActiveStage] = useState<StageId>("fit"); // which stage the grid/chart edits (restored from resume)
   // A just-added band, born highlighted so it's never hunted for. The chart always pulses its
   // node; `focusGrid` additionally scrolls the grid column in and enters its Fc edit mode —
   // set only for the keyboard/Add path, so a mouse double-click on the chart isn't yanked off
@@ -349,6 +350,7 @@ function App() {
           setSlotInputs({ A: resume.slots.A ?? null, B: resume.slots.B ?? null });
           setActiveSlot(activeSlotName);
         }
+        if (resume?.activeStage) setActiveStage(resume.activeStage); // else stays "fit"
 
         // §3.5 launch-from-cache: seed each slot's persisted fit into the backend so both
         // slots are hydrated (A/B switching is instant) and the active one can be written
@@ -432,11 +434,12 @@ function App() {
         deviceId,
         slots: { A: slotInputs.A, B: slotInputs.B },
         fits: { A: slotFits.A, B: slotFits.B }, // §3.5: persist the fits for launch-from-cache
+        activeStage,
       };
       invoke("set_resume", { resume }).catch(() => {});
     }, 400);
     return () => window.clearTimeout(id);
-  }, [restored, activeSlot, deviceId, slotInputs, slotFits]);
+  }, [restored, activeSlot, deviceId, slotInputs, slotFits, activeStage]);
 
   // §3.5: persist the preset library (saved presets + filter templates) on change, same
   // debounce + `restored` gate as the resume blob.
@@ -909,13 +912,15 @@ function App() {
       },
     ];
     if (!dryActive) {
+      // Draw every enabled, non-empty stage — the SAME set regardless of which tab is active.
+      // (Previously the active stage was special-cased and drawn even when empty, so e.g. an
+      // empty Content stage appeared only on its own tab: the inconsistency.) The active stage
+      // is prominent; the others are muted context.
       for (const id of STAGE_ORDER) {
         const st = stages[id];
         const bands = st.bands.filter((b) => b.enabled !== false);
-        if (id === activeStage) {
-          out.push({ id: `stage-${id}`, bands, color: STAGE_COLOR[id], label: STAGE_META[id].label });
-        } else if (st.enabled && bands.length) {
-          out.push({ id: `stage-${id}`, bands, color: STAGE_COLOR[id], label: STAGE_META[id].label, muted: true });
+        if (st.enabled && bands.length) {
+          out.push({ id: `stage-${id}`, bands, color: STAGE_COLOR[id], label: STAGE_META[id].label, muted: id !== activeStage });
         }
       }
     }
@@ -1311,11 +1316,13 @@ function App() {
                     onAdd={addFilter}
                     onRemove={removeFilter}
                   />
-                  {activeBands.length > 0 && (
-                    <p style={{ fontSize: "0.72em", opacity: 0.55, margin: "0.1rem 0 0" }}>
-                      Drag a value to scrub, click to type, ↑/↓ to fine-tune · double-click the chart to add a band (or a node to remove it) · changes apply live.
-                    </p>
-                  )}
+                  {/* Always rendered (with reserved height) so switching to an empty stage
+                      doesn't shrink the panel; the text just adapts to empty vs populated. */}
+                  <p className="tg-hint">
+                    {activeBands.length > 0
+                      ? "Drag a value to scrub, click to type, ↑/↓ to fine-tune · double-click the chart to add a band (or a node to remove it) · changes apply live."
+                      : "This stage has no bands yet — press ＋ or double-click the chart to add one."}
+                  </p>
                 </>
               )}
             </div>
