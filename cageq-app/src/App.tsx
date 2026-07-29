@@ -1143,7 +1143,10 @@ function App() {
         </p>
       )}
 
-      {loading && <p>Loading AutoEq catalogue…</p>}
+      {/* The cold-start wait is the Python DSP sidecar: after a reboot its numpy/scipy bundle
+          is read cold from disk (a couple of seconds; the OS file cache makes repeat launches
+          fast) plus the one-time import — I/O-bound, not the catalogue (a 17 ms read). */}
+      {loading && <p>Starting the AutoEq engine…</p>}
 
       <div className="app-main">
         {/* ================= LEFT: target + chart + bands ================= */}

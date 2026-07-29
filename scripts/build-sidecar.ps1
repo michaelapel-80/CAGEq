@@ -14,8 +14,15 @@ if (-not (Test-Path $py)) {
 }
 
 & $py -m pip install --quiet pyinstaller
+# Exclude matplotlib + tkinter: sidecar_dsp.py stubs matplotlib in sys.modules before
+# `import autoeq`, so neither is ever imported — but PyInstaller would otherwise bundle the
+# whole matplotlib/tcl/tk ecosystem (~1130 of ~1300 files: fonts, mpl-data, tcl scripts).
+# Cold start is per-file-bound (metadata + Defender scan), so dropping ~87% of the file count
+# is the real startup win, not the ~18 MB. (If PIL/contourpy linger in the rebuilt bundle,
+# add --exclude-module PIL.)
 & $py -m PyInstaller --noconfirm --onedir --console --name cageq-sidecar `
     --collect-all autoeq `
+    --exclude-module matplotlib --exclude-module tkinter `
     --distpath (Join-Path $sidecar "..\cageq-app\src-tauri\sidecar") `
     --workpath (Join-Path $sidecar "build") `
     --specpath (Join-Path $sidecar "build") `
