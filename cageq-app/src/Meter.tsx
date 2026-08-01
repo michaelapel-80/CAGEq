@@ -3,13 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 /**
- * §5.3c post-EQ output meter. Subscribes to the backend's `monitor` events (WASAPI loopback on
- * the selected render endpoint — already post-EQ, so it shows what actually reaches the DAC) and
- * renders peak/RMS + BS.1770 momentary/short-term LUFS. The LUFS numbers are the point: they make
- * the auto-LUFS preamp match visible ("did it land?"). Independent of the custom-APO work.
- *
- * Mounting starts capture (`start_monitor`), unmounting stops it (`stop_monitor`); a device change
- * restarts on the new endpoint. Needs audio actually playing — an idle endpoint reads no signal.
+ * §5.3c post-EQ output meter, laid out vertically to sit beside the chart (no vertical growth, so
+ * it can be on by default). Subscribes to the backend's `monitor` events (WASAPI loopback on the
+ * selected render endpoint — already post-EQ) and shows two bars:
+ *   • Level (dBFS): the phosphor-histogram fill + peak (amber) and true-RMS (neutral) marks.
+ *   • LUFS: BS.1770 momentary fill + short-term mark — makes the auto-LUFS preamp match visible.
+ * Independent of the custom-APO work. Mounting starts capture, unmounting stops it.
  */
 
 type MeterUpdate = {
@@ -22,17 +21,32 @@ type MeterUpdate = {
   bins: number[];
 };
 
-// Bar scale: dBFS mapped across the meter width. -60..0 covers the useful range.
-const BAR_MIN_DB = -60;
-const barPct = (db: number) => Math.max(0, Math.min(100, ((db - BAR_MIN_DB) / -BAR_MIN_DB) * 100));
+// Level bar scale (dBFS). Must match the backend histogram range (BAR_MIN_DB) so the peak/RMS
+// marks line up with the phosphor fill.
+const LEVEL_MIN_DB = -40;
+// LUFS bar scale — momentary/short-term music loudness lives comfortably inside this.
+const LUFS_MIN = -40;
+const pctOf = (v: number, min: number) => Math.max(0, Math.min(100, ((v - min) / -min) * 100));
 const fmt = (v: number) => (v > 0 ? "+" : "") + v.toFixed(1);
-// The bar/line update every event (~60 fps) for smoothness; the numeric readouts refresh at this
-// slower interval so peak/LUFS digits are readable instead of a 60 fps blur.
+// The bars update every event (~60 fps); the numeric readouts refresh slower so digits are readable.
 const NUMS_INTERVAL_MS = 200;
+// A vertical marker's `bottom`, clamped so a 2px line at the top edge isn't cropped.
+const mark = (pct: number) => `clamp(0px, ${pct}%, calc(100% - 2px))`;
+// Extra top inset (px) for the bars so they clear the Apply button above the column without
+// pushing the layout down. The bars just get shorter; their bottom stays on the chart's X axis.
+const BAR_TOP_GAP = 14;
 
-export function Meter({ deviceId }: { deviceId: string }) {
-  const [bar, setBar] = useState<MeterUpdate | null>(null); // fast: phosphor bar + RMS line
-  const [nums, setNums] = useState<MeterUpdate | null>(null); // throttled: peak/RMS/LUFS readouts
+export function Meter({
+  deviceId,
+  plotBox,
+}: {
+  deviceId: string;
+  /** Rendered chart plot-area box (px) so the bars match the chart's Y extent (top gridline → X
+   *  axis) instead of stretching past it. Null until measured → bars just fill the column. */
+  plotBox: { top: number; height: number } | null;
+}) {
+  const [bar, setBar] = useState<MeterUpdate | null>(null); // fast: bars + marks
+  const [nums, setNums] = useState<MeterUpdate | null>(null); // throttled: readouts
   const [err, setErr] = useState<string | null>(null);
   const lastNums = useRef(0);
 
@@ -59,7 +73,6 @@ export function Meter({ deviceId }: { deviceId: string }) {
     return () => {
       active = false;
       unlisten?.();
-      // Best-effort stop; a failure here just leaves the capture thread to be replaced next start.
       invoke("stop_monitor").catch(() => {});
     };
   }, [deviceId]);
@@ -67,47 +80,73 @@ export function Meter({ deviceId }: { deviceId: string }) {
   if (err) return <div className="meter meter-err">Meter unavailable: {err}</div>;
 
   const live = bar?.signal === true;
-  const rms = live ? bar!.rms_db : BAR_MIN_DB;
-  const peak = live ? bar!.peak_db : BAR_MIN_DB;
   const bins = live && Array.isArray(bar!.bins) ? bar!.bins : [];
-  // Numeric readouts come from the throttled snapshot, and only once there is one and audio is live.
   const showNums = live && nums != null;
-  // The bar is a horizontal gradient whose per-segment alpha is that segment's phosphor
-  // brightness (bright where the level dwells, fading afterglow where peaks reached). The line
-  // marks the true RMS on top.
+
+  // Vertical phosphor gradient (bottom = quietest segment). Per-segment alpha is the segment's
+  // persistence brightness.
   const fillStyle =
     bins.length > 1
       ? {
-          background: `linear-gradient(to right, ${bins
+          background: `linear-gradient(to top, ${bins
             .map((b, i) => {
-              const pct = Math.round(Math.max(0, Math.min(1, b)) * 100);
+              const alpha = Math.round(Math.max(0, Math.min(1, b)) * 100);
               const pos = ((i / (bins.length - 1)) * 100).toFixed(1);
-              return `color-mix(in srgb, var(--accent) ${pct}%, transparent) ${pos}%`;
+              return `color-mix(in srgb, var(--accent) ${alpha}%, transparent) ${pos}%`;
             })
             .join(", ")})`,
         }
       : undefined;
 
+  const num = (v: number | undefined) => (showNums && v != null ? fmt(v) : "—");
+
   return (
     <div className={`meter${live ? "" : " meter-idle"}`}>
-      <div className="meter-lufs" title="BS.1770 loudness — momentary (400 ms) / short-term (3 s)">
-        <span className="meter-lufs-m">{showNums ? fmt(nums!.momentary_lufs) : "—"}</span>
-        <span className="meter-lufs-unit">LUFS·M</span>
-        <span className="meter-lufs-s">S {showNums ? fmt(nums!.short_term_lufs) : "—"}</span>
+      <div
+        className="meter-bars"
+        style={
+          plotBox
+            ? { flex: "none", marginTop: `${plotBox.top + BAR_TOP_GAP}px`, height: `${Math.max(20, plotBox.height - BAR_TOP_GAP)}px` }
+            : undefined
+        }
+      >
+        <div className="vbar-group" title="Output level (dBFS): phosphor fill, amber peak, neutral RMS">
+          <div className="vbar" aria-hidden="true">
+            <i className="vbar-fill" style={fillStyle} />
+            <i className="vbar-ticks" />
+            {live && <i className="vbar-rms" style={{ bottom: mark(pctOf(bar!.rms_db, LEVEL_MIN_DB)) }} />}
+            {live && <i className="vbar-peak" style={{ bottom: mark(pctOf(bar!.peak_db, LEVEL_MIN_DB)) }} />}
+          </div>
+          <span className="vbar-cap">dBFS</span>
+        </div>
+        <div className="vbar-scale" aria-hidden="true">
+          <div className="vbar-scale-track">
+            {[0, -10, -20, -30, -40].map((db) => (
+              <span key={db} style={{ bottom: `${pctOf(db, LEVEL_MIN_DB)}%` }}>
+                {db}
+              </span>
+            ))}
+          </div>
+          <span className="vbar-cap">dB</span>
+        </div>
+        <div className="vbar-group" title="Loudness (LUFS): short-term fill, momentary mark (BS.1770)">
+          <div className="vbar" aria-hidden="true">
+            <i className="vbar-lufs" style={{ height: live ? `${pctOf(bar!.short_term_lufs, LUFS_MIN)}%` : "0%" }} />
+            <i className="vbar-ticks" />
+            {live && <i className="vbar-lufs-m" style={{ bottom: mark(pctOf(bar!.momentary_lufs, LUFS_MIN)) }} />}
+          </div>
+          <span className="vbar-cap">LUFS</span>
+        </div>
       </div>
-      <div className="meter-bar" aria-hidden="true">
-        <i className="meter-bar-fill" style={fillStyle} />
-        {live && <i className="meter-bar-rms" style={{ left: `clamp(0px, ${barPct(rms)}%, calc(100% - 2px))` }} />}
-        {live && <i className="meter-bar-peak" style={{ left: `clamp(0px, ${barPct(peak)}%, calc(100% - 2px))` }} />}
-      </div>
-      <div className="meter-nums">
-        {live ? (
-          <>
-            peak <b>{showNums ? fmt(nums!.peak_db) : "—"}</b> · rms <b>{showNums ? fmt(nums!.rms_db) : "—"}</b> dBFS
-          </>
-        ) : (
-          <span className="meter-nosignal">no signal — play audio to meter the output</span>
-        )}
+      <div className="meter-read">
+        <span className="mr-k">pk</span>
+        <span className="mr-v">{num(nums?.peak_db)}</span>
+        <span className="mr-k">M</span>
+        <span className="mr-v">{num(nums?.momentary_lufs)}</span>
+        <span className="mr-k">rms</span>
+        <span className="mr-v">{num(nums?.rms_db)}</span>
+        <span className="mr-k">S</span>
+        <span className="mr-v">{num(nums?.short_term_lufs)}</span>
       </div>
     </div>
   );

@@ -91,18 +91,18 @@ mod windows_impl {
     /// No frames for at least this long ⇒ the endpoint is idle (report `signal: false`).
     const SILENCE_GAP: Duration = Duration::from_millis(300);
     /// Level-bar range (dBFS): the phosphor histogram's segments span BAR_MIN_DB..0.
-    const BAR_MIN_DB: f32 = -60.0;
+    const BAR_MIN_DB: f32 = -40.0;
     /// Number of segments in the phosphor level histogram (bar resolution).
     const N_BINS: usize = 64;
     /// Phosphor persistence: per-segment brightness decay time constant (seconds) — the afterglow.
-    const PHOSPHOR_DECAY_SECS: f32 = 0.6;
+    const PHOSPHOR_DECAY_SECS: f32 = 1.2;
     /// Fraction of the way from the block RMS toward its peak used as the histogram coverage level
     /// — a touch of peak so transients poke above the energy fill without saturating the bar.
-    const PEAK_BLEND: f32 = 0.6;
+    const PEAK_BLEND: f32 = 1.0;
     /// Brightness ramp: a segment reaches full brightness when the level sits this many dB above
     /// it, fading to dark at the level. Sets the fill's tonal range — smaller = steeper/punchier,
     /// larger = a gentler glow.
-    const GLOW_SPAN_DB: f32 = 6.0;
+    const GLOW_SPAN_DB: f32 = 3.0;
 
     // --- spectrum analyzer (post-EQ loopback FFT) ---
     /// FFT size. At 44.1 kHz ≈ 5.4 Hz bins / 186 ms window — decent low-end for resonance hunting.

@@ -261,9 +261,6 @@ function App() {
   // Cross-view hover link: the storage index of the band the pointer is over in *either* the
   // chart or the grid, so the other view highlights the matching node/column (null = none).
   const [hoverBand, setHoverBand] = useState<number | null>(null);
-  // §5.3c post-EQ output meter (WASAPI loopback). Off by default — it runs a capture thread while
-  // on, and it's a diagnostic, not always-on chrome.
-  const [monitoring, setMonitoring] = useState(false);
   // Force light/dark to override the system preference (handy for testing both). `auto` follows
   // the OS. Persisted across reloads; applied as a `data-theme` attribute the CSS keys off.
   const [theme, setTheme] = useState<"auto" | "light" | "dark">(
@@ -276,14 +273,10 @@ function App() {
     localStorage.setItem("cageq-theme", theme);
   }, [theme]);
   const cycleTheme = () => setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
-  // Live post-EQ spectrum (loopback FFT) drawn on the chart while monitoring. The Meter component
-  // owns start/stop of the capture; here we just subscribe to the `spectrum` events it produces.
+  // Live post-EQ spectrum (loopback FFT) drawn on the chart. The Meter component owns start/stop
+  // of the capture; here we just subscribe to the `spectrum` events it produces.
   const [spectrum, setSpectrum] = useState<SpectrumData | null>(null);
   useEffect(() => {
-    if (!monitoring) {
-      setSpectrum(null);
-      return;
-    }
     let active = true;
     let unlisten: (() => void) | undefined;
     void (async () => {
@@ -295,7 +288,11 @@ function App() {
       active = false;
       unlisten?.();
     };
-  }, [monitoring]);
+  }, []);
+  // Align the vertical meter bars to the chart's *plot area* (top gridline → X axis) rather than
+  // letting them stretch past it (the chart-wrap also holds the legend). Measured near the return.
+  const chartWrapRef = useRef<HTMLDivElement>(null);
+  const [plotBox, setPlotBox] = useState<{ top: number; height: number } | null>(null);
   // Undo/redo (v1): a single stack of whole-`stages` snapshots for the *current* slot, reset on
   // slot switch (deliberately not per-slot — a history that changes meaning when you switch slots
   // is more confusing than useful). Snapshots are the immutable `stages` object, so they cost
@@ -1022,6 +1019,25 @@ function App() {
   const selectedDevice = devices.find((d) => d.id === deviceId);
   const dryActive = activeSlot === "Dry";
 
+  // Measure the chart's rendered SVG so the meter bars can match its plot-area Y extent. EqChart's
+  // viewBox is 720×215 with PAD.t=12 / PAD.b=24 → the plot spans y 12..191 of 215.
+  useEffect(() => {
+    const svg = chartWrapRef.current?.querySelector("svg");
+    if (!svg) {
+      setPlotBox(null);
+      return;
+    }
+    const measure = () => {
+      const h = svg.getBoundingClientRect().height;
+      setPlotBox(h > 0 ? { top: (12 / 215) * h, height: (179 / 215) * h } : null);
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(svg);
+    measure();
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [impulseView, dryActive, loading, !!result]);
+
   // The active stage's bands (the grid/nodes edit these) and the full applied custom set.
   const activeBands = stages[activeStage].bands;
   const appliedCustom = useMemo(() => appliedBands(stages), [stages]);
@@ -1340,7 +1356,8 @@ function App() {
                 <>
                   {/* The Frequency/Time (domain) view swap lives in the panel header row
                       (above). Phase rides the frequency chart's secondary axis (legend). */}
-                  <div className="chart-wrap">
+                  <div className="chart-row">
+                  <div className="chart-wrap" ref={chartWrapRef}>
                     {impulseView && !dryActive ? (
                       <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} />
                     ) : (
@@ -1380,20 +1397,10 @@ function App() {
                       <span className="chart-preamp-mode">{loudness?.mode === "FinalVolume" ? "max" : "matched"}</span>
                     </div>
                   </div>
-                  {/* §5.3c post-EQ output meter — validates the auto-LUFS preamp against the real
-                      endpoint mix (loopback, post-EQ). Off by default; capture runs only while on. */}
-                  <div className="monitor-row">
-                    <button
-                      type="button"
-                      className={`monitor-toggle${monitoring ? " on" : ""}`}
-                      aria-pressed={monitoring}
-                      onClick={() => setMonitoring((v) => !v)}
-                      title="Meter the actual post-EQ output level (WASAPI loopback). Needs audio playing."
-                    >
-                      <span className="monitor-dot" aria-hidden="true" />
-                      {monitoring ? "Metering output" : "Meter output"}
-                    </button>
-                    {monitoring && <Meter deviceId={deviceId} />}
+                    {/* §5.3c post-EQ meters beside the chart (loopback, post-EQ) — always on. */}
+                    <div className="meter-col">
+                      <Meter deviceId={deviceId} plotBox={plotBox} />
+                    </div>
                   </div>
                   {result.clipping_warning && (
                     <p style={{ color: "#b8860b", fontSize: "0.8em", margin: "0.2em 0 0" }}>
