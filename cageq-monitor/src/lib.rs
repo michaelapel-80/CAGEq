@@ -15,11 +15,11 @@
 use serde::Serialize;
 
 /// One meter reading, pushed to the UI ~20×/s. Plain data, so it's platform-independent.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MeterUpdate {
-    /// Peak level over the last tick, dBFS (floored at -120).
+    /// Peak level, dBFS — a PPM-style follower (instant attack, brief hold, release), floored at -120.
     pub peak_db: f32,
-    /// RMS level over the last tick, dBFS (floored at -120).
+    /// True RMS level (VU-integrated), dBFS, floored at -120.
     pub rms_db: f32,
     /// BS.1770 K-weighted momentary loudness (400 ms window), LUFS (floored at -70).
     pub momentary_lufs: f32,
@@ -28,6 +28,11 @@ pub struct MeterUpdate {
     /// `false` when the endpoint produced no audio this window — the UI shows an idle state
     /// rather than a misleading `-120`/`-70`.
     pub signal: bool,
+    /// Phosphor-persistence histogram of the level bar: per-segment brightness 0..1, from the
+    /// quietest segment (index 0) up. A segment lights when the level covers it and decays
+    /// otherwise, so always-covered low segments stay bright and peaks leave a fading afterglow —
+    /// the meter's glow. Empty while idle.
+    pub bins: Vec<f32>,
 }
 
 #[cfg(windows)]
@@ -54,10 +59,33 @@ mod windows_impl {
     const DB_FLOOR: f32 = -120.0;
     /// LUFS floor (below the BS.1770 absolute gate) for the same reason.
     const LUFS_FLOOR: f32 = -70.0;
-    /// UI cadence. Peak/RMS are measured over this window; LUFS windows are internal to ebur128.
-    const TICK: Duration = Duration::from_millis(50);
+    /// Emit cadence (~60 fps). Decoupled from the metering ballistics below, which are time-based
+    /// — so the fast rate makes the meter smooth, not twitchy (BS.1770 sets window *lengths*, not
+    /// a refresh rate; the LUFS windows stay 400 ms / 3 s inside ebur128 regardless).
+    const TICK: Duration = Duration::from_millis(16);
+    /// Peak meter release: linear dB/s after the hold expires (attack is instant). PPM-like.
+    const PEAK_RELEASE_DB_PER_SEC: f32 = 20.0;
+    /// Hold a fresh peak this long before it starts releasing, so transients stay readable.
+    const PEAK_HOLD: Duration = Duration::from_millis(350);
+    /// True-RMS integration for the reference line (symmetric one-pole, VU-like ~300 ms). The
+    /// glowing bar itself is the peak's phosphor-decay envelope; this is just the honest RMS
+    /// marker drawn on top of it.
+    const RMS_TAU_SECS: f64 = 0.3;
     /// No frames for at least this long ⇒ the endpoint is idle (report `signal: false`).
     const SILENCE_GAP: Duration = Duration::from_millis(300);
+    /// Level-bar range (dBFS): the phosphor histogram's segments span BAR_MIN_DB..0.
+    const BAR_MIN_DB: f32 = -60.0;
+    /// Number of segments in the phosphor level histogram (bar resolution).
+    const N_BINS: usize = 64;
+    /// Phosphor persistence: per-segment brightness decay time constant (seconds) — the afterglow.
+    const PHOSPHOR_DECAY_SECS: f32 = 0.6;
+    /// Fraction of the way from the block RMS toward its peak used as the histogram coverage level
+    /// — a touch of peak so transients poke above the energy fill without saturating the bar.
+    const PEAK_BLEND: f32 = 0.6;
+    /// Brightness ramp: a segment reaches full brightness when the level sits this many dB above
+    /// it, fading to dark at the level. Sets the fill's tonal range — smaller = steeper/punchier,
+    /// larger = a gentler glow.
+    const GLOW_SPAN_DB: f32 = 6.0;
 
     /// A running loopback monitor. Dropping it (or calling [`Monitor::stop`]) ends the thread.
     pub struct Monitor {
@@ -168,6 +196,7 @@ mod windows_impl {
                     momentary_lufs: LUFS_FLOOR,
                     short_term_lufs: LUFS_FLOOR,
                     signal: false,
+                    bins: Vec::new(),
                 });
                 sleep_unless_stopped(stop, Duration::from_millis(500));
             }
@@ -227,10 +256,16 @@ mod windows_impl {
         audio_client.start_stream()?;
 
         let mut queue: VecDeque<u8> = VecDeque::new();
-        let mut frames: Vec<f32> = Vec::new(); // interleaved, reused each tick for ebur128
-        let mut peak = 0.0f32;
-        let mut sum_sq = 0.0f64;
-        let mut sample_count: u64 = 0;
+        let mut frames: Vec<f32> = Vec::new(); // interleaved, reused each read for ebur128
+        // Per-tick block accumulators (reset every emit).
+        let mut block_peak = 0.0f32;
+        let mut block_sum_sq = 0.0f64;
+        let mut block_count: u64 = 0;
+        // Persistent, time-based meter ballistics (carried across ticks).
+        let mut peak_db = DB_FLOOR; // held/decaying peak, dBFS
+        let mut peak_hold_until = Instant::now();
+        let mut rms_mean_sq = 0.0f64; // one-pole-smoothed mean square
+        let mut intensity = vec![0.0f32; N_BINS]; // phosphor histogram brightness per segment
         let mut last_tick = Instant::now();
         let mut last_signal = Instant::now();
 
@@ -254,11 +289,11 @@ mod windows_impl {
                     let s = f32::from_le_bytes(b);
                     frames.push(s);
                     let a = s.abs();
-                    if a > peak {
-                        peak = a;
+                    if a > block_peak {
+                        block_peak = a;
                     }
-                    sum_sq += (s as f64) * (s as f64);
-                    sample_count += 1;
+                    block_sum_sq += (s as f64) * (s as f64);
+                    block_count += 1;
                 }
             }
             if !frames.is_empty() {
@@ -266,27 +301,58 @@ mod windows_impl {
             }
 
             if last_tick.elapsed() >= TICK {
-                let signal = sample_count > 0 && last_signal.elapsed() < SILENCE_GAP;
-                let rms = if sample_count > 0 {
-                    (sum_sq / sample_count as f64).sqrt() as f32
-                } else {
-                    0.0
-                };
+                let dt = last_tick.elapsed().as_secs_f32();
+                let now = Instant::now();
+
+                // Peak: instant attack, brief hold, then linear-dB release — a PPM-style follower
+                // that reads cleanly at 60 fps instead of flickering on a raw per-tick max.
+                let block_peak_db = to_db(block_peak);
+                if block_peak_db >= peak_db {
+                    peak_db = block_peak_db;
+                    peak_hold_until = now + PEAK_HOLD;
+                } else if now >= peak_hold_until {
+                    peak_db = (peak_db - PEAK_RELEASE_DB_PER_SEC * dt).max(DB_FLOOR);
+                }
+
+                // True RMS for the reference line: a plain symmetric integrator (VU-like). The
+                // bar's glow and decay come from the phosphor histogram below, not from here.
+                let block_ms = if block_count > 0 { block_sum_sq / block_count as f64 } else { 0.0 };
+                let alpha = 1.0 - (-(dt as f64) / RMS_TAU_SECS).exp();
+                rms_mean_sq += alpha * (block_ms - rms_mean_sq);
+
+                // Phosphor histogram. Coverage level is mostly the block RMS (energy) — peaks sit
+                // near 0 dBFS on most material and would saturate the bar, whereas energy shows
+                // where the sound actually sits — with a little peak blended in so transients poke
+                // up. Each segment's *target* brightness ramps with how far the level sits above it
+                // (deeper = brighter), so the fill has real tonal range instead of a flat block;
+                // segments hold their brightest recent value and decay from it (the afterglow), so
+                // a passing peak leaves a fading trail above the current level.
+                let rms_now_db = to_db(block_ms.sqrt() as f32);
+                let cover_db = rms_now_db + PEAK_BLEND * (block_peak_db - rms_now_db);
+                let decay = (-dt / PHOSPHOR_DECAY_SECS).exp();
+                for (i, cell) in intensity.iter_mut().enumerate() {
+                    let seg_db = BAR_MIN_DB * (1.0 - (i as f32 + 0.5) / N_BINS as f32);
+                    let target = ((cover_db - seg_db) / GLOW_SPAN_DB).clamp(0.0, 1.0);
+                    *cell = (*cell * decay).max(target);
+                }
+
                 on_update(MeterUpdate {
-                    peak_db: to_db(peak),
-                    rms_db: to_db(rms),
+                    peak_db,
+                    rms_db: to_db(rms_mean_sq.sqrt() as f32),
                     momentary_lufs: clamp_lufs(
                         ebu.loudness_momentary().unwrap_or(f64::NEG_INFINITY),
                     ),
                     short_term_lufs: clamp_lufs(
                         ebu.loudness_shortterm().unwrap_or(f64::NEG_INFINITY),
                     ),
-                    signal,
+                    signal: last_signal.elapsed() < SILENCE_GAP,
+                    bins: intensity.clone(),
                 });
-                peak = 0.0;
-                sum_sq = 0.0;
-                sample_count = 0;
-                last_tick = Instant::now();
+
+                block_peak = 0.0;
+                block_sum_sq = 0.0;
+                block_count = 0;
+                last_tick = now;
             }
 
             // Nothing ready — yield briefly so we don't spin a core polling an idle endpoint.

@@ -285,22 +285,34 @@ select:disabled {
   min-width: 70px;
   border-radius: 4px;
   background: rgba(128, 128, 128, 0.18);
-  overflow: hidden;
+  /* Not clipped: the fill rounds its own corners, and the marker ticks are meant to overhang
+     top/bottom. Horizontal clipping is handled by clamping the marker positions instead, so the
+     0 dBFS peak tick stays flush inside the right edge rather than being cropped. */
 }
-.meter-bar-rms {
+/* Phosphor level histogram: spans the whole bar; per-segment brightness (a gradient built from
+   the backend's decaying-persistence bins) encodes the level and its afterglow. */
+.meter-bar-fill {
   position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  inset: 0;
   border-radius: 4px;
 }
+/* Thin marker = the true (VU-integrated) RMS level, drawn over the fill. */
+.meter-bar-rms {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 2px;
+  background: color-mix(in srgb, currentColor 85%, transparent);
+  border-radius: 1px;
+}
+/* Peak-hold marker — a warm tick that stands out from the accent glow and the neutral RMS line. */
 .meter-bar-peak {
   position: absolute;
-  top: 0;
-  bottom: 0;
+  top: -2px;
+  bottom: -2px;
   width: 2px;
-  background: var(--accent);
+  background: #e6a23c;
+  border-radius: 1px;
 }
 .meter-nums {
   font-size: 0.7rem;
