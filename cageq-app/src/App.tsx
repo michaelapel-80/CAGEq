@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Band } from "./biquad";
-import { EqChart, Marker, PhaseCurve, RefCurve, Series } from "./EqChart";
+import { EqChart, Marker, PhaseCurve, RefCurve, Series, SpectrumData } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import { Meter } from "./Meter";
@@ -263,6 +264,38 @@ function App() {
   // §5.3c post-EQ output meter (WASAPI loopback). Off by default — it runs a capture thread while
   // on, and it's a diagnostic, not always-on chrome.
   const [monitoring, setMonitoring] = useState(false);
+  // Force light/dark to override the system preference (handy for testing both). `auto` follows
+  // the OS. Persisted across reloads; applied as a `data-theme` attribute the CSS keys off.
+  const [theme, setTheme] = useState<"auto" | "light" | "dark">(
+    () => (localStorage.getItem("cageq-theme") as "auto" | "light" | "dark" | null) ?? "auto",
+  );
+  useEffect(() => {
+    const el = document.documentElement;
+    if (theme === "auto") el.removeAttribute("data-theme");
+    else el.setAttribute("data-theme", theme);
+    localStorage.setItem("cageq-theme", theme);
+  }, [theme]);
+  const cycleTheme = () => setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
+  // Live post-EQ spectrum (loopback FFT) drawn on the chart while monitoring. The Meter component
+  // owns start/stop of the capture; here we just subscribe to the `spectrum` events it produces.
+  const [spectrum, setSpectrum] = useState<SpectrumData | null>(null);
+  useEffect(() => {
+    if (!monitoring) {
+      setSpectrum(null);
+      return;
+    }
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      unlisten = await listen<SpectrumData>("spectrum", (e) => {
+        if (active) setSpectrum(e.payload);
+      });
+    })();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [monitoring]);
   // Undo/redo (v1): a single stack of whole-`stages` snapshots for the *current* slot, reset on
   // slot switch (deliberately not per-slot — a history that changes meaning when you switch slots
   // is more confusing than useful). Snapshots are the immutable `stages` object, so they cost
@@ -1238,16 +1271,15 @@ function App() {
             </form>
           </>
         )}
-        {status && (
-          <span className="info-chip" tabIndex={0} role="button" aria-label="Diagnostics">
-            ⓘ
-            <span className="info-pop">
-              {status.sidecar} · {status.health}
-              <br />
-              {status.config_source}
-            </span>
-          </span>
-        )}
+        <button
+          type="button"
+          className="theme-toggle"
+          onClick={cycleTheme}
+          title={`Theme: ${theme} — click to force light/dark (Auto → Light → Dark)`}
+          aria-label={`Theme: ${theme}. Click to change.`}
+        >
+          {theme === "auto" ? "◐" : theme === "light" ? "○" : "●"}
+        </button>
       </header>
 
       {!loading && selectedDevice && !selectedDevice.eqapo_enabled && (
@@ -1317,6 +1349,7 @@ function App() {
                         markers={chartMarkers}
                         refs={chartRefs}
                         phase={chartPhase}
+                        spectrum={spectrum}
                         height={215}
                         nodes={{
                           bands: activeBands,

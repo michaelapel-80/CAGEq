@@ -271,10 +271,17 @@ fn start_monitor(device: Option<String>, app: tauri::AppHandle, state: State<Mon
         existing.stop();
     }
     let sink = app.clone();
-    let monitor = cageq_monitor::Monitor::start(device, move |update| {
-        // A dropped listener just means no one's watching; ignore send failures.
-        let _ = sink.emit("monitor", update);
-    })?;
+    let spectrum_sink = app.clone();
+    let monitor = cageq_monitor::Monitor::start(
+        device,
+        move |update| {
+            // A dropped listener just means no one's watching; ignore send failures.
+            let _ = sink.emit("monitor", update);
+        },
+        move |spectrum| {
+            let _ = spectrum_sink.emit("spectrum", spectrum);
+        },
+    )?;
     *guard = Some(monitor);
     Ok(())
 }

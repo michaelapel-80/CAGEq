@@ -35,6 +35,21 @@ pub struct MeterUpdate {
     pub bins: Vec<f32>,
 }
 
+/// A post-EQ spectrum snapshot (loopback FFT), emitted a few times a second on its own channel.
+/// Log-frequency bins so it drops straight onto the EQ chart's log axis; the source spectrum is
+/// derivable later by dividing out the known filter response. Plain data → platform-independent.
+#[derive(Clone, Debug, Serialize)]
+pub struct SpectrumUpdate {
+    /// Smoothed magnitude per log-frequency bin, dB (relative), from low freq (index 0) up.
+    pub db: Vec<f32>,
+    /// Per-bin peak-hold (slow decay) — the resonance catcher.
+    pub peak_db: Vec<f32>,
+    /// Centre frequency of bin 0 (Hz); bins are geometrically spaced up to `f_max`.
+    pub f_min: f32,
+    /// Centre frequency of the last bin (Hz).
+    pub f_max: f32,
+}
+
 #[cfg(windows)]
 pub use windows_impl::Monitor;
 
@@ -43,7 +58,7 @@ pub use stub::Monitor;
 
 #[cfg(windows)]
 mod windows_impl {
-    use super::MeterUpdate;
+    use super::{MeterUpdate, SpectrumUpdate};
     use std::collections::VecDeque;
     use std::error::Error;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +66,8 @@ mod windows_impl {
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
+    use realfft::num_complex::Complex;
+    use realfft::{RealFftPlanner, RealToComplex};
     use wasapi::{
         initialize_mta, Device, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
     };
@@ -87,6 +104,27 @@ mod windows_impl {
     /// larger = a gentler glow.
     const GLOW_SPAN_DB: f32 = 6.0;
 
+    // --- spectrum analyzer (post-EQ loopback FFT) ---
+    /// FFT size. At 44.1 kHz ≈ 5.4 Hz bins / 186 ms window — decent low-end for resonance hunting.
+    const FFT_SIZE: usize = 8192;
+    /// Hop between successive windows (75% overlap) → Welch-style averaging, ~20 FFTs/s at 44.1k.
+    const FFT_HOP: usize = 2048;
+    /// Number of log-frequency display bins spanning [SPEC_F_MIN, SPEC_F_MAX].
+    const N_LOG_BINS: usize = 120;
+    const SPEC_F_MIN: f32 = 20.0;
+    const SPEC_F_MAX: f32 = 20_000.0;
+    /// dB floor for empty/silent spectrum bins.
+    const SPEC_FLOOR: f32 = -120.0;
+    /// Power-spectrum smoothing time constant (seconds) — steadies the display.
+    const SPEC_TAU_SECS: f32 = 0.15;
+    /// Per-bin peak-hold decay (dB/s) — slow, so resonances linger and read.
+    const SPEC_PEAK_DROP_DB_PER_SEC: f32 = 12.0;
+    /// Spectrum emit cadence (FFT is heavier than the meter and needn't run at 60 fps).
+    const SPECTRUM_INTERVAL: Duration = Duration::from_millis(50);
+    /// Power multiplier applied per emit when no fresh FFT arrived (silence) — fades the stored
+    /// spectrum toward the floor instead of freezing it lit (≈11 dB/s at the 50 ms cadence).
+    const SPEC_IDLE_DECAY: f32 = 0.88;
+
     /// A running loopback monitor. Dropping it (or calling [`Monitor::stop`]) ends the thread.
     pub struct Monitor {
         stop: Arc<AtomicBool>,
@@ -98,16 +136,21 @@ mod windows_impl {
         /// GUID); the matching WASAPI endpoint is found by suffix (its id is `{0.0.0.0…}.{guid}`),
         /// falling back to the default render endpoint when `None` or unmatched. `on_update` is
         /// called from the capture thread ~20×/s.
-        pub fn start<F>(endpoint_id: Option<String>, on_update: F) -> Result<Monitor, String>
+        pub fn start<F, G>(
+            endpoint_id: Option<String>,
+            on_update: F,
+            on_spectrum: G,
+        ) -> Result<Monitor, String>
         where
             F: Fn(MeterUpdate) + Send + 'static,
+            G: Fn(SpectrumUpdate) + Send + 'static,
         {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_thread = stop.clone();
             let handle = thread::Builder::new()
                 .name("cageq-loopback".into())
                 .spawn(move || {
-                    if let Err(e) = capture_loop(endpoint_id, &stop_thread, on_update) {
+                    if let Err(e) = capture_loop(endpoint_id, &stop_thread, on_update, on_spectrum) {
                         // A failed monitor simply yields no updates; surface why for debugging.
                         eprintln!("[cageq-monitor] capture ended: {e}");
                     }
@@ -151,6 +194,128 @@ mod windows_impl {
         }
     }
 
+    /// Post-EQ spectrum analyzer: accumulates mono loopback samples, runs overlapping Hann-windowed
+    /// FFTs, exponentially averages the power spectrum, and collapses it onto log-frequency bins
+    /// with a slow per-bin peak-hold for resonance spotting.
+    struct Spectrum {
+        fft: Arc<dyn RealToComplex<f32>>,
+        in_buf: Vec<f32>,          // realfft input scratch (len FFT_SIZE)
+        out_buf: Vec<Complex<f32>>, // realfft output scratch (len FFT_SIZE/2 + 1)
+        scratch: Vec<Complex<f32>>,
+        window: Vec<f32>,          // Hann window
+        accum: VecDeque<f32>,      // mono sample accumulator
+        avg_power: Vec<f32>,       // smoothed linear power per FFT bin
+        ranges: Vec<(usize, usize)>, // per log bin: inclusive linear-bin span
+        peak_db: Vec<f32>,         // per log bin peak-hold, dB
+        smoothing: f32,            // power-average coefficient per hop
+        power_scale: f32,          // |X|² -> normalized power so a full-scale sine reads ~0 dBFS
+        fresh: bool,               // an FFT ran since the last emit (else the display is faded)
+    }
+
+    impl Spectrum {
+        fn new(rate: u32) -> Self {
+            let fft = RealFftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
+            let in_buf = fft.make_input_vec();
+            let out_buf = fft.make_output_vec();
+            let scratch = fft.make_scratch_vec();
+            let window: Vec<f32> = (0..FFT_SIZE)
+                .map(|n| {
+                    0.5 - 0.5 * (2.0 * std::f32::consts::PI * n as f32 / FFT_SIZE as f32).cos()
+                })
+                .collect();
+
+            let n_lin = FFT_SIZE / 2 + 1;
+            let bin_hz = rate as f32 / FFT_SIZE as f32;
+            let ratio = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_BINS as f32 - 1.0));
+            let half = ratio.sqrt();
+            let mut ranges = Vec::with_capacity(N_LOG_BINS);
+            for i in 0..N_LOG_BINS {
+                let fc = SPEC_F_MIN * ratio.powi(i as i32);
+                let lo = ((fc / half) / bin_hz).floor().max(0.0) as usize;
+                let hi = (((fc * half) / bin_hz).ceil() as usize).min(n_lin - 1);
+                ranges.push((lo.min(hi), hi));
+            }
+
+            let smoothing = 1.0 - (-(FFT_HOP as f32 / rate as f32) / SPEC_TAU_SECS).exp();
+            // Amplitude normalization: a full-scale sine at a bin centre gives |X| = S1/2 (window
+            // coherent gain), so multiply the one-sided amplitude by 2/S1 to read 1.0 → 0 dBFS.
+            // In the power domain that's (2/S1)². S1 = sum(window). This makes the level absolute
+            // and FFT-size independent, so the display can use a fixed scale.
+            let s1: f32 = window.iter().sum();
+            let power_scale = (2.0 / s1).powi(2);
+            Spectrum {
+                fft,
+                in_buf,
+                out_buf,
+                scratch,
+                window,
+                accum: VecDeque::new(),
+                avg_power: vec![0.0; n_lin],
+                ranges,
+                peak_db: vec![SPEC_FLOOR; N_LOG_BINS],
+                smoothing,
+                power_scale,
+                fresh: false,
+            }
+        }
+
+        /// Feed mono samples; runs an FFT for every full hop and folds it into the running average.
+        fn push(&mut self, mono: &[f32]) {
+            self.accum.extend(mono.iter().copied());
+            while self.accum.len() >= FFT_SIZE {
+                for (i, w) in self.window.iter().enumerate() {
+                    self.in_buf[i] = self.accum[i] * w;
+                }
+                if self
+                    .fft
+                    .process_with_scratch(&mut self.in_buf, &mut self.out_buf, &mut self.scratch)
+                    .is_ok()
+                {
+                    let a = self.smoothing;
+                    for (avg, c) in self.avg_power.iter_mut().zip(self.out_buf.iter()) {
+                        *avg += a * (c.norm_sqr() - *avg);
+                    }
+                    self.fresh = true;
+                }
+                for _ in 0..FFT_HOP {
+                    self.accum.pop_front();
+                }
+            }
+        }
+
+        /// Consume the "an FFT ran" flag (true since the last call).
+        fn take_fresh(&mut self) -> bool {
+            std::mem::take(&mut self.fresh)
+        }
+
+        /// Fade the stored power toward the floor — called on an emit with no fresh audio, so the
+        /// spectrum decays during silence instead of freezing at its last values.
+        fn decay_idle(&mut self) {
+            for p in self.avg_power.iter_mut() {
+                *p *= SPEC_IDLE_DECAY;
+            }
+        }
+
+        /// Collapse the averaged power onto log bins (dB) and advance the per-bin peak-hold.
+        fn snapshot(&mut self, dt: f32) -> SpectrumUpdate {
+            let drop = SPEC_PEAK_DROP_DB_PER_SEC * dt;
+            let mut db = Vec::with_capacity(N_LOG_BINS);
+            for (i, &(lo, hi)) in self.ranges.iter().enumerate() {
+                // Peak linear bin in this log bin, normalized to dBFS — so a narrow resonance reads
+                // its true level regardless of the (wider, at HF) log bin, on an absolute scale.
+                let power = self.avg_power[lo..=hi].iter().copied().fold(0.0f32, f32::max);
+                let cur = if power > 0.0 {
+                    (10.0 * (power * self.power_scale).log10()).max(SPEC_FLOOR)
+                } else {
+                    SPEC_FLOOR
+                };
+                self.peak_db[i] = (self.peak_db[i] - drop).max(cur);
+                db.push(cur);
+            }
+            SpectrumUpdate { db, peak_db: self.peak_db.clone(), f_min: SPEC_F_MIN, f_max: SPEC_F_MAX }
+        }
+    }
+
     /// Resolve the app's endpoint id (registry GUID) to a WASAPI render device, else default.
     fn resolve_device(
         enumerator: &DeviceEnumerator,
@@ -170,13 +335,15 @@ mod windows_impl {
         Ok(enumerator.get_default_device(&Direction::Render)?)
     }
 
-    fn capture_loop<F>(
+    fn capture_loop<F, G>(
         endpoint_id: Option<String>,
         stop: &AtomicBool,
         on_update: F,
+        on_spectrum: G,
     ) -> Result<(), Box<dyn Error>>
     where
         F: Fn(MeterUpdate),
+        G: Fn(SpectrumUpdate),
     {
         initialize_mta().ok()?;
 
@@ -187,7 +354,7 @@ mod windows_impl {
         // until the user toggled it off/on), tear down and reopen: get_mixformat re-reads the new
         // rate and the loudness state is rebuilt for it, so a rate change self-heals.
         while !stop.load(Ordering::Relaxed) {
-            if let Err(e) = run_session(&endpoint_id, stop, &on_update) {
+            if let Err(e) = run_session(&endpoint_id, stop, &on_update, &on_spectrum) {
                 eprintln!("[cageq-monitor] reopening capture after: {e}");
                 // Show the UI an idle state during the gap, then back off before reopening.
                 on_update(MeterUpdate {
@@ -218,13 +385,15 @@ mod windows_impl {
     /// One capture session: open loopback on the (re-resolved) endpoint at its current mix format
     /// and meter until stopped (returns `Ok`) or the stream errors/invalidates (returns `Err`, so
     /// the supervisor reopens — e.g. after a sample-rate change).
-    fn run_session<F>(
+    fn run_session<F, G>(
         endpoint_id: &Option<String>,
         stop: &AtomicBool,
         on_update: &F,
+        on_spectrum: &G,
     ) -> Result<(), Box<dyn Error>>
     where
         F: Fn(MeterUpdate),
+        G: Fn(SpectrumUpdate),
     {
         let enumerator = DeviceEnumerator::new()?;
         let device = resolve_device(&enumerator, endpoint_id)?;
@@ -253,10 +422,13 @@ mod windows_impl {
         )
         .map_err(|e| format!("ebur128 init: {e:?}"))?;
 
+        let mut spectrum = Spectrum::new(rate);
+
         audio_client.start_stream()?;
 
         let mut queue: VecDeque<u8> = VecDeque::new();
         let mut frames: Vec<f32> = Vec::new(); // interleaved, reused each read for ebur128
+        let mut mono: Vec<f32> = Vec::new(); // per-read mono downmix, fed to the FFT
         // Per-tick block accumulators (reset every emit).
         let mut block_peak = 0.0f32;
         let mut block_sum_sq = 0.0f64;
@@ -267,6 +439,7 @@ mod windows_impl {
         let mut rms_mean_sq = 0.0f64; // one-pole-smoothed mean square
         let mut intensity = vec![0.0f32; N_BINS]; // phosphor histogram brightness per segment
         let mut last_tick = Instant::now();
+        let mut last_spectrum = Instant::now();
         let mut last_signal = Instant::now();
 
         while !stop.load(Ordering::Relaxed) {
@@ -278,7 +451,9 @@ mod windows_impl {
             }
 
             frames.clear();
+            mono.clear();
             while queue.len() >= bytes_per_frame {
+                let mut frame_sum = 0.0f32;
                 for _ in 0..channels {
                     let b = [
                         queue.pop_front().unwrap(),
@@ -288,6 +463,7 @@ mod windows_impl {
                     ];
                     let s = f32::from_le_bytes(b);
                     frames.push(s);
+                    frame_sum += s;
                     let a = s.abs();
                     if a > block_peak {
                         block_peak = a;
@@ -295,9 +471,13 @@ mod windows_impl {
                     block_sum_sq += (s as f64) * (s as f64);
                     block_count += 1;
                 }
+                mono.push(frame_sum / channels as f32);
             }
             if !frames.is_empty() {
                 let _ = ebu.add_frames_f32(&frames);
+            }
+            if !mono.is_empty() {
+                spectrum.push(&mono);
             }
 
             if last_tick.elapsed() >= TICK {
@@ -355,6 +535,17 @@ mod windows_impl {
                 last_tick = now;
             }
 
+            // Spectrum on its own (slower) cadence — the FFTs themselves ran in `push` above.
+            // With no fresh audio (silence), fade the stored spectrum so it falls away.
+            if last_spectrum.elapsed() >= SPECTRUM_INTERVAL {
+                let sdt = last_spectrum.elapsed().as_secs_f32();
+                if !spectrum.take_fresh() {
+                    spectrum.decay_idle();
+                }
+                on_spectrum(spectrum.snapshot(sdt));
+                last_spectrum = Instant::now();
+            }
+
             // Nothing ready — yield briefly so we don't spin a core polling an idle endpoint.
             if !got_data {
                 thread::sleep(Duration::from_millis(5));
@@ -368,15 +559,20 @@ mod windows_impl {
 
 #[cfg(not(windows))]
 mod stub {
-    use super::MeterUpdate;
+    use super::{MeterUpdate, SpectrumUpdate};
 
     /// Non-Windows stub: loopback monitoring needs WASAPI, so [`Monitor::start`] just errors.
     pub struct Monitor;
 
     impl Monitor {
-        pub fn start<F>(_endpoint_id: Option<String>, _on_update: F) -> Result<Monitor, String>
+        pub fn start<F, G>(
+            _endpoint_id: Option<String>,
+            _on_update: F,
+            _on_spectrum: G,
+        ) -> Result<Monitor, String>
         where
             F: Fn(MeterUpdate) + Send + 'static,
+            G: Fn(SpectrumUpdate) + Send + 'static,
         {
             Err("loopback monitoring is only available on Windows".to_string())
         }

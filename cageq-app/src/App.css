@@ -13,6 +13,7 @@
 
   color: #0f0f0f;
   background-color: #f6f6f6;
+  color-scheme: light; /* native controls (selects) match; overridden to dark below */
 
   /* Theme tokens — used by form controls, the modal card, and popovers so they
      stay readable in both light and dark (the confirm dialog was hard-coded white). */
@@ -107,18 +108,32 @@ select:disabled {
   cursor: default;
 }
 
+/* Dark tokens. Auto (system) applies only when the user hasn't forced a theme via the toggle;
+   forced dark (`data-theme="dark"`) applies regardless of system. Forced light falls through to
+   the light defaults in :root because the auto rule is gated on :not([data-theme]). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
     color: #f6f6f6;
     background-color: #2f2f2f;
+    color-scheme: dark;
     --fg: #f6f6f6;
     --surface: #262626;
     --border: rgba(255, 255, 255, 0.2);
   }
-
-  a:hover {
+  :root:not([data-theme]) a:hover {
     color: #24c8db;
   }
+}
+:root[data-theme="dark"] {
+  color: #f6f6f6;
+  background-color: #2f2f2f;
+  color-scheme: dark;
+  --fg: #f6f6f6;
+  --surface: #262626;
+  --border: rgba(255, 255, 255, 0.2);
+}
+:root[data-theme="dark"] a:hover {
+  color: #24c8db;
 }
 
 /* --- §5.1 dashboard layout ------------------------------------------------
@@ -145,6 +160,12 @@ select:disabled {
   padding-bottom: 0.55rem;
   border-bottom: 1px solid rgba(128, 128, 128, 0.3);
   margin-bottom: 0.7rem;
+}
+.theme-toggle {
+  margin-left: auto; /* push to the right end of the header row */
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0.2rem 0.4rem;
 }
 
 .app-main {
@@ -366,6 +387,24 @@ select:disabled {
 }
 
 /* --- §5.2 chart legend: chips below the plot (not overlapping it) ---------- */
+/* The chart stacks a phosphor-spectrum canvas behind the SVG; both share the plot geometry. */
+.eq-chart {
+  position: relative;
+}
+.eq-spectrum-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: auto; /* matches the SVG's width:100%/height:auto so viewBox coords line up */
+  pointer-events: none;
+}
+/* The SVG must be positioned too, otherwise the absolute canvas (a positioned element) paints
+   above it and the spectrum covers the curves. Positioned + later in DOM ⇒ the plot sits on top. */
+.eq-chart svg {
+  position: relative;
+}
+
 .eq-legend {
   display: flex;
   flex-wrap: wrap;
@@ -792,44 +831,6 @@ select:disabled {
   max-width: 26em;
   text-align: left;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
-}
-
-/* --- header diagnostics tucked behind a small info chip (reclaims the top row) --- */
-.info-chip {
-  margin-left: auto;
-  position: relative;
-  cursor: help;
-  opacity: 0.5;
-  font-size: 0.95rem;
-  line-height: 1;
-  border: none;
-  background: transparent;
-  padding: 0.2em;
-}
-.info-chip:hover,
-.info-chip:focus {
-  opacity: 0.9;
-}
-.info-pop {
-  display: none;
-  position: absolute;
-  right: 0;
-  top: 1.6em;
-  z-index: 6;
-  white-space: nowrap;
-  text-align: right;
-  background: var(--surface);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 0.4em 0.6em;
-  font-size: 0.72rem;
-  line-height: 1.5;
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
-}
-.info-chip:hover .info-pop,
-.info-chip:focus-within .info-pop {
-  display: block;
 }
 
 /* --- §3.5 preset library panel (saved presets + filter templates) ---------- */

@@ -53,6 +53,11 @@ export type RefCurve = {
  *  Bode-style overlay, off by default. Computed from bands, so it tracks live edits. */
 export type PhaseCurve = { id: string; bands: Band[]; color: string; label: string; defaultHidden?: boolean };
 
+/** A live post-EQ spectrum snapshot (loopback FFT) — log-frequency magnitude bins + per-bin
+ *  peak-hold, in dB (relative). Drawn as a backdrop on the shared log-Hz axis with its own
+ *  self-scaling level range, so resonances read against the EQ curve (§5.3c). */
+export type SpectrumData = { db: number[]; peak_db: number[]; f_min: number; f_max: number };
+
 /** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). */
 export type Nodes = {
   bands: Band[];
@@ -77,6 +82,20 @@ export type Nodes = {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
+/** Parse a computed `rgb(r, g, b)` / `rgba(...)` colour string to [r,g,b]; grey fallback. */
+function parseRgb(col: string): [number, number, number] {
+  const m = col.match(/\d+(?:\.\d+)?/g);
+  return m && m.length >= 3 ? [Math.round(+m[0]), Math.round(+m[1]), Math.round(+m[2])] : [128, 128, 128];
+}
+
+// --- FFT spectrum backdrop: its own tuning set, independent of the level meter's phosphor ---
+const SPEC_TOP_DB = 0; // top of the fixed dBFS scale
+const SPEC_DYN = 90; // dB shown below the top
+const SPEC_FADE = 0.11; // decay: alpha removed from the canvas per frame (higher = shorter trail)
+const SPEC_GLOW_BASE = 0.2; // brightness at the level floor (kept dim so it stays a backdrop)
+const SPEC_GLOW_TIP = 0.025; // brightness near the current level (vertical falloff)
+const SPEC_DARK_SCALE = 0.6; // dim the glow in dark mode: light-on-dark composites brighter (gamma)
+
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
 const F_MAX = 20000;
@@ -92,6 +111,7 @@ export function EqChart({
   refs = [],
   phase,
   nodes,
+  spectrum,
   height = 210,
 }: {
   series: Series[];
@@ -99,11 +119,14 @@ export function EqChart({
   refs?: RefCurve[];
   phase?: PhaseCurve;
   nodes?: Nodes;
+  /** Live post-EQ spectrum (loopback FFT) drawn as a backdrop on the log-Hz axis, own scale. */
+  spectrum?: SpectrumData | null;
   height?: number;
 }) {
   const W = 720;
   const H = height;
   const svgRef = useRef<SVGSVGElement>(null);
+  const specCanvasRef = useRef<HTMLCanvasElement>(null); // phosphor spectrum backdrop (imperative)
   const clipId = useId(); // clips the plotted curves to the plot rect (see refPaths)
   // Manual double-click detection from bubbled `click` events. The native `dblclick` is
   // unreliable here: pointer-capture/preventDefault on a node disrupts its synthesis, and on
@@ -274,8 +297,54 @@ export function EqChart({
     ...markers.map((m) => ({ id: m.id, color: m.color, label: m.label, style: "diamond" as LegendStyle })),
   ];
 
+  // Phosphor spectrum backdrop: fade the whole canvas a touch, then paint the current spectrum as
+  // one column per FFT bin with a bright-at-the-floor gradient. Fade + repaint = persistence — a
+  // moving resonance leaves a glowing decaying trail and sustained energy stays lit — the same
+  // idea as the level meter, one bar per bin. Imperative, so the SVG doesn't re-render at the
+  // spectrum rate. Drawn in the neutral theme text colour (not the accent) and kept dim, so it
+  // reads as a backdrop and the coloured EQ curves stay legible on top. X = log-Hz; Y = dBFS.
+  useEffect(() => {
+    const cv = specCanvasRef.current;
+    const ctx = cv?.getContext("2d");
+    if (!cv || !ctx) return;
+    if (!spectrum || spectrum.db.length < 2) {
+      ctx.clearRect(0, 0, W, H);
+      return;
+    }
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.fillStyle = `rgba(0,0,0,${SPEC_FADE})`;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = "source-over";
+
+    const n = spectrum.db.length;
+    const lnF0 = Math.log(spectrum.f_min);
+    const lnF1 = Math.log(spectrum.f_max);
+    const fx = (i: number) => x(Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0)));
+    const plotTop = PAD.t;
+    const plotBot = H - PAD.b;
+    const sy = (db: number) => plotBot - clamp((db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN, 0, 1) * (plotBot - plotTop);
+
+    const [r, g, b] = parseRgb(getComputedStyle(cv).color);
+    // Light text ⇒ dark theme. Light-on-dark accumulates brighter (sRGB/gamma compositing) and has
+    // higher apparent contrast, so dim the glow there to read as cleanly as it does on light.
+    const scale = 0.299 * r + 0.587 * g + 0.114 * b > 140 ? SPEC_DARK_SCALE : 1;
+    const grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
+    grad.addColorStop(0, `rgba(${r},${g},${b},${SPEC_GLOW_BASE * scale})`); // brightest at the floor
+    grad.addColorStop(1, `rgba(${r},${g},${b},${SPEC_GLOW_TIP * scale})`); // fades out toward the top
+    ctx.fillStyle = grad;
+    for (let i = 0; i < n; i++) {
+      const x0 = fx(i);
+      const x1 = i < n - 1 ? fx(i + 1) : x0 + 1;
+      const yTop = sy(spectrum.db[i]);
+      ctx.fillRect(x0, yTop, Math.max(1, x1 - x0), plotBot - yTop);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spectrum, phaseOn]);
+
   return (
     <div className="eq-chart">
+    {/* phosphor spectrum backdrop — same viewBox coords as the SVG (CSS-scaled to match), behind it */}
+    <canvas ref={specCanvasRef} className="eq-spectrum-canvas" width={W} height={H} aria-hidden="true" />
     <svg
       ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}

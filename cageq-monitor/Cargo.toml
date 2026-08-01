@@ -9,6 +9,7 @@ edition = "2021"
 
 [dependencies]
 ebur128 = "0.1.10"
+realfft = "3.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
