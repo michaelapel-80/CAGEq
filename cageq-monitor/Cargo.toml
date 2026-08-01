@@ -1,0 +1,14 @@
+# §5.3c post-EQ monitoring (loopback). SPIKE STAGE: a throwaway binary that proves the
+# WASAPI loopback capture path (endpoint mapping + mix format + pulling frames) before any
+# metrics/UI are built. Will grow into the real capture module (peak/RMS/LUFS -> Tauri events).
+[package]
+name = "cageq-monitor"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "loopback-spike"
+path = "src/bin/loopback_spike.rs"
+
+[dependencies]
+wasapi = "0.23.0"

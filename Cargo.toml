@@ -11,4 +11,5 @@ members = [
     "cageq-sidecar",
     "cageq-watchdog",
     "cageq-core",
+    "cageq-monitor",
 ]
