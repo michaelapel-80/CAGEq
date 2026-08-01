@@ -14,10 +14,14 @@
 //! events while the endpoint is idle, so a meter would stall on silence — polling just reads
 //! zero frames and moves on.
 
+// Consts/helpers below are used only by the Windows `main`; on other targets they're unused.
+#![allow(dead_code)]
+
 use std::collections::VecDeque;
 use std::error::Error;
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
 use wasapi::{initialize_mta, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
 type Res<T> = Result<T, Box<dyn Error>>;
@@ -34,6 +38,12 @@ fn dbfs(linear: f32) -> f32 {
     }
 }
 
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("loopback-spike is Windows-only (needs WASAPI).");
+}
+
+#[cfg(windows)]
 fn main() -> Res<()> {
     initialize_mta().ok()?;
 

@@ -19,6 +19,11 @@ enum Backend {
     Failed(String),
 }
 
+/// Holds the running §5.3c loopback monitor so start/stop commands can replace or end it.
+/// Capture is Windows-only (`cageq_monitor::Monitor::start` errors elsewhere).
+#[derive(Default)]
+struct MonitorState(std::sync::Mutex<Option<cageq_monitor::Monitor>>);
+
 #[derive(serde::Serialize)]
 struct ApplyResult {
     hash: String,
@@ -253,6 +258,35 @@ fn list_headphones(state: State<Backend>) -> Result<Value, String> {
 #[tauri::command]
 fn list_devices() -> Vec<AudioDevice> {
     list_render_devices()
+}
+
+/// §5.3c: start post-EQ loudness monitoring on `device` (the selected endpoint's id, or `None`
+/// for the default render endpoint). Opens WASAPI loopback and emits a `monitor` event
+/// (`MeterUpdate`) ~20×/s. Replaces any monitor already running (e.g. after a device change).
+#[tauri::command]
+fn start_monitor(device: Option<String>, app: tauri::AppHandle, state: State<MonitorState>) -> Result<(), String> {
+    use tauri::Emitter;
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(existing) = guard.take() {
+        existing.stop();
+    }
+    let sink = app.clone();
+    let monitor = cageq_monitor::Monitor::start(device, move |update| {
+        // A dropped listener just means no one's watching; ignore send failures.
+        let _ = sink.emit("monitor", update);
+    })?;
+    *guard = Some(monitor);
+    Ok(())
+}
+
+/// §5.3c: stop loopback monitoring (idempotent — no-op if nothing is running).
+#[tauri::command]
+fn stop_monitor(state: State<MonitorState>) -> Result<(), String> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(existing) = guard.take() {
+        existing.stop();
+    }
+    Ok(())
 }
 
 /// The raw headphone measurement + target curves (centered, shared dBr reference) for the
@@ -655,6 +689,7 @@ pub fn run() {
                 .ok()
                 .map(|r| r.join("sidecar").join("cageq-sidecar.exe"));
             app.manage(build_backend(bundled));
+            app.manage(MonitorState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -667,6 +702,8 @@ pub fn run() {
             status,
             list_headphones,
             list_devices,
+            start_monitor,
+            stop_monitor,
             list_targets,
             measurement_curves,
             get_loudness,

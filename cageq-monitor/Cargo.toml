@@ -1,14 +1,20 @@
-# §5.3c post-EQ monitoring (loopback). SPIKE STAGE: a throwaway binary that proves the
-# WASAPI loopback capture path (endpoint mapping + mix format + pulling frames) before any
-# metrics/UI are built. Will grow into the real capture module (peak/RMS/LUFS -> Tauri events).
+# §5.3c post-EQ monitoring: WASAPI render-endpoint loopback capture + BS.1770 loudness metering.
+# Independent of the custom-APO work (loopback taps the already-post-EQ mix at the endpoint).
+# Real capture is Windows-only (wasapi); the crate still compiles elsewhere as a no-op stub so
+# the workspace stays cross-platform, matching the rest of the codebase (e.g. list_render_devices).
 [package]
 name = "cageq-monitor"
 version = "0.1.0"
 edition = "2021"
 
+# Throwaway proof-of-path binary from the spike stage (kept as a runnable reference).
 [[bin]]
 name = "loopback-spike"
 path = "src/bin/loopback_spike.rs"
 
 [dependencies]
+ebur128 = "0.1.10"
+serde = { version = "1.0.229", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
 wasapi = "0.23.0"

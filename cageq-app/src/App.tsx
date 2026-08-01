@@ -5,6 +5,7 @@ import { Band } from "./biquad";
 import { EqChart, Marker, PhaseCurve, RefCurve, Series } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
+import { Meter } from "./Meter";
 import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
@@ -259,6 +260,9 @@ function App() {
   // Cross-view hover link: the storage index of the band the pointer is over in *either* the
   // chart or the grid, so the other view highlights the matching node/column (null = none).
   const [hoverBand, setHoverBand] = useState<number | null>(null);
+  // §5.3c post-EQ output meter (WASAPI loopback). Off by default — it runs a capture thread while
+  // on, and it's a diagnostic, not always-on chrome.
+  const [monitoring, setMonitoring] = useState(false);
   // Undo/redo (v1): a single stack of whole-`stages` snapshots for the *current* slot, reset on
   // slot switch (deliberately not per-slot — a history that changes meaning when you switch slots
   // is more confusing than useful). Snapshots are the immutable `stages` object, so they cost
@@ -1342,6 +1346,21 @@ function App() {
                       Preamp <b>{result.preamp_db.toFixed(1)} dB</b>
                       <span className="chart-preamp-mode">{loudness?.mode === "FinalVolume" ? "max" : "matched"}</span>
                     </div>
+                  </div>
+                  {/* §5.3c post-EQ output meter — validates the auto-LUFS preamp against the real
+                      endpoint mix (loopback, post-EQ). Off by default; capture runs only while on. */}
+                  <div className="monitor-row">
+                    <button
+                      type="button"
+                      className={`monitor-toggle${monitoring ? " on" : ""}`}
+                      aria-pressed={monitoring}
+                      onClick={() => setMonitoring((v) => !v)}
+                      title="Meter the actual post-EQ output level (WASAPI loopback). Needs audio playing."
+                    >
+                      <span className="monitor-dot" aria-hidden="true" />
+                      {monitoring ? "Metering output" : "Meter output"}
+                    </button>
+                    {monitoring && <Meter deviceId={deviceId} />}
                   </div>
                   {result.clipping_warning && (
                     <p style={{ color: "#b8860b", fontSize: "0.8em", margin: "0.2em 0 0" }}>

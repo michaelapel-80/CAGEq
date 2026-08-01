@@ -211,6 +211,107 @@ select:disabled {
   opacity: 0.6;
 }
 
+/* --- §5.3c post-EQ output meter (WASAPI loopback) --------------------------- */
+.monitor-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.45rem;
+  flex-wrap: wrap;
+}
+.monitor-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  padding: 0.22rem 0.55rem;
+  border-radius: 5px;
+}
+.monitor-toggle.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.monitor-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(128, 128, 128, 0.5);
+}
+.monitor-toggle.on .monitor-dot {
+  background: #16a34a;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #16a34a 25%, transparent);
+}
+.meter {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex: 1 1 auto;
+  min-width: 220px;
+  font-variant-numeric: tabular-nums;
+}
+.meter-idle {
+  opacity: 0.6;
+}
+.meter-err {
+  color: #b8860b;
+  font-size: 0.72rem;
+}
+.meter-lufs {
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  flex: 0 0 auto;
+}
+.meter-lufs-m {
+  font-size: 1rem;
+  font-weight: 700;
+}
+.meter-lufs-unit {
+  font-size: 0.58rem;
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.meter-lufs-s {
+  font-size: 0.72rem;
+  opacity: 0.7;
+  margin-left: 0.35rem;
+}
+.meter-bar {
+  position: relative;
+  flex: 1 1 auto;
+  height: 8px;
+  min-width: 70px;
+  border-radius: 4px;
+  background: rgba(128, 128, 128, 0.18);
+  overflow: hidden;
+}
+.meter-bar-rms {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 4px;
+}
+.meter-bar-peak {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+}
+.meter-nums {
+  font-size: 0.7rem;
+  opacity: 0.85;
+  flex: 0 0 auto;
+}
+.meter-nosignal {
+  opacity: 0.7;
+  font-style: italic;
+}
+
 /* --- §5.2 chart view swap: magnitude Response vs Impulse -------------------- */
 .chart-view {
   display: inline-flex;
