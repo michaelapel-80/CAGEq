@@ -414,6 +414,29 @@ select:disabled {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
+/* Filter-bands panel header: title on the left, undo/redo on the right. */
+.tg-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.tg-history {
+  display: flex;
+  gap: 0.25rem;
+}
+.tg-hist-btn {
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  font-size: 0.95rem;
+  line-height: 1;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* A just-added band flashes so the eye lands on the column that appeared. */
 .tg-col-flash {
   animation: tgColFlash 0.9s ease-out;

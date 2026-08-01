@@ -259,6 +259,15 @@ function App() {
   // Cross-view hover link: the storage index of the band the pointer is over in *either* the
   // chart or the grid, so the other view highlights the matching node/column (null = none).
   const [hoverBand, setHoverBand] = useState<number | null>(null);
+  // Undo/redo (v1): a single stack of whole-`stages` snapshots for the *current* slot, reset on
+  // slot switch (deliberately not per-slot — a history that changes meaning when you switch slots
+  // is more confusing than useful). Snapshots are the immutable `stages` object, so they cost
+  // nothing to keep. `historyBaseline` holds the pre-gesture state so a whole drag/scrub becomes
+  // one entry; `commitToken` bumps at each commit boundary to trigger the seal effect below.
+  const [undoStack, setUndoStack] = useState<Stages[]>([]);
+  const [redoStack, setRedoStack] = useState<Stages[]>([]);
+  const [commitToken, setCommitToken] = useState(0);
+  const historyBaseline = useRef<Stages | null>(null);
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
   const [impulseView, setImpulseView] = useState(false); // §5.2: swap the chart for the impulse response
   const [rawCurve, setRawCurve] = useState<{ f: number; db: number }[] | null>(null); // raw measured FR (nerd overlay)
@@ -646,6 +655,60 @@ function App() {
     }, delay);
   }
 
+  // --- undo/redo history --------------------------------------------------------------------
+  // Remember the state *before* the current gesture (the first edit since the last commit); a
+  // no-op if a gesture is already in progress, so a 200-frame drag captures one baseline.
+  const captureBaseline = () => {
+    if (historyBaseline.current === null) historyBaseline.current = stages;
+  };
+  // Mark a commit boundary (gesture end / discrete action). The seal effect turns the captured
+  // baseline into an undo entry — done in an effect, not here, so it reads the settled `stages`.
+  const commitHistory = () => setCommitToken((t) => t + 1);
+  const resetHistory = () => {
+    setUndoStack([]);
+    setRedoStack([]);
+    historyBaseline.current = null;
+  };
+  // Seal a completed gesture into the undo stack. Keyed on commitToken (NOT stages) so it fires
+  // only at commit boundaries, never on the throttled inputs mid-drag; `stages` here is the
+  // settled post-gesture value. Skips no-op commits (baseline === result) so undo always does
+  // something visible. Clears redo — a fresh edit forks the timeline.
+  useEffect(() => {
+    if (commitToken === 0) return;
+    const base = historyBaseline.current;
+    historyBaseline.current = null;
+    if (base && JSON.stringify(base) !== JSON.stringify(stages)) {
+      setUndoStack((u) => [...u, base].slice(-50));
+      setRedoStack([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commitToken]);
+  // Switching the editable slot swaps the whole document — start its history fresh (covers both
+  // switchSlot and copySlot, which both change activeSlot). Runs on mount too (harmless: empty).
+  useEffect(() => {
+    resetHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSlot]);
+
+  const undo = () => {
+    if (activeSlot === "Dry" || undoStack.length === 0) return;
+    const prev = undoStack[undoStack.length - 1];
+    historyBaseline.current = null; // the restore itself must not seal a new entry
+    setRedoStack((r) => [...r, stages].slice(-50));
+    setUndoStack((u) => u.slice(0, -1));
+    setStages(prev);
+    requestApply(0);
+  };
+  const redo = () => {
+    if (activeSlot === "Dry" || redoStack.length === 0) return;
+    const next = redoStack[redoStack.length - 1];
+    historyBaseline.current = null;
+    setUndoStack((u) => [...u, stages].slice(-50));
+    setRedoStack((r) => r.slice(0, -1));
+    setStages(next);
+    requestApply(0);
+  };
+
   // Switch the active comparison slot. A hydrated A/B (fit cached this session) and Dry
   // write instantly (pure re-write, no re-fit); a slot whose inputs were restored from a
   // previous session but not yet fitted this session is re-fitted on first switch; an
@@ -734,32 +797,42 @@ function App() {
   // so it lands where you're looking rather than at a fixed 1 kHz you then have to find. Mouse
   // path → pulse only, no grid focus-steal (you stay on the chart to drag/wheel it).
   const addFilterAt = (freq_hz: number, gain_db: number) => {
+    captureBaseline();
     const idx = stages[activeStage].bands.length;
     setStageBands(activeStage, (cf) => [...cf, { kind: "Peaking", freq_hz, gain_db, q: 1 }]);
     markNewBand(idx, false);
     requestApply(0);
+    commitHistory();
   };
   // The Add button (keyboard/discoverability path): drop a flat band into the widest empty
   // gap between existing bands (in log-frequency), so it never lands on top of a neighbour,
   // and open its Fc for typing straight away (keyboard-first).
   const addFilter = () => {
+    captureBaseline();
     const bands = stages[activeStage].bands;
     const idx = bands.length;
     setStageBands(activeStage, (cf) => [...cf, { kind: "Peaking", freq_hz: widestGapHz(bands), gain_db: 0, q: 1 }]);
     markNewBand(idx, true);
     requestApply(0);
+    commitHistory();
   };
   const updateFilter = (i: number, patch: Partial<CustomFilter>, delay = 0) => {
+    captureBaseline();
     setStageBands(activeStage, (cf) => cf.map((f, j) => (j === i ? { ...f, ...patch } : f)));
     requestApply(delay);
+    // delay 0 is the final/commit call (scrub release, blur, Enter, kind cycle, bypass toggle);
+    // delay 70 is a live throttled input mid-drag, which must not seal a history entry.
+    if (delay === 0) commitHistory();
   };
   const removeFilter = (i: number) => {
     // The fixed Bass/Treble/Air macros are never removable (the grid hides their ✕; the
     // chart's double-click-to-remove would otherwise slip past that). Guard at the source.
     if (stages[activeStage].bands[i]?.fixed) return;
+    captureBaseline();
     setStageBands(activeStage, (cf) => cf.filter((_, j) => j !== i));
     setNewBand(null); // storage indices shift on removal — drop any stale highlight
     requestApply(0);
+    commitHistory();
   };
   // The born-highlighted state is a one-shot cue: let the pulse play, then clear it (also
   // avoids a stale index lingering after later edits/reorders).
@@ -770,8 +843,10 @@ function App() {
   }, [newBand]);
   // Enable/disable a whole stage — a big tonal jump the §5.3a morph smooths.
   const toggleStage = (id: StageId) => {
+    captureBaseline();
     setStages((st) => ({ ...st, [id]: { ...st[id], enabled: !st[id].enabled } }));
     requestApply(0);
+    commitHistory();
   };
   // --- §3.5 preset library: load / save / delete -----------------------------
   // Loading always targets the *active* slot (disabled on Dry). A filter template drops its
@@ -779,10 +854,12 @@ function App() {
   // target + all stages.
   const loadTemplate = (t: FilterTemplate) => {
     if (activeSlot === "Dry") return;
+    captureBaseline(); // dropping a template's bands into a stage is one undoable step
     const bands = t.stage === "tone" ? ensureMacros(t.bands) : t.bands;
     setStages((st) => ({ ...st, [t.stage]: { enabled: true, bands } }));
     setActiveStage(t.stage);
     requestApply(0);
+    commitHistory();
   };
   const loadPreset = (p: UserPreset) => {
     if (activeSlot === "Dry") return;
@@ -791,6 +868,9 @@ function App() {
     setTargetPath(p.targetPath);
     setStages(normalizeStages(p.stages));
     requestApply(0);
+    // A full preset swaps measurement + target + all stages — a new document, not an edit; undo
+    // can't half-restore those (they're outside history), so start fresh rather than mislead.
+    resetHistory();
   };
 
   // Save the current controls as a preset or template. Empty name → inline field error.
@@ -871,7 +951,26 @@ function App() {
   // (§5.2 blind-comparison shortcuts).
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      const el = document.activeElement;
+      const el = document.activeElement as HTMLElement | null;
+      // Undo/redo first, and only blocked by a genuine *text-editing* field (so its native
+      // text-undo wins). A range fader keeps focus after a drag but isn't text — undo must still
+      // work there (that was the "Ctrl+Z does nothing after a slider drag" bug).
+      const mod = e.ctrlKey || e.metaKey;
+      const k = e.key.toLowerCase();
+      if (mod && (k === "z" || k === "y")) {
+        const type = el?.tagName === "INPUT" ? ((el as HTMLInputElement).type || "text").toLowerCase() : "";
+        const inTextField =
+          !!el &&
+          (el.tagName === "TEXTAREA" ||
+            el.isContentEditable ||
+            (el.tagName === "INPUT" && !["range", "checkbox", "radio", "button", "submit", "reset", "file", "color"].includes(type)));
+        if (inTextField) return;
+        e.preventDefault();
+        if (k === "y" || e.shiftKey) redo();
+        else undo();
+        return;
+      }
+      // Plain-letter slot/loudness shortcuts: suppressed whenever any form field has focus.
       if (el && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName)) return;
       if (e.key === "a") switchSlot("A");
       else if (e.key === "s") switchSlot("B");
@@ -1220,7 +1319,10 @@ function App() {
                           color: STAGE_COLOR[activeStage],
                           disabled: dryActive,
                           onChange: (i, patch) => updateFilter(i, patch, 70),
-                          onDragEnd: () => requestApply(0),
+                          onDragEnd: () => {
+                            requestApply(0);
+                            commitHistory(); // seal the whole chart drag as one undo entry
+                          },
                           onAdd: addFilterAt,
                           onRemove: removeFilter,
                           highlightIdx: newBand?.stage === activeStage ? newBand.idx : undefined,
@@ -1264,7 +1366,31 @@ function App() {
           {/* ---- filter bands: per-stage keyboard-first graphic-EQ grid (§5.2 stage 3) ---- */}
           {!loading && (
             <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
-              <h2>Filter bands</h2>
+              <div className="tg-panel-head">
+                <h2>Filter bands</h2>
+                <div className="tg-history" role="group" aria-label="Undo and redo edits">
+                  <button
+                    type="button"
+                    className="tg-hist-btn"
+                    onClick={undo}
+                    disabled={dryActive || undoStack.length === 0}
+                    title="Undo (Ctrl+Z)"
+                    aria-label="Undo last edit"
+                  >
+                    ↶
+                  </button>
+                  <button
+                    type="button"
+                    className="tg-hist-btn"
+                    onClick={redo}
+                    disabled={dryActive || redoStack.length === 0}
+                    title="Redo (Ctrl+Shift+Z)"
+                    aria-label="Redo edit"
+                  >
+                    ↷
+                  </button>
+                </div>
+              </div>
               {dryActive ? (
                 <p className="tg-empty">Dry is the fixed reference — pick Slot A or B to edit filter bands.</p>
               ) : (
