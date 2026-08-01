@@ -51,6 +51,16 @@ import numpy as np  # noqa: E402
 import autoeq.peq as autoeq_peq  # noqa: E402
 from autoeq.frequency_response import FrequencyResponse  # noqa: E402
 
+# AutoEq's PEQ optimizer measures its convergence "change rate" as d_loss / d_time, timing each
+# SLSQP callback with time.time() (peq.py: `from time import time`). On Windows time.time() has
+# ~15 ms resolution, so two callbacks in the same tick give d_time == 0 -> a divide-by-zero
+# warning and a +/-inf change_rate that can falsely trip the "Change too small" early stop,
+# ending the fit prematurely. Swap that name for the monotonic, sub-microsecond perf_counter
+# (same seconds unit, so max_time etc. are unaffected) so d_time is always > 0.
+from time import perf_counter as _perf_counter  # noqa: E402
+
+autoeq_peq.time = _perf_counter
+
 # User custom-filter kinds -> AutoEq PEQ filter classes (same biquad model as the fit,
 # so a custom filter's response composes exactly with the AutoEq bands).
 _CUSTOM_FILTER_CLASSES = {
