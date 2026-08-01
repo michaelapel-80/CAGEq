@@ -414,22 +414,32 @@ select:disabled {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
-/* Filter-bands panel header: title on the left, undo/redo on the right. */
+/* Filter-bands panel header: title on the left, undo/redo on the right. The wrapper displaces
+   the h2 from `.panel > h2`, so restyle it here (same compact label) and let the wrapper carry
+   the bottom spacing the h2 margin used to provide — otherwise the h2 reverts to a big default. */
 .tg-panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
+  margin: 0 0 0.45rem;
+}
+.tg-panel-head > h2 {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.6;
+  margin: 0;
 }
 .tg-history {
   display: flex;
   gap: 0.25rem;
 }
 .tg-hist-btn {
-  width: 26px;
-  height: 24px;
+  width: 24px;
+  height: 20px;
   padding: 0;
-  font-size: 0.95rem;
+  font-size: 0.85rem;
   line-height: 1;
   border-radius: 5px;
   display: inline-flex;
