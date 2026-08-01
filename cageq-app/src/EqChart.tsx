@@ -66,6 +66,12 @@ export type Nodes = {
   onRemove?: (index: number) => void;
   /** Index of a just-added band to pulse-highlight so the eye catches it. */
   highlightIdx?: number;
+  /** Externally highlighted band — the pointer is over its column in the grid, so draw the
+   *  node active (enlarged + readout) even though the chart itself isn't being hovered. */
+  hoverIdx?: number | null;
+  /** Reports which band the chart pointer is over (or dragging) so the grid can echo the
+   *  highlight; null when the pointer leaves the handles. */
+  onHover?: (index: number | null) => void;
   disabled?: boolean;
 };
 
@@ -211,6 +217,16 @@ export function EqChart({
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, [nodes, hoverIdx]);
+
+  // Report the hovered (or dragged) node up so the grid can highlight the matching band —
+  // the reverse direction arrives via nodes.hoverIdx. Driven off internal state (not the
+  // enter/leave handlers directly) so the leave→enter ordering between adjacent nodes can't
+  // leave a stale value; the drag index wins so the link holds even if a fast drag outruns
+  // the pointer leaving the circle.
+  useEffect(() => {
+    nodes?.onHover?.(dragIdx ?? hoverIdx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hoverIdx, dragIdx]);
 
   const paths = useMemo(
     () =>
@@ -410,7 +426,7 @@ export function EqChart({
       {nodes && !nodes.disabled && nodes.bands.map((b, i) => {
         const cx = x(clamp(b.freq_hz, F_MIN, F_MAX));
         const cy = y(clamp(b.gain_db, yMin, yMax));
-        const active = dragIdx === i || hoverIdx === i;
+        const active = dragIdx === i || hoverIdx === i || nodes.hoverIdx === i;
         const isNew = nodes.highlightIdx === i;
         // Fixed macro bands (Bass/Treble/Air) ride along at runtime even though the type is
         // Band; they can't be removed, so don't promise it in the tooltip.

@@ -40,6 +40,10 @@ export type ToneGridProps = {
   focusIndex?: number | null;
   /** Bumped per add so the focus fires again even when the index repeats. */
   focusNonce?: number;
+  /** Storage index of the band to cross-highlight (the pointer is over its chart node). */
+  hoverIndex?: number | null;
+  /** Reports the band the pointer is over so the chart can echo the highlight; null on leave. */
+  onHover?: (index: number | null) => void;
 };
 
 const KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
@@ -82,7 +86,7 @@ function KindGlyph({ kind }: { kind: FilterKind }) {
   );
 }
 
-export function ToneGrid({ filters, disabled, focusIndex, focusNonce, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
+export function ToneGrid({ filters, disabled, focusIndex, focusNonce, hoverIndex, onHover, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
   // Display order: sort indices by Fc; storage order (and thus the indices we pass back)
   // never changes here, so focus survives a visual reorder.
   const order = filters.map((_, i) => i).sort((a, b) => filters[a].freq_hz - filters[b].freq_hz);
@@ -116,7 +120,13 @@ export function ToneGrid({ filters, disabled, focusIndex, focusNonce, onInput, o
         const on = f.enabled !== false;
         const name = macroLabel ?? `band at ${fmtHz(f.freq_hz)} hertz`;
         return (
-          <div className={`tg-col${f.fixed ? " tg-col-fixed" : ""}${on ? "" : " tg-col-off"}`} key={i} data-idx={i}>
+          <div
+            className={`tg-col${f.fixed ? " tg-col-fixed" : ""}${on ? "" : " tg-col-off"}${hoverIndex === i ? " tg-col-hover" : ""}`}
+            key={i}
+            data-idx={i}
+            onPointerEnter={() => onHover?.(i)}
+            onPointerLeave={() => onHover?.(null)}
+          >
             <button
               type="button"
               className={`tg-enable${on ? " on" : ""}`}

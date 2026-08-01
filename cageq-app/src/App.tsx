@@ -256,6 +256,9 @@ function App() {
   // the chart into the grid. `nonce` re-fires the effects even when the storage idx repeats.
   const [newBand, setNewBand] = useState<{ stage: StageId; idx: number; nonce: number; focusGrid: boolean } | null>(null);
   const newBandNonce = useRef(0);
+  // Cross-view hover link: the storage index of the band the pointer is over in *either* the
+  // chart or the grid, so the other view highlights the matching node/column (null = none).
+  const [hoverBand, setHoverBand] = useState<number | null>(null);
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
   const [impulseView, setImpulseView] = useState(false); // §5.2: swap the chart for the impulse response
   const [rawCurve, setRawCurve] = useState<{ f: number; db: number }[] | null>(null); // raw measured FR (nerd overlay)
@@ -271,6 +274,9 @@ function App() {
   const [saveForm, setSaveForm] = useState<{ kind: "preset" | "template"; name: string; error: boolean } | null>(null);
   const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
   const [activeSlot, setActiveSlot] = useState<SlotName>("A");
+  // Drop a stale cross-view highlight when the underlying band list changes out from under a
+  // still pointer (stage tab switch, slot change) — no pointerleave fires in that case.
+  useEffect(() => setHoverBand(null), [activeStage, activeSlot]);
   // Last-applied inputs per editable slot (for display + reloading the controls).
   const [slotInputs, setSlotInputs] = useState<Record<"A" | "B", SlotInputs | null>>({ A: null, B: null });
   // Last computed fit per editable slot, persisted into the resume blob so the next launch
@@ -1218,6 +1224,8 @@ function App() {
                           onAdd: addFilterAt,
                           onRemove: removeFilter,
                           highlightIdx: newBand?.stage === activeStage ? newBand.idx : undefined,
+                          hoverIdx: hoverBand,
+                          onHover: setHoverBand,
                         }}
                       />
                     )}
@@ -1311,6 +1319,8 @@ function App() {
                     disabled={dryActive}
                     focusIndex={newBand?.stage === activeStage && newBand.focusGrid ? newBand.idx : null}
                     focusNonce={newBand?.nonce}
+                    hoverIndex={hoverBand}
+                    onHover={setHoverBand}
                     onInput={(i, patch) => updateFilter(i, patch, 70)}
                     onCommit={(i, patch) => updateFilter(i, patch, 0)}
                     onAdd={addFilter}

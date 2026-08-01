@@ -402,6 +402,16 @@ select:disabled {
   padding: 0.35rem 0.2rem;
   border: 1px solid rgba(128, 128, 128, 0.3);
   border-radius: 6px;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
+}
+
+/* Cross-view hover link: the pointer is over this band's node in the chart (or this column),
+   so light it up. Border + ring carry the signal even on fixed/bypassed columns whose own
+   background rules would otherwise mask a tint. */
+.tg-col-hover {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background-color: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 /* A just-added band flashes so the eye lands on the column that appeared. */
