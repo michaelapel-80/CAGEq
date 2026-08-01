@@ -7,11 +7,6 @@ name = "cageq-monitor"
 version = "0.1.0"
 edition = "2021"
 
-# Throwaway proof-of-path binary from the spike stage (kept as a runnable reference).
-[[bin]]
-name = "loopback-spike"
-path = "src/bin/loopback_spike.rs"
-
 [dependencies]
 ebur128 = "0.1.10"
 serde = { version = "1.0.229", features = ["derive"] }
