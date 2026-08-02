@@ -1055,9 +1055,18 @@ select:disabled {
   background: transparent;
 }
 .tg-enable.on .tg-led {
-  background: var(--tg, #16a34a);
   border-color: var(--tg, #16a34a);
-  box-shadow: 0 0 5px -0.5px color-mix(in srgb, var(--tg, #16a34a) 85%, transparent); /* phosphor lamp */
+  /* Lit LED: a gaussian across the dot itself — bright in the centre, fading to the stage
+     colour at the rim — plus a soft stacked-shadow bloom around it. */
+  background: radial-gradient(
+    circle at 50% 42%,
+    color-mix(in srgb, var(--tg, #16a34a) 45%, white),
+    var(--tg, #16a34a) 72%
+  );
+  box-shadow:
+    0 0 2px 0 color-mix(in srgb, var(--tg, #16a34a) 95%, transparent),
+    0 0 5px 0 color-mix(in srgb, var(--tg, #16a34a) 60%, transparent),
+    0 0 10px 1px color-mix(in srgb, var(--tg, #16a34a) 10%, transparent);
 }
 /* Bypassed column: dim everything but keep the LED toggle prominent so it can be re-armed. */
 .tg-col-off .tg-kind,

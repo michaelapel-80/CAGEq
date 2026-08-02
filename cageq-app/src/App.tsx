@@ -1639,12 +1639,13 @@ function App() {
               <p style={{ fontSize: "0.75em", opacity: 0.7, margin: "0.5em 0 0" }}>
                 {loudness.mode === "Comparison" ? tr("loudness.comparisonDesc") : tr("loudness.finalDesc")}
               </p>
-              <label style={{ fontSize: "0.75em", opacity: 0.8, display: "block", marginTop: "0.5em" }}>
+              <label style={{ fontSize: "0.75em", opacity: 0.8, display: "flex", alignItems: "center", gap: "0.4em", marginTop: "0.5em" }}>
                 <input
                   type="checkbox"
                   checked={confirmFinalVolume}
                   onChange={(e) => toggleConfirmFinalVolume(e.currentTarget.checked)}
-                />{" "}
+                  style={{ flex: "none", margin: 0 }}
+                />
                 {tr("loudness.confirmToggle")}
               </label>
             </div>
