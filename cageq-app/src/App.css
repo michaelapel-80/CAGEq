@@ -509,14 +509,33 @@ select:disabled {
   border: 1px solid rgba(128, 128, 128, 0.32);
   border-radius: 6px;
   overflow: hidden;
+  /* Recessed instrument track: the selected segment lights up in it (see .stage-seg.active). */
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.14);
 }
 /* One segment = label + count + power icon, all inline and centred (no inner divider —
-   the power reads as part of the segment, not a pinned right cell). */
+   the power reads as part of the segment, not a pinned right cell). The active one is lit
+   in its stage colour (--stage, set inline per segment). */
 .stage-seg {
+  --stage: #888;
   display: flex;
   align-items: center;
   gap: 0.4em;
   padding: 0.34em 0.7em;
+  transition: background 0.18s, box-shadow 0.18s, color 0.18s;
+}
+/* Illuminated active segment: a colour-graded fill, a bright bottom power-rail, and an inner
+   glow — the "lit button" that ties the selector to the meters' phosphor language. */
+.stage-seg.active {
+  color: var(--stage);
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--stage) 22%, transparent),
+    color-mix(in srgb, var(--stage) 7%, transparent)
+  );
+  box-shadow:
+    inset 0 -2px 0 var(--stage),
+    inset 0 0 11px -4px color-mix(in srgb, var(--stage) 85%, transparent);
 }
 .stage-seg + .stage-seg {
   border-left: 1px solid rgba(128, 128, 128, 0.28);
@@ -536,6 +555,7 @@ select:disabled {
 }
 .stage-seg.active .stage-seg-select {
   opacity: 1;
+  text-shadow: 0 0 7px color-mix(in srgb, var(--stage) 55%, transparent); /* lit label */
 }
 .stage-seg.off .stage-seg-select {
   opacity: 0.45;
@@ -600,8 +620,55 @@ select:disabled {
   opacity: 0.8;
 }
 
-/* --- §5.2 tone grid (stage 3): graphic-EQ columns ------------------------- */
+/* --- §5.2 compare: slot chips as illuminated instrument buttons ------------
+   Each chip carries its slot colour in --slot (set inline). The active slot lights up —
+   colour-graded fill, a coloured halo bloom, an inner glow and a lit label — echoing the
+   phosphor language of the meters; inactive chips sit as unlit, recessed keys. */
+.slot-chip {
+  --slot: #888;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 6px;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--fg) 3%, transparent),
+    color-mix(in srgb, var(--fg) 9%, transparent)
+  );
+  color: var(--fg);
+  font-weight: 500;
+  transition: border-color 0.18s, box-shadow 0.18s, background 0.18s, color 0.18s;
+}
+.slot-chip:hover {
+  border-color: color-mix(in srgb, var(--slot) 60%, var(--border));
+}
+.slot-chip.empty {
+  opacity: 0.5;
+}
+.slot-chip.active {
+  border-color: var(--slot);
+  color: var(--slot);
+  font-weight: 700;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--slot) 26%, transparent),
+    color-mix(in srgb, var(--slot) 9%, transparent)
+  );
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--slot) 45%, transparent),
+    0 0 12px -3px color-mix(in srgb, var(--slot) 65%, transparent),
+    inset 0 0 9px -3px color-mix(in srgb, var(--slot) 75%, transparent);
+  text-shadow: 0 0 7px color-mix(in srgb, var(--slot) 50%, transparent);
+}
+.slot-chip kbd {
+  font-size: 0.7em;
+  opacity: 0.6;
+}
+
+/* --- §5.2 tone grid (stage 3): graphic-EQ channel strips -----------------------------
+   Each band is an instrument channel strip: a faintly recessed panel with a fader riding in
+   a real slot, lit in the active stage's colour (--tg, set inline on the grid). The hovered /
+   edited strip lights up; bypassed strips read as dark, matching the slot/stage chips. */
 .tg-grid {
+  --tg: #16a34a; /* fallback (tone green); overridden inline with the active stage colour */
   display: flex;
   align-items: stretch;
   gap: 0.35rem;
@@ -618,16 +685,24 @@ select:disabled {
   padding: 0.35rem 0.2rem;
   border: 1px solid rgba(128, 128, 128, 0.3);
   border-radius: 6px;
+  /* Recessed channel-strip face. */
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--fg) 3%, transparent),
+    color-mix(in srgb, var(--fg) 8%, transparent)
+  );
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.09);
   transition: border-color 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
 }
 
 /* Cross-view hover link: the pointer is over this band's node in the chart (or this column),
-   so light it up. Border + ring carry the signal even on fixed/bypassed columns whose own
-   background rules would otherwise mask a tint. */
+   so light it up in the stage colour. Border + ring carry the signal even on fixed/bypassed
+   columns whose own background rules would otherwise mask a tint. */
 .tg-col-hover {
-  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
-  background-color: color-mix(in srgb, var(--accent) 10%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--tg);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--tg) 45%, transparent),
+    0 0 11px -3px color-mix(in srgb, var(--tg) 55%, transparent);
 }
 
 /* Filter-bands panel header: title on the left, undo/redo on the right. The wrapper displaces
@@ -669,8 +744,8 @@ select:disabled {
 }
 @keyframes tgColFlash {
   0% {
-    border-color: var(--accent, #4c8bf5);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, #4c8bf5) 55%, transparent);
+    border-color: var(--tg, #4c8bf5);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--tg, #4c8bf5) 55%, transparent);
   }
   100% {
     border-color: rgba(128, 128, 128, 0.3);
@@ -731,8 +806,8 @@ select:disabled {
   border-color: rgba(128, 128, 128, 0.35);
 }
 .tg-num:focus {
-  border-color: #396cd8;
-  background: rgba(128, 128, 128, 0.12);
+  border-color: var(--tg, #396cd8);
+  background: color-mix(in srgb, var(--tg, #396cd8) 12%, transparent);
 }
 /* Rejected type-in-place value (out of range / garbage): a brief red ring, then it
    reverts to the last good value. */
@@ -748,6 +823,7 @@ select:disabled {
    across browser versions (min→bottom, max→top), unlike writing-mode which flips between
    Chromium releases. The wrapper reserves the vertical space the rotated slider occupies. */
 .tg-fader-wrap {
+  position: relative;
   height: 92px;
   width: 22px;
   display: flex;
@@ -755,10 +831,37 @@ select:disabled {
   justify-content: center;
   margin: 0.1rem 0;
 }
+/* Recessed slot the fader rides in — a vertical channel with an inset shadow, like the meter
+   track. Sits behind the (in-flow) range input. */
+.tg-fader-wrap::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--fg) 11%, transparent);
+  box-shadow: inset 0 0 3px rgba(0, 0, 0, 0.28);
+}
+/* 0 dB detent — a centre fiducial across the slot, echoing the meter's centre marks. */
+.tg-fader-wrap::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 12px;
+  height: 1px;
+  background: color-mix(in srgb, var(--fg) 32%, transparent);
+}
 .tg-fader {
+  position: relative; /* ride above the recessed slot pseudo-elements */
+  z-index: 1;
   width: 90px;
   transform: rotate(-90deg);
-  accent-color: #16a34a; /* the tone-layer colour */
+  accent-color: var(--tg, #16a34a); /* lit in the active stage colour */
   background: transparent;
   border: none;
   cursor: ns-resize;
@@ -795,9 +898,14 @@ select:disabled {
   border-color: #c0392b;
   color: #c0392b;
 }
-/* Fixed Bass/Treble macro bands: a faint tint + a label where the remove ✕ would be. */
+/* Fixed Bass/Treble macro bands: a faint stage-colour wash over the recessed strip + a label
+   where the remove ✕ would be. */
 .tg-col-fixed {
-  background: rgba(22, 163, 74, 0.07);
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--tg) 10%, transparent),
+    color-mix(in srgb, var(--tg) 4%, transparent)
+  );
 }
 .tg-fixed {
   height: 20px;
@@ -827,9 +935,9 @@ select:disabled {
   background: transparent;
 }
 .tg-enable.on .tg-led {
-  background: #16a34a;
-  border-color: #16a34a;
-  box-shadow: 0 0 3px rgba(22, 163, 74, 0.6);
+  background: var(--tg, #16a34a);
+  border-color: var(--tg, #16a34a);
+  box-shadow: 0 0 5px -0.5px color-mix(in srgb, var(--tg, #16a34a) 85%, transparent); /* phosphor lamp */
 }
 /* Bypassed column: dim everything but keep the LED toggle prominent so it can be re-armed. */
 .tg-col-off .tg-kind,

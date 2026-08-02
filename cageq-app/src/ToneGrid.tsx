@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type CSSProperties } from "react";
 import { Band, FilterKind } from "./biquad";
 import { ScrubNumber } from "./ScrubNumber";
 
@@ -30,6 +30,9 @@ export type ToneBand = Band & { fixed?: boolean; enabled?: boolean; macro?: stri
 export type ToneGridProps = {
   filters: ToneBand[];
   disabled?: boolean;
+  /** The active stage's colour — lights the faders / LEDs / lit columns in the stage's hue,
+   *  so the grid matches its stage chip (Fit cyan / Content pink / Tone green). */
+  accent?: string;
   /** Live, throttled — every scrub frame / fader move / keystroke. */
   onInput: (index: number, patch: Partial<ToneBand>) => void;
   /** Final, un-throttled — drag release / blur / Enter / enable toggle. */
@@ -86,7 +89,7 @@ function KindGlyph({ kind }: { kind: FilterKind }) {
   );
 }
 
-export function ToneGrid({ filters, disabled, focusIndex, focusNonce, hoverIndex, onHover, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
+export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, hoverIndex, onHover, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
   // Display order: sort indices by Fc; storage order (and thus the indices we pass back)
   // never changes here, so focus survives a visual reorder.
   const order = filters.map((_, i) => i).sort((a, b) => filters[a].freq_hz - filters[b].freq_hz);
@@ -113,7 +116,7 @@ export function ToneGrid({ filters, disabled, focusIndex, focusNonce, hoverIndex
   };
 
   return (
-    <div className="tg-grid" ref={gridRef} role="group" aria-label="Tone filter bands">
+    <div className="tg-grid" ref={gridRef} role="group" aria-label="Tone filter bands" style={accent ? ({ "--tg": accent } as CSSProperties) : undefined}>
       {order.map((i) => {
         const f = filters[i];
         const macroLabel = f.fixed ? (f.macro ?? (f.kind === "LowShelf" ? "Bass" : "Treble")) : null;

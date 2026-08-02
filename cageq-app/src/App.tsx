@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -1467,7 +1467,7 @@ function App() {
                         <div
                           key={id}
                           className={`stage-seg${isActive ? " active" : ""}${st.enabled ? "" : " off"}`}
-                          style={isActive ? { background: `color-mix(in srgb, ${color} 15%, transparent)`, boxShadow: `inset 0 -2px 0 ${color}`, color } : undefined}
+                          style={{ "--stage": color } as CSSProperties}
                         >
                           <button
                             type="button"
@@ -1503,6 +1503,7 @@ function App() {
                   <ToneGrid
                     filters={activeBands}
                     disabled={dryActive}
+                    accent={STAGE_COLOR[activeStage]}
                     focusIndex={newBand?.stage === activeStage && newBand.focusGrid ? newBand.idx : null}
                     focusNonce={newBand?.nonce}
                     hoverIndex={hoverBand}
@@ -1539,18 +1540,12 @@ function App() {
                     <button
                       key={s}
                       type="button"
+                      className={`slot-chip${active ? " active" : ""}${populated || active ? "" : " empty"}`}
                       onClick={() => switchSlot(s)}
                       title={`${s} (key ${key})${populated ? "" : " — empty"}`}
-                      style={{
-                        borderWidth: 2,
-                        borderStyle: "solid",
-                        borderColor: active ? SLOT_COLOR[s] : "transparent",
-                        color: active ? SLOT_COLOR[s] : undefined,
-                        fontWeight: active ? 700 : 400,
-                        opacity: populated || active ? 1 : 0.55,
-                      }}
+                      style={{ "--slot": SLOT_COLOR[s] } as CSSProperties}
                     >
-                      {s === "Dry" ? "Dry" : `Slot ${s}`} <kbd style={{ fontSize: "0.7em", opacity: 0.6 }}>{key}</kbd>
+                      {s === "Dry" ? "Dry" : `Slot ${s}`} <kbd>{key}</kbd>
                     </button>
                   );
                 })}
