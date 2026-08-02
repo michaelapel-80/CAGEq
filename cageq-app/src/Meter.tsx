@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -45,6 +46,7 @@ export function Meter({
    *  axis) instead of stretching past it. Null until measured → bars just fill the column. */
   plotBox: { top: number; height: number } | null;
 }) {
+  const { t } = useTranslation();
   const [bar, setBar] = useState<MeterUpdate | null>(null); // fast: bars + marks
   const [nums, setNums] = useState<MeterUpdate | null>(null); // throttled: readouts
   const [err, setErr] = useState<string | null>(null);
@@ -77,7 +79,7 @@ export function Meter({
     };
   }, [deviceId]);
 
-  if (err) return <div className="meter meter-err">Meter unavailable: {err}</div>;
+  if (err) return <div className="meter meter-err">{t("meter.unavailable", { error: err })}</div>;
 
   const live = bar?.signal === true;
   const bins = live && Array.isArray(bar!.bins) ? bar!.bins : [];
@@ -110,7 +112,7 @@ export function Meter({
             : undefined
         }
       >
-        <div className="vbar-group" title="Output level (dBFS): phosphor fill, amber peak, neutral RMS">
+        <div className="vbar-group" title={t("meter.levelTitle")}>
           <div className="vbar" aria-hidden="true">
             <i className="vbar-fill" style={fillStyle} />
             <i className="vbar-ticks" />
@@ -129,7 +131,7 @@ export function Meter({
           </div>
           <span className="vbar-cap">dB</span>
         </div>
-        <div className="vbar-group" title="Loudness (LUFS): short-term fill, momentary mark (BS.1770)">
+        <div className="vbar-group" title={t("meter.lufsTitle")}>
           <div className="vbar" aria-hidden="true">
             <i className="vbar-lufs" style={{ height: live ? `${pctOf(bar!.short_term_lufs, LUFS_MIN)}%` : "0%" }} />
             <i className="vbar-ticks" />

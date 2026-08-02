@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useTranslation, Trans } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { LANGS, setLang, type LangCode } from "./i18n";
 import { Band } from "./biquad";
 import { EqChart, Marker, PhaseCurve, RefCurve, Series, SpectrumData } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
@@ -102,11 +104,8 @@ function ensureMacros(cf: CustomFilter[]): CustomFilter[] {
 // the semantic grouping that's their whole point, and EqAPO sums them anyway). Order is
 // display-only; the summed response is order-independent.
 const STAGE_ORDER: StageId[] = ["fit", "content", "tone"];
-const STAGE_META: Record<StageId, { label: string; hint: string }> = {
-  fit: { label: "Fit", hint: "Personal correction on top of the target — pads, seal, your own ears." },
-  content: { label: "Content", hint: "Adjustments for what you're playing — dialogue lift, a bright master." },
-  tone: { label: "Tone", hint: "Your permanent taste. The fixed Bass / Treble / Air macros live here." },
-};
+// Stage display labels/hints are localized — see the `stageLabel`/`stageHint` helpers (i18n keys
+// `stages.<id>.label` / `.hint`). The ids (fit/content/tone) stay English internally.
 
 /** A fresh three-stage set: Fit/Content empty, Tone seeded with the 0 dB fixed macros. */
 const defaultStages = (): Stages => ({
@@ -166,15 +165,19 @@ function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyP
 
 // Presets are bass/treble/air gain triples applied to the three fixed macro bands;
 // picking one resets the tone to exactly those three bands at the given gains.
-const TONE_PRESETS: { name: string; bass: number; treble: number; air: number }[] = [
-  { name: "Flat", bass: 0, treble: 0, air: 0 },
-  { name: "Bass boost", bass: 6, treble: 0, air: 0 },
-  { name: "Treble boost", bass: 0, treble: 5, air: 0 },
-  { name: "Airy", bass: 0, treble: 0, air: 5 },
-  { name: "V-shape", bass: 5, treble: 4, air: 2 },
-  { name: "Warm", bass: 4, treble: -3, air: -3 },
-  { name: "Bright", bass: -2, treble: 4, air: 3 },
+// `name` is the stable identity (feeds the curated template id, persisted); `key` is its i18n
+// label key — so the display name localizes without changing the id.
+const TONE_PRESETS: { name: string; key: string; bass: number; treble: number; air: number }[] = [
+  { name: "Flat", key: "flat", bass: 0, treble: 0, air: 0 },
+  { name: "Bass boost", key: "bassBoost", bass: 6, treble: 0, air: 0 },
+  { name: "Treble boost", key: "trebleBoost", bass: 0, treble: 5, air: 0 },
+  { name: "Airy", key: "airy", bass: 0, treble: 0, air: 5 },
+  { name: "V-shape", key: "vShape", bass: 5, treble: 4, air: 2 },
+  { name: "Warm", key: "warm", bass: 4, treble: -3, air: -3 },
+  { name: "Bright", key: "bright", bass: -2, treble: 4, air: 3 },
 ];
+// name → i18n label key, for translating the curated templates' display names.
+const TONE_PRESET_KEY: Record<string, string> = Object.fromEntries(TONE_PRESETS.map((p) => [p.name, p.key]));
 
 // §3.5 preset library. Two kinds, deliberately different in scope (filter.md §5.2):
 //   • FilterTemplate — one **stage's** bands; loading drops them into that stage only.
@@ -242,6 +245,12 @@ const TARGET_COLOR = "#7dd3fc"; // the target curve — pale blue, à la AutoEq 
 const PHASE_COLOR = "#f59e0b"; // the filter chain's phase, on the secondary axis (nerd overlay)
 
 function App() {
+  // i18n aliased to `tr` (App.tsx already uses `t` as a lambda param for templates/targets).
+  const { t: tr, i18n } = useTranslation();
+  // Localized display helpers for the identity-keyed enums (stage/slot stay English ids internally).
+  const stageLabel = (id: StageId) => tr(`stages.${id}.label`);
+  const stageHint = (id: StageId) => tr(`stages.${id}.hint`);
+  const slotLabel = (s: SlotName) => tr(`slots.${s}`);
   const [status, setStatus] = useState<Status | null>(null);
   const [headphones, setHeadphones] = useState<Headphone[]>([]);
   const [targets, setTargets] = useState<Target[]>([]);
@@ -644,12 +653,12 @@ function App() {
   async function apply(auto = false) {
     if (activeSlot === "Dry") return; // Dry is a fixed reference, not editable
     if (!measurementPath) {
-      if (!auto) setError("Pick a headphone model and measurement first.");
+      if (!auto) setError(tr("errors.pickHeadphone"));
       return;
     }
     const dev = devices.find((d) => d.id === deviceId);
     if (!dev) {
-      if (!auto) setError("Pick an output device first.");
+      if (!auto) setError(tr("errors.pickDevice"));
       return;
     }
     try {
@@ -796,7 +805,7 @@ function App() {
     const raw = slotInputs[from];
     const src = raw && migrateInputs(raw);
     if (!src) {
-      setError(`Slot ${from} is empty — apply something to it first.`);
+      setError(tr("errors.slotEmpty", { from }));
       return;
     }
     try {
@@ -939,9 +948,9 @@ function App() {
       setConfirmBox({
         message:
           kind === "preset"
-            ? `A preset named “${name}” already exists. Overwrite it?`
-            : `A ${STAGE_META[activeStage].label} template named “${name}” already exists. Overwrite it?`,
-        confirmLabel: "Overwrite",
+            ? tr("dialog.overwritePreset", { name })
+            : tr("dialog.overwriteTemplate", { stage: stageLabel(activeStage), name }),
+        confirmLabel: tr("dialog.overwrite"),
         onConfirm: write,
       });
     } else {
@@ -954,8 +963,8 @@ function App() {
   // doesn't mean retyping the name. Confirms first (reusing the overwrite dialog).
   const updatePreset = (p: UserPreset) =>
     setConfirmBox({
-      message: `Overwrite the preset “${p.name}” with the current headphone, target and all stages?`,
-      confirmLabel: "Overwrite",
+      message: tr("dialog.updatePreset", { name: p.name }),
+      confirmLabel: tr("dialog.overwrite"),
       onConfirm: () =>
         setLibrary((lib) => ({
           ...lib,
@@ -965,8 +974,8 @@ function App() {
   // A template row's "update" saves the current bands of *that template's* stage.
   const updateTemplate = (t: FilterTemplate) =>
     setConfirmBox({
-      message: `Overwrite the ${STAGE_META[t.stage].label} template “${t.name}” with the current ${STAGE_META[t.stage].label} bands?`,
-      confirmLabel: "Overwrite",
+      message: tr("dialog.updateTemplate", { stage: stageLabel(t.stage), name: t.name }),
+      confirmLabel: tr("dialog.overwrite"),
       onConfirm: () =>
         setLibrary((lib) => ({ ...lib, templates: upsert(lib.templates, { id: t.id, name: t.name, stage: t.stage, bands: stages[t.stage].bands }) })),
     });
@@ -974,14 +983,14 @@ function App() {
   // Delete asks first — same confirm overlay as the other destructive actions.
   const deletePreset = (p: UserPreset) =>
     setConfirmBox({
-      message: `Delete the preset “${p.name}”? This can't be undone.`,
-      confirmLabel: "Delete",
+      message: tr("dialog.deletePreset", { name: p.name }),
+      confirmLabel: tr("dialog.delete"),
       onConfirm: () => setLibrary((lib) => ({ ...lib, presets: lib.presets.filter((x) => x.id !== p.id) })),
     });
   const deleteTemplate = (t: FilterTemplate) =>
     setConfirmBox({
-      message: `Delete the filter template “${t.name}”? This can't be undone.`,
-      confirmLabel: "Delete",
+      message: tr("dialog.deleteTemplate", { name: t.name }),
+      confirmLabel: tr("dialog.delete"),
       onConfirm: () => setLibrary((lib) => ({ ...lib, templates: lib.templates.filter((x) => x.id !== t.id) })),
     });
 
@@ -1070,7 +1079,7 @@ function App() {
         id: `slot-${activeSlot}`,
         bands: result.filters,
         color: SLOT_COLOR[activeSlot],
-        label: dryActive ? "Dry" : `Slot ${activeSlot}`,
+        label: slotLabel(activeSlot),
       },
     ];
     if (!dryActive) {
@@ -1082,17 +1091,19 @@ function App() {
         const st = stages[id];
         const bands = st.bands.filter((b) => b.enabled !== false);
         if (st.enabled && bands.length) {
-          out.push({ id: `stage-${id}`, bands, color: STAGE_COLOR[id], label: STAGE_META[id].label, muted: id !== activeStage });
+          out.push({ id: `stage-${id}`, bands, color: STAGE_COLOR[id], label: stageLabel(id), muted: id !== activeStage });
         }
       }
     }
     return out;
-  }, [result, activeSlot, dryActive, stages, activeStage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, activeSlot, dryActive, stages, activeStage, i18n.language]);
 
   const chartMarkers: Marker[] = useMemo(
     // Off by default — a nerd overlay revealed from the legend.
-    () => (autoEqBands.length ? [{ id: "autoeq", bands: autoEqBands, color: SLOT_COLOR[activeSlot], label: "AutoEq", defaultHidden: true }] : []),
-    [autoEqBands, activeSlot],
+    () => (autoEqBands.length ? [{ id: "autoeq", bands: autoEqBands, color: SLOT_COLOR[activeSlot], label: tr("chart.autoeq"), defaultHidden: true }] : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [autoEqBands, activeSlot, i18n.language],
   );
 
   // The ideal correction the active slot's fit chases (§5.2): the AutoEq curve should
@@ -1101,19 +1112,21 @@ function App() {
     if (dryActive) return [];
     const out: RefCurve[] = [];
     if (result?.reference_curve?.length)
-      out.push({ id: "ideal", points: result.reference_curve, color: REF_COLOR, label: "Ideal EQ" });
+      out.push({ id: "ideal", points: result.reference_curve, color: REF_COLOR, label: tr("chart.idealEq") });
     // Target + raw measurement — nerd overlays, off by default (share the dBr reference).
     if (targetCurve?.length)
-      out.push({ id: "target", points: targetCurve, color: TARGET_COLOR, label: "Target", defaultHidden: true });
+      out.push({ id: "target", points: targetCurve, color: TARGET_COLOR, label: tr("chart.target"), defaultHidden: true });
     if (rawCurve?.length)
-      out.push({ id: "raw", points: rawCurve, color: RAW_COLOR, label: "Raw", defaultHidden: true });
+      out.push({ id: "raw", points: rawCurve, color: RAW_COLOR, label: tr("chart.raw"), defaultHidden: true });
     return out;
-  }, [result, dryActive, rawCurve, targetCurve]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, dryActive, rawCurve, targetCurve, i18n.language]);
 
   // Phase of the applied filter chain, on the secondary axis — a nerd overlay, off by default.
   const chartPhase: PhaseCurve | undefined = useMemo(
-    () => (!dryActive && result ? { id: "phase", bands: result.filters, color: PHASE_COLOR, label: "Phase", defaultHidden: true } : undefined),
-    [result, dryActive],
+    () => (!dryActive && result ? { id: "phase", bands: result.filters, color: PHASE_COLOR, label: tr("chart.phase"), defaultHidden: true } : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [result, dryActive, i18n.language],
   );
 
   // Fail-safe / startup banner (§5.1). Watchdog states are live; the startup verdicts
@@ -1121,25 +1134,13 @@ function App() {
   const banner = (() => {
     if (!status) return null;
     if (status.health_kind === "Terminal")
-      return {
-        critical: true,
-        text: "Safety shutdown: the audio DSP couldn't be recovered, so EQ is muted.",
-        retry: true,
-      };
+      return { critical: true, text: tr("banner.terminal"), retry: true };
     if (status.health_kind === "Recovering")
-      return { critical: false, text: "Recovering the audio DSP… (safe state active, EQ muted)", retry: false };
+      return { critical: false, text: tr("banner.recovering"), retry: false };
     if (!result && status.startup === "SafeStateStillActive")
-      return {
-        critical: false,
-        text: "A safety shutdown from a previous session is still active (EQ muted). Apply a correction to restore it.",
-        retry: false,
-      };
+      return { critical: false, text: tr("banner.safeState"), retry: false };
     if (!result && status.startup === "ExternallyModified")
-      return {
-        critical: false,
-        text: "cageq.txt was changed outside CAGEq since the last run — the shown state may not match what's applied.",
-        retry: false,
-      };
+      return { critical: false, text: tr("banner.externallyModified"), retry: false };
     return null;
   })();
 
@@ -1160,19 +1161,18 @@ function App() {
         >
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <p style={{ marginTop: 0 }}>
-              Switching to <b>Final volume</b> raises the volume by{" "}
-              <b>+{pendingFinal.jump.toFixed(1)} dB</b> (ramped in at 6 dB/s). Continue?
+              <Trans i18nKey="dialog.finalTitle" values={{ jump: pendingFinal.jump.toFixed(1) }} components={[<b />, <b />]} />
             </p>
             <label style={{ fontSize: "0.85em", display: "block", margin: "0.6em 0" }}>
               <input type="checkbox" checked={dontAskAgain} onChange={(e) => setDontAskAgain(e.currentTarget.checked)} />{" "}
-              Don't ask again (re-enable in the Loudness panel)
+              {tr("dialog.dontAskAgain")}
             </label>
             <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
               <button type="button" onClick={() => setPendingFinal(null)}>
-                Cancel
+                {tr("dialog.cancel")}
               </button>
               <button type="button" onClick={confirmFinal}>
-                Switch to Final volume
+                {tr("dialog.switchFinal")}
               </button>
             </div>
           </div>
@@ -1188,7 +1188,7 @@ function App() {
             <p style={{ marginTop: 0 }}>{confirmBox.message}</p>
             <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
               <button type="button" onClick={() => setConfirmBox(null)}>
-                Cancel
+                {tr("dialog.cancel")}
               </button>
               <button
                 type="button"
@@ -1220,7 +1220,7 @@ function App() {
           {banner.text}
           {banner.retry && (
             <button type="button" onClick={retry} style={{ marginLeft: "0.6em" }}>
-              Retry
+              {tr("banner.retry")}
             </button>
           )}
         </div>
@@ -1250,16 +1250,16 @@ function App() {
           <>
             <span className="row" style={{ gap: "0.4em" }}>
               <label htmlFor="device-select" style={{ fontSize: "0.85em", opacity: 0.75 }}>
-                Output
+                {tr("header.output")}
               </label>
               {devices.length === 0 ? (
-                <span style={{ opacity: 0.7, fontSize: "0.85em" }}>no active playback device</span>
+                <span style={{ opacity: 0.7, fontSize: "0.85em" }}>{tr("header.noDevice")}</span>
               ) : (
                 <select id="device-select" value={deviceId} onChange={(e) => changeDevice(e.currentTarget.value)}>
                   {devices.map((d) => (
                     <option key={d.id} value={d.id}>
                       {d.name}
-                      {d.eqapo_enabled ? "" : " — ⚠ Equalizer APO not installed"}
+                      {d.eqapo_enabled ? "" : tr("header.apoNotInstalledOption")}
                     </option>
                   ))}
                 </select>
@@ -1273,12 +1273,12 @@ function App() {
                 apply();
               }}
             >
-              <label style={{ fontSize: "0.85em", opacity: 0.75 }}>Headphone</label>
+              <label style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("header.headphone")}</label>
               <input
                 list="model-list"
                 value={query}
                 onChange={(e) => onModelInput(e.currentTarget.value)}
-                placeholder={`Search ${byModel.size} models…`}
+                placeholder={tr("header.searchPlaceholder", { count: byModel.size })}
                 style={{ minWidth: "14em" }}
                 disabled={dryActive}
               />
@@ -1287,20 +1287,20 @@ function App() {
                   <option key={name} value={name} />
                 ))}
               </datalist>
-              <label style={{ fontSize: "0.85em", opacity: 0.75 }}>Measurement</label>
+              <label style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("header.measurement")}</label>
               <select
                 value={measurementPath}
                 onChange={(e) => setMeasurementPath(e.currentTarget.value)}
                 disabled={dryActive || measurements.length === 0}
-                title="Measurement source / rig"
+                title={tr("header.measurementTitle")}
               >
                 {measurements.length === 0 ? (
-                  <option value="">— pick a model —</option>
+                  <option value="">{tr("header.pickModel")}</option>
                 ) : (
                   measurements.map((m) => (
                     <option key={m.path} value={m.path}>
-                      by {m.source}
-                      {m.rig ? ` on ${m.rig}` : ""}
+                      {tr("header.measBy", { source: m.source })}
+                      {m.rig ? tr("header.measOnRig", { rig: m.rig }) : ""}
                     </option>
                   ))
                 )}
@@ -1308,12 +1308,25 @@ function App() {
             </form>
           </>
         )}
+        <select
+          className="lang-select"
+          value={i18n.language.startsWith("de") ? "de" : "en"}
+          onChange={(e) => setLang(e.currentTarget.value as LangCode)}
+          title={tr("lang.label")}
+          aria-label={tr("lang.label")}
+        >
+          {LANGS.map((l) => (
+            <option key={l.code} value={l.code}>
+              {l.label}
+            </option>
+          ))}
+        </select>
         <button
           type="button"
           className="theme-toggle"
           onClick={cycleTheme}
-          title={`Theme: ${theme} — click to force light/dark (Auto → Light → Dark)`}
-          aria-label={`Theme: ${theme}. Click to change.`}
+          title={tr("theme.title", { mode: tr(`theme.${theme}`) })}
+          aria-label={tr("theme.aria", { mode: tr(`theme.${theme}`) })}
         >
           {theme === "auto" ? "◐" : theme === "light" ? "○" : "●"}
         </button>
@@ -1321,15 +1334,14 @@ function App() {
 
       {!loading && selectedDevice && !selectedDevice.eqapo_enabled && (
         <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.8em" }}>
-          ⚠ Equalizer APO isn't installed on this device, so applying an EQ here has no effect. Enable it
-          for this device with Equalizer APO's <em>Configurator</em> (DeviceSelector.exe), then reboot.
+          <Trans i18nKey="app.apoWarning" components={[<em />]} />
         </p>
       )}
 
       {/* The cold-start wait is the Python DSP sidecar: after a reboot its numpy/scipy bundle
           is read cold from disk (a couple of seconds; the OS file cache makes repeat launches
           fast) plus the one-time import — I/O-bound, not the catalogue (a 17 ms read). */}
-      {loading && <p>Starting the AutoEq engine…</p>}
+      {loading && <p>{tr("app.loading")}</p>}
 
       <div className="app-main">
         {/* ================= LEFT: target + chart + bands ================= */}
@@ -1337,30 +1349,30 @@ function App() {
           {!loading && (
             <div className="panel">
               <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.35rem" }}>
-                <h2 style={{ margin: 0 }}>Correction</h2>
+                <h2 style={{ margin: 0 }}>{tr("correction.title")}</h2>
                 {result && !dryActive && (
-                  <div className="chart-view" style={{ margin: 0 }} role="group" aria-label="Chart domain">
+                  <div className="chart-view" style={{ margin: 0 }} role="group" aria-label={tr("correction.domainAria")}>
                     <button
                       type="button"
                       className={!impulseView ? "on" : ""}
-                      title="Frequency domain — magnitude (and phase)"
+                      title={tr("correction.frequencyTitle")}
                       onClick={() => setImpulseView(false)}
                     >
-                      Frequency
+                      {tr("correction.frequency")}
                     </button>
                     <button
                       type="button"
                       className={impulseView ? "on" : ""}
-                      title="Time domain — impulse-response decay"
+                      title={tr("correction.timeTitle")}
                       onClick={() => setImpulseView(true)}
                     >
-                      Time
+                      {tr("correction.time")}
                     </button>
                   </div>
                 )}
               </div>
               <div className="row" style={{ gap: "0.5em" }}>
-                <label style={{ fontSize: "0.85em", opacity: 0.75 }}>Target</label>
+                <label style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("correction.target")}</label>
                 <select value={targetPath} onChange={(e) => setTargetPath(e.currentTarget.value)} disabled={dryActive}>
                   {targets.map((t) => (
                     <option key={t.path} value={t.path}>
@@ -1369,7 +1381,7 @@ function App() {
                   ))}
                 </select>
                 <button type="button" onClick={() => apply()} disabled={applying || dryActive} style={{ marginLeft: "auto" }}>
-                  {applying ? "Fitting…" : dryActive ? "Dry (pick A or B)" : `Apply → Slot ${activeSlot}`}
+                  {applying ? tr("correction.fitting") : dryActive ? tr("correction.applyDry") : tr("correction.apply", { slot: slotLabel(activeSlot) })}
                 </button>
               </div>
 
@@ -1409,14 +1421,10 @@ function App() {
                     )}
                     <div
                       className="chart-preamp"
-                      title={
-                        loudness?.mode === "FinalVolume"
-                          ? "Preamp for maximum clipping-free volume"
-                          : "Preamp for the loudness-matched level (Auto-LUFS)"
-                      }
+                      title={loudness?.mode === "FinalVolume" ? tr("correction.preampTitleMax") : tr("correction.preampTitleMatched")}
                     >
-                      Preamp <b>{result.preamp_db.toFixed(1)} dB</b>
-                      <span className="chart-preamp-mode">{loudness?.mode === "FinalVolume" ? "max" : "matched"}</span>
+                      {tr("correction.preamp")} <b>{result.preamp_db.toFixed(1)} dB</b>
+                      <span className="chart-preamp-mode">{loudness?.mode === "FinalVolume" ? tr("correction.preampMax") : tr("correction.preampMatched")}</span>
                     </div>
                   </div>
                     {/* §5.3c post-EQ meters beside the chart (loopback, post-EQ) — always on. */}
@@ -1426,15 +1434,15 @@ function App() {
                   </div>
                   {result.clipping_warning && (
                     <p style={{ color: "#b8860b", fontSize: "0.8em", margin: "0.2em 0 0" }}>
-                      ⚠ Emergency clipping protection active instead of the loudness match — extreme peak.
+                      {tr("correction.clipping")}
                       {loudness?.mode === "Comparison" && headroomPregain != null && headroomPregain < loudness.base_pregain_db && (
                         <button
                           type="button"
                           onClick={addHeadroom}
                           style={{ marginLeft: "0.5em", fontSize: "0.9em", padding: "0.1em 0.5em" }}
-                          title="Lower the base pre-gain so the loudness match fits instead of the clipping ceiling"
+                          title={tr("correction.addHeadroomTitle")}
                         >
-                          Add headroom → {headroomPregain} dB
+                          {tr("correction.addHeadroom", { db: headroomPregain })}
                         </button>
                       )}
                     </p>
@@ -1448,15 +1456,15 @@ function App() {
           {!loading && (
             <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
               <div className="tg-panel-head">
-                <h2>Filter bands</h2>
-                <div className="tg-history" role="group" aria-label="Undo and redo edits">
+                <h2>{tr("bands.title")}</h2>
+                <div className="tg-history" role="group" aria-label={tr("bands.historyAria")}>
                   <button
                     type="button"
                     className="tg-hist-btn"
                     onClick={undo}
                     disabled={dryActive || undoStack.length === 0}
-                    title="Undo (Ctrl+Z)"
-                    aria-label="Undo last edit"
+                    title={tr("bands.undoTitle")}
+                    aria-label={tr("bands.undoAria")}
                   >
                     ↶
                   </button>
@@ -1465,20 +1473,20 @@ function App() {
                     className="tg-hist-btn"
                     onClick={redo}
                     disabled={dryActive || redoStack.length === 0}
-                    title="Redo (Ctrl+Shift+Z)"
-                    aria-label="Redo edit"
+                    title={tr("bands.redoTitle")}
+                    aria-label={tr("bands.redoAria")}
                   >
                     ↷
                   </button>
                 </div>
               </div>
               {dryActive ? (
-                <p className="tg-empty">Dry is the fixed reference — pick Slot A or B to edit filter bands.</p>
+                <p className="tg-empty">{tr("bands.dryNotice")}</p>
               ) : (
                 <>
                   {/* Stage selector (segmented): the name button picks the stage to edit; the
                       power icon toggles the whole stage on/off. Active = tinted in the stage colour. */}
-                  <div className="stage-tabs" role="tablist" aria-label="Filter stages">
+                  <div className="stage-tabs" role="tablist" aria-label={tr("bands.stagesAria")}>
                     {STAGE_ORDER.map((id) => {
                       const st = stages[id];
                       const isActive = id === activeStage;
@@ -1495,10 +1503,10 @@ function App() {
                             role="tab"
                             aria-selected={isActive}
                             className="stage-seg-select"
-                            title={STAGE_META[id].hint}
+                            title={stageHint(id)}
                             onClick={() => setActiveStage(id)}
                           >
-                            {STAGE_META[id].label}
+                            {stageLabel(id)}
                             {count > 0 && <span className="stage-count">{count}</span>}
                           </button>
                           <button
@@ -1506,8 +1514,8 @@ function App() {
                             className="stage-seg-power"
                             role="switch"
                             aria-checked={st.enabled}
-                            title={st.enabled ? `Disable the ${STAGE_META[id].label} stage` : `Enable the ${STAGE_META[id].label} stage`}
-                            aria-label={`${st.enabled ? "Disable" : "Enable"} the ${STAGE_META[id].label} stage`}
+                            title={st.enabled ? tr("stages.disable", { stage: stageLabel(id) }) : tr("stages.enable", { stage: stageLabel(id) })}
+                            aria-label={st.enabled ? tr("stages.disable", { stage: stageLabel(id) }) : tr("stages.enable", { stage: stageLabel(id) })}
                             onClick={() => toggleStage(id)}
                           >
                             <PowerGlyph />
@@ -1517,8 +1525,8 @@ function App() {
                     })}
                   </div>
                   <p className="stage-hint">
-                    {STAGE_META[activeStage].hint}
-                    {!stages[activeStage].enabled && <b> · stage disabled (not applied)</b>}
+                    {stageHint(activeStage)}
+                    {!stages[activeStage].enabled && <b>{tr("stages.disabledSuffix")}</b>}
                   </p>
 
                   <ToneGrid
@@ -1536,11 +1544,7 @@ function App() {
                   />
                   {/* Always rendered (with reserved height) so switching to an empty stage
                       doesn't shrink the panel; the text just adapts to empty vs populated. */}
-                  <p className="tg-hint">
-                    {activeBands.length > 0
-                      ? "Drag a value to scrub, click to type, ↑/↓ to fine-tune · double-click the chart to add a band (or a node to remove it) · changes apply live."
-                      : "This stage has no bands yet — press ＋ or double-click the chart to add one."}
-                  </p>
+                  <p className="tg-hint">{activeBands.length > 0 ? tr("bands.hint") : tr("bands.emptyHint")}</p>
                 </>
               )}
             </div>
@@ -1551,7 +1555,7 @@ function App() {
         <aside>
           {!loading && (
             <div className="panel">
-              <h2>Compare</h2>
+              <h2>{tr("compare.title")}</h2>
               <div className="row" style={{ gap: "0.4em" }}>
                 {SLOT_ORDER.map((s) => {
                   const active = s === activeSlot;
@@ -1563,16 +1567,16 @@ function App() {
                       type="button"
                       className={`slot-chip${active ? " active" : ""}${populated || active ? "" : " empty"}`}
                       onClick={() => switchSlot(s)}
-                      title={`${s} (key ${key})${populated ? "" : " — empty"}`}
+                      title={tr("compare.slotTitle", { slot: slotLabel(s), key }) + (populated ? "" : tr("compare.slotEmptySuffix"))}
                       style={{ "--slot": SLOT_COLOR[s] } as CSSProperties}
                     >
-                      {s === "Dry" ? "Dry" : `Slot ${s}`} <kbd>{key}</kbd>
+                      {slotLabel(s)} <kbd>{key}</kbd>
                     </button>
                   );
                 })}
               </div>
               <div className="row" style={{ gap: "0.4em", marginTop: "0.4em" }}>
-                <span style={{ fontSize: "0.75em", opacity: 0.6 }}>Copy:</span>
+                <span style={{ fontSize: "0.75em", opacity: 0.6 }}>{tr("compare.copy")}</span>
                 <button type="button" onClick={() => copySlot("A", "B")} disabled={!slotInputs.A} style={{ fontSize: "0.8em" }}>
                   A→B
                 </button>
@@ -1580,13 +1584,10 @@ function App() {
                   B→A
                 </button>
               </div>
-              <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.5em 0 0" }}>
-                A / S / D switch slots, W toggles the loudness mode — even without looking at the screen.
-              </p>
+              <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.5em 0 0" }}>{tr("compare.shortcuts")}</p>
               {loudness?.mode === "FinalVolume" && (slotInputs.A !== null || slotInputs.B !== null) && (
                 <p style={{ color: "#b8860b", fontSize: "0.78em", margin: "0.4em 0 0" }}>
-                  ⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched
-                  — a louder slot can just sound "better". Press <kbd>W</kbd> for Comparison to A/B fairly.
+                  <Trans i18nKey="compare.finalWarning" components={[<kbd />]} />
                 </p>
               )}
             </div>
@@ -1594,10 +1595,10 @@ function App() {
 
           {loudness && (
             <div className="panel">
-              <h2>Loudness</h2>
+              <h2>{tr("loudness.title")}</h2>
               {/* Segmented mode selector, lit like the stage/slot chips: Comparison in the accent,
                   Final volume in amber — the "hot" (loudest-safe) mode, which is confirm-gated. */}
-              <div className="ld-modes" role="radiogroup" aria-label="Loudness mode">
+              <div className="ld-modes" role="radiogroup" aria-label={tr("loudness.modeAria")}>
                 <button
                   type="button"
                   role="radio"
@@ -1606,8 +1607,8 @@ function App() {
                   style={{ "--md": "#3b82f6" } as CSSProperties}
                   onClick={() => requestLoudness({ ...loudness, mode: "Comparison" })}
                 >
-                  <span className="ld-mode-t">Comparison</span>
-                  <span className="ld-mode-s">A/B-fair</span>
+                  <span className="ld-mode-t">{tr("loudness.comparison")}</span>
+                  <span className="ld-mode-s">{tr("loudness.comparisonSub")}</span>
                 </button>
                 <button
                   type="button"
@@ -1617,12 +1618,12 @@ function App() {
                   style={{ "--md": "#daa520" } as CSSProperties}
                   onClick={() => requestLoudness({ ...loudness, mode: "FinalVolume" })}
                 >
-                  <span className="ld-mode-t">Final volume</span>
-                  <span className="ld-mode-s">loudest safe</span>
+                  <span className="ld-mode-t">{tr("loudness.final")}</span>
+                  <span className="ld-mode-s">{tr("loudness.finalSub")}</span>
                 </button>
               </div>
               <label className="row" style={{ opacity: loudness.mode === "Comparison" ? 1 : 0.4, fontSize: "0.85em" }}>
-                Base pre-gain
+                {tr("loudness.basePregain")}
                 <input
                   type="number"
                   min={-40}
@@ -1636,9 +1637,7 @@ function App() {
                 dB
               </label>
               <p style={{ fontSize: "0.75em", opacity: 0.7, margin: "0.5em 0 0" }}>
-                {loudness.mode === "Comparison"
-                  ? "Every curve ends up equally loud, so A/B comparisons judge timbre, not level."
-                  : "Maximum clipping-free volume — base pre-gain and loudness match are disabled."}
+                {loudness.mode === "Comparison" ? tr("loudness.comparisonDesc") : tr("loudness.finalDesc")}
               </p>
               <label style={{ fontSize: "0.75em", opacity: 0.8, display: "block", marginTop: "0.5em" }}>
                 <input
@@ -1646,7 +1645,7 @@ function App() {
                   checked={confirmFinalVolume}
                   onChange={(e) => toggleConfirmFinalVolume(e.currentTarget.checked)}
                 />{" "}
-                Confirm before switching to Final volume
+                {tr("loudness.confirmToggle")}
               </label>
             </div>
           )}
@@ -1654,7 +1653,7 @@ function App() {
           {!loading && (
             <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
               <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-                <h2 style={{ margin: 0 }}>Presets &amp; filters</h2>
+                <h2 style={{ margin: 0 }}>{tr("presets.title")}</h2>
                 <button
                   type="button"
                   className="pl-save"
@@ -1662,9 +1661,9 @@ function App() {
                   onClick={() =>
                     setSaveForm(saveForm ? null : { kind: measurementPath ? "preset" : "template", name: "", error: false })
                   }
-                  title="Save the current setup or tone"
+                  title={tr("presets.saveTitle")}
                 >
-                  <span aria-hidden>💾</span> Save
+                  <span aria-hidden>💾</span> {tr("presets.save")}
                 </button>
               </div>
 
@@ -1672,27 +1671,27 @@ function App() {
                 <div className="pl-saveform">
                   <div className="pl-toggle">
                     <button type="button" className={saveForm.kind === "template" ? "on" : ""} onClick={() => setSaveForm({ ...saveForm, kind: "template" })}>
-                      Filter template
+                      {tr("presets.filterTemplate")}
                     </button>
                     <button
                       type="button"
                       className={saveForm.kind === "preset" ? "on" : ""}
                       disabled={!measurementPath}
-                      title={measurementPath ? undefined : "Pick a headphone to save a full preset"}
+                      title={measurementPath ? undefined : tr("presets.fullPresetDisabledTitle")}
                       onClick={() => setSaveForm({ ...saveForm, kind: "preset" })}
                     >
-                      Full preset
+                      {tr("presets.fullPreset")}
                     </button>
                   </div>
                   <p className="pl-hint">
                     {saveForm.kind === "preset"
-                      ? "Saves the measurement, target curve and all filter stages — loading replaces the whole setup."
-                      : `Saves the current ${STAGE_META[activeStage].label} stage's bands — loading drops them into ${STAGE_META[activeStage].label}, keeping measurement & target.`}
+                      ? tr("presets.presetHint")
+                      : tr("presets.templateHint", { stage: stageLabel(activeStage) })}
                   </p>
                   <div className="row" style={{ gap: "0.3em" }}>
                     <input
                       type="text"
-                      placeholder="Name"
+                      placeholder={tr("presets.namePlaceholder")}
                       autoFocus
                       value={saveForm.name}
                       onChange={(e) => setSaveForm({ ...saveForm, name: e.currentTarget.value, error: false })}
@@ -1703,19 +1702,19 @@ function App() {
                       style={{ flex: 1, borderColor: saveForm.error ? "#c0392b" : undefined }}
                     />
                     <button type="button" onClick={commitSave}>
-                      Save
+                      {tr("presets.save")}
                     </button>
                     <button type="button" onClick={() => setSaveForm(null)}>
-                      Cancel
+                      {tr("presets.cancel")}
                     </button>
                   </div>
                 </div>
               )}
 
               <h3 className="pl-group">
-                Filter templates <span>{showAllStages ? "all stages" : STAGE_META[activeStage].label}</span>
+                {tr("presets.filterTemplates")} <span>{showAllStages ? tr("presets.scopeAllStages") : stageLabel(activeStage)}</span>
                 <button type="button" className="pl-showall" onClick={() => setShowAllStages((v) => !v)}>
-                  {showAllStages ? "active stage" : "show all"}
+                  {showAllStages ? tr("presets.activeStage") : tr("presets.showAll")}
                 </button>
               </h3>
               <div className="pl-scroll">
@@ -1723,7 +1722,7 @@ function App() {
                   <div className="row pl-curated">
                     {CURATED_TEMPLATES.map((t) => (
                       <button key={t.id} type="button" disabled={dryActive} onClick={() => loadTemplate(t)}>
-                        {t.name}
+                        {tr(`tonePresets.${TONE_PRESET_KEY[t.name]}`)}
                       </button>
                     ))}
                   </div>
@@ -1734,25 +1733,25 @@ function App() {
                     <li key={t.id} className="pl-item">
                       {showAllStages && (
                         <span className="stage-badge" style={{ color: STAGE_COLOR[t.stage] }}>
-                          {STAGE_META[t.stage].label}
+                          {stageLabel(t.stage)}
                         </span>
                       )}
                       <span className="pl-name" title={t.name}>
                         {t.name}
                       </span>
                       <button type="button" disabled={dryActive} onClick={() => loadTemplate(t)}>
-                        Load
+                        {tr("presets.load")}
                       </button>
                       <button
                         type="button"
                         className="pl-upd"
-                        title={`Overwrite with the current ${STAGE_META[t.stage].label} bands`}
+                        title={tr("presets.updateTemplateTitle", { stage: stageLabel(t.stage) })}
                         disabled={dryActive}
                         onClick={() => updateTemplate(t)}
                       >
                         💾
                       </button>
-                      <button type="button" className="pl-del" title="Delete" onClick={() => deleteTemplate(t)}>
+                      <button type="button" className="pl-del" title={tr("presets.deleteTitle")} onClick={() => deleteTemplate(t)}>
                         🗑
                       </button>
                     </li>
@@ -1762,36 +1761,36 @@ function App() {
               </div>
 
               <h3 className="pl-group">
-                Presets <span>measurement + target + all stages</span>
+                {tr("presets.presetsGroup")} <span>{tr("presets.presetsScope")}</span>
               </h3>
               <div className="pl-scroll">
                 {library.presets.length > 0 ? (
                   <ul className="pl-list">
                     {library.presets.map((p) => (
                       <li key={p.id} className="pl-item">
-                        <span className="pl-name" title={`${p.name} — ${p.model || "no measurement"}`}>
+                        <span className="pl-name" title={`${p.name} — ${p.model || tr("presets.noMeasurement")}`}>
                           {p.name}
                         </span>
                         <button type="button" disabled={dryActive} onClick={() => loadPreset(p)}>
-                          Load
+                          {tr("presets.load")}
                         </button>
                         <button
                           type="button"
                           className="pl-upd"
-                          title={measurementPath ? "Overwrite with the current setup" : "Pick a headphone to overwrite this preset"}
+                          title={measurementPath ? tr("presets.updatePresetTitle") : tr("presets.updatePresetDisabledTitle")}
                           disabled={dryActive || !measurementPath}
                           onClick={() => updatePreset(p)}
                         >
                           💾
                         </button>
-                        <button type="button" className="pl-del" title="Delete" onClick={() => deletePreset(p)}>
+                        <button type="button" className="pl-del" title={tr("presets.deleteTitle")} onClick={() => deletePreset(p)}>
                           🗑
                         </button>
                       </li>
                     ))}
                   </ul>
                 ) : (
-                  <p className="pl-empty">Pick a headphone + target, then 💾 Save a full preset to recall the whole setup.</p>
+                  <p className="pl-empty">{tr("presets.emptyPresets")}</p>
                 )}
               </div>
             </div>
@@ -1802,17 +1801,18 @@ function App() {
       {error && <p style={{ color: "crimson" }}>{error}</p>}
 
       <footer className="app-footer">
-        Headphone corrections and target curves from{" "}
-        <a
-          href="https://github.com/jaakkopasanen/AutoEq"
-          onClick={(e) => {
-            e.preventDefault();
-            void openUrl("https://github.com/jaakkopasanen/AutoEq").catch(() => {});
-          }}
-        >
-          AutoEq
-        </a>{" "}
-        by Jaakko Pasanen, MIT-licensed. CAGEq is an independent project, not affiliated with AutoEq.
+        <Trans
+          i18nKey="footer.text"
+          components={[
+            <a
+              href="https://github.com/jaakkopasanen/AutoEq"
+              onClick={(e) => {
+                e.preventDefault();
+                void openUrl("https://github.com/jaakkopasanen/AutoEq").catch(() => {});
+              }}
+            />,
+          ]}
+        />
       </footer>
     </main>
   );

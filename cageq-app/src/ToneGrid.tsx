@@ -1,4 +1,5 @@
 import { useEffect, useRef, type CSSProperties } from "react";
+import { useTranslation } from "react-i18next";
 import { Band, FilterKind } from "./biquad";
 import { ScrubNumber } from "./ScrubNumber";
 
@@ -122,6 +123,7 @@ function KindGlyph({ kind }: { kind: FilterKind }) {
 }
 
 export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, hoverIndex, onHover, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
+  const { t } = useTranslation();
   // Display order: sort indices by Fc; storage order (and thus the indices we pass back)
   // never changes here, so focus survives a visual reorder.
   const order = filters.map((_, i) => i).sort((a, b) => filters[a].freq_hz - filters[b].freq_hz);
@@ -148,12 +150,13 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
   };
 
   return (
-    <div className="tg-grid" ref={gridRef} role="group" aria-label="Tone filter bands" style={accent ? ({ "--tg": accent } as CSSProperties) : undefined}>
+    <div className="tg-grid" ref={gridRef} role="group" aria-label={t("bands.title")} style={accent ? ({ "--tg": accent } as CSSProperties) : undefined}>
       {order.map((i) => {
         const f = filters[i];
-        const macroLabel = f.fixed ? (f.macro ?? (f.kind === "LowShelf" ? "Bass" : "Treble")) : null;
+        const macroId = f.fixed ? (f.macro ?? (f.kind === "LowShelf" ? "Bass" : "Treble")) : null;
+        const macroLabel = macroId ? t(`macros.${macroId}`) : null;
         const on = f.enabled !== false;
-        const name = macroLabel ?? `band at ${fmtHz(f.freq_hz)} hertz`;
+        const name = macroLabel ?? t("bands.bandAt", { hz: fmtHz(f.freq_hz) });
         // Value-reactive tints (see the WARM/COOL block above). The gain readout warms/cools
         // with the setting (log ramp); the fader just shows a static gradient fill up to the thumb.
         const gainTint = f.gain_db >= 0 ? WARM : COOL;
@@ -177,8 +180,8 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
               disabled={disabled}
               role="switch"
               aria-checked={on}
-              title={on ? `Bypass ${name}` : `Enable ${name}`}
-              aria-label={`${on ? "Bypass" : "Enable"} ${name}`}
+              title={on ? t("bands.bypass", { name }) : t("bands.enable", { name })}
+              aria-label={on ? t("bands.bypass", { name }) : t("bands.enable", { name })}
               onClick={() => onCommit(i, { enabled: !on })}
             >
               <span className="tg-led" aria-hidden="true" />
@@ -188,8 +191,8 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
               type="button"
               className="tg-kind"
               disabled={disabled || f.fixed}
-              title={f.fixed ? `${macroLabel} macro (${f.kind}) — type is fixed` : `${f.kind} — click to change type`}
-              aria-label={f.fixed ? `${macroLabel} macro band (${f.kind})` : `Filter type: ${f.kind}. Activate to cycle.`}
+              title={f.fixed ? t("bands.kindFixed", { macro: macroLabel, kind: f.kind }) : t("bands.kindCycle", { kind: f.kind })}
+              aria-label={f.fixed ? t("bands.kindFixedAria", { macro: macroLabel, kind: f.kind }) : t("bands.kindCycleAria", { kind: f.kind })}
               onClick={() => cycleKind(i, f.kind)}
             >
               <KindGlyph kind={f.kind} />
@@ -206,7 +209,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
               format={fmtGain}
               disabled={disabled}
               style={tint(gainTint, gainAmt)}
-              ariaLabel={`Gain, band at ${fmtHz(f.freq_hz)} hertz`}
+              ariaLabel={t("bands.gainAria", { name })}
               onInput={(v) => onInput(i, { gain_db: v })}
               onCommit={(v) => onCommit(i, { gain_db: v })}
             />
@@ -221,14 +224,14 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
                 value={f.gain_db}
                 disabled={disabled}
                 style={{ "--fill": fillPct } as CSSProperties}
-                aria-label={`Gain fader, band at ${fmtHz(f.freq_hz)} hertz`}
+                aria-label={t("bands.gainFaderAria", { name })}
                 onChange={(e) => onInput(i, { gain_db: Number(e.currentTarget.value) })}
                 onPointerUp={() => onCommit(i, { gain_db: f.gain_db })}
               />
             </div>
 
             <label className="tg-cell">
-              <span className="tg-lbl">Fc</span>
+              <span className="tg-lbl">{t("bands.fc")}</span>
               <ScrubNumber
                 className="tg-num"
                 value={f.freq_hz}
@@ -240,7 +243,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
                 format={fmtHz}
                 disabled={disabled}
                 style={tint(fcHue(f.freq_hz), 100)}
-                ariaLabel={`Centre frequency, ${f.kind} band`}
+                ariaLabel={t("bands.fcAria", { kind: f.kind })}
                 beginEditSignal={focusIndex === i ? focusNonce : undefined}
                 onInput={(v) => onInput(i, { freq_hz: v })}
                 onCommit={(v) => onCommit(i, { freq_hz: v })}
@@ -248,7 +251,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
             </label>
 
             <label className="tg-cell">
-              <span className="tg-lbl">Q</span>
+              <span className="tg-lbl">{t("bands.q")}</span>
               <ScrubNumber
                 className="tg-num"
                 value={f.q}
@@ -259,14 +262,14 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
                 decimals={2}
                 disabled={disabled}
                 style={tint(qTint, qAmt)}
-                ariaLabel={`Q, ${f.kind} band at ${fmtHz(f.freq_hz)} hertz`}
+                ariaLabel={t("bands.qAria", { kind: f.kind, hz: fmtHz(f.freq_hz) })}
                 onInput={(v) => onInput(i, { q: v })}
                 onCommit={(v) => onCommit(i, { q: v })}
               />
             </label>
 
             {f.fixed ? (
-              <span className="tg-fixed" title={`${macroLabel} macro — always available, can't be removed`}>
+              <span className="tg-fixed" title={t("bands.fixedTitle", { macro: macroLabel })}>
                 {macroLabel}
               </span>
             ) : (
@@ -274,8 +277,8 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
                 type="button"
                 className="tg-remove"
                 disabled={disabled}
-                title="Remove this band"
-                aria-label={`Remove band at ${fmtHz(f.freq_hz)} hertz`}
+                title={t("bands.removeTitle")}
+                aria-label={t("bands.removeAria", { name })}
                 onClick={() => onRemove(i)}
               >
                 ✕
@@ -285,9 +288,9 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
         );
       })}
 
-      <button type="button" className="tg-add" disabled={disabled} onClick={onAdd} title="Add a band in the widest gap (or double-click the chart to place one)">
+      <button type="button" className="tg-add" disabled={disabled} onClick={onAdd} title={t("bands.addTitle")}>
         <span aria-hidden="true">＋</span>
-        <span className="tg-add-lbl">Add</span>
+        <span className="tg-add-lbl">{t("bands.add")}</span>
       </button>
     </div>
   );

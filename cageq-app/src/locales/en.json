@@ -1,0 +1,206 @@
+{
+  "lang": { "label": "Language" },
+  "theme": {
+    "title": "Theme: {{mode}} — click to force light/dark (Auto → Light → Dark)",
+    "aria": "Theme: {{mode}}. Click to change.",
+    "auto": "Auto",
+    "light": "Light",
+    "dark": "Dark"
+  },
+
+  "app": {
+    "loading": "Starting the AutoEq engine…",
+    "apoWarning": "⚠ Equalizer APO isn't installed on this device, so applying an EQ here has no effect. Enable it for this device with Equalizer APO's <0>Configurator</0> (DeviceSelector.exe), then reboot."
+  },
+
+  "header": {
+    "output": "Output",
+    "headphone": "Headphone",
+    "measurement": "Measurement",
+    "noDevice": "no active playback device",
+    "searchPlaceholder": "Search {{count}} models…",
+    "apoNotInstalledOption": " — ⚠ Equalizer APO not installed",
+    "measurementTitle": "Measurement source / rig",
+    "pickModel": "— pick a model —",
+    "measBy": "by {{source}}",
+    "measOnRig": " on {{rig}}"
+  },
+
+  "slots": { "A": "Slot A", "B": "Slot B", "Dry": "Dry" },
+
+  "stages": {
+    "fit": { "label": "Fit", "hint": "Personal correction on top of the target — pads, seal, your own ears." },
+    "content": { "label": "Content", "hint": "Adjustments for what you're playing — dialogue lift, a bright master." },
+    "tone": { "label": "Tone", "hint": "Your permanent taste. The fixed Bass / Treble / Air macros live here." },
+    "disabledSuffix": " · stage disabled (not applied)",
+    "enable": "Enable the {{stage}} stage",
+    "disable": "Disable the {{stage}} stage"
+  },
+
+  "correction": {
+    "title": "Correction",
+    "target": "Target",
+    "apply": "Apply → {{slot}}",
+    "fitting": "Fitting…",
+    "applyDry": "Dry (pick A or B)",
+    "frequency": "Frequency",
+    "time": "Time",
+    "frequencyTitle": "Frequency domain — magnitude (and phase)",
+    "timeTitle": "Time domain — impulse-response decay",
+    "domainAria": "Chart domain",
+    "preamp": "Preamp",
+    "preampMax": "max",
+    "preampMatched": "matched",
+    "preampTitleMax": "Preamp for maximum clipping-free volume",
+    "preampTitleMatched": "Preamp for the loudness-matched level (Auto-LUFS)",
+    "clipping": "⚠ Emergency clipping protection active instead of the loudness match — extreme peak.",
+    "addHeadroom": "Add headroom → {{db}} dB",
+    "addHeadroomTitle": "Lower the base pre-gain so the loudness match fits instead of the clipping ceiling"
+  },
+
+  "chart": {
+    "idealEq": "Ideal EQ",
+    "target": "Target",
+    "raw": "Raw",
+    "phase": "Phase",
+    "autoeq": "AutoEq",
+    "show": "Show {{label}}",
+    "hide": "Hide {{label}}",
+    "aria": "Equalizer response curve",
+    "impulseAria": "Filter impulse-response decay",
+    "impulseCaption": "Impulse-response decay of the applied filter chain (dB envelope) — window auto-set to the decay.",
+    "nodeEdit": "Drag to edit · wheel for Q · double-click to remove",
+    "nodeMacro": "Macro band — drag to edit · wheel for Q (not removable)"
+  },
+
+  "bands": {
+    "title": "Filter bands",
+    "historyAria": "Undo and redo edits",
+    "undoTitle": "Undo (Ctrl+Z)",
+    "undoAria": "Undo last edit",
+    "redoTitle": "Redo (Ctrl+Shift+Z)",
+    "redoAria": "Redo edit",
+    "stagesAria": "Filter stages",
+    "add": "Add",
+    "addTitle": "Add a band in the widest gap (or double-click the chart to place one)",
+    "fc": "Fc",
+    "q": "Q",
+    "dryNotice": "Dry is the fixed reference — pick Slot A or B to edit filter bands.",
+    "hint": "Drag a value to scrub, click to type, ↑/↓ to fine-tune · double-click the chart to add a band (or a node to remove it) · changes apply live.",
+    "emptyHint": "This stage has no bands yet — press ＋ or double-click the chart to add one.",
+    "bypass": "Bypass {{name}}",
+    "enable": "Enable {{name}}",
+    "bandAt": "band at {{hz}} hertz",
+    "kindFixed": "{{macro}} macro ({{kind}}) — type is fixed",
+    "kindCycle": "{{kind}} — click to change type",
+    "kindFixedAria": "{{macro}} macro band ({{kind}})",
+    "kindCycleAria": "Filter type: {{kind}}. Activate to cycle.",
+    "gainAria": "Gain, {{name}}",
+    "gainFaderAria": "Gain fader, {{name}}",
+    "fcAria": "Centre frequency, {{kind}} band",
+    "qAria": "Q, {{kind}} band at {{hz}} hertz",
+    "removeTitle": "Remove this band",
+    "removeAria": "Remove {{name}}",
+    "fixedTitle": "{{macro}} macro — always available, can't be removed",
+    "scrubTitle": "{{label}} — drag to scrub, click to type, ↑/↓ to step ({{min}}…{{max}})"
+  },
+
+  "macros": { "Bass": "Bass", "Treble": "Treble", "Air": "Air" },
+
+  "compare": {
+    "title": "Compare",
+    "copy": "Copy:",
+    "slotTitle": "{{slot}} (key {{key}})",
+    "slotEmptySuffix": " — empty",
+    "shortcuts": "A / S / D switch slots, W toggles the loudness mode — even without looking at the screen.",
+    "finalWarning": "⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched — a louder slot can just sound \"better\". Press <0>W</0> for Comparison to A/B fairly."
+  },
+
+  "loudness": {
+    "title": "Loudness",
+    "modeAria": "Loudness mode",
+    "comparison": "Comparison",
+    "comparisonSub": "A/B-fair",
+    "final": "Final volume",
+    "finalSub": "clipping safe",
+    "basePregain": "Base pre-gain",
+    "comparisonDesc": "Every curve ends up equally loud, so A/B comparisons judge timbre, not level.",
+    "finalDesc": "Maximum clipping-free volume — base pre-gain and loudness match are disabled.",
+    "confirmToggle": "Confirm before switching to Final volume"
+  },
+
+  "presets": {
+    "title": "Presets & filters",
+    "save": "Save",
+    "saveTitle": "Save the current setup or tone",
+    "filterTemplate": "Filter template",
+    "fullPreset": "Full preset",
+    "fullPresetDisabledTitle": "Pick a headphone to save a full preset",
+    "presetHint": "Saves the measurement, target curve and all filter stages — loading replaces the whole setup.",
+    "templateHint": "Saves the current {{stage}} stage's bands — loading drops them into {{stage}}, keeping measurement & target.",
+    "namePlaceholder": "Name",
+    "cancel": "Cancel",
+    "filterTemplates": "Filter templates",
+    "scopeAllStages": "all stages",
+    "showAll": "show all",
+    "activeStage": "active stage",
+    "presetsGroup": "Presets",
+    "presetsScope": "measurement + target + all stages",
+    "load": "Load",
+    "noMeasurement": "no measurement",
+    "updateTemplateTitle": "Overwrite with the current {{stage}} bands",
+    "updatePresetTitle": "Overwrite with the current setup",
+    "updatePresetDisabledTitle": "Pick a headphone to overwrite this preset",
+    "deleteTitle": "Delete",
+    "emptyPresets": "Pick a headphone + target, then 💾 Save a full preset to recall the whole setup."
+  },
+
+  "tonePresets": {
+    "flat": "Flat",
+    "bassBoost": "Bass boost",
+    "trebleBoost": "Treble boost",
+    "airy": "Airy",
+    "vShape": "V-shape",
+    "warm": "Warm",
+    "bright": "Bright"
+  },
+
+  "meter": {
+    "levelTitle": "Output level (dBFS): phosphor fill, amber peak, neutral RMS",
+    "lufsTitle": "Loudness (LUFS): short-term fill, momentary mark (BS.1770)",
+    "unavailable": "Meter unavailable: {{error}}"
+  },
+
+  "banner": {
+    "terminal": "Safety shutdown: the audio DSP couldn't be recovered, so EQ is muted.",
+    "recovering": "Recovering the audio DSP… (safe state active, EQ muted)",
+    "safeState": "A safety shutdown from a previous session is still active (EQ muted). Apply a correction to restore it.",
+    "externallyModified": "cageq.txt was changed outside CAGEq since the last run — the shown state may not match what's applied.",
+    "retry": "Retry"
+  },
+
+  "dialog": {
+    "finalTitle": "Switching to <0>Final volume</0> raises the volume by <1>+{{jump}} dB</1> (ramped in at 6 dB/s). Continue?",
+    "dontAskAgain": "Don't ask again (re-enable in the Loudness panel)",
+    "cancel": "Cancel",
+    "switchFinal": "Switch to Final volume",
+    "overwritePreset": "A preset named “{{name}}” already exists. Overwrite it?",
+    "overwriteTemplate": "A {{stage}} template named “{{name}}” already exists. Overwrite it?",
+    "overwrite": "Overwrite",
+    "updatePreset": "Overwrite the preset “{{name}}” with the current headphone, target and all stages?",
+    "updateTemplate": "Overwrite the {{stage}} template “{{name}}” with the current {{stage}} bands?",
+    "deletePreset": "Delete the preset “{{name}}”? This can't be undone.",
+    "deleteTemplate": "Delete the filter template “{{name}}”? This can't be undone.",
+    "delete": "Delete"
+  },
+
+  "errors": {
+    "pickHeadphone": "Pick a headphone model and measurement first.",
+    "pickDevice": "Pick an output device first.",
+    "slotEmpty": "Slot {{from}} is empty — apply something to it first."
+  },
+
+  "footer": {
+    "text": "Headphone corrections and target curves from <0>AutoEq</0> by Jaakko Pasanen, MIT-licensed. CAGEq is an independent project, not affiliated with AutoEq."
+  }
+}

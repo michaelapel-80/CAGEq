@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, logGrid, phaseDeg } from "./biquad";
 
 /**
@@ -137,6 +138,7 @@ export function EqChart({
   eqBands?: Band[];
   height?: number;
 }) {
+  const { t } = useTranslation();
   const W = 720;
   const H = height;
   const svgRef = useRef<SVGSVGElement>(null);
@@ -387,7 +389,7 @@ export function EqChart({
       viewBox={`0 0 ${W} ${H}`}
       style={{ width: "100%", height: "auto", userSelect: "none", touchAction: "none" }}
       role="img"
-      aria-label="Equalizer response curve"
+      aria-label={t("chart.aria")}
       onClick={(e) => {
         // Symmetric double-click gestures (detected manually — see lastTap): a second click
         // close to the first (time + screen distance) *and over the same target* → over that
@@ -539,7 +541,7 @@ export function EqChart({
         const isFixed = (b as { fixed?: boolean }).fixed === true;
         return (
           <g key={`n${i}`}>
-            <title>{isFixed ? "Macro band — drag to edit · wheel for Q (not removable)" : "Drag to edit · wheel for Q · double-click to remove"}</title>
+            <title>{isFixed ? t("chart.nodeMacro") : t("chart.nodeEdit")}</title>
             {isNew && (
               <circle cx={cx} cy={cy} r={6} fill="none" stroke={nodes.color} strokeWidth={2} className="eq-node-pulse" />
             )}
@@ -620,7 +622,7 @@ export function EqChart({
               className={`eq-legend-item${off ? " off" : ""}`}
               aria-pressed={!off}
               onClick={() => toggle(row.id)}
-              title={off ? `Show ${row.label}` : `Hide ${row.label}`}
+              title={off ? t("chart.show", { label: row.label }) : t("chart.hide", { label: row.label })}
             >
               <svg className="eq-swatch" viewBox="0 0 18 10" width="18" height="10" aria-hidden="true">
                 {row.style === "diamond" ? (

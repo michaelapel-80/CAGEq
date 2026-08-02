@@ -151,8 +151,14 @@ select:disabled {
   border-bottom: 1px solid rgba(128, 128, 128, 0.3);
   margin-bottom: 0.7rem;
 }
+/* Language picker + theme toggle sit together at the header's right edge. */
+.lang-select {
+  margin-left: auto; /* pushes the pair to the right end of the header row */
+  font-size: 0.8rem;
+  padding: 0.2rem 0.35rem;
+}
 .theme-toggle {
-  margin-left: auto; /* push to the right end of the header row */
+  margin-left: 0.35rem;
   font-size: 0.95rem;
   line-height: 1;
   padding: 0.2rem 0.4rem;

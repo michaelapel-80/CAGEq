@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { Band, FS, impulseResponse } from "./biquad";
 
 /**
@@ -20,6 +21,7 @@ const FLOOR_DB = -80; // display floor
 const DB_TICKS = [0, -20, -40, -60];
 
 export function ImpulseChart({ bands, color, height = 215, fs = FS }: { bands: Band[]; color: string; height?: number; fs?: number }) {
+  const { t } = useTranslation();
   const H = height;
   const plotW = W - PAD.l - PAD.r;
 
@@ -62,7 +64,7 @@ export function ImpulseChart({ bands, color, height = 215, fs = FS }: { bands: B
 
   return (
     <div className="eq-chart">
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto" }} role="img" aria-label="Filter impulse-response decay">
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto" }} role="img" aria-label={t("chart.impulseAria")}>
         {DB_TICKS.map((db) => (
           <g key={db}>
             <line x1={PAD.l} x2={W - PAD.r} y1={yDb(db)} y2={yDb(db)} stroke="currentColor" strokeOpacity={db === 0 ? 0.28 : 0.1} />
@@ -86,7 +88,7 @@ export function ImpulseChart({ bands, color, height = 215, fs = FS }: { bands: B
         <path d={d} fill="none" stroke={color} strokeWidth={1.6} strokeLinejoin="round" />
       </svg>
       <div className="eq-legend" style={{ opacity: 0.55, fontSize: "0.72rem" }}>
-        <span>Impulse-response decay of the applied filter chain (dB envelope) — window auto-set to the decay.</span>
+        <span>{t("chart.impulseCaption")}</span>
       </div>
     </div>
   );

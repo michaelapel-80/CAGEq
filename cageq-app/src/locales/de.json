@@ -1,0 +1,206 @@
+{
+  "lang": { "label": "Sprache" },
+  "theme": {
+    "title": "Design: {{mode}} — klicken für erzwungen hell/dunkel (Auto → Hell → Dunkel)",
+    "aria": "Design: {{mode}}. Zum Ändern klicken.",
+    "auto": "Auto",
+    "light": "Hell",
+    "dark": "Dunkel"
+  },
+
+  "app": {
+    "loading": "AutoEq-Engine wird gestartet…",
+    "apoWarning": "⚠ Equalizer APO ist auf diesem Gerät nicht installiert, ein EQ hier bleibt also wirkungslos. Aktiviere es für dieses Gerät mit dem <0>Configurator</0> von Equalizer APO (DeviceSelector.exe) und starte neu."
+  },
+
+  "header": {
+    "output": "Ausgabe",
+    "headphone": "Kopfhörer",
+    "measurement": "Messung",
+    "noDevice": "kein aktives Wiedergabegerät",
+    "searchPlaceholder": "{{count}} Modelle suchen…",
+    "apoNotInstalledOption": " — ⚠ Equalizer APO nicht installiert",
+    "measurementTitle": "Messquelle / Rig",
+    "pickModel": "— Modell wählen —",
+    "measBy": "von {{source}}",
+    "measOnRig": " auf {{rig}}"
+  },
+
+  "slots": { "A": "Slot A", "B": "Slot B", "Dry": "Dry" },
+
+  "stages": {
+    "fit": { "label": "Anpassung", "hint": "Persönliche Korrektur auf die Zielkurve – Pads, Sitz, deine eigenen Ohren." },
+    "content": { "label": "Material", "hint": "Anpassung ans Material – Dialog-Anhebung, heller Master." },
+    "tone": { "label": "Klang", "hint": "Dein permanenter Geschmack. Die festen Bass/Treble/Air-Macros leben hier." },
+    "disabledSuffix": " · Stage deaktiviert (nicht angewandt)",
+    "enable": "Stage {{stage}} aktivieren",
+    "disable": "Stage {{stage}} deaktivieren"
+  },
+
+  "correction": {
+    "title": "Korrektur",
+    "target": "Zielkurve",
+    "apply": "Anwenden → {{slot}}",
+    "fitting": "Fitten…",
+    "applyDry": "Dry (A oder B wählen)",
+    "frequency": "Frequenz",
+    "time": "Zeit",
+    "frequencyTitle": "Frequenzbereich – Magnitude (und Phase)",
+    "timeTitle": "Zeitbereich – Impulsantwort-Abklingen",
+    "domainAria": "Diagramm-Bereich",
+    "preamp": "Preamp",
+    "preampMax": "max",
+    "preampMatched": "angeglichen",
+    "preampTitleMax": "Preamp für maximale clipping-freie Lautstärke",
+    "preampTitleMatched": "Preamp für den lautheitsangeglichenen Pegel (Auto-LUFS)",
+    "clipping": "⚠ Notfall-Clipping-Schutz aktiv statt Lautheitsausgleich – extreme Spitze.",
+    "addHeadroom": "Headroom schaffen → {{db}} dB",
+    "addHeadroomTitle": "Basis-Pre-Gain senken, damit der Lautheitsausgleich statt der Clipping-Grenze greift"
+  },
+
+  "chart": {
+    "idealEq": "Ideal-EQ",
+    "target": "Ziel",
+    "raw": "Roh",
+    "phase": "Phase",
+    "autoeq": "AutoEq",
+    "show": "{{label}} einblenden",
+    "hide": "{{label}} ausblenden",
+    "aria": "Equalizer-Frequenzgang",
+    "impulseAria": "Filter-Impulsantwort-Abklingen",
+    "impulseCaption": "Impulsantwort-Abklingen der angewandten Filterkette (dB-Hüllkurve) – Fenster automatisch aufs Abklingen gesetzt.",
+    "nodeEdit": "Ziehen zum Bearbeiten · Rad für Q · Doppelklick zum Entfernen",
+    "nodeMacro": "Macro-Band – ziehen zum Bearbeiten · Rad für Q (nicht entfernbar)"
+  },
+
+  "bands": {
+    "title": "Filterbänder",
+    "historyAria": "Bearbeitungen rückgängig/wiederholen",
+    "undoTitle": "Rückgängig (Strg+Z)",
+    "undoAria": "Letzte Bearbeitung rückgängig",
+    "redoTitle": "Wiederholen (Strg+Umschalt+Z)",
+    "redoAria": "Bearbeitung wiederholen",
+    "stagesAria": "Filter-Stages",
+    "add": "Neu",
+    "addTitle": "Band in der größten Lücke hinzufügen (oder Doppelklick ins Diagramm zum Platzieren)",
+    "fc": "Fc",
+    "q": "Q",
+    "dryNotice": "Dry ist die feste Referenz – wähle Slot A oder B, um Filterbänder zu bearbeiten.",
+    "hint": "Wert ziehen zum Scrubben, klicken zum Tippen, ↑/↓ zum Feinjustieren · Doppelklick ins Diagramm fügt ein Band hinzu (oder ein Knoten zum Entfernen) · Änderungen wirken live.",
+    "emptyHint": "Diese Stage hat noch keine Bänder – ＋ drücken oder Doppelklick ins Diagramm zum Hinzufügen.",
+    "bypass": "{{name}} überbrücken",
+    "enable": "{{name}} aktivieren",
+    "bandAt": "Band bei {{hz}} Hertz",
+    "kindFixed": "{{macro}}-Macro ({{kind}}) – Typ ist fest",
+    "kindCycle": "{{kind}} – zum Ändern des Typs klicken",
+    "kindFixedAria": "{{macro}}-Macro-Band ({{kind}})",
+    "kindCycleAria": "Filtertyp: {{kind}}. Aktivieren zum Durchschalten.",
+    "gainAria": "Gain, {{name}}",
+    "gainFaderAria": "Gain-Fader, {{name}}",
+    "fcAria": "Mittenfrequenz, {{kind}}-Band",
+    "qAria": "Q, {{kind}}-Band bei {{hz}} Hertz",
+    "removeTitle": "Dieses Band entfernen",
+    "removeAria": "{{name}} entfernen",
+    "fixedTitle": "{{macro}}-Macro – immer verfügbar, nicht entfernbar",
+    "scrubTitle": "{{label}} – ziehen zum Scrubben, klicken zum Tippen, ↑/↓ in Schritten ({{min}}…{{max}})"
+  },
+
+  "macros": { "Bass": "Bass", "Treble": "Treble", "Air": "Air" },
+
+  "compare": {
+    "title": "Vergleich",
+    "copy": "Kopieren:",
+    "slotTitle": "{{slot}} (Taste {{key}})",
+    "slotEmptySuffix": " – leer",
+    "shortcuts": "A / S / D wechseln Slots, W schaltet den Lautheitsmodus – auch ohne auf den Bildschirm zu sehen.",
+    "finalWarning": "⚠ Finale Lautstärke: Jeder Slot spielt auf seiner eigenen Maximallautstärke, A/B/Dry sind also nicht lautheitsangeglichen – ein lauterer Slot kann einfach „besser“ klingen. <0>W</0> drücken für Vergleich, um fair A/B zu hören."
+  },
+
+  "loudness": {
+    "title": "Lautheit",
+    "modeAria": "Lautheitsmodus",
+    "comparison": "Vergleich",
+    "comparisonSub": "A/B-fair",
+    "final": "Finale Lautstärke",
+    "finalSub": "Übersteuerungssicher",
+    "basePregain": "Basis-Pre-Gain",
+    "comparisonDesc": "Jede Kurve wirkt gleich laut, damit A/B-Vergleiche die Klangfarbe beurteilen, nicht den Pegel.",
+    "finalDesc": "Maximale clipping-freie Lautstärke – Basis-Pre-Gain und Lautheitsausgleich sind deaktiviert.",
+    "confirmToggle": "Vor Wechsel zu Finaler Lautstärke bestätigen"
+  },
+
+  "presets": {
+    "title": "Presets & Filter",
+    "save": "Speichern",
+    "saveTitle": "Aktuelles Setup oder Tone speichern",
+    "filterTemplate": "Filter-Vorlage",
+    "fullPreset": "Volles Preset",
+    "fullPresetDisabledTitle": "Kopfhörer wählen, um ein volles Preset zu speichern",
+    "presetHint": "Speichert Messung, Zielkurve und alle Filter-Stages – Laden ersetzt das ganze Setup.",
+    "templateHint": "Speichert die Bänder der aktuellen {{stage}}-Stage – Laden setzt sie in {{stage}} ein, Messung & Ziel bleiben.",
+    "namePlaceholder": "Name",
+    "cancel": "Abbrechen",
+    "filterTemplates": "Filter-Vorlagen",
+    "scopeAllStages": "alle Stages",
+    "showAll": "alle zeigen",
+    "activeStage": "aktive Stage",
+    "presetsGroup": "Presets",
+    "presetsScope": "Messung + Ziel + alle Stages",
+    "load": "Laden",
+    "noMeasurement": "keine Messung",
+    "updateTemplateTitle": "Mit den aktuellen {{stage}}-Bändern überschreiben",
+    "updatePresetTitle": "Mit dem aktuellen Setup überschreiben",
+    "updatePresetDisabledTitle": "Kopfhörer wählen, um dieses Preset zu überschreiben",
+    "deleteTitle": "Löschen",
+    "emptyPresets": "Kopfhörer + Ziel wählen, dann 💾 ein volles Preset speichern, um das ganze Setup abzurufen."
+  },
+
+  "tonePresets": {
+    "flat": "Neutral",
+    "bassBoost": "Bass-Boost",
+    "trebleBoost": "Höhen-Boost",
+    "airy": "Luftig",
+    "vShape": "V-Form",
+    "warm": "Warm",
+    "bright": "Hell"
+  },
+
+  "meter": {
+    "levelTitle": "Ausgangspegel (dBFS): Phosphor-Füllung, Peak bernstein, RMS neutral",
+    "lufsTitle": "Lautheit (LUFS): Short-Term-Füllung, Momentary-Marke (BS.1770)",
+    "unavailable": "Meter nicht verfügbar: {{error}}"
+  },
+
+  "banner": {
+    "terminal": "Sicherheitsabschaltung: Der Audio-DSP konnte nicht wiederhergestellt werden, EQ ist stumm.",
+    "recovering": "Audio-DSP wird wiederhergestellt… (sicherer Zustand aktiv, EQ stumm)",
+    "safeState": "Eine Sicherheitsabschaltung aus einer vorherigen Sitzung ist noch aktiv (EQ stumm). Wende eine Korrektur an, um ihn wiederherzustellen.",
+    "externallyModified": "cageq.txt wurde seit dem letzten Lauf außerhalb von CAGEq geändert – der angezeigte Zustand entspricht evtl. nicht dem angewandten.",
+    "retry": "Erneut versuchen"
+  },
+
+  "dialog": {
+    "finalTitle": "Der Wechsel zu <0>Finaler Lautstärke</0> erhöht die Lautstärke um <1>+{{jump}} dB</1> (mit 6 dB/s eingerampt). Fortfahren?",
+    "dontAskAgain": "Nicht mehr fragen (im Lautheits-Panel reaktivierbar)",
+    "cancel": "Abbrechen",
+    "switchFinal": "Zu Finaler Lautstärke wechseln",
+    "overwritePreset": "Ein Preset namens „{{name}}“ existiert bereits. Überschreiben?",
+    "overwriteTemplate": "Eine {{stage}}-Vorlage namens „{{name}}“ existiert bereits. Überschreiben?",
+    "overwrite": "Überschreiben",
+    "updatePreset": "Das Preset „{{name}}“ mit aktuellem Kopfhörer, Ziel und allen Stages überschreiben?",
+    "updateTemplate": "Die {{stage}}-Vorlage „{{name}}“ mit den aktuellen {{stage}}-Bändern überschreiben?",
+    "deletePreset": "Das Preset „{{name}}“ löschen? Kann nicht rückgängig gemacht werden.",
+    "deleteTemplate": "Die Filter-Vorlage „{{name}}“ löschen? Kann nicht rückgängig gemacht werden.",
+    "delete": "Löschen"
+  },
+
+  "errors": {
+    "pickHeadphone": "Zuerst ein Kopfhörer-Modell und eine Messung wählen.",
+    "pickDevice": "Zuerst ein Ausgabegerät wählen.",
+    "slotEmpty": "Slot {{from}} ist leer – wende zuerst etwas darauf an."
+  },
+
+  "footer": {
+    "text": "Kopfhörer-Korrekturen und Zielkurven von <0>AutoEq</0> von Jaakko Pasanen, MIT-lizenziert. CAGEq ist ein unabhängiges Projekt, nicht mit AutoEq affiliiert."
+  }
+}

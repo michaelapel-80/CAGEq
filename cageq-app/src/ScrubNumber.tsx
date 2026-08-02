@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useTranslation } from "react-i18next";
 
 /**
  * A numeric value that is **scrubbable, typeable, and arrow-steppable** — the control
@@ -75,6 +76,7 @@ export function ScrubNumber({
   style,
   beginEditSignal,
 }: ScrubNumberProps) {
+  const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState("");
@@ -232,7 +234,7 @@ export function ScrubNumber({
       disabled={disabled}
       readOnly={!editing}
       value={editing ? text : suffix ? `${shown} ${suffix}` : shown}
-      title={`${ariaLabel} — drag to scrub, click to type, ↑/↓ to step (${min}…${max})`}
+      title={t("bands.scrubTitle", { label: ariaLabel, min, max })}
       style={{ cursor: disabled ? "default" : editing ? "text" : "ew-resize", touchAction: "none", ...style }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
