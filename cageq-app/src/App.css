@@ -4,6 +4,10 @@
   line-height: 24px;
   font-weight: 400;
 
+  /* Always reserve the scrollbar gutter so a page that grows past the window (and gains a
+     scrollbar) doesn't narrow the content — which would rescale the width:100% charts. */
+  scrollbar-gutter: stable;
+
   color: #0f0f0f;
   background-color: #f6f6f6;
   color-scheme: light; /* native controls (selects) match; overridden to dark below */
@@ -553,8 +557,13 @@ select:disabled {
 .eq-legend {
   display: flex;
   flex-wrap: wrap;
+  align-content: flex-start;
   gap: 0.15rem 0.35rem;
   margin-top: 0.35rem;
+  /* Both the frequency (chip legend) and time (one-line caption) charts share this class;
+     reserve a consistent height so swapping domains doesn't change the panel height (which,
+     at the tight window size, would toggle the scrollbar and rescale the width:100% chart). */
+  min-height: 1.9rem;
 }
 .eq-legend-item {
   display: inline-flex;
