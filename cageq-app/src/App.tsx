@@ -1367,6 +1367,7 @@ function App() {
                         refs={chartRefs}
                         phase={chartPhase}
                         spectrum={spectrum}
+                        eqBands={dryActive ? undefined : result.filters}
                         height={215}
                         nodes={{
                           bands: activeBands,

@@ -53,9 +53,10 @@ export type RefCurve = {
  *  Bode-style overlay, off by default. Computed from bands, so it tracks live edits. */
 export type PhaseCurve = { id: string; bands: Band[]; color: string; label: string; defaultHidden?: boolean };
 
-/** A live post-EQ spectrum snapshot (loopback FFT) — log-frequency magnitude bins + per-bin
- *  peak-hold, in dB (relative). Drawn as a backdrop on the shared log-Hz axis with its own
- *  self-scaling level range, so resonances read against the EQ curve (§5.3c). */
+/** A live loopback-FFT spectrum snapshot — log-frequency magnitude bins + per-bin peak-hold,
+ *  in dB (relative). The capture is the post-EQ output; the chart draws the **pre-filter**
+ *  (source) view by removing the applied filter response per bin (see `eqBands`), so it reads
+ *  against the EQ curve as "what's coming in" rather than the already-corrected output (§5.3c). */
 export type SpectrumData = { db: number[]; peak_db: number[]; f_min: number; f_max: number };
 
 /** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). */
@@ -88,6 +89,14 @@ function parseRgb(col: string): [number, number, number] {
   return m && m.length >= 3 ? [Math.round(+m[0]), Math.round(+m[1]), Math.round(+m[2])] : [128, 128, 128];
 }
 
+/** Parse a `#rrggbb` hex (e.g. the `--accent` CSS var) to [r,g,b]; null if not a 6-digit hex. */
+function parseHex(hex: string): [number, number, number] | null {
+  const m = hex.trim().match(/^#?([0-9a-f]{6})$/i);
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
 // --- FFT spectrum backdrop: its own tuning set, independent of the level meter's phosphor ---
 const SPEC_TOP_DB = 0; // top of the fixed dBFS scale
 const SPEC_DYN = 90; // dB shown below the top
@@ -95,6 +104,7 @@ const SPEC_FADE = 0.11; // decay: alpha removed from the canvas per frame (highe
 const SPEC_GLOW_BASE = 0.2; // brightness at the level floor (kept dim so it stays a backdrop)
 const SPEC_GLOW_TIP = 0.025; // brightness near the current level (vertical falloff)
 const SPEC_DARK_SCALE = 0.6; // dim the glow in dark mode: light-on-dark composites brighter (gamma)
+const SPEC_TINT = 0.42; // blend the accent this far into the neutral glow — a hint of colour, not a rival to the curves
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -112,6 +122,7 @@ export function EqChart({
   phase,
   nodes,
   spectrum,
+  eqBands,
   height = 210,
 }: {
   series: Series[];
@@ -119,8 +130,11 @@ export function EqChart({
   refs?: RefCurve[];
   phase?: PhaseCurve;
   nodes?: Nodes;
-  /** Live post-EQ spectrum (loopback FFT) drawn as a backdrop on the log-Hz axis, own scale. */
+  /** Live loopback-FFT spectrum drawn as a backdrop on the log-Hz axis, own scale. */
   spectrum?: SpectrumData | null;
+  /** The applied filter cascade (AutoEq fit + custom). Its magnitude response is removed from
+   *  the post-EQ capture per bin so the backdrop shows the **pre-filter** source spectrum. */
+  eqBands?: Band[];
   height?: number;
 }) {
   const W = 720;
@@ -301,8 +315,13 @@ export function EqChart({
   // one column per FFT bin with a bright-at-the-floor gradient. Fade + repaint = persistence — a
   // moving resonance leaves a glowing decaying trail and sustained energy stays lit — the same
   // idea as the level meter, one bar per bin. Imperative, so the SVG doesn't re-render at the
-  // spectrum rate. Drawn in the neutral theme text colour (not the accent) and kept dim, so it
-  // reads as a backdrop and the coloured EQ curves stay legible on top. X = log-Hz; Y = dBFS.
+  // spectrum rate. Kept dim (neutral theme colour with a hint of accent tinted in), so it reads
+  // as a backdrop and the coloured EQ curves stay legible on top. X = log-Hz; Y = dBFS.
+  //
+  // Pre-filter view: the capture is the post-EQ output, so subtract the applied filter response
+  // (dB) at each bin's frequency to recover the source spectrum — the resonances the EQ is
+  // fighting show where they actually are, not flattened by the correction. (VU/LUFS keep the
+  // raw post-EQ signal; only this display is un-EQ'd.)
   useEffect(() => {
     const cv = specCanvasRef.current;
     const ctx = cv?.getContext("2d");
@@ -319,15 +338,32 @@ export function EqChart({
     const n = spectrum.db.length;
     const lnF0 = Math.log(spectrum.f_min);
     const lnF1 = Math.log(spectrum.f_max);
-    const fx = (i: number) => x(Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0)));
+    const binF = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
+    const fx = (i: number) => x(binF(i));
     const plotTop = PAD.t;
     const plotBot = H - PAD.b;
     const sy = (db: number) => plotBot - clamp((db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN, 0, 1) * (plotBot - plotTop);
 
-    const [r, g, b] = parseRgb(getComputedStyle(cv).color);
-    // Light text ⇒ dark theme. Light-on-dark accumulates brighter (sRGB/gamma compositing) and has
-    // higher apparent contrast, so dim the glow there to read as cleanly as it does on light.
-    const scale = 0.299 * r + 0.587 * g + 0.114 * b > 140 ? SPEC_DARK_SCALE : 1;
+    // The EQ response at each bin frequency — subtracted from the (post-EQ) capture to undo the
+    // filter. Null when nothing's applied (e.g. Dry), leaving the capture as-is.
+    let corr: Float64Array | null = null;
+    if (eqBands && eqBands.length) {
+      const bf = new Float64Array(n);
+      for (let i = 0; i < n; i++) bf[i] = binF(i);
+      corr = composedCurveDb(eqBands, bf);
+    }
+
+    const cs = getComputedStyle(cv);
+    const [nr, ng, nb] = parseRgb(cs.color);
+    const acc = parseHex(cs.getPropertyValue("--accent"));
+    // A hint of the accent mixed into the neutral text colour — lifts the glow off flat grey
+    // without letting it read as another curve.
+    const [r, g, b] = acc
+      ? [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round)
+      : [nr, ng, nb];
+    // Light *text* ⇒ dark theme (test the neutral colour, not the tinted one). Light-on-dark
+    // accumulates brighter (sRGB/gamma compositing), so dim the glow there to match light mode.
+    const scale = 0.299 * nr + 0.587 * ng + 0.114 * nb > 140 ? SPEC_DARK_SCALE : 1;
     const grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
     grad.addColorStop(0, `rgba(${r},${g},${b},${SPEC_GLOW_BASE * scale})`); // brightest at the floor
     grad.addColorStop(1, `rgba(${r},${g},${b},${SPEC_GLOW_TIP * scale})`); // fades out toward the top
@@ -335,11 +371,12 @@ export function EqChart({
     for (let i = 0; i < n; i++) {
       const x0 = fx(i);
       const x1 = i < n - 1 ? fx(i + 1) : x0 + 1;
-      const yTop = sy(spectrum.db[i]);
+      const db = corr ? spectrum.db[i] - corr[i] : spectrum.db[i];
+      const yTop = sy(db);
       ctx.fillRect(x0, yTop, Math.max(1, x1 - x0), plotBot - yTop);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [spectrum, phaseOn]);
+  }, [spectrum, phaseOn, eqBands]);
 
   return (
     <div className="eq-chart">
