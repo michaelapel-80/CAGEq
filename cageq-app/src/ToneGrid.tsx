@@ -52,6 +52,9 @@ export type ToneGridProps = {
 const KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
 const GAIN_MIN = -20;
 const GAIN_MAX = 20;
+// Gain's tint ramps logarithmically from this floor (dB) up to full at ±GAIN_MAX — the same
+// log response Fc/Q already use, so a small boost/cut still registers (no linear dead zone).
+const GAIN_TINT_MIN_DB = 1;
 
 // A fixed macro band's Fc is constrained to a sensible window around its corner so its
 // label stays meaningful (a "Bass" shelf dragged to 8 kHz is no longer bass). Free bands
@@ -72,6 +75,35 @@ const fcBounds = (f: ToneBand): [number, number] => {
 
 const fmtHz = (v: number) => (v >= 1000 ? `${+(v / 1000).toFixed(2)}k` : `${Math.round(v)}`);
 const fmtGain = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
+
+// --- value-reactive tints -------------------------------------------------------------
+// A hair of colour so a strip's *setting* reads at a glance, without leaving the instrument
+// look: gain warms on a boost / cools on a cut; Fc runs spectral (warm low → cool high, the
+// bass→treble metaphor); Q departs either way from a neutral 1.0 — violet as it narrows,
+// teal as it widens. Each ramps logarithmically to full tint at the extreme — Fc through its
+// hue position, gain/Q through the mix amount — so small settings still register. Applied
+// inline as a color-mix into the theme text colour, so it stays legible in either theme.
+const WARM = "#e8a020"; // gain boost
+const COOL = "#3f9bef"; // gain cut
+const Q_NARROW = "#b95cf0"; // high Q — surgical / focused (violet)
+const Q_WIDE = "#14b8a6"; // low Q — broad / gentle (teal)
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+/** Position of `v` on a log scale from `lo`→`hi`, clamped 0..1. */
+const logNorm = (v: number, lo: number, hi: number) => clamp01((Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)));
+
+// Fc hue sweep: interpolate in HUE space (not RGB), warm low → cool high, so the mids stay
+// vivid (an orange↔blue RGB blend greys out through the middle, where most bands live). The
+// window is narrowed to the musical range so typical bands span the whole sweep — sub-bass
+// pins warm, the top octave pins cool — instead of bunching up in the blue.
+const FC_HUE_LO = 30; // warm orange at the low end (bass)
+const FC_HUE_HI = 250; // blue-violet at the top (air)
+const FC_HUE_F_LO = 100; // Hz that maps to the warm end
+const FC_HUE_F_HI = 15000; // Hz that maps to the cool end
+const fcHue = (hz: number) =>
+  `hsl(${Math.round(FC_HUE_LO + (FC_HUE_HI - FC_HUE_LO) * logNorm(hz, FC_HUE_F_LO, FC_HUE_F_HI))}, 58%, 56%)`;
+/** A readout tint: `amt`% of the target hue mixed into the theme text colour, set inline so it
+ *  beats the base `input` rule's `color` (which outranks a plain `.tg-num` class). */
+const tint = (c: string, amt: number): CSSProperties => ({ color: `color-mix(in srgb, var(--fg), ${c} ${Math.round(amt)}%)` });
 
 /** A tiny pictogram of each filter's shape, so the kind reads at a glance (memory: curve
  *  icons, not "PK/LS/HS" text). Click cycles Peaking → LowShelf → HighShelf. */
@@ -122,6 +154,15 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
         const macroLabel = f.fixed ? (f.macro ?? (f.kind === "LowShelf" ? "Bass" : "Treble")) : null;
         const on = f.enabled !== false;
         const name = macroLabel ?? `band at ${fmtHz(f.freq_hz)} hertz`;
+        // Value-reactive tints (see the WARM/COOL block above). The gain readout warms/cools
+        // with the setting (log ramp); the fader just shows a static gradient fill up to the thumb.
+        const gainTint = f.gain_db >= 0 ? WARM : COOL;
+        const gainAmt = logNorm(Math.abs(f.gain_db), GAIN_TINT_MIN_DB, GAIN_MAX) * 100;
+        const fillPct = `${((f.gain_db - GAIN_MIN) / (GAIN_MAX - GAIN_MIN)) * 100}%`;
+        // Q tints either way from a neutral 1.0 — violet as it narrows, teal as it widens; the
+        // amount is the log-distance from 1, normalised to its end (0.1 or 20) so both reach full.
+        const qTint = f.q >= 1 ? Q_NARROW : Q_WIDE;
+        const qAmt = clamp01(Math.abs(Math.log(f.q)) / (f.q >= 1 ? Math.log(20) : -Math.log(0.1))) * 100;
         return (
           <div
             className={`tg-col${f.fixed ? " tg-col-fixed" : ""}${on ? "" : " tg-col-off"}${hoverIndex === i ? " tg-col-hover" : ""}`}
@@ -164,6 +205,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
               decimals={1}
               format={fmtGain}
               disabled={disabled}
+              style={tint(gainTint, gainAmt)}
               ariaLabel={`Gain, band at ${fmtHz(f.freq_hz)} hertz`}
               onInput={(v) => onInput(i, { gain_db: v })}
               onCommit={(v) => onCommit(i, { gain_db: v })}
@@ -178,6 +220,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
                 step={0.1}
                 value={f.gain_db}
                 disabled={disabled}
+                style={{ "--fill": fillPct } as CSSProperties}
                 aria-label={`Gain fader, band at ${fmtHz(f.freq_hz)} hertz`}
                 onChange={(e) => onInput(i, { gain_db: Number(e.currentTarget.value) })}
                 onPointerUp={() => onCommit(i, { gain_db: f.gain_db })}
@@ -196,6 +239,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
                 decimals={0}
                 format={fmtHz}
                 disabled={disabled}
+                style={tint(fcHue(f.freq_hz), 100)}
                 ariaLabel={`Centre frequency, ${f.kind} band`}
                 beginEditSignal={focusIndex === i ? focusNonce : undefined}
                 onInput={(v) => onInput(i, { freq_hz: v })}
@@ -214,6 +258,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
                 arrowStep={1.05}
                 decimals={2}
                 disabled={disabled}
+                style={tint(qTint, qAmt)}
                 ariaLabel={`Q, ${f.kind} band at ${fmtHz(f.freq_hz)} hertz`}
                 onInput={(v) => onInput(i, { q: v })}
                 onCommit={(v) => onCommit(i, { q: v })}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 
 /**
  * A numeric value that is **scrubbable, typeable, and arrow-steppable** — the control
@@ -33,6 +33,9 @@ export type ScrubNumberProps = {
   disabled?: boolean;
   ariaLabel: string;
   className?: string;
+  /** Extra inline style merged onto the input (after the internal cursor/touch style) — the
+   *  grid uses it to pass the value-reactive tint vars (--tint / --tint-amt). */
+  style?: CSSProperties;
   /** Bump to programmatically enter type-in-place mode (value selected, ready to type) —
    *  e.g. a freshly-added band focusing its Fc. `readOnly` otherwise swallows keystrokes. */
   beginEditSignal?: number;
@@ -69,6 +72,7 @@ export function ScrubNumber({
   disabled,
   ariaLabel,
   className,
+  style,
   beginEditSignal,
 }: ScrubNumberProps) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -229,7 +233,7 @@ export function ScrubNumber({
       readOnly={!editing}
       value={editing ? text : suffix ? `${shown} ${suffix}` : shown}
       title={`${ariaLabel} — drag to scrub, click to type, ↑/↓ to step (${min}…${max})`}
-      style={{ cursor: disabled ? "default" : editing ? "text" : "ew-resize", touchAction: "none" }}
+      style={{ cursor: disabled ? "default" : editing ? "text" : "ew-resize", touchAction: "none", ...style }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
