@@ -105,7 +105,7 @@
     "scrubTitle": "{{label}} – ziehen zum Scrubben, klicken zum Tippen, ↑/↓ in Schritten ({{min}}…{{max}})"
   },
 
-  "macros": { "Bass": "Bass", "Treble": "Treble", "Air": "Air" },
+  "macros": { "Bass": "Bass", "Treble": "Höhen", "Air": "Luft" },
 
   "compare": {
     "title": "Vergleich",
