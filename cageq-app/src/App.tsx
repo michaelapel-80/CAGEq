@@ -461,7 +461,11 @@ function App() {
             setMeasurementPath(savedHp.path);
           }
           const savedTarget = sel.target && tg.targets.some((t) => t.path === sel.target) ? sel.target : undefined;
-          const harman = tg.targets.find((t) => /harman over-ear 2018$/i.test(t.name));
+          // The plain "Harman over-ear 2018" — matched exactly. (A `$`-anchored regex also matched
+          // lab-prefixed variants like "crinacle … Harman over-ear 2018", which sort first and won.)
+          const harman =
+            tg.targets.find((t) => t.name.toLowerCase() === "harman over-ear 2018") ??
+            tg.targets.find((t) => /^harman over-ear 2018\b/i.test(t.name));
           setTargetPath(savedTarget ?? harman?.path ?? tg.targets[0]?.path ?? "");
         }
       } catch (e) {
