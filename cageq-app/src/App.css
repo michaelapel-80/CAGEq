@@ -1018,15 +1018,9 @@ select:disabled {
   border-color: #c0392b;
   color: #c0392b;
 }
-/* Fixed Bass/Treble macro bands: a faint stage-colour wash over the recessed strip + a label
-   where the remove ✕ would be. */
-.tg-col-fixed {
-  background: linear-gradient(
-    to bottom,
-    color-mix(in srgb, var(--tg) 10%, transparent),
-    color-mix(in srgb, var(--tg) 4%, transparent)
-  );
-}
+/* Fixed Bass/Treble/Air macro bands use the exact same neutral wash as a regular column (they
+   inherit .tg-col's background — no override), so the Tone tab matches Fit/Content. The locked
+   type + the Bass/Treble/Air label below carry the "permanent" distinction. */
 .tg-fixed {
   height: 20px;
   display: flex;
@@ -1051,8 +1045,10 @@ select:disabled {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  border: 1.5px solid rgba(128, 128, 128, 0.6);
-  background: transparent;
+  /* Unlit LED (bypassed band): a flat, darkened cut of the stage colour — no gradient, no
+     bloom. The lit state (.on) overrides with the gaussian dome + glow. */
+  border: 1.5px solid color-mix(in srgb, var(--tg, #16a34a) 55%, #000);
+  background: color-mix(in srgb, var(--tg, #16a34a) 38%, #000);
 }
 .tg-enable.on .tg-led {
   border-color: var(--tg, #16a34a);
