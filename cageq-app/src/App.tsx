@@ -1574,24 +1574,32 @@ function App() {
           {loudness && (
             <div className="panel">
               <h2>Loudness</h2>
-              <label style={{ display: "block", marginBottom: "0.2em" }}>
-                <input
-                  type="radio"
-                  name="loudness-mode"
-                  checked={loudness.mode === "Comparison"}
-                  onChange={() => requestLoudness({ ...loudness, mode: "Comparison" })}
-                />{" "}
-                Comparison (A/B-fair)
-              </label>
-              <label style={{ display: "block", marginBottom: "0.4em" }}>
-                <input
-                  type="radio"
-                  name="loudness-mode"
-                  checked={loudness.mode === "FinalVolume"}
-                  onChange={() => requestLoudness({ ...loudness, mode: "FinalVolume" })}
-                />{" "}
-                Final volume (loudest safe)
-              </label>
+              {/* Segmented mode selector, lit like the stage/slot chips: Comparison in the accent,
+                  Final volume in amber — the "hot" (loudest-safe) mode, which is confirm-gated. */}
+              <div className="ld-modes" role="radiogroup" aria-label="Loudness mode">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={loudness.mode === "Comparison"}
+                  className={`ld-mode${loudness.mode === "Comparison" ? " active" : ""}`}
+                  style={{ "--md": "#3b82f6" } as CSSProperties}
+                  onClick={() => requestLoudness({ ...loudness, mode: "Comparison" })}
+                >
+                  <span className="ld-mode-t">Comparison</span>
+                  <span className="ld-mode-s">A/B-fair</span>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={loudness.mode === "FinalVolume"}
+                  className={`ld-mode${loudness.mode === "FinalVolume" ? " active" : ""}`}
+                  style={{ "--md": "#daa520" } as CSSProperties}
+                  onClick={() => requestLoudness({ ...loudness, mode: "FinalVolume" })}
+                >
+                  <span className="ld-mode-t">Final volume</span>
+                  <span className="ld-mode-s">loudest safe</span>
+                </button>
+              </div>
               <label className="row" style={{ opacity: loudness.mode === "Comparison" ? 1 : 0.4, fontSize: "0.85em" }}>
                 Base pre-gain
                 <input
@@ -1689,16 +1697,17 @@ function App() {
                   {showAllStages ? "active stage" : "show all"}
                 </button>
               </h3>
-              {showCurated && (
-                <div className="row" style={{ gap: "0.35em" }}>
-                  {CURATED_TEMPLATES.map((t) => (
-                    <button key={t.id} type="button" disabled={dryActive} onClick={() => loadTemplate(t)} style={{ fontSize: "0.8em" }}>
-                      {t.name}
-                    </button>
-                  ))}
-                </div>
-              )}
-              {visibleTemplates.length > 0 && (
+              <div className="pl-scroll">
+                {showCurated && (
+                  <div className="row pl-curated">
+                    {CURATED_TEMPLATES.map((t) => (
+                      <button key={t.id} type="button" disabled={dryActive} onClick={() => loadTemplate(t)}>
+                        {t.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {visibleTemplates.length > 0 && (
                 <ul className="pl-list">
                   {visibleTemplates.map((t) => (
                     <li key={t.id} className="pl-item">
@@ -1728,54 +1737,48 @@ function App() {
                     </li>
                   ))}
                 </ul>
-              )}
+                )}
+              </div>
 
               <h3 className="pl-group">
                 Presets <span>measurement + target + all stages</span>
               </h3>
-              {library.presets.length > 0 ? (
-                <ul className="pl-list">
-                  {library.presets.map((p) => (
-                    <li key={p.id} className="pl-item">
-                      <span className="pl-name" title={`${p.name} — ${p.model || "no measurement"}`}>
-                        {p.name}
-                      </span>
-                      <button type="button" disabled={dryActive} onClick={() => loadPreset(p)}>
-                        Load
-                      </button>
-                      <button
-                        type="button"
-                        className="pl-upd"
-                        title={measurementPath ? "Overwrite with the current setup" : "Pick a headphone to overwrite this preset"}
-                        disabled={dryActive || !measurementPath}
-                        onClick={() => updatePreset(p)}
-                      >
-                        💾
-                      </button>
-                      <button type="button" className="pl-del" title="Delete" onClick={() => deletePreset(p)}>
-                        🗑
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="pl-empty">Pick a headphone + target, then 💾 Save a full preset to recall the whole setup.</p>
-              )}
+              <div className="pl-scroll">
+                {library.presets.length > 0 ? (
+                  <ul className="pl-list">
+                    {library.presets.map((p) => (
+                      <li key={p.id} className="pl-item">
+                        <span className="pl-name" title={`${p.name} — ${p.model || "no measurement"}`}>
+                          {p.name}
+                        </span>
+                        <button type="button" disabled={dryActive} onClick={() => loadPreset(p)}>
+                          Load
+                        </button>
+                        <button
+                          type="button"
+                          className="pl-upd"
+                          title={measurementPath ? "Overwrite with the current setup" : "Pick a headphone to overwrite this preset"}
+                          disabled={dryActive || !measurementPath}
+                          onClick={() => updatePreset(p)}
+                        >
+                          💾
+                        </button>
+                        <button type="button" className="pl-del" title="Delete" onClick={() => deletePreset(p)}>
+                          🗑
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="pl-empty">Pick a headphone + target, then 💾 Save a full preset to recall the whole setup.</p>
+                )}
+              </div>
             </div>
           )}
         </aside>
       </div>
 
       {error && <p style={{ color: "crimson" }}>{error}</p>}
-
-      {result && (
-        <details style={{ marginTop: "0.5em", fontSize: "0.8em" }}>
-          <summary style={{ cursor: "pointer", opacity: 0.7 }}>Written config — {result.cageq_path}</summary>
-          <pre style={{ textAlign: "left", background: "#0002", padding: "0.75em", overflowX: "auto" }}>
-            {result.cageq_text}
-          </pre>
-        </details>
-      )}
 
       <footer className="app-footer">
         Headphone corrections and target curves from{" "}

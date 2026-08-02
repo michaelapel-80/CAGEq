@@ -172,19 +172,54 @@ select:disabled {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
   gap: 1.1rem;
-  align-items: start;
+  /* Stretch both columns to the taller one's height so the shorter column can fill its cell
+     (see the aside/Presets rules) instead of leaving dead space above the footer. */
+  align-items: stretch;
+}
+/* Right column: stack the panels and let the Presets panel grow to fill the leftover height,
+   with its saved-preset list taking the slack — more rows when there's room, still scrolls
+   when the library is long. Keeps the right column hugging the (usually taller) left column. */
+.app-main > aside {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.app-main > aside > .panel:last-child {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.app-main > aside > .panel:last-child > .pl-scroll:last-child {
+  /* flex-basis 0 so the list's own content height doesn't feed back into the column sizing
+     (which would make the right column outgrow the left); it grows to fill the left column's
+     height and scrolls past that. */
+  flex: 1 1 0;
+  max-height: none;
+  min-height: 3.5rem;
 }
 @media (max-width: 950px) {
   .app-main {
     grid-template-columns: minmax(0, 1fr);
   }
+  /* Stacked (narrow) layout: don't let the Presets panel stretch to fill the viewport. */
+  .app-main > aside > .panel:last-child,
+  .app-main > aside > .panel:last-child > .pl-scroll:last-child {
+    flex: 0 1 auto;
+  }
+  .app-main > aside > .panel:last-child > .pl-scroll:last-child {
+    max-height: 12rem;
+  }
 }
 
 .panel {
-  border: 1px solid rgba(128, 128, 128, 0.35);
-  border-radius: 6px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 7px;
   padding: 0.5rem 0.75rem;
   margin: 0 0 0.55rem;
+  /* Subtle instrument-panel face: a faint top-lit wash + a hairline top bevel. */
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--fg) 3%, transparent), transparent 55%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 7%, transparent);
 }
 .panel > h2 {
   font-size: 0.72rem;
@@ -192,6 +227,66 @@ select:disabled {
   letter-spacing: 0.05em;
   opacity: 0.6;
   margin: 0 0 0.45rem;
+}
+
+/* --- §4 loudness: mode selector as a lit segmented toggle -------------------
+   Two segments in a recessed track; the active one lights in its --md colour (Comparison
+   accent-blue, Final volume amber — the "hot", confirm-gated mode). */
+.ld-modes {
+  display: flex;
+  gap: 0;
+  margin-bottom: 0.5rem;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: 6px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.14);
+}
+.ld-mode {
+  --md: var(--accent);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.05em;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0.3em 0.4em;
+  opacity: 0.68;
+  transition: background 0.16s, box-shadow 0.16s, color 0.16s, opacity 0.16s;
+}
+.ld-mode + .ld-mode {
+  border-left: 1px solid rgba(128, 128, 128, 0.28);
+}
+.ld-mode:hover {
+  opacity: 0.9;
+}
+.ld-mode.active {
+  opacity: 1;
+  color: var(--md);
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--md) 22%, transparent),
+    color-mix(in srgb, var(--md) 7%, transparent)
+  );
+  box-shadow:
+    inset 0 -2px 0 var(--md),
+    inset 0 0 11px -4px color-mix(in srgb, var(--md) 85%, transparent);
+}
+.ld-mode-t {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.ld-mode.active .ld-mode-t {
+  text-shadow: 0 0 7px color-mix(in srgb, var(--md) 55%, transparent);
+}
+.ld-mode-s {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
 }
 
 /* Dashboard rows read left-to-right, not centred like the starter template. */
@@ -438,8 +533,8 @@ select:disabled {
 
 /* --- footer: AutoEq attribution (MIT) + acknowledgement --------------------- */
 .app-footer {
-  margin-top: 1rem;
-  padding-top: 0.6rem;
+  margin-top: 0.0rem;
+  padding-top: 0.0rem;
   border-top: 1px solid rgba(128, 128, 128, 0.25);
   font-size: 0.72rem;
   opacity: 0.6;
@@ -1062,7 +1157,13 @@ select:disabled {
 .pl-toggle button.on {
   opacity: 1;
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--accent) 22%, transparent),
+    color-mix(in srgb, var(--accent) 7%, transparent)
+  );
+  box-shadow: inset 0 0 9px -4px color-mix(in srgb, var(--accent) 80%, transparent);
 }
 .pl-hint {
   font-size: 0.72rem;
@@ -1090,19 +1191,69 @@ select:disabled {
   opacity: 0.8;
 }
 
+/* Curated tone shapes (Flat / Bass boost / …) as pill chips. */
+.pl-curated {
+  gap: 0.35em;
+}
+.pl-curated button {
+  font-size: 0.78rem;
+  padding: 0.18em 0.65em;
+  border-radius: 999px;
+  opacity: 0.85;
+}
+.pl-curated button:hover:not(:disabled) {
+  opacity: 1;
+  border-color: var(--accent);
+}
+
+/* A group's scroll region — wraps the curated chips *and* the list together so the whole
+   section is capped (the curated tone chips would otherwise stack on top of the list and make
+   the Tone stage taller than the others). A long library scrolls inside instead of stretching
+   the layout; the recessed rows keep their hover ring clear of the scrollbar via padding. */
+.pl-scroll {
+  max-height: 6.5rem;
+  overflow-y: auto;
+  margin-top: 0.35rem;
+  padding-right: 0.2rem;
+  scrollbar-width: thin;
+}
+.pl-scroll::-webkit-scrollbar {
+  width: 7px;
+}
+.pl-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--fg) 22%, transparent);
+  border-radius: 4px;
+}
+.pl-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--fg) 34%, transparent);
+}
+
 /* Saved-entry rows: name grows, then a Load and a delete button. */
 .pl-list {
   list-style: none;
-  margin: 0.35rem 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.1rem;
+}
+/* Space the list under the curated chips when both share a scroll region. */
+.pl-curated + .pl-list {
+  margin-top: 0.35rem;
 }
 .pl-item {
   display: flex;
   align-items: center;
   gap: 0.3rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  transition: background 0.14s, border-color 0.14s;
+}
+.pl-item:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
 }
 .pl-name {
   flex: 1;
