@@ -302,6 +302,12 @@ function App() {
   // letting them stretch past it (the chart-wrap also holds the legend). Measured near the return.
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const [plotBox, setPlotBox] = useState<{ top: number; height: number } | null>(null);
+  // The chart legend renders (via portal) into this full-width host *below* the chart-row, so its
+  // toggle chips can use the whole width (incl. under the meters) instead of the chart's column —
+  // long (localized) labels then have room. State (not a ref) so the portal target triggers a
+  // render once mounted. Both the freq and time charts target it, keeping the chart-row height
+  // identical across the domain swap.
+  const [legendHost, setLegendHost] = useState<HTMLDivElement | null>(null);
   // Undo/redo (v1): a single stack of whole-`stages` snapshots for the *current* slot, reset on
   // slot switch (deliberately not per-slot — a history that changes meaning when you switch slots
   // is more confusing than useful). Snapshots are the immutable `stages` object, so they cost
@@ -1392,7 +1398,7 @@ function App() {
                   <div className="chart-row">
                   <div className="chart-wrap" ref={chartWrapRef}>
                     {impulseView && !dryActive ? (
-                      <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} />
+                      <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
                     ) : (
                       <EqChart
                         series={chartSeries}
@@ -1401,6 +1407,7 @@ function App() {
                         phase={chartPhase}
                         spectrum={spectrum}
                         eqBands={dryActive ? undefined : result.filters}
+                        legendHost={legendHost}
                         height={215}
                         nodes={{
                           bands: activeBands,
@@ -1432,6 +1439,9 @@ function App() {
                       <Meter deviceId={deviceId} plotBox={plotBox} />
                     </div>
                   </div>
+                  {/* Full-width host for the chart legend (portaled from the chart) — spans under
+                      the meters too, so long/localized toggle labels have room. */}
+                  <div ref={setLegendHost} className="chart-legend-host" />
                   {result.clipping_warning && (
                     <p style={{ color: "#b8860b", fontSize: "0.8em", margin: "0.2em 0 0" }}>
                       {tr("correction.clipping")}

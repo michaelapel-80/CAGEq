@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, logGrid, phaseDeg } from "./biquad";
 
@@ -124,6 +125,7 @@ export function EqChart({
   nodes,
   spectrum,
   eqBands,
+  legendHost,
   height = 210,
 }: {
   series: Series[];
@@ -136,6 +138,9 @@ export function EqChart({
   /** The applied filter cascade (AutoEq fit + custom). Its magnitude response is removed from
    *  the post-EQ capture per bin so the backdrop shows the **pre-filter** source spectrum. */
   eqBands?: Band[];
+  /** If given, the legend renders (via portal) into this element instead of inline — used to
+   *  place it full-width below the chart+meters row so long labels have room. */
+  legendHost?: HTMLElement | null;
   height?: number;
 }) {
   const { t } = useTranslation();
@@ -380,6 +385,42 @@ export function EqChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spectrum, phaseOn, eqBands]);
 
+  const legendMarkup = (
+    <div className="eq-legend">
+      {legend.map((row) => {
+        const off = isHidden(row.id);
+        return (
+          <button
+            type="button"
+            key={`l${row.id}`}
+            className={`eq-legend-item${off ? " off" : ""}`}
+            aria-pressed={!off}
+            onClick={() => toggle(row.id)}
+            title={off ? t("chart.show", { label: row.label }) : t("chart.hide", { label: row.label })}
+          >
+            <svg className="eq-swatch" viewBox="0 0 18 10" width="18" height="10" aria-hidden="true">
+              {row.style === "diamond" ? (
+                <path d="M9,1.5L13,5L9,8.5L5,5Z" fill={row.color} fillOpacity={0.8} />
+              ) : (
+                <line
+                  x1={1}
+                  x2={17}
+                  y1={5}
+                  y2={5}
+                  stroke={row.color}
+                  strokeWidth={row.style === "solid" ? 2.4 : row.style === "dotted" ? 1.6 : 1.6}
+                  strokeDasharray={row.style === "dotted" ? "1.5 2.5" : row.style === "dashed" ? "4 3" : undefined}
+                  strokeLinecap={row.style === "dotted" ? "round" : undefined}
+                />
+              )}
+            </svg>
+            <span>{row.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div className="eq-chart">
     {/* phosphor spectrum backdrop — same viewBox coords as the SVG (CSS-scaled to match), behind it */}
@@ -611,40 +652,14 @@ export function EqChart({
 
     </svg>
 
-      {/* legend — below the plot (not overlapping it); click a chip to hide/show */}
-      <div className="eq-legend">
-        {legend.map((row) => {
-          const off = isHidden(row.id);
-          return (
-            <button
-              type="button"
-              key={`l${row.id}`}
-              className={`eq-legend-item${off ? " off" : ""}`}
-              aria-pressed={!off}
-              onClick={() => toggle(row.id)}
-              title={off ? t("chart.show", { label: row.label }) : t("chart.hide", { label: row.label })}
-            >
-              <svg className="eq-swatch" viewBox="0 0 18 10" width="18" height="10" aria-hidden="true">
-                {row.style === "diamond" ? (
-                  <path d="M9,1.5L13,5L9,8.5L5,5Z" fill={row.color} fillOpacity={0.8} />
-                ) : (
-                  <line
-                    x1={1}
-                    x2={17}
-                    y1={5}
-                    y2={5}
-                    stroke={row.color}
-                    strokeWidth={row.style === "solid" ? 2.4 : row.style === "dotted" ? 1.6 : 1.6}
-                    strokeDasharray={row.style === "dotted" ? "1.5 2.5" : row.style === "dashed" ? "4 3" : undefined}
-                    strokeLinecap={row.style === "dotted" ? "round" : undefined}
-                  />
-                )}
-              </svg>
-              <span>{row.label}</span>
-            </button>
-          );
-        })}
-      </div>
+      {/* legend — below the plot; click a chip to hide/show. Portaled into `legendHost` (a
+          full-width host below the chart+meters row) when given, else rendered inline. */}
+      {legendPortal(legendMarkup, legendHost)}
     </div>
   );
+}
+
+/** Render `markup` into `host` via a portal when a host is provided, else inline. */
+function legendPortal(markup: ReactNode, host?: HTMLElement | null) {
+  return host ? createPortal(markup, host) : markup;
 }

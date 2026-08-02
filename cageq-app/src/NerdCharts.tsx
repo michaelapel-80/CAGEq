@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, FS, impulseResponse } from "./biquad";
 
@@ -20,7 +21,20 @@ const WINDOW_DB = -70; // decay tail below this (rel. peak) is treated as settle
 const FLOOR_DB = -80; // display floor
 const DB_TICKS = [0, -20, -40, -60];
 
-export function ImpulseChart({ bands, color, height = 215, fs = FS }: { bands: Band[]; color: string; height?: number; fs?: number }) {
+export function ImpulseChart({
+  bands,
+  color,
+  height = 215,
+  fs = FS,
+  legendHost,
+}: {
+  bands: Band[];
+  color: string;
+  height?: number;
+  fs?: number;
+  /** Full-width host to portal the caption into (matches EqChart's legend placement). */
+  legendHost?: HTMLElement | null;
+}) {
   const { t } = useTranslation();
   const H = height;
   const plotW = W - PAD.l - PAD.r;
@@ -87,9 +101,17 @@ export function ImpulseChart({ bands, color, height = 215, fs = FS }: { bands: B
         })}
         <path d={d} fill="none" stroke={color} strokeWidth={1.6} strokeLinejoin="round" />
       </svg>
-      <div className="eq-legend" style={{ opacity: 0.55, fontSize: "0.72rem" }}>
-        <span>{t("chart.impulseCaption")}</span>
-      </div>
+      {legendPortal(
+        <div className="eq-legend" style={{ opacity: 0.55, fontSize: "0.72rem" }}>
+          <span>{t("chart.impulseCaption")}</span>
+        </div>,
+        legendHost,
+      )}
     </div>
   );
+}
+
+/** Render into `host` via a portal when provided, else inline (mirrors EqChart). */
+function legendPortal(markup: ReactNode, host?: HTMLElement | null) {
+  return host ? createPortal(markup, host) : markup;
 }
