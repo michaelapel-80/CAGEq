@@ -1224,7 +1224,24 @@ function App() {
 
       {/* ---- header: the "set once per session" inputs (§5.1) ---- */}
       <header className="app-header">
-        <h1>CAGEq</h1>
+        {/* Wordmark: headphone-band-over-EQ-bars glyph (currentColor so it tracks the theme) +
+            "Eq" set lighter/dimmer so the EQ part reads as its own token — no gap, no colour. */}
+        <span className="brand">
+          <svg className="brand-glyph" viewBox="0 0 64 64" role="img" aria-label="CAGEq logo">
+            <path d="M13 36 C13 1 51 1 51 36" fill="none" stroke="currentColor" strokeOpacity={0.55} strokeWidth={2.4} strokeLinecap="round" />
+            <rect x="9.5" y="31" width="7" height="17" rx="3.5" fill="currentColor" fillOpacity={0.55} />
+            <rect x="47.5" y="31" width="7" height="17" rx="3.5" fill="currentColor" fillOpacity={0.55} />
+            <g fill="currentColor">
+              <rect x="19" y="26" width="3.5" height="21" rx="1.75" />
+              <rect x="26.5" y="21" width="3.5" height="37" rx="1.75" />
+              <rect x="41.5" y="24" width="3.5" height="23" rx="1.75" />
+            </g>
+            <rect x="34" y="32" width="3.5" height="26" rx="1.75" fill="#f4b73f" />
+          </svg>
+          <h1>
+            CAG<span className="wordmark-eq">Eq</span>
+          </h1>
+        </span>
         {!loading && (
           <>
             <span className="row" style={{ gap: "0.4em" }}>
