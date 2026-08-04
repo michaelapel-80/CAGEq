@@ -1102,6 +1102,11 @@ function App() {
   useEffect(() => {
     if (autoEqBands.length === 0) setAutoEqView(false);
   }, [autoEqBands.length]);
+  // The AutoEq tab's band count, taken from the *live* fit but falling back to the active slot's
+  // cached fit so the tab renders in the same paint as the editable tabs on a slot switch — the
+  // live `result` arrives a beat after `stages`, which otherwise made the tab pop in late.
+  const activeFit = activeSlot === "A" || activeSlot === "B" ? slotFits[activeSlot] : null;
+  const autoEqCount = autoEqBands.length || (activeFit ? Math.max(0, activeFit.filters.length - appliedCustom.length) : 0);
 
   // §5.2 chart: only the *active* slot's total (drawing every slot at once crowded the
   // legend once the per-stage lines were added — the A/B comparison is primarily by ear).
@@ -1570,7 +1575,7 @@ function App() {
                         </div>
                       );
                     })}
-                    {autoEqBands.length > 0 && (
+                    {autoEqCount > 0 && (
                       <div
                         className={`stage-seg stage-seg-ro${autoEqView ? " active" : ""}`}
                         style={{ "--stage": AUTOEQ_COLOR } as CSSProperties}
@@ -1584,7 +1589,7 @@ function App() {
                           onClick={() => setAutoEqView(true)}
                         >
                           {tr("stages.autoeq.label")}
-                          <span className="stage-count">{autoEqBands.length}</span>
+                          <span className="stage-count">{autoEqCount}</span>
                         </button>
                       </div>
                     )}
