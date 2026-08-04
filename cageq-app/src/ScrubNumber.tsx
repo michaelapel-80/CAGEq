@@ -234,7 +234,7 @@ export function ScrubNumber({
       disabled={disabled}
       readOnly={!editing}
       value={editing ? text : suffix ? `${shown} ${suffix}` : shown}
-      title={t("bands.scrubTitle", { label: ariaLabel, min, max })}
+      title={disabled ? ariaLabel : t("bands.scrubTitle", { label: ariaLabel, min, max })}
       style={{ cursor: disabled ? "default" : editing ? "text" : "ew-resize", touchAction: "none", ...style }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}

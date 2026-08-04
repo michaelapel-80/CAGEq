@@ -228,7 +228,7 @@ export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focu
               format={fmtGain}
               disabled={inert}
               style={tint(gainTint, gainAmt)}
-              ariaLabel={t("bands.gainAria", { name })}
+              ariaLabel={t("bands.gainAria", { name, unit: "dB" })}
               onInput={(v) => onInput(i, { gain_db: v })}
               onCommit={(v) => onCommit(i, { gain_db: v })}
             />
@@ -262,7 +262,7 @@ export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focu
                 format={fmtHz}
                 disabled={inert}
                 style={tint(fcHue(f.freq_hz), 100)}
-                ariaLabel={t("bands.fcAria", { kind: f.kind })}
+                ariaLabel={t("bands.fcAria", { kind: f.kind, unit: "Hz" })}
                 beginEditSignal={focusIndex === i ? focusNonce : undefined}
                 onInput={(v) => onInput(i, { freq_hz: v })}
                 onCommit={(v) => onCommit(i, { freq_hz: v })}
