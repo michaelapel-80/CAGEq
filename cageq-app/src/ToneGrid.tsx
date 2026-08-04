@@ -78,6 +78,9 @@ const fcBounds = (f: ToneBand): [number, number] => {
 };
 
 const fmtHz = (v: number) => (v >= 1000 ? `${+(v / 1000).toFixed(2)}k` : `${Math.round(v)}`);
+// Spoken/label form with the unit attached (kHz / Hz) — the compact `fmtHz` "1.2k" would read
+// as "1.2k Hz" once a bare " Hz" is appended, so aria strings carry the full unit here instead.
+const fmtHzUnit = (v: number) => (v >= 1000 ? `${+(v / 1000).toFixed(2)} kHz` : `${Math.round(v)} Hz`);
 const fmtGain = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
 
 // --- value-reactive tints -------------------------------------------------------------
@@ -160,7 +163,7 @@ export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focu
         const macroId = f.fixed ? (f.macro ?? (f.kind === "LowShelf" ? "Bass" : "Treble")) : null;
         const macroLabel = macroId ? t(`macros.${macroId}`) : null;
         const on = f.enabled !== false;
-        const name = macroLabel ?? t("bands.bandAt", { hz: fmtHz(f.freq_hz) });
+        const name = macroLabel ?? t("bands.bandAt", { hz: fmtHzUnit(f.freq_hz) });
         // Value-reactive tints (see the WARM/COOL block above). The gain readout warms/cools
         // with the setting (log ramp); the fader just shows a static gradient fill up to the thumb.
         const gainTint = f.gain_db >= 0 ? WARM : COOL;
@@ -278,7 +281,7 @@ export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focu
                 decimals={2}
                 disabled={inert}
                 style={tint(qTint, qAmt)}
-                ariaLabel={t("bands.qAria", { kind: f.kind, hz: fmtHz(f.freq_hz) })}
+                ariaLabel={t("bands.qAria", { kind: f.kind, hz: fmtHzUnit(f.freq_hz) })}
                 onInput={(v) => onInput(i, { q: v })}
                 onCommit={(v) => onCommit(i, { q: v })}
               />
