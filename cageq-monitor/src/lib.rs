@@ -123,10 +123,16 @@ mod windows_impl {
     const GLOW_SPAN_DB: f32 = 3.0;
 
     // --- spectrum analyzer (post-EQ loopback FFT) ---
-    /// FFT size. At 44.1 kHz ≈ 5.4 Hz bins / 186 ms window — decent low-end for resonance hunting.
-    const FFT_SIZE: usize = 8192;
-    /// Hop between successive windows (75% overlap) → Welch-style averaging, ~20 FFTs/s at 44.1k.
-    const FFT_HOP: usize = 2048;
+    /// Base FFT size at ≤48 kHz (≈5.9 Hz bins / 171 ms window — decent low-end for resonance
+    /// hunting). Scaled up with the sample rate in [`Spectrum::new`] so the analysis *window
+    /// duration* — and thus the low-frequency resolution — stays constant at 96/192 kHz instead of
+    /// halving/quartering. We only ever display up to 20 kHz, so analysing the whole (wider) band
+    /// and ignoring the bins above 20 kHz is simpler and alias-free vs. decimating the input.
+    const BASE_FFT_SIZE: usize = 8192;
+    /// The rate the base size is tuned for; higher rates scale the FFT proportionally.
+    const BASE_RATE: f32 = 48_000.0;
+    /// Hop is a quarter of the (per-rate) FFT size → 75% overlap, Welch-style averaging.
+    const FFT_OVERLAP_DIV: usize = 4;
     /// Number of log-frequency display bins spanning [SPEC_F_MIN, SPEC_F_MAX].
     const N_LOG_BINS: usize = 120;
     const SPEC_F_MIN: f32 = 20.0;
@@ -217,8 +223,10 @@ mod windows_impl {
     /// with a slow per-bin peak-hold for resonance spotting.
     struct Spectrum {
         fft: Arc<dyn RealToComplex<f32>>,
-        in_buf: Vec<f32>,          // realfft input scratch (len FFT_SIZE)
-        out_buf: Vec<Complex<f32>>, // realfft output scratch (len FFT_SIZE/2 + 1)
+        fft_size: usize,           // per-rate FFT length (BASE_FFT_SIZE scaled to the sample rate)
+        fft_hop: usize,            // hop between windows = fft_size / FFT_OVERLAP_DIV
+        in_buf: Vec<f32>,          // realfft input scratch (len fft_size)
+        out_buf: Vec<Complex<f32>>, // realfft output scratch (len fft_size/2 + 1)
         scratch: Vec<Complex<f32>>,
         window: Vec<f32>,          // Hann window
         accum: VecDeque<f32>,      // mono sample accumulator
@@ -232,18 +240,26 @@ mod windows_impl {
 
     impl Spectrum {
         fn new(rate: u32) -> Self {
-            let fft = RealFftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
+            // Scale the FFT length up with the rate so the window *duration* (≈171 ms) stays
+            // constant: FFT_SIZE = BASE × next_pow2(round(rate / 48 kHz)). 48 k→8192, 96 k→16384,
+            // 192 k→32768 (44.1/88.2/176.4 round to the same multiples). Keeps `bin_hz` — and the
+            // low-frequency resolution — identical across devices instead of coarsening at high rates.
+            let mult = ((rate as f32 / BASE_RATE).round().max(1.0) as usize).next_power_of_two();
+            let fft_size = BASE_FFT_SIZE * mult;
+            let fft_hop = fft_size / FFT_OVERLAP_DIV;
+
+            let fft = RealFftPlanner::<f32>::new().plan_fft_forward(fft_size);
             let in_buf = fft.make_input_vec();
             let out_buf = fft.make_output_vec();
             let scratch = fft.make_scratch_vec();
-            let window: Vec<f32> = (0..FFT_SIZE)
+            let window: Vec<f32> = (0..fft_size)
                 .map(|n| {
-                    0.5 - 0.5 * (2.0 * std::f32::consts::PI * n as f32 / FFT_SIZE as f32).cos()
+                    0.5 - 0.5 * (2.0 * std::f32::consts::PI * n as f32 / fft_size as f32).cos()
                 })
                 .collect();
 
-            let n_lin = FFT_SIZE / 2 + 1;
-            let bin_hz = rate as f32 / FFT_SIZE as f32;
+            let n_lin = fft_size / 2 + 1;
+            let bin_hz = rate as f32 / fft_size as f32;
             let ratio = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_BINS as f32 - 1.0));
             let half = ratio.sqrt();
             let mut ranges = Vec::with_capacity(N_LOG_BINS);
@@ -254,7 +270,7 @@ mod windows_impl {
                 ranges.push((lo.min(hi), hi));
             }
 
-            let smoothing = 1.0 - (-(FFT_HOP as f32 / rate as f32) / SPEC_TAU_SECS).exp();
+            let smoothing = 1.0 - (-(fft_hop as f32 / rate as f32) / SPEC_TAU_SECS).exp();
             // Amplitude normalization: a full-scale sine at a bin centre gives |X| = S1/2 (window
             // coherent gain), so multiply the one-sided amplitude by 2/S1 to read 1.0 → 0 dBFS.
             // In the power domain that's (2/S1)². S1 = sum(window). This makes the level absolute
@@ -263,6 +279,8 @@ mod windows_impl {
             let power_scale = (2.0 / s1).powi(2);
             Spectrum {
                 fft,
+                fft_size,
+                fft_hop,
                 in_buf,
                 out_buf,
                 scratch,
@@ -280,7 +298,7 @@ mod windows_impl {
         /// Feed mono samples; runs an FFT for every full hop and folds it into the running average.
         fn push(&mut self, mono: &[f32]) {
             self.accum.extend(mono.iter().copied());
-            while self.accum.len() >= FFT_SIZE {
+            while self.accum.len() >= self.fft_size {
                 for (i, w) in self.window.iter().enumerate() {
                     self.in_buf[i] = self.accum[i] * w;
                 }
@@ -295,7 +313,7 @@ mod windows_impl {
                     }
                     self.fresh = true;
                 }
-                for _ in 0..FFT_HOP {
+                for _ in 0..self.fft_hop {
                     self.accum.pop_front();
                 }
             }
