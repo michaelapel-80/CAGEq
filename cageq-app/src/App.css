@@ -118,6 +118,15 @@ select:disabled {
   max-width: 1500px;
   text-align: left;
 }
+/* Short viewports (e.g. a 1080p laptop at Windows 125% scaling ≈ 864 CSS px tall) get the whole
+   app scaled down a notch so it fits without feeling oversized — chart, faders, text and all.
+   `zoom` sits on .app, not :root, so scaling the content never changes the window dimensions the
+   media query tests against (which on :root would flip-flop the rule on and off). */
+@media (max-height: 900px) {
+  .app {
+    zoom: 0.9;
+  }
+}
 .app h1 {
   text-align: left;
   font-size: 1.25rem;
