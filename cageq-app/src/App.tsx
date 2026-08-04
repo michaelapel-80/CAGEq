@@ -292,6 +292,9 @@ function App() {
   // Live post-EQ spectrum (loopback FFT) drawn on the chart. The Meter component owns start/stop
   // of the capture; here we just subscribe to the `spectrum` events it produces.
   const [spectrum, setSpectrum] = useState<SpectrumData | null>(null);
+  // The selected output's live mix sample rate (Hz), reported by the loopback monitor (§8 read-only
+  // format display). Null when monitoring isn't running yet. Shown next to the device picker.
+  const [sampleRate, setSampleRate] = useState<number | null>(null);
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
@@ -845,6 +848,15 @@ function App() {
     if (dev) await invoke("set_device", { device: dev.eqapo_pattern });
   }
 
+  // §8: jump to the modern Windows Sound settings for the selected output so the user can change
+  // its playback format there (CAGEq only reads the sample rate, never sets the format). The
+  // backend picks the right deep-link (default device → its properties page, else the device list).
+  const openOutputSettings = () => {
+    void invoke("open_output_settings", { device: deviceId || null }).catch((e) => setError(String(e)));
+  };
+  // Windows playback rate, shown compactly (48 kHz, 44.1 kHz, 96 kHz…).
+  const fmtRate = (hz: number) => `${+(hz / 1000).toFixed(1)} kHz`;
+
   // §3.4 tone editing — every change auto-applies (throttled). Edits target the *active
   // stage's* band list (the grid + chart nodes show only that stage); indices are into it.
   const setStageBands = (stage: StageId, updater: (bands: CustomFilter[]) => CustomFilter[]) =>
@@ -1295,14 +1307,30 @@ function App() {
               {devices.length === 0 ? (
                 <span style={{ opacity: 0.7, fontSize: "0.85em" }}>{tr("header.noDevice")}</span>
               ) : (
-                <select id="device-select" value={deviceId} onChange={(e) => changeDevice(e.currentTarget.value)}>
-                  {devices.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name}
-                      {d.eqapo_enabled ? "" : tr("header.apoNotInstalledOption")}
-                    </option>
-                  ))}
-                </select>
+                <>
+                  <select id="device-select" value={deviceId} onChange={(e) => changeDevice(e.currentTarget.value)}>
+                    {devices.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                        {d.eqapo_enabled ? "" : tr("header.apoNotInstalledOption")}
+                      </option>
+                    ))}
+                  </select>
+                  {/* Rate readout doubles as the deep-link button — click the format to change it
+                      in Windows Sound settings (one control, saves header width). */}
+                  <button
+                    type="button"
+                    className="dev-settings"
+                    onClick={openOutputSettings}
+                    title={tr("header.soundSettings")}
+                    aria-label={tr("header.soundSettings")}
+                  >
+                    {sampleRate != null && <span className="dev-rate">{fmtRate(sampleRate)}</span>}
+                    <span className="dev-gear" aria-hidden>
+                      ⚙
+                    </span>
+                  </button>
+                </>
               )}
             </span>
             <form
@@ -1319,7 +1347,8 @@ function App() {
                 value={query}
                 onChange={(e) => onModelInput(e.currentTarget.value)}
                 placeholder={tr("header.searchPlaceholder", { count: byModel.size })}
-                style={{ minWidth: "14em" }}
+                size={1}
+                style={{ width: "13em", minWidth: 0 }}
                 disabled={dryActive}
               />
               <datalist id="model-list">
@@ -1356,8 +1385,8 @@ function App() {
           aria-label={tr("lang.label")}
         >
           {LANGS.map((l) => (
-            <option key={l.code} value={l.code}>
-              {l.label}
+            <option key={l.code} value={l.code} title={l.label}>
+              {l.code.toUpperCase()}
             </option>
           ))}
         </select>
@@ -1474,7 +1503,7 @@ function App() {
                   </div>
                     {/* §5.3c post-EQ meters beside the chart (loopback, post-EQ) — always on. */}
                     <div className="meter-col">
-                      <Meter deviceId={deviceId} plotBox={plotBox} />
+                      <Meter deviceId={deviceId} plotBox={plotBox} onSampleRate={setSampleRate} />
                     </div>
                   </div>
                   {/* Full-width host for the chart legend (portaled from the chart) — spans under

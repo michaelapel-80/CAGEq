@@ -23,7 +23,8 @@
     "measurementTitle": "Measurement source / rig",
     "pickModel": "— pick a model —",
     "measBy": "by {{source}}",
-    "measOnRig": " on {{rig}}"
+    "measOnRig": " on {{rig}}",
+    "soundSettings": "Output sample rate — click to change the playback format in Windows Sound settings"
   },
 
   "slots": { "A": "Slot A", "B": "Slot B", "Dry": "Dry" },

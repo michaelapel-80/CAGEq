@@ -20,6 +20,8 @@ type MeterUpdate = {
   signal: boolean;
   /** Phosphor-persistence histogram: per-segment brightness 0..1, quietest segment first. */
   bins: number[];
+  /** Endpoint mix sample rate (Hz); 0 while the session is (re)opening. */
+  sample_rate: number;
 };
 
 // Level bar scale (dBFS). Must match the backend histogram range (BAR_MIN_DB) so the peak/RMS
@@ -40,25 +42,36 @@ const BAR_TOP_GAP = 14;
 export function Meter({
   deviceId,
   plotBox,
+  onSampleRate,
 }: {
   deviceId: string;
   /** Rendered chart plot-area box (px) so the bars match the chart's Y extent (top gridline → X
    *  axis) instead of stretching past it. Null until measured → bars just fill the column. */
   plotBox: { top: number; height: number } | null;
+  /** Reports the endpoint's mix sample rate (Hz, null when unknown) — the header shows it. Called
+   *  only when the value changes, so it never re-renders the parent at the meter's 60 fps. */
+  onSampleRate?: (hz: number | null) => void;
 }) {
   const { t } = useTranslation();
   const [bar, setBar] = useState<MeterUpdate | null>(null); // fast: bars + marks
   const [nums, setNums] = useState<MeterUpdate | null>(null); // throttled: readouts
   const [err, setErr] = useState<string | null>(null);
   const lastNums = useRef(0);
+  const lastRate = useRef<number | null>(null);
 
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
+    lastRate.current = null; // a new session may report a different (or the same) rate — re-emit it
     (async () => {
       unlisten = await listen<MeterUpdate>("monitor", (e) => {
         if (!active) return;
         setBar(e.payload);
+        const rate = e.payload.sample_rate || null;
+        if (rate !== lastRate.current) {
+          lastRate.current = rate;
+          onSampleRate?.(rate);
+        }
         const now = performance.now();
         if (now - lastNums.current >= NUMS_INTERVAL_MS) {
           lastNums.current = now;
@@ -75,8 +88,10 @@ export function Meter({
     return () => {
       active = false;
       unlisten?.();
+      onSampleRate?.(null); // monitor is stopping — the header rate is no longer live
       invoke("stop_monitor").catch(() => {});
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceId]);
 
   if (err) return <div className="meter meter-err">{t("meter.unavailable", { error: err })}</div>;

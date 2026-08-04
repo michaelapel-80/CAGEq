@@ -23,7 +23,8 @@
     "measurementTitle": "Messquelle / Rig",
     "pickModel": "— Modell wählen —",
     "measBy": "von {{source}}",
-    "measOnRig": " auf {{rig}}"
+    "measOnRig": " auf {{rig}}",
+    "soundSettings": "Ausgabe-Abtastrate – klicken, um das Wiedergabeformat in den Windows-Sound-Einstellungen zu ändern"
   },
 
   "slots": { "A": "Slot A", "B": "Slot B", "Dry": "Dry" },

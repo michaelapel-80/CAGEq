@@ -296,6 +296,49 @@ fn stop_monitor(state: State<MonitorState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Open the modern Windows Sound settings for the selected output, so the user can change its
+/// playback format (sample rate / bit depth). CAGEq only *reads* the format (via the loopback's
+/// mix rate) — the device-format property is read-only per Microsoft, so we point at the native
+/// tool rather than reimplement it (filter.md §8). When the selected device is the Windows
+/// default, jump straight to its properties page (format dropdown); otherwise open the general
+/// device list (there's no documented deep-link to a specific non-default device).
+#[tauri::command]
+fn open_output_settings(device: Option<String>) -> Result<(), String> {
+    let is_default = match &device {
+        None => true,
+        Some(id) => cageq_monitor::default_render_id()
+            .map(|d| d.to_ascii_lowercase().contains(&id.to_ascii_lowercase()))
+            .unwrap_or(false),
+    };
+    let uri = if is_default {
+        "ms-settings:sound-defaultoutputproperties"
+    } else {
+        "ms-settings:sound-devices"
+    };
+    open_uri(uri)
+}
+
+/// Fire-and-forget open of a URI via the OS shell. Windows only carries the `ms-settings:`
+/// scheme this feature uses; elsewhere it's a no-op.
+#[cfg(windows)]
+fn open_uri(uri: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    // `cmd /C start "" <uri>` — the empty "" is start's window-title arg, so the URI isn't
+    // swallowed as the title. Handles the ms-settings: scheme that ShellExecute registers.
+    // CREATE_NO_WINDOW keeps the transient cmd from flashing a console window.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    Command::new("cmd")
+        .args(["/C", "start", "", uri])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+#[cfg(not(windows))]
+fn open_uri(_uri: &str) -> Result<(), String> {
+    Ok(())
+}
+
 /// The raw headphone measurement + target curves (centered, shared dBr reference) for the
 /// §5.2 nerd overlays. Measurement/target-only, so it's fetched on its own rather than
 /// threaded through the apply/slot pipeline. Relayed as-is (`{ raw_curve, target_curve }`).
@@ -711,6 +754,7 @@ pub fn run() {
             list_devices,
             start_monitor,
             stop_monitor,
+            open_output_settings,
             list_targets,
             measurement_curves,
             get_loudness,

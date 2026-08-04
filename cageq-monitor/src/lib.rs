@@ -33,6 +33,10 @@ pub struct MeterUpdate {
     /// otherwise, so always-covered low segments stay bright and peaks leave a fading afterglow —
     /// the meter's glow. Empty while idle.
     pub bins: Vec<f32>,
+    /// The endpoint's shared-mode mix sample rate (Hz) — i.e. Windows' configured playback rate
+    /// for this device, which the loopback runs at. `0` while the session is (re)opening. The UI
+    /// surfaces it next to the device picker (filter.md §8, read-only format display).
+    pub sample_rate: u32,
 }
 
 /// A post-EQ spectrum snapshot (loopback FFT), emitted a few times a second on its own channel.
@@ -55,6 +59,20 @@ pub use windows_impl::Monitor;
 
 #[cfg(not(windows))]
 pub use stub::Monitor;
+
+/// The Windows default render endpoint's WASAPI id (`{0.0.0.00000000}.{guid}`), or `None` off
+/// Windows / on failure. Used to choose the right `ms-settings:` deep-link: the app's device id
+/// (the registry GUID) is the suffix of this, so a `contains` match tells whether the selected
+/// device *is* the default (filter.md §8). Runs the COM query on its own thread so it doesn't
+/// disturb the caller's apartment.
+#[cfg(windows)]
+pub fn default_render_id() -> Option<String> {
+    std::thread::spawn(windows_impl::default_render_id).join().ok().flatten()
+}
+#[cfg(not(windows))]
+pub fn default_render_id() -> Option<String> {
+    None
+}
 
 #[cfg(windows)]
 mod windows_impl {
@@ -335,6 +353,15 @@ mod windows_impl {
         Ok(enumerator.get_default_device(&Direction::Render)?)
     }
 
+    /// The default render endpoint's id — for the deep-link default check. Own-thread COM init
+    /// (see the public wrapper) so it's safe to call from any Tauri command thread.
+    pub(super) fn default_render_id() -> Option<String> {
+        let _ = initialize_mta(); // fresh thread → no COM yet; ignore (enumerator fails to None if not)
+        let enumerator = DeviceEnumerator::new().ok()?;
+        let dev = enumerator.get_default_device(&Direction::Render).ok()?;
+        dev.get_id().ok()
+    }
+
     fn capture_loop<F, G>(
         endpoint_id: Option<String>,
         stop: &AtomicBool,
@@ -364,6 +391,7 @@ mod windows_impl {
                     short_term_lufs: LUFS_FLOOR,
                     signal: false,
                     bins: Vec::new(),
+                    sample_rate: 0, // unknown until the session reopens and re-reads the mix format
                 });
                 sleep_unless_stopped(stop, Duration::from_millis(500));
             }
@@ -527,6 +555,7 @@ mod windows_impl {
                     ),
                     signal: last_signal.elapsed() < SILENCE_GAP,
                     bins: intensity.clone(),
+                    sample_rate: rate,
                 });
 
                 block_peak = 0.0;

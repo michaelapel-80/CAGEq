@@ -146,10 +146,20 @@ select:disabled {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem 1.1rem;
+  gap: 0.5rem 0.75rem;
   padding-bottom: 0.55rem;
   border-bottom: 1px solid rgba(128, 128, 128, 0.3);
   margin-bottom: 0.7rem;
+}
+/* Each label+control cluster stays a single non-wrapping unit that can shrink, so the header
+   wraps at whole-group boundaries and packs tightly — never a lone select dropping under its
+   label (which left slack on the first line). */
+.app-header > .row {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.app-header select {
+  min-width: 0;
 }
 /* One uniform height for every control in the header so the whole top row aligns cleanly —
    the theme toggle (line-height:1) and the smaller language picker were otherwise shorter than
@@ -165,6 +175,23 @@ select:disabled {
   align-items: center;
   justify-content: center;
 }
+/* One control next to the device picker (§8, read-only format display): the live sample rate
+   doubles as the deep-link button to the Windows format settings — click the format to change it.
+   Just the gear shows until a rate is known. */
+.dev-settings {
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  padding: 0.2rem 0.5rem;
+}
+.dev-rate {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dev-gear {
+  font-size: 0.95em;
+  opacity: 0.7;
+  line-height: 1;
+}
 /* Language picker + theme toggle sit together at the header's right edge. */
 .lang-select {
   margin-left: auto; /* pushes the pair to the right end of the header row */
@@ -172,7 +199,6 @@ select:disabled {
   padding: 0.2rem 0.35rem;
 }
 .theme-toggle {
-  margin-left: 0.35rem;
   font-size: 0.95rem;
   line-height: 1;
   padding: 0.2rem 0.4rem;
