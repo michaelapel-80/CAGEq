@@ -151,6 +151,20 @@ select:disabled {
   border-bottom: 1px solid rgba(128, 128, 128, 0.3);
   margin-bottom: 0.7rem;
 }
+/* One uniform height for every control in the header so the whole top row aligns cleanly —
+   the theme toggle (line-height:1) and the smaller language picker were otherwise shorter than
+   the selects/inputs, throwing the row off. box-sizing keeps their own padding/font intact. */
+.app-header select,
+.app-header input:not([type="range"]),
+.app-header button {
+  height: 2.1rem;
+  box-sizing: border-box;
+}
+.app-header button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 /* Language picker + theme toggle sit together at the header's right edge. */
 .lang-select {
   margin-left: auto; /* pushes the pair to the right end of the header row */
@@ -1074,6 +1088,25 @@ select:disabled {
   opacity: 0.4;
 }
 
+/* Read-only grid (the AutoEq fit stage): the same channel strips, but presented rather than
+   editable. Controls are inert yet stay at full contrast (undo the global disabled dimming) so
+   the fit reads as data, not a greyed-out form; the strips lose their edit affordances. */
+.tg-readonly .tg-num:disabled,
+.tg-readonly .tg-fader:disabled {
+  opacity: 1;
+}
+.tg-readonly .tg-kind,
+.tg-readonly .tg-num,
+.tg-readonly .tg-col {
+  cursor: default;
+}
+.tg-readonly .tg-num:hover {
+  border-color: transparent;
+}
+.tg-readonly .tg-fader:disabled::-webkit-slider-thumb {
+  box-shadow: 0 0 5px -1px color-mix(in srgb, var(--tg) 80%, transparent);
+}
+
 /* The trailing "add" column matches a band column's footprint. */
 .tg-add {
   flex: 0 0 auto;
@@ -1269,16 +1302,25 @@ select:disabled {
   white-space: nowrap;
   font-size: 0.85rem;
 }
+/* Inline rename field — sits in the name's slot, matching its footprint. */
+.pl-rename {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  padding: 0.05em 0.3em;
+}
 .pl-item button {
   font-size: 0.75rem;
   padding: 0.15em 0.5em;
 }
+.pl-ren,
 .pl-upd,
 .pl-del {
   border-color: transparent;
   opacity: 0.55;
   padding: 0.15em 0.35em;
 }
+.pl-ren:hover:not(:disabled),
 .pl-upd:hover:not(:disabled) {
   opacity: 1;
   border-color: var(--accent);

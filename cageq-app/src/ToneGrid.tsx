@@ -31,6 +31,9 @@ export type ToneBand = Band & { fixed?: boolean; enabled?: boolean; macro?: stri
 export type ToneGridProps = {
   filters: ToneBand[];
   disabled?: boolean;
+  /** Presented, not editable (the AutoEq fit stage): every control is inert, the edit
+   *  affordances (kind cycle, bypass, remove, add) drop out, but the strips stay full-contrast. */
+  readOnly?: boolean;
   /** The active stage's colour — lights the faders / LEDs / lit columns in the stage's hue,
    *  so the grid matches its stage chip (Fit cyan / Content pink / Tone green). */
   accent?: string;
@@ -122,8 +125,9 @@ function KindGlyph({ kind }: { kind: FilterKind }) {
   );
 }
 
-export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, hoverIndex, onHover, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
+export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focusNonce, hoverIndex, onHover, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
   const { t } = useTranslation();
+  const inert = disabled || readOnly; // no interaction while read-only, even without `disabled`
   // Display order: sort indices by Fc; storage order (and thus the indices we pass back)
   // never changes here, so focus survives a visual reorder.
   const order = filters.map((_, i) => i).sort((a, b) => filters[a].freq_hz - filters[b].freq_hz);
@@ -150,7 +154,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
   };
 
   return (
-    <div className="tg-grid" ref={gridRef} role="group" aria-label={t("bands.title")} style={accent ? ({ "--tg": accent } as CSSProperties) : undefined}>
+    <div className={`tg-grid${readOnly ? " tg-readonly" : ""}`} ref={gridRef} role="group" aria-label={t("bands.title")} style={accent ? ({ "--tg": accent } as CSSProperties) : undefined}>
       {order.map((i) => {
         const f = filters[i];
         const macroId = f.fixed ? (f.macro ?? (f.kind === "LowShelf" ? "Bass" : "Treble")) : null;
@@ -174,29 +178,41 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
             onPointerEnter={() => onHover?.(i)}
             onPointerLeave={() => onHover?.(null)}
           >
-            <button
-              type="button"
-              className={`tg-enable${on ? " on" : ""}`}
-              disabled={disabled}
-              role="switch"
-              aria-checked={on}
-              title={on ? t("bands.bypass", { name }) : t("bands.enable", { name })}
-              aria-label={on ? t("bands.bypass", { name }) : t("bands.enable", { name })}
-              onClick={() => onCommit(i, { enabled: !on })}
-            >
-              <span className="tg-led" aria-hidden="true" />
-            </button>
+            {readOnly ? (
+              <span className={`tg-enable${on ? " on" : ""}`} aria-hidden="true">
+                <span className="tg-led" />
+              </span>
+            ) : (
+              <button
+                type="button"
+                className={`tg-enable${on ? " on" : ""}`}
+                disabled={disabled}
+                role="switch"
+                aria-checked={on}
+                title={on ? t("bands.bypass", { name }) : t("bands.enable", { name })}
+                aria-label={on ? t("bands.bypass", { name }) : t("bands.enable", { name })}
+                onClick={() => onCommit(i, { enabled: !on })}
+              >
+                <span className="tg-led" aria-hidden="true" />
+              </button>
+            )}
 
-            <button
-              type="button"
-              className="tg-kind"
-              disabled={disabled || f.fixed}
-              title={f.fixed ? t("bands.kindFixed", { macro: macroLabel, kind: f.kind }) : t("bands.kindCycle", { kind: f.kind })}
-              aria-label={f.fixed ? t("bands.kindFixedAria", { macro: macroLabel, kind: f.kind }) : t("bands.kindCycleAria", { kind: f.kind })}
-              onClick={() => cycleKind(i, f.kind)}
-            >
-              <KindGlyph kind={f.kind} />
-            </button>
+            {readOnly ? (
+              <span className="tg-kind" title={f.kind} aria-label={t("bands.kindFixedAria", { macro: name, kind: f.kind })}>
+                <KindGlyph kind={f.kind} />
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="tg-kind"
+                disabled={disabled || f.fixed}
+                title={f.fixed ? t("bands.kindFixed", { macro: macroLabel, kind: f.kind }) : t("bands.kindCycle", { kind: f.kind })}
+                aria-label={f.fixed ? t("bands.kindFixedAria", { macro: macroLabel, kind: f.kind }) : t("bands.kindCycleAria", { kind: f.kind })}
+                onClick={() => cycleKind(i, f.kind)}
+              >
+                <KindGlyph kind={f.kind} />
+              </button>
+            )}
 
             <ScrubNumber
               className="tg-num tg-gain"
@@ -207,7 +223,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
               arrowStep={0.1}
               decimals={1}
               format={fmtGain}
-              disabled={disabled}
+              disabled={inert}
               style={tint(gainTint, gainAmt)}
               ariaLabel={t("bands.gainAria", { name })}
               onInput={(v) => onInput(i, { gain_db: v })}
@@ -222,7 +238,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
                 max={GAIN_MAX}
                 step={0.1}
                 value={f.gain_db}
-                disabled={disabled}
+                disabled={inert}
                 style={{ "--fill": fillPct } as CSSProperties}
                 aria-label={t("bands.gainFaderAria", { name })}
                 onChange={(e) => onInput(i, { gain_db: Number(e.currentTarget.value) })}
@@ -241,7 +257,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
                 arrowStep={1.02}
                 decimals={0}
                 format={fmtHz}
-                disabled={disabled}
+                disabled={inert}
                 style={tint(fcHue(f.freq_hz), 100)}
                 ariaLabel={t("bands.fcAria", { kind: f.kind })}
                 beginEditSignal={focusIndex === i ? focusNonce : undefined}
@@ -260,7 +276,7 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
                 mode="mult"
                 arrowStep={1.05}
                 decimals={2}
-                disabled={disabled}
+                disabled={inert}
                 style={tint(qTint, qAmt)}
                 ariaLabel={t("bands.qAria", { kind: f.kind, hz: fmtHz(f.freq_hz) })}
                 onInput={(v) => onInput(i, { q: v })}
@@ -268,7 +284,9 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
               />
             </label>
 
-            {f.fixed ? (
+            {readOnly ? (
+              <span className="tg-fixed">{f.kind === "Peaking" ? "PK" : f.kind === "LowShelf" ? "LS" : "HS"}</span>
+            ) : f.fixed ? (
               <span className="tg-fixed" title={t("bands.fixedTitle", { macro: macroLabel })}>
                 {macroLabel}
               </span>
@@ -288,10 +306,12 @@ export function ToneGrid({ filters, disabled, accent, focusIndex, focusNonce, ho
         );
       })}
 
-      <button type="button" className="tg-add" disabled={disabled} onClick={onAdd} title={t("bands.addTitle")}>
-        <span aria-hidden="true">＋</span>
-        <span className="tg-add-lbl">{t("bands.add")}</span>
-      </button>
+      {!readOnly && (
+        <button type="button" className="tg-add" disabled={disabled} onClick={onAdd} title={t("bands.addTitle")}>
+          <span aria-hidden="true">＋</span>
+          <span className="tg-add-lbl">{t("bands.add")}</span>
+        </button>
+      )}
     </div>
   );
 }

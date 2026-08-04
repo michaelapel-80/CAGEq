@@ -32,6 +32,7 @@
     "fit": { "label": "Anpassung", "hint": "Persönliche Korrektur auf die Zielkurve – Pads, Sitz, deine eigenen Ohren." },
     "content": { "label": "Material", "hint": "Anpassung ans Material – Dialog-Anhebung, heller Master." },
     "tone": { "label": "Klang", "hint": "Dein permanenter Geschmack. Die festen Bass/Treble/Air-Macros leben hier." },
+    "autoeq": { "label": "AutoEq", "hint": "AutoEqs automatischer parametrischer Fit zur Zielkurve – schreibgeschützt, nur zur Ansicht. Deine Stages Anpassung / Material / Klang kommen obendrauf." },
     "disabledSuffix": " · Stage deaktiviert (nicht angewandt)",
     "enable": "Stage {{stage}} aktivieren",
     "disable": "Stage {{stage}} deaktivieren"
@@ -88,6 +89,7 @@
     "dryNotice": "Dry ist die feste Referenz – wähle Slot A oder B, um Filterbänder zu bearbeiten.",
     "hint": "Wert ziehen zum Scrubben, klicken zum Tippen, ↑/↓ zum Feinjustieren · Doppelklick ins Diagramm fügt ein Band hinzu (oder ein Knoten zum Entfernen) · Änderungen wirken live.",
     "emptyHint": "Diese Stage hat noch keine Bänder – ＋ drücken oder Doppelklick ins Diagramm zum Hinzufügen.",
+    "autoeqReadonly": "Schreibgeschützt – diese Bänder stammen direkt aus AutoEqs Fit. Ändere die Zielkurve oder deine eigenen Stages, um den Klang zu formen.",
     "bypass": "{{name}} überbrücken",
     "enable": "{{name}} aktivieren",
     "bandAt": "Band bei {{hz}} Hertz",
@@ -151,6 +153,8 @@
     "updateTemplateTitle": "Mit den aktuellen {{stage}}-Bändern überschreiben",
     "updatePresetTitle": "Mit dem aktuellen Setup überschreiben",
     "updatePresetDisabledTitle": "Kopfhörer wählen, um dieses Preset zu überschreiben",
+    "renameTitle": "Umbenennen",
+    "renameAria": "{{name}} umbenennen",
     "deleteTitle": "Löschen",
     "emptyPresets": "Kopfhörer + Ziel wählen, dann 💾 ein volles Preset speichern, um das ganze Setup abzurufen."
   },

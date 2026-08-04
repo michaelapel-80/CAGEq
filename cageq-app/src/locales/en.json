@@ -32,6 +32,7 @@
     "fit": { "label": "Fit", "hint": "Personal correction on top of the target — pads, seal, your own ears." },
     "content": { "label": "Content", "hint": "Adjustments for what you're playing — dialogue lift, a bright master." },
     "tone": { "label": "Tone", "hint": "Your permanent taste. The fixed Bass / Treble / Air macros live here." },
+    "autoeq": { "label": "AutoEq", "hint": "AutoEq's automatic parametric fit toward the target — read-only, shown for the curious. Your Fit / Content / Tone stages add on top." },
     "disabledSuffix": " · stage disabled (not applied)",
     "enable": "Enable the {{stage}} stage",
     "disable": "Disable the {{stage}} stage"
@@ -88,6 +89,7 @@
     "dryNotice": "Dry is the fixed reference — pick Slot A or B to edit filter bands.",
     "hint": "Drag a value to scrub, click to type, ↑/↓ to fine-tune · double-click the chart to add a band (or a node to remove it) · changes apply live.",
     "emptyHint": "This stage has no bands yet — press ＋ or double-click the chart to add one.",
+    "autoeqReadonly": "Read-only — these bands come straight from AutoEq's fit. Change the target or your own stages to reshape the sound.",
     "bypass": "Bypass {{name}}",
     "enable": "Enable {{name}}",
     "bandAt": "band at {{hz}} hertz",
@@ -151,6 +153,8 @@
     "updateTemplateTitle": "Overwrite with the current {{stage}} bands",
     "updatePresetTitle": "Overwrite with the current setup",
     "updatePresetDisabledTitle": "Pick a headphone to overwrite this preset",
+    "renameTitle": "Rename",
+    "renameAria": "Rename {{name}}",
     "deleteTitle": "Delete",
     "emptyPresets": "Pick a headphone + target, then 💾 Save a full preset to recall the whole setup."
   },

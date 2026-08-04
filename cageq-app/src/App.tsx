@@ -239,6 +239,9 @@ const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
 // Distinct from the slot colours (A gold, B blue, Dry grey) and the ref purple: Fit cyan,
 // Content pink, Tone green. (Content was amber — too close to Slot A's goldenrod.)
 const STAGE_COLOR: Record<StageId, string> = { fit: "#0ea5e9", content: "#ec4899", tone: "#16a34a" };
+// The read-only AutoEq-fit stage: a muted slate, distinct from the three editable stage hues —
+// it isn't yours to tune, it's what AutoEq computed.
+const AUTOEQ_COLOR = "#8b93a7";
 const REF_COLOR = "#a855f7"; // AutoEq's ideal-correction reference (target the fit chases)
 const RAW_COLOR = "#94a3b8"; // the raw headphone measurement (nerd overlay)
 const TARGET_COLOR = "#7dd3fc"; // the target curve — pale blue, à la AutoEq (nerd overlay)
@@ -261,6 +264,10 @@ function App() {
   const [targetPath, setTargetPath] = useState("");
   const [stages, setStages] = useState<Stages>(defaultStages()); // §3.4 the three per-slot filter stages
   const [activeStage, setActiveStage] = useState<StageId>("fit"); // which stage the grid/chart edits (restored from resume)
+  // Read-only "AutoEq fit" tab in the band section: shows the automatic parametric fit (not one
+  // of the editable stages). A view flag, not a StageId, so `stages[activeStage]` stays valid and
+  // the chart's drag nodes keep tracking the last editable stage underneath.
+  const [autoEqView, setAutoEqView] = useState(false);
   // A just-added band, born highlighted so it's never hunted for. The chart always pulses its
   // node; `focusGrid` additionally scrolls the grid column in and enters its Fc edit mode —
   // set only for the keyboard/Add path, so a mouse double-click on the chart isn't yanked off
@@ -330,6 +337,8 @@ function App() {
   // the "overwrite existing?" prompt, mirroring the destructive-slot-action confirm).
   const [library, setLibrary] = useState<Library>({ presets: [], templates: [] });
   const [saveForm, setSaveForm] = useState<{ kind: "preset" | "template"; name: string; error: boolean } | null>(null);
+  // Inline rename of a saved preset/template row (id + edited name). Committed on Enter/blur.
+  const [renaming, setRenaming] = useState<{ kind: "preset" | "template"; id: string; name: string } | null>(null);
   const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
   const [activeSlot, setActiveSlot] = useState<SlotName>("A");
   // Drop a stale cross-view highlight when the underlying band list changes out from under a
@@ -1000,6 +1009,21 @@ function App() {
       onConfirm: () => setLibrary((lib) => ({ ...lib, templates: lib.templates.filter((x) => x.id !== t.id) })),
     });
 
+  // Inline rename: write the trimmed name back to the matching entry (empty name = cancel),
+  // preserving the id so the row stays put and its persisted identity is unchanged.
+  const commitRename = () => {
+    if (!renaming) return;
+    const name = renaming.name.trim();
+    const { kind, id } = renaming;
+    if (name)
+      setLibrary((lib) =>
+        kind === "preset"
+          ? { ...lib, presets: lib.presets.map((x) => (x.id === id ? { ...x, name } : x)) }
+          : { ...lib, templates: lib.templates.map((x) => (x.id === id ? { ...x, name } : x)) },
+      );
+    setRenaming(null);
+  };
+
   // A/S/D switch slots, W toggles loudness mode — but not while typing in a field
   // (§5.2 blind-comparison shortcuts).
   useEffect(() => {
@@ -1073,6 +1097,11 @@ function App() {
     const n = Math.max(0, result.filters.length - appliedCustom.length);
     return result.filters.slice(0, n);
   }, [result, appliedCustom, dryActive]);
+  // Drop the read-only AutoEq view when there's nothing to show (Dry, or no fit yet) so its tab
+  // never lingers active over an empty grid.
+  useEffect(() => {
+    if (autoEqBands.length === 0) setAutoEqView(false);
+  }, [autoEqBands.length]);
 
   // §5.2 chart: only the *active* slot's total (drawing every slot at once crowded the
   // legend once the per-stage lines were added — the A/B comparison is primarily by ear).
@@ -1334,7 +1363,11 @@ function App() {
           title={tr("theme.title", { mode: tr(`theme.${theme}`) })}
           aria-label={tr("theme.aria", { mode: tr(`theme.${theme}`) })}
         >
-          {theme === "auto" ? "◐" : theme === "light" ? "○" : "●"}
+          {/* Per-glyph sizing: ⏾ renders noticeably larger than ◐/☀ in most fonts, so scale it back
+              to match the optical size of the other two. */}
+          <span className="theme-glyph" style={theme === "dark" ? { fontSize: "0.8em" } : undefined}>
+            {theme === "auto" ? "◐" : theme === "light" ? "☀" : "⏾"}
+          </span>
         </button>
       </header>
 
@@ -1495,11 +1528,12 @@ function App() {
               ) : (
                 <>
                   {/* Stage selector (segmented): the name button picks the stage to edit; the
-                      power icon toggles the whole stage on/off. Active = tinted in the stage colour. */}
+                      power icon toggles the whole stage on/off. Active = tinted in the stage colour.
+                      A trailing read-only "AutoEq" segment (no power) shows the automatic fit. */}
                   <div className="stage-tabs" role="tablist" aria-label={tr("bands.stagesAria")}>
                     {STAGE_ORDER.map((id) => {
                       const st = stages[id];
-                      const isActive = id === activeStage;
+                      const isActive = id === activeStage && !autoEqView;
                       const count = st.bands.filter((b) => b.enabled !== false).length;
                       const color = STAGE_COLOR[id];
                       return (
@@ -1514,7 +1548,10 @@ function App() {
                             aria-selected={isActive}
                             className="stage-seg-select"
                             title={stageHint(id)}
-                            onClick={() => setActiveStage(id)}
+                            onClick={() => {
+                              setActiveStage(id);
+                              setAutoEqView(false);
+                            }}
                           >
                             {stageLabel(id)}
                             {count > 0 && <span className="stage-count">{count}</span>}
@@ -1533,28 +1570,57 @@ function App() {
                         </div>
                       );
                     })}
+                    {autoEqBands.length > 0 && (
+                      <div
+                        className={`stage-seg stage-seg-ro${autoEqView ? " active" : ""}`}
+                        style={{ "--stage": AUTOEQ_COLOR } as CSSProperties}
+                      >
+                        <button
+                          type="button"
+                          role="tab"
+                          aria-selected={autoEqView}
+                          className="stage-seg-select"
+                          title={tr("stages.autoeq.hint")}
+                          onClick={() => setAutoEqView(true)}
+                        >
+                          {tr("stages.autoeq.label")}
+                          <span className="stage-count">{autoEqBands.length}</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  <p className="stage-hint">
-                    {stageHint(activeStage)}
-                    {!stages[activeStage].enabled && <b>{tr("stages.disabledSuffix")}</b>}
-                  </p>
 
-                  <ToneGrid
-                    filters={activeBands}
-                    disabled={dryActive}
-                    accent={STAGE_COLOR[activeStage]}
-                    focusIndex={newBand?.stage === activeStage && newBand.focusGrid ? newBand.idx : null}
-                    focusNonce={newBand?.nonce}
-                    hoverIndex={hoverBand}
-                    onHover={setHoverBand}
-                    onInput={(i, patch) => updateFilter(i, patch, 70)}
-                    onCommit={(i, patch) => updateFilter(i, patch, 0)}
-                    onAdd={addFilter}
-                    onRemove={removeFilter}
-                  />
-                  {/* Always rendered (with reserved height) so switching to an empty stage
-                      doesn't shrink the panel; the text just adapts to empty vs populated. */}
-                  <p className="tg-hint">{activeBands.length > 0 ? tr("bands.hint") : tr("bands.emptyHint")}</p>
+                  {autoEqView ? (
+                    <>
+                      <p className="stage-hint">{tr("stages.autoeq.hint")}</p>
+                      <ToneGrid filters={autoEqBands} readOnly accent={AUTOEQ_COLOR} onInput={() => {}} onCommit={() => {}} onAdd={() => {}} onRemove={() => {}} />
+                      <p className="tg-hint">{tr("bands.autoeqReadonly")}</p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="stage-hint">
+                        {stageHint(activeStage)}
+                        {!stages[activeStage].enabled && <b>{tr("stages.disabledSuffix")}</b>}
+                      </p>
+
+                      <ToneGrid
+                        filters={activeBands}
+                        disabled={dryActive}
+                        accent={STAGE_COLOR[activeStage]}
+                        focusIndex={newBand?.stage === activeStage && newBand.focusGrid ? newBand.idx : null}
+                        focusNonce={newBand?.nonce}
+                        hoverIndex={hoverBand}
+                        onHover={setHoverBand}
+                        onInput={(i, patch) => updateFilter(i, patch, 70)}
+                        onCommit={(i, patch) => updateFilter(i, patch, 0)}
+                        onAdd={addFilter}
+                        onRemove={removeFilter}
+                      />
+                      {/* Always rendered (with reserved height) so switching to an empty stage
+                          doesn't shrink the panel; the text just adapts to empty vs populated. */}
+                      <p className="tg-hint">{activeBands.length > 0 ? tr("bands.hint") : tr("bands.emptyHint")}</p>
+                    </>
+                  )}
                 </>
               )}
             </div>
@@ -1642,7 +1708,7 @@ function App() {
                   value={loudness.base_pregain_db}
                   disabled={loudness.mode !== "Comparison"}
                   onChange={(e) => updateLoudness({ ...loudness, base_pregain_db: Number(e.currentTarget.value) })}
-                  style={{ width: "4.5em" }}
+                  style={{ width: "4em", textAlign: "right" }}
                 />
                 dB
               </label>
@@ -1747,11 +1813,34 @@ function App() {
                           {stageLabel(t.stage)}
                         </span>
                       )}
-                      <span className="pl-name" title={t.name}>
-                        {t.name}
-                      </span>
+                      {renaming?.kind === "template" && renaming.id === t.id ? (
+                        <input
+                          className="pl-rename"
+                          autoFocus
+                          value={renaming.name}
+                          onChange={(e) => setRenaming({ ...renaming, name: e.currentTarget.value })}
+                          onBlur={commitRename}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") commitRename();
+                            else if (e.key === "Escape") setRenaming(null);
+                          }}
+                        />
+                      ) : (
+                        <span className="pl-name" title={t.name} onDoubleClick={() => setRenaming({ kind: "template", id: t.id, name: t.name })}>
+                          {t.name}
+                        </span>
+                      )}
                       <button type="button" disabled={dryActive} onClick={() => loadTemplate(t)}>
                         {tr("presets.load")}
+                      </button>
+                      <button
+                        type="button"
+                        className="pl-ren"
+                        title={tr("presets.renameTitle")}
+                        aria-label={tr("presets.renameAria", { name: t.name })}
+                        onClick={() => setRenaming({ kind: "template", id: t.id, name: t.name })}
+                      >
+                        ✎
                       </button>
                       <button
                         type="button"
@@ -1779,11 +1868,38 @@ function App() {
                   <ul className="pl-list">
                     {library.presets.map((p) => (
                       <li key={p.id} className="pl-item">
-                        <span className="pl-name" title={`${p.name} — ${p.model || tr("presets.noMeasurement")}`}>
-                          {p.name}
-                        </span>
+                        {renaming?.kind === "preset" && renaming.id === p.id ? (
+                          <input
+                            className="pl-rename"
+                            autoFocus
+                            value={renaming.name}
+                            onChange={(e) => setRenaming({ ...renaming, name: e.currentTarget.value })}
+                            onBlur={commitRename}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") commitRename();
+                              else if (e.key === "Escape") setRenaming(null);
+                            }}
+                          />
+                        ) : (
+                          <span
+                            className="pl-name"
+                            title={`${p.name} — ${p.model || tr("presets.noMeasurement")}`}
+                            onDoubleClick={() => setRenaming({ kind: "preset", id: p.id, name: p.name })}
+                          >
+                            {p.name}
+                          </span>
+                        )}
                         <button type="button" disabled={dryActive} onClick={() => loadPreset(p)}>
                           {tr("presets.load")}
+                        </button>
+                        <button
+                          type="button"
+                          className="pl-ren"
+                          title={tr("presets.renameTitle")}
+                          aria-label={tr("presets.renameAria", { name: p.name })}
+                          onClick={() => setRenaming({ kind: "preset", id: p.id, name: p.name })}
+                        >
+                          ✎
                         </button>
                         <button
                           type="button"
