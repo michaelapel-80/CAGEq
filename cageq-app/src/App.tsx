@@ -1494,7 +1494,9 @@ function App() {
                         nodes={{
                           bands: activeBands,
                           color: STAGE_COLOR[activeStage],
-                          disabled: dryActive,
+                          // Clear the editable drag handles while the read-only AutoEq stage is shown
+                          // (same as Dry) — otherwise the last editable stage's nodes linger on top.
+                          disabled: dryActive || autoEqView,
                           onChange: (i, patch) => updateFilter(i, patch, 70),
                           onDragEnd: () => {
                             requestApply(0);
