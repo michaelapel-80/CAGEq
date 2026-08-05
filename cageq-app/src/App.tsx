@@ -259,6 +259,9 @@ function App() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [deviceId, setDeviceId] = useState("");
+  // True when the last session's output device isn't currently active (e.g. unplugged) and we fell
+  // back to another endpoint on launch — surfaced as a hint, cleared once the user picks a device.
+  const [resumeDeviceMissing, setResumeDeviceMissing] = useState(false);
   const [query, setQuery] = useState(""); // headphone-model search / selected model name
   const [measurementPath, setMeasurementPath] = useState(""); // chosen measurement (source) path
   const [targetPath, setTargetPath] = useState("");
@@ -418,6 +421,9 @@ function App() {
         const rdev = resume?.deviceId ? dev.find((d) => d.id === resume.deviceId) : undefined;
         const useDev = rdev ?? initial;
         setDeviceId(useDev?.id ?? "");
+        // Last session's output isn't in the active list (e.g. unplugged) but others are, so we
+        // silently fell back to `useDev` — flag it so the user knows their device is missing.
+        if (resume?.deviceId && !rdev && useDev) setResumeDeviceMissing(true);
         if (useDev) await invoke("set_device", { device: useDev.eqapo_pattern });
 
         const activeSlotName = resume?.activeSlot ?? "A";
@@ -844,6 +850,7 @@ function App() {
 
   async function changeDevice(id: string) {
     setDeviceId(id);
+    setResumeDeviceMissing(false); // the user has now made an explicit choice
     const dev = devices.find((d) => d.id === id);
     if (dev) await invoke("set_device", { device: dev.eqapo_pattern });
   }
@@ -1305,7 +1312,9 @@ function App() {
                 {tr("header.output")}
               </label>
               {devices.length === 0 ? (
-                <span style={{ opacity: 0.7, fontSize: "0.85em" }}>{tr("header.noDevice")}</span>
+                <span className="dev-none" title={tr("header.noDeviceTitle")}>
+                  <span aria-hidden>⚠</span> {tr("header.noDevice")}
+                </span>
               ) : (
                 <>
                   <select id="device-select" value={deviceId} onChange={(e) => changeDevice(e.currentTarget.value)}>
@@ -1404,6 +1413,12 @@ function App() {
           </span>
         </button>
       </header>
+
+      {!loading && resumeDeviceMissing && (
+        <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.8em" }}>
+          ⚠ {tr("app.deviceUnavailable", { device: selectedDevice?.name ?? "" })}
+        </p>
+      )}
 
       {!loading && selectedDevice && !selectedDevice.eqapo_enabled && (
         <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.8em" }}>

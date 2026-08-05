@@ -196,6 +196,20 @@ select:disabled {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* No active playback device (e.g. a configured EqAPO output that's unplugged) — a state where
+   the EQ has nothing to apply to, so flag it as an amber warning chip rather than muted grey. */
+.dev-none {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #b8860b;
+  background: color-mix(in srgb, #b8860b 12%, transparent);
+  border: 1px solid color-mix(in srgb, #b8860b 45%, transparent);
+  border-radius: 5px;
+  padding: 0.15rem 0.5rem;
+}
 .dev-gear {
   font-size: 0.95em;
   opacity: 0.7;
