@@ -12,10 +12,16 @@
 //!   cargo run -p cageq-monitor --example testtone -- --level -24
 //!   cargo run -p cageq-monitor --example testtone -- --seconds 10     # auto-stop w/ fade-out
 //!   cargo run -p cageq-monitor --example testtone -- --device "Phonitor"  # match by name
+//!   cargo run -p cageq-monitor --example testtone -- --sine 12000 --rate 44100  # test Windows' resampler
+//!
+//! `--rate <hz>` forces a *source* rate different from the device's — Windows' shared-mode
+//! resampler (AUTOCONVERT) then converts it up/down to the device rate, so any resampling images/
+//! aliasing show up in the loopback spectrum. Pair with `--sine` and a Dry slot to isolate it.
 //!
 //! Safety: the level is clamped to ≤ -3 dBFS, every sample is hard-limited just below full scale,
 //! and it fades in (and out, with --seconds) — so even with EQ boosts stacked on top it can't
-//! blast. Ctrl+C stops it (abrupt; use --seconds for a clean fade-out).
+//! blast. `--unsafe` lifts both clamps for a deliberate full-scale (0 dBFS) torture test. Ctrl+C
+//! stops it (abrupt; use --seconds for a clean fade-out).
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,6 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut level_dbfs: f32 = -20.0;
     let mut seconds: Option<f32> = None;
     let mut device_match: Option<String> = None;
+    let mut rate_override: Option<u32> = None;
+    let mut unsafe_mode = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -36,22 +44,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--level" => level_dbfs = args.next().ok_or("--level needs a value")?.parse()?,
             "--seconds" => seconds = Some(args.next().ok_or("--seconds needs a value")?.parse()?),
             "--device" => device_match = Some(args.next().ok_or("--device needs a name")?),
+            // Force a source sample rate ≠ the device rate → Windows' shared-mode resampler
+            // converts it (AUTOCONVERT), so the loopback shows the resampling artifacts. Pair with
+            // --sine and a Dry slot to isolate the resampler.
+            "--rate" => rate_override = Some(args.next().ok_or("--rate needs a value")?.parse()?),
+            // Lift the -3 dBFS safety ceiling and the per-sample limiter to allow a full-scale
+            // (0 dBFS) torture test. Opt-in and deliberate — mind your ears and gear.
+            "--unsafe" => unsafe_mode = true,
             "-h" | "--help" => {
-                eprintln!("usage: testtone [--sine <hz>] [--level <dbfs>] [--seconds <n>] [--device <name-substr>]");
+                eprintln!("usage: testtone [--sine <hz>] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
                 return Ok(());
             }
             other => return Err(format!("unknown arg: {other}").into()),
         }
     }
-    // Clamp the level well below full scale so a boosted EQ can't drive it into a blast.
-    const LEVEL_CEIL_DBFS: f32 = -3.0;
-    if level_dbfs > LEVEL_CEIL_DBFS {
-        eprintln!("[testtone] level {level_dbfs} dBFS is above the {LEVEL_CEIL_DBFS} dBFS safety ceiling — clamping.");
-        level_dbfs = LEVEL_CEIL_DBFS;
+    if let Some(r) = rate_override {
+        if !(8_000..=768_000).contains(&r) {
+            return Err(format!("--rate {r} is out of the 8000..=768000 range").into());
+        }
     }
-    let gain = 10f32.powf(level_dbfs.clamp(-80.0, LEVEL_CEIL_DBFS) / 20.0);
-    // Final per-sample ceiling (~-1 dBFS) so pink-noise/EQ peaks never reach digital clip.
-    const SAMPLE_CEIL: f32 = 0.891;
+    // Clamp the level below full scale so a boosted EQ can't drive it into a blast — unless the
+    // caller opts into a full-scale (0 dBFS) torture test with --unsafe.
+    let level_ceil_dbfs: f32 = if unsafe_mode { 0.0 } else { -3.0 };
+    if unsafe_mode {
+        eprintln!("[testtone] --unsafe: full-scale (0 dBFS) allowed and the per-sample limiter is off — mind your ears/gear.");
+    }
+    if level_dbfs > level_ceil_dbfs {
+        eprintln!("[testtone] level {level_dbfs} dBFS is above the {level_ceil_dbfs} dBFS ceiling — clamping.");
+        level_dbfs = level_ceil_dbfs;
+    }
+    let gain = 10f32.powf(level_dbfs.clamp(-80.0, level_ceil_dbfs) / 20.0);
+    // Final per-sample ceiling: ~-1 dBFS normally (keeps pink/EQ peaks off the clip rail), full
+    // scale under --unsafe so a 0 dBFS sine passes through untouched.
+    let sample_ceil: f32 = if unsafe_mode { 1.0 } else { 0.891 };
 
     initialize_mta().ok()?;
     let enumerator = wasapi::DeviceEnumerator::new()?;
@@ -76,21 +101,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut audio_client = device.get_iaudioclient()?;
     let mix = audio_client.get_mixformat()?;
-    let rate = mix.get_samplespersec();
+    let mix_rate = mix.get_samplespersec();
     let channels = mix.get_nchannels();
+    // Source rate: the device mix rate unless forced. When it differs, AUTOCONVERT below makes the
+    // engine resample us up/down to the mix rate — the whole point of --rate.
+    let rate = rate_override.unwrap_or(mix_rate);
     let desired = WaveFormat::new(32, 32, &SampleType::Float, rate as usize, channels as usize, None);
     let block_align = desired.get_blockalign() as usize;
 
     let (def_period, _min_period) = audio_client.get_device_period()?;
     let mode = StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: def_period };
-    audio_client.initialize_client(&desired, &Direction::Render, &mode)?;
+    audio_client
+        .initialize_client(&desired, &Direction::Render, &mode)
+        .map_err(|e| format!("initialize_client at {rate} Hz failed ({e:?}) — the endpoint may not accept this source rate"))?;
     let render = audio_client.get_audiorenderclient()?;
 
     let total_frames: Option<u64> = seconds.map(|s| (s * rate as f32) as u64);
     let fade_frames = (0.12 * rate as f32) as u64; // 120 ms fade in/out — kills startup/stop pops
+    let resample = if rate != mix_rate { format!(" → resampled to {mix_rate} Hz by Windows") } else { String::new() };
     match sine_hz {
-        Some(hz) => eprintln!("[testtone] {hz} Hz sine @ {level_dbfs} dBFS, {rate} Hz / {channels} ch"),
-        None => eprintln!("[testtone] pink noise @ ~{level_dbfs} dBFS, {rate} Hz / {channels} ch"),
+        Some(hz) => eprintln!("[testtone] {hz} Hz sine @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
+        None => eprintln!("[testtone] pink noise @ ~{level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
     }
     eprintln!("[testtone] Ctrl+C to stop.");
 
@@ -100,7 +131,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame: u64 = 0;
     let mut rng: u32 = 0x2545_f491; // xorshift white-noise source (no rand dependency needed)
     let (mut b0, mut b1, mut b2) = (0f32, 0f32, 0f32); // Paul Kellet economy pink-noise filter
-    let two_pi_f = std::f32::consts::TAU * sine_hz.unwrap_or(0.0);
+    // Sine phase as a *wrapped incremental accumulator*, not `sin(2π·f·frame/rate)`: computing the
+    // latter from an ever-growing `frame` in f32 loses precision in binades, dirtying the tone
+    // step-wise over time (a confound that looks like the resampler degrading). Wrapping keeps the
+    // argument in [0, 2π) so it stays precise indefinitely.
+    let phase_inc = std::f32::consts::TAU * sine_hz.unwrap_or(0.0) / rate as f32;
+    let mut phase = 0f32;
     let mut buf: Vec<u8> = Vec::new();
 
     'play: loop {
@@ -131,7 +167,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mono = match sine_hz {
-                Some(_) => (two_pi_f * frame as f32 / rate as f32).sin() * gain,
+                Some(_) => {
+                    let s = phase.sin() * gain;
+                    phase += phase_inc;
+                    if phase >= std::f32::consts::TAU {
+                        phase -= std::f32::consts::TAU;
+                    }
+                    s
+                }
                 None => {
                     // White (uniform [-1,1]) → Paul Kellet's economy pink filter.
                     rng ^= rng << 13;
@@ -145,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (b0 + b1 + b2 + white * 0.1848) * 0.11 * gain
                 }
             };
-            let s = (mono * env).clamp(-SAMPLE_CEIL, SAMPLE_CEIL);
+            let s = (mono * env).clamp(-sample_ceil, sample_ceil);
             let bytes = s.to_le_bytes();
             for _ in 0..channels {
                 buf.extend_from_slice(&bytes);
