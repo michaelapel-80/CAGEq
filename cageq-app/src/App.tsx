@@ -1404,7 +1404,12 @@ function App() {
                 </div>
               </>
             )}
-            {selfTest.phase === "running" && <p style={{ margin: 0 }}>{tr("selfTest.running")}</p>}
+            {selfTest.phase === "running" && (
+              <>
+                <p style={{ margin: 0 }}>{tr("selfTest.running")}</p>
+                <p style={{ margin: "0.5em 0 0", fontSize: "0.8em", opacity: 0.7 }}>{tr("selfTest.rawNote")}</p>
+              </>
+            )}
             {selfTest.phase === "done" &&
               (() => {
                 const v = selfTest.verdict;
@@ -1666,7 +1671,7 @@ function App() {
                         refs={chartRefs}
                         phase={chartPhase}
                         spectrum={spectrum}
-                        eqBands={dryActive ? undefined : result.filters}
+                        eqBands={dryActive || selfTest?.phase === "running" ? undefined : result.filters}
                         legendHost={legendHost}
                         height={215}
                         nodes={{

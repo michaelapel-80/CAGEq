@@ -129,6 +129,7 @@
     "run": "Test abspielen",
     "cancel": "Abbrechen",
     "running": "Test läuft… der Loopback wird mit und ohne deine Korrektur gemessen (einige Sekunden; der Klang ändert sich kurz).",
+    "rawNote": "Während des Tests wird das rohe Loopback-Spektrum angezeigt – es flacht ab, sobald die Korrektur überbrückt wird.",
     "close": "Schließen",
     "retry": "Erneut",
     "passTitle": "✓ EQ erreicht deinen Ausgang",

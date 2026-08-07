@@ -129,6 +129,7 @@
     "run": "Play test",
     "cancel": "Cancel",
     "running": "Testing… measuring the loopback with your correction and bypassed (a few seconds; the sound will briefly change).",
+    "rawNote": "Raw loopback spectrum shown during the test — watch it flatten when the correction is bypassed.",
     "close": "Close",
     "retry": "Retry",
     "passTitle": "✓ EQ is reaching your output",
