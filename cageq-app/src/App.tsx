@@ -411,6 +411,12 @@ function App() {
   const [renaming, setRenaming] = useState<{ kind: "preset" | "template"; id: string; name: string } | null>(null);
   const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
   const [selfTest, setSelfTest] = useState<SelfTestState | null>(null); // §5.4 output self-test
+  // Finding #1: active directives in config.txt outside CAGEq's block that stack on top of every
+  // correction (e.g. EqAPO's fresh-install default preamp/example filters). Detected once after
+  // load; surfaced passively (never a first-run modal) as a line + reversible review panel.
+  const [foreignConfig, setForeignConfig] = useState<string[] | null>(null);
+  const [foreignReview, setForeignReview] = useState<null | "review" | "done">(null);
+  const [foreignDismissed, setForeignDismissed] = useState(false);
   const [activeSlot, setActiveSlot] = useState<SlotName>("A");
   // Drop a stale cross-view highlight when the underlying band list changes out from under a
   // still pointer (stage tab switch, slot change) — no pointerleave fires in that case.
@@ -918,6 +924,35 @@ function App() {
     setResumeDeviceMissing(false); // the user has now made an explicit choice
     const dev = devices.find((d) => d.id === id);
     if (dev) await invoke("set_device", { device: dev.eqapo_pattern });
+  }
+
+  // Finding #1: detect foreign config.txt directives once the backend is up (read-only).
+  useEffect(() => {
+    if (loading) return;
+    invoke<string[]>("config_foreign_directives").then(setForeignConfig).catch(() => {});
+  }, [loading]);
+
+  // Comment out the foreign directives (reversible) so only CAGEq's correction applies.
+  async function commentOutForeign() {
+    try {
+      setError("");
+      await invoke("disable_foreign_config");
+      setForeignConfig([]); // now none active
+      setForeignReview("done");
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+  // Undo the comment-out, restoring the original directives.
+  async function restoreForeign() {
+    try {
+      setError("");
+      await invoke("restore_foreign_config");
+      setForeignConfig(await invoke<string[]>("config_foreign_directives"));
+      setForeignReview(null);
+    } catch (e) {
+      setError(String(e));
+    }
   }
 
   // §8: jump to the modern Windows Sound settings for the selected output so the user can change
@@ -1446,6 +1481,57 @@ function App() {
         </div>
       )}
 
+      {foreignReview && (
+        <div
+          onClick={() => setForeignReview(null)}
+          style={{ position: "fixed", inset: 0, background: "#0006", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10 }}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            {foreignReview === "review" ? (
+              <>
+                <p style={{ marginTop: 0, fontWeight: 600 }}>{tr("foreignConfig.reviewTitle")}</p>
+                <p style={{ fontSize: "0.9em" }}>{tr("foreignConfig.reviewBody")}</p>
+                <pre
+                  style={{
+                    maxHeight: "9em",
+                    overflow: "auto",
+                    fontSize: "0.8em",
+                    background: "color-mix(in srgb, var(--fg) 8%, transparent)",
+                    padding: "0.5em 0.7em",
+                    borderRadius: 5,
+                    whiteSpace: "pre-wrap",
+                    margin: "0.5em 0",
+                  }}
+                >
+                  {foreignConfig?.join("\n")}
+                </pre>
+                <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
+                  <button type="button" onClick={() => setForeignReview(null)}>
+                    {tr("foreignConfig.cancel")}
+                  </button>
+                  <button type="button" onClick={commentOutForeign}>
+                    {tr("foreignConfig.commentOut")}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p style={{ marginTop: 0, color: "#16a34a", fontWeight: 600 }}>{tr("foreignConfig.doneTitle")}</p>
+                <p style={{ fontSize: "0.9em" }}>{tr("foreignConfig.doneBody")}</p>
+                <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
+                  <button type="button" onClick={restoreForeign}>
+                    {tr("foreignConfig.undo")}
+                  </button>
+                  <button type="button" onClick={() => setForeignReview(null)}>
+                    {tr("foreignConfig.close")}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {banner && (
         <div
           style={{
@@ -1606,6 +1692,20 @@ function App() {
       {!loading && selectedDevice && !selectedDevice.eqapo_enabled && (
         <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.8em" }}>
           <Trans i18nKey="app.apoWarning" components={[<em />]} />
+        </p>
+      )}
+
+      {/* Finding #1: passive (never modal) notice when foreign config.txt filters stack on top of
+          CAGEq — only once a correction is applied, and dismissable per session. */}
+      {!loading && result && foreignConfig && foreignConfig.length > 0 && !foreignDismissed && (
+        <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.8em", display: "flex", alignItems: "center", gap: "0.5em", flexWrap: "wrap" }}>
+          <span>⚠ {tr("foreignConfig.notice", { count: foreignConfig.length })}</span>
+          <button type="button" onClick={() => setForeignReview("review")} style={{ fontSize: "0.85em" }}>
+            {tr("foreignConfig.review")}
+          </button>
+          <button type="button" onClick={() => setForeignDismissed(true)} style={{ fontSize: "0.85em" }}>
+            {tr("foreignConfig.dismiss")}
+          </button>
         </p>
       )}
 

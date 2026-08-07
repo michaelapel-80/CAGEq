@@ -45,7 +45,7 @@ use serde_json::{Map, Value};
 // (the `pub use` both re-exports and brings them into scope here).
 pub use cageq_config_writer::{
     AudioDevice, DeviceConfig, Filter, FilterType, StartupDecision, detect_eqapo_config_dir,
-    list_render_devices,
+    disable_foreign_config, foreign_config_directives, list_render_devices, restore_foreign_config,
 };
 pub use cageq_sidecar::{Sidecar, SidecarError};
 pub use cageq_watchdog::{Health, WatchdogConfig};

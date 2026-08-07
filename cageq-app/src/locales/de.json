@@ -121,6 +121,20 @@
     "finalWarning": "⚠ Finale Lautstärke: Jeder Slot spielt auf seiner eigenen Maximallautstärke, A/B/Dry sind also nicht lautheitsangeglichen – ein lauterer Slot kann einfach „besser“ klingen. <0>W</0> drücken für Vergleich, um fair A/B zu hören."
   },
 
+  "foreignConfig": {
+    "notice": "config.txt enthält {{count}} weitere aktive Filterzeile(n), die sich über jede CAGEq-Korrektur stapeln.",
+    "review": "Prüfen",
+    "dismiss": "Ausblenden",
+    "reviewTitle": "Andere Filter in config.txt",
+    "reviewBody": "Diese aktiven Zeilen in der config.txt von Equalizer APO wirken über jede CAGEq-Korrektur – meist der Standard-Preamp / die Beispiel-Filter einer Neuinstallation. Auskommentieren, damit nur deine CAGEq-Korrektur angewandt wird? Es wird nichts gelöscht – sie werden markiert und können wiederhergestellt werden.",
+    "commentOut": "Auskommentieren",
+    "cancel": "Abbrechen",
+    "doneTitle": "Erledigt",
+    "doneBody": "Diese Zeilen sind auskommentiert, sodass jetzt nur CAGEqs Korrektur wirkt. Sie bleiben mit einer CAGEq-Markierung in der config.txt erhalten und können wiederhergestellt werden.",
+    "undo": "Rückgängig",
+    "close": "Schließen"
+  },
+
   "selfTest": {
     "button": "Selbsttest",
     "buttonTitle": "Ein Testsignal abspielen und prüfen, ob deine Korrektur tatsächlich am Ausgang ankommt",

@@ -264,6 +264,42 @@ fn list_devices() -> Vec<AudioDevice> {
     list_render_devices()
 }
 
+/// Active directives in EqAPO's config.txt outside CAGEq's own include block — the foreign
+/// filters (e.g. the fresh-install default preamp) that stack on top of every CAGEq correction.
+/// Returned for a UI preview so the user can choose to neutralize them.
+#[tauri::command]
+fn config_foreign_directives(state: State<Backend>) -> Result<Vec<String>, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { config_dir, .. } => {
+            cageq_core::foreign_config_directives(&config_dir.join("config.txt")).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Comment out those foreign directives (reversible marker prefix), so only CAGEq's correction
+/// applies. Returns whether config.txt changed.
+#[tauri::command]
+fn disable_foreign_config(state: State<Backend>) -> Result<bool, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { config_dir, .. } => {
+            cageq_core::disable_foreign_config(&config_dir.join("config.txt")).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Undo [`disable_foreign_config`] — strip the disable markers, restoring the original directives.
+#[tauri::command]
+fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { config_dir, .. } => {
+            cageq_core::restore_foreign_config(&config_dir.join("config.txt")).map_err(|e| e.to_string())
+        }
+    }
+}
+
 /// §5.3c: start post-EQ loudness monitoring on `device` (the selected endpoint's id, or `None`
 /// for the default render endpoint). Opens WASAPI loopback and emits a `monitor` event
 /// (`MeterUpdate`) ~20×/s. Replaces any monitor already running (e.g. after a device change).
@@ -781,6 +817,9 @@ pub fn run() {
             status,
             list_headphones,
             list_devices,
+            config_foreign_directives,
+            disable_foreign_config,
+            restore_foreign_config,
             start_monitor,
             stop_monitor,
             start_test_signal,

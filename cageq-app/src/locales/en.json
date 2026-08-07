@@ -121,6 +121,20 @@
     "finalWarning": "⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched — a louder slot can just sound \"better\". Press <0>W</0> for Comparison to A/B fairly."
   },
 
+  "foreignConfig": {
+    "notice": "config.txt has {{count}} other active filter line(s) that stack on top of every CAGEq correction.",
+    "review": "Review",
+    "dismiss": "Dismiss",
+    "reviewTitle": "Other filters in config.txt",
+    "reviewBody": "These active lines in Equalizer APO's config.txt apply on top of every CAGEq correction — usually the default preamp / example filters from a fresh install. Comment them out so only your CAGEq correction is applied? Nothing is deleted — they're marked and can be restored.",
+    "commentOut": "Comment them out",
+    "cancel": "Cancel",
+    "doneTitle": "Done",
+    "doneBody": "Those lines are commented out, so only CAGEq's correction applies now. They're kept in config.txt with a CAGEq marker and can be restored.",
+    "undo": "Undo",
+    "close": "Close"
+  },
+
   "selfTest": {
     "button": "Self-test",
     "buttonTitle": "Play a test signal and verify your correction actually reaches the output",

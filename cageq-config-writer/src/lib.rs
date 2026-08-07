@@ -185,6 +185,97 @@ pub fn ensure_include(config_txt_path: &Path, cageq_filename: &str) -> Result<bo
     }
 }
 
+// Per-line marker CAGEq prepends to disable a foreign config.txt directive: the leading '#'
+// makes EqAPO treat the whole line as a comment, and the distinctive tag lets us strip it back
+// off cleanly on restore. Space after so the original directive stays readable in the file.
+const DISABLED_PREFIX: &str = "#CAGEqOff# ";
+
+/// Active (non-comment, non-blank) directives in config.txt that live *outside* CAGEq's own
+/// `#CAGEq:BEGIN`/`END` include block — the lines that stack on top of every CAGEq correction
+/// (typically Equalizer APO's shipped default `Preamp:`/example filters on a fresh install).
+/// Returned trimmed, for a UI preview. Lines CAGEq previously disabled already start with '#',
+/// so they're excluded. Read-only.
+pub fn foreign_config_directives(config_txt_path: &Path) -> Result<Vec<String>, WriteError> {
+    Ok(find_foreign_directives(&read_utf8_or_empty(config_txt_path)?))
+}
+
+/// Comment out every foreign active directive (see [`foreign_config_directives`]) by prefixing it
+/// with [`DISABLED_PREFIX`], so EqAPO ignores it and CAGEq's correction applies alone. Nothing is
+/// deleted — reversible via [`restore_foreign_config`]. `Ok(true)` when it changed the file.
+pub fn disable_foreign_config(config_txt_path: &Path) -> Result<bool, WriteError> {
+    match disable_foreign(&read_utf8_or_empty(config_txt_path)?) {
+        Some(new) => {
+            atomic_write(config_txt_path, new.as_bytes())?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// Undo [`disable_foreign_config`]: strip the disable-marker off any lines carrying it, restoring
+/// the original directives. `Ok(true)` when it changed the file.
+pub fn restore_foreign_config(config_txt_path: &Path) -> Result<bool, WriteError> {
+    match enable_foreign(&read_utf8_or_empty(config_txt_path)?) {
+        Some(new) => {
+            atomic_write(config_txt_path, new.as_bytes())?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// Byte offsets of the CAGEq include block, so per-line scans can skip it.
+fn line_in_block(start: usize, block: Option<(usize, usize)>) -> bool {
+    matches!(block, Some((b, e)) if start >= b && start < e)
+}
+
+/// The trimmed foreign active directives, outside the CAGEq block (pure).
+fn find_foreign_directives(text: &str) -> Vec<String> {
+    let block = find_marker_range(text);
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let t = line.trim();
+        if !line_in_block(start, block) && !t.is_empty() && !t.starts_with('#') {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
+/// Prefix each foreign active directive with the disable marker (pure). `None` if nothing to do.
+fn disable_foreign(text: &str) -> Option<String> {
+    let block = find_marker_range(text);
+    let mut changed = false;
+    let mut out = String::with_capacity(text.len() + DISABLED_PREFIX.len());
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let t = line.trim();
+        if !line_in_block(start, block) && !t.is_empty() && !t.starts_with('#') {
+            out.push_str(DISABLED_PREFIX);
+            changed = true;
+        }
+        out.push_str(line);
+    }
+    changed.then_some(out)
+}
+
+/// Strip the disable marker off any line carrying it (pure). `None` if none present.
+fn enable_foreign(text: &str) -> Option<String> {
+    if !text.contains(DISABLED_PREFIX) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        out.push_str(line.strip_prefix(DISABLED_PREFIX).unwrap_or(line));
+    }
+    Some(out)
+}
+
 /// Atomically write CAGEq's hardcoded safe-state (§7.1/7.2) to cageq.txt, using the
 /// same header+body format as a normal write so [`read_cageq_state`] +
 /// [`decide_startup`] recognise it as [`StartupDecision::SafeStateStillActive`].
@@ -651,6 +742,27 @@ mod tests {
         // …while genuine, non-transient failures surface immediately (no wasted budget).
         assert!(!is_transient_lock(&io::Error::from(io::ErrorKind::NotFound)));
         assert!(!is_transient_lock(&io::Error::from(io::ErrorKind::InvalidData)));
+    }
+
+    #[test]
+    fn foreign_directives_detected_disabled_and_restored_outside_the_cageq_block() {
+        // A fresh-install config.txt: a default preamp + example include, plus a comment, then
+        // CAGEq's own include block. Only the two active lines *outside* the block are foreign.
+        let cfg = "# Equalizer APO default\nPreamp: -6 dB\nInclude: example.txt\n#CAGEq:BEGIN\nInclude: cageq.txt\n#CAGEq:END\n";
+        assert_eq!(find_foreign_directives(cfg), vec!["Preamp: -6 dB", "Include: example.txt"]);
+
+        // Disabling comments exactly those two lines (marker-prefixed), leaving comments, the
+        // blank/CAGEq block, and cageq.txt's own Include untouched.
+        let disabled = disable_foreign(cfg).expect("something to disable");
+        assert!(disabled.contains("#CAGEqOff# Preamp: -6 dB"));
+        assert!(disabled.contains("#CAGEqOff# Include: example.txt"));
+        assert!(disabled.contains("#CAGEq:BEGIN\nInclude: cageq.txt\n#CAGEq:END")); // block intact
+        assert!(find_foreign_directives(&disabled).is_empty()); // now all commented → none active
+        assert!(disable_foreign(&disabled).is_none()); // idempotent
+
+        // Restoring strips the marker back to byte-identical original.
+        assert_eq!(enable_foreign(&disabled).as_deref(), Some(cfg));
+        assert!(enable_foreign(cfg).is_none()); // nothing to restore
     }
 
     fn sample() -> Vec<DeviceConfig> {
