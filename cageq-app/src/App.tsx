@@ -1728,8 +1728,16 @@ function App() {
             <div className="panel">
               <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.35rem" }}>
                 <h2 style={{ margin: 0 }}>{tr("correction.title")}</h2>
-                {result && !dryActive && (
-                  <div className="chart-view" style={{ margin: 0 }} role="group" aria-label={tr("correction.domainAria")}>
+                {/* Kept mounted (space reserved) but hidden on Dry — the impulse view is meaningless
+                    for Dry, but removing the toggle collapsed the header row and jumped the layout. */}
+                {result && (
+                  <div
+                    className="chart-view"
+                    style={{ margin: 0, visibility: dryActive ? "hidden" : "visible" }}
+                    role="group"
+                    aria-label={tr("correction.domainAria")}
+                    aria-hidden={dryActive || undefined}
+                  >
                     <button
                       type="button"
                       className={!impulseView ? "on" : ""}
