@@ -55,10 +55,10 @@ pub struct SpectrumUpdate {
 }
 
 #[cfg(windows)]
-pub use windows_impl::Monitor;
+pub use windows_impl::{Monitor, TestSignal};
 
 #[cfg(not(windows))]
-pub use stub::Monitor;
+pub use stub::{Monitor, TestSignal};
 
 /// The Windows default render endpoint's WASAPI id (`{0.0.0.00000000}.{guid}`), or `None` off
 /// Windows / on failure. Used to choose the right `ms-settings:` deep-link: the app's device id
@@ -200,6 +200,111 @@ mod windows_impl {
         fn drop(&mut self) {
             self.shutdown();
         }
+    }
+
+    /// A safe, self-terminating pink-noise player — the render counterpart to the loopback. The
+    /// app's self-test plays this out the endpoint (through EqAPO) while the loopback captures the
+    /// result, to prove end-to-end that the EQ chain is actually applying corrections. Level is
+    /// fixed low (audible but safe) and faded in; the caller stops it when the measurement is done.
+    pub struct TestSignal {
+        stop: Arc<AtomicBool>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    /// Self-test playback level — audible but conservative (extra headroom over the -3 dBFS the dev
+    /// `testtone` example allows, since this plays on real users' devices through their EQ).
+    const TEST_SIGNAL_DBFS: f32 = -18.0;
+
+    impl TestSignal {
+        /// Start pink noise on `endpoint_id` (or the default render endpoint) until [`stop`].
+        pub fn start(endpoint_id: Option<String>) -> Result<TestSignal, String> {
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_thread = stop.clone();
+            let handle = thread::Builder::new()
+                .name("cageq-testsignal".into())
+                .spawn(move || {
+                    if let Err(e) = render_pink(endpoint_id, &stop_thread) {
+                        eprintln!("[cageq-monitor] test signal ended: {e}");
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(TestSignal { stop, handle: Some(handle) })
+        }
+
+        pub fn stop(mut self) {
+            self.shutdown();
+        }
+
+        fn shutdown(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    impl Drop for TestSignal {
+        fn drop(&mut self) {
+            self.shutdown();
+        }
+    }
+
+    /// Render faded-in pink noise out the endpoint at [`TEST_SIGNAL_DBFS`] until `stop`. Shared-mode
+    /// render, so it passes through EqAPO like any app's audio (the whole point of the self-test).
+    fn render_pink(endpoint_id: Option<String>, stop: &AtomicBool) -> Result<(), Box<dyn Error>> {
+        initialize_mta().ok()?;
+        let enumerator = DeviceEnumerator::new()?;
+        let device = resolve_device(&enumerator, &endpoint_id)?;
+        let mut audio_client = device.get_iaudioclient()?;
+        let mix = audio_client.get_mixformat()?;
+        let rate = mix.get_samplespersec();
+        let channels = mix.get_nchannels();
+        let desired =
+            WaveFormat::new(32, 32, &SampleType::Float, rate as usize, channels as usize, None);
+        let block_align = desired.get_blockalign() as usize;
+        let (def_period, _min_period) = audio_client.get_device_period()?;
+        let mode = StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: def_period };
+        audio_client.initialize_client(&desired, &Direction::Render, &mode)?;
+        let render = audio_client.get_audiorenderclient()?;
+
+        let gain = 10f32.powf(TEST_SIGNAL_DBFS / 20.0);
+        let fade = (0.12 * rate as f32) as u64; // 120 ms fade-in — no startup pop
+        audio_client.start_stream()?;
+
+        let mut frame: u64 = 0;
+        let mut rng: u32 = 0x2545_f491; // xorshift white source
+        let (mut b0, mut b1, mut b2) = (0f32, 0f32, 0f32); // Paul Kellet economy pink filter
+        let mut buf: Vec<u8> = Vec::new();
+        while !stop.load(Ordering::Relaxed) {
+            let space = audio_client.get_available_space_in_frames()? as usize;
+            if space == 0 {
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            buf.clear();
+            for _ in 0..space {
+                let env = if frame < fade { frame as f32 / fade as f32 } else { 1.0 };
+                rng ^= rng << 13;
+                rng ^= rng >> 17;
+                rng ^= rng << 5;
+                let white = (rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+                b0 = 0.99765 * b0 + white * 0.0990460;
+                b1 = 0.96300 * b1 + white * 0.2965164;
+                b2 = 0.57000 * b2 + white * 1.0526913;
+                let s = ((b0 + b1 + b2 + white * 0.1848) * 0.11 * gain * env).clamp(-0.891, 0.891);
+                let bytes = s.to_le_bytes();
+                for _ in 0..channels {
+                    buf.extend_from_slice(&bytes);
+                }
+                frame += 1;
+            }
+            let frames = buf.len() / block_align;
+            if frames > 0 {
+                render.write_to_device(frames, &buf, None)?;
+            }
+        }
+        let _ = audio_client.stop_stream();
+        Ok(())
     }
 
     fn to_db(linear: f32) -> f32 {
@@ -622,6 +727,17 @@ mod stub {
             G: Fn(SpectrumUpdate) + Send + 'static,
         {
             Err("loopback monitoring is only available on Windows".to_string())
+        }
+
+        pub fn stop(self) {}
+    }
+
+    /// Non-Windows stub for the self-test signal player (WASAPI render is Windows-only).
+    pub struct TestSignal;
+
+    impl TestSignal {
+        pub fn start(_endpoint_id: Option<String>) -> Result<TestSignal, String> {
+            Err("test-signal playback is only available on Windows".to_string())
         }
 
         pub fn stop(self) {}

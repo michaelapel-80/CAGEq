@@ -24,6 +24,10 @@ enum Backend {
 #[derive(Default)]
 struct MonitorState(std::sync::Mutex<Option<cageq_monitor::Monitor>>);
 
+/// Holds the running self-test signal player (pink noise), so start/stop can replace or end it.
+#[derive(Default)]
+struct TestSignalState(std::sync::Mutex<Option<cageq_monitor::TestSignal>>);
+
 #[derive(serde::Serialize)]
 struct ApplyResult {
     hash: String,
@@ -289,6 +293,30 @@ fn start_monitor(device: Option<String>, app: tauri::AppHandle, state: State<Mon
 /// §5.3c: stop loopback monitoring (idempotent — no-op if nothing is running).
 #[tauri::command]
 fn stop_monitor(state: State<MonitorState>) -> Result<(), String> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(existing) = guard.take() {
+        existing.stop();
+    }
+    Ok(())
+}
+
+/// Self-test: start pink noise on `device` (or the default endpoint) so it plays out through
+/// EqAPO while the loopback monitor captures the result — the frontend compares the captured
+/// spectrum shape against the applied EQ curve to prove corrections reach the output. Replaces any
+/// test signal already playing.
+#[tauri::command]
+fn start_test_signal(device: Option<String>, state: State<TestSignalState>) -> Result<(), String> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(existing) = guard.take() {
+        existing.stop();
+    }
+    *guard = Some(cageq_monitor::TestSignal::start(device)?);
+    Ok(())
+}
+
+/// Stop the self-test signal (idempotent — no-op if nothing is playing).
+#[tauri::command]
+fn stop_test_signal(state: State<TestSignalState>) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.take() {
         existing.stop();
@@ -740,6 +768,7 @@ pub fn run() {
                 .map(|r| r.join("sidecar").join("cageq-sidecar.exe"));
             app.manage(build_backend(bundled));
             app.manage(MonitorState::default());
+            app.manage(TestSignalState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -754,6 +783,8 @@ pub fn run() {
             list_devices,
             start_monitor,
             stop_monitor,
+            start_test_signal,
+            stop_test_signal,
             open_output_settings,
             list_targets,
             measurement_curves,

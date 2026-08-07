@@ -121,6 +121,26 @@
     "finalWarning": "⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched — a louder slot can just sound \"better\". Press <0>W</0> for Comparison to A/B fairly."
   },
 
+  "selfTest": {
+    "button": "Self-test",
+    "buttonTitle": "Play a test signal and verify your correction actually reaches the output",
+    "warnTitle": "Run output self-test?",
+    "warnBody": "This plays a short burst of pink noise through {{device}}. Turn your volume DOWN first and stop any other audio.",
+    "run": "Play test",
+    "cancel": "Cancel",
+    "running": "Testing… measuring the loopback with your correction and bypassed (a few seconds; the sound will briefly change).",
+    "close": "Close",
+    "retry": "Retry",
+    "passTitle": "✓ EQ is reaching your output",
+    "pass": "The measured output matches your correction (shape match {{r}}%). Equalizer APO is applying it.",
+    "failTitle": "✕ No EQ detected at the output",
+    "fail": "The output didn't change with your correction — Equalizer APO isn't affecting this device. Check:\n• Audio enhancements are enabled for the device (Windows Sound → device → Properties).\n• Equalizer APO is installed on it (run its DeviceSelector).\n• No other filters in config.txt are interfering.",
+    "mismatchTitle": "⚠ Output doesn't match your correction",
+    "mismatch": "Something is shaping the output, but not the way your correction predicts (match {{r}}%). Other active filters in config.txt may be stacking on top.",
+    "inconclusiveTitle": "Couldn't measure",
+    "inconclusive": "Your current correction is too flat to test reliably. Pick a headphone correction with more shape (Slot A or B), then retry."
+  },
+
   "loudness": {
     "title": "Loudness",
     "modeAria": "Loudness mode",

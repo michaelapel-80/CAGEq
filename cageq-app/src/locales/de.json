@@ -121,6 +121,26 @@
     "finalWarning": "⚠ Finale Lautstärke: Jeder Slot spielt auf seiner eigenen Maximallautstärke, A/B/Dry sind also nicht lautheitsangeglichen – ein lauterer Slot kann einfach „besser“ klingen. <0>W</0> drücken für Vergleich, um fair A/B zu hören."
   },
 
+  "selfTest": {
+    "button": "Selbsttest",
+    "buttonTitle": "Ein Testsignal abspielen und prüfen, ob deine Korrektur tatsächlich am Ausgang ankommt",
+    "warnTitle": "Ausgangs-Selbsttest starten?",
+    "warnBody": "Spielt einen kurzen Rosa-Rausch-Stoß über {{device}} ab. Drehe zuerst die Lautstärke RUNTER und stoppe andere Audioquellen.",
+    "run": "Test abspielen",
+    "cancel": "Abbrechen",
+    "running": "Test läuft… der Loopback wird mit und ohne deine Korrektur gemessen (einige Sekunden; der Klang ändert sich kurz).",
+    "close": "Schließen",
+    "retry": "Erneut",
+    "passTitle": "✓ EQ erreicht deinen Ausgang",
+    "pass": "Die gemessene Ausgabe passt zu deiner Korrektur (Formübereinstimmung {{r}} %). Equalizer APO wendet sie an.",
+    "failTitle": "✕ Kein EQ am Ausgang erkannt",
+    "fail": "Die Ausgabe änderte sich nicht mit deiner Korrektur — Equalizer APO wirkt auf diesem Gerät nicht. Prüfe:\n• Audioverbesserungen sind für das Gerät aktiviert (Windows-Sound → Gerät → Eigenschaften).\n• Equalizer APO ist darauf installiert (DeviceSelector ausführen).\n• Keine anderen Filter in config.txt stören.",
+    "mismatchTitle": "⚠ Ausgabe passt nicht zur Korrektur",
+    "mismatch": "Etwas formt die Ausgabe, aber nicht so, wie deine Korrektur es vorhersagt (Übereinstimmung {{r}} %). Möglicherweise stapeln sich andere aktive Filter in config.txt darüber.",
+    "inconclusiveTitle": "Messung nicht möglich",
+    "inconclusive": "Deine aktuelle Korrektur ist zu flach für einen zuverlässigen Test. Wähle eine Kopfhörer-Korrektur mit mehr Form (Slot A oder B) und versuche es erneut."
+  },
+
   "loudness": {
     "title": "Lautheit",
     "modeAria": "Lautheitsmodus",

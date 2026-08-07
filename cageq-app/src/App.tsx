@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
-import { Band } from "./biquad";
+import { Band, composedCurveDb } from "./biquad";
 import { EqChart, Marker, PhaseCurve, RefCurve, Series, SpectrumData } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
@@ -247,6 +247,61 @@ const RAW_COLOR = "#94a3b8"; // the raw headphone measurement (nerd overlay)
 const TARGET_COLOR = "#7dd3fc"; // the target curve — pale blue, à la AutoEq (nerd overlay)
 const PHASE_COLOR = "#f59e0b"; // the filter chain's phase, on the secondary axis (nerd overlay)
 
+// §5.4 self-test verdict — **delta method**. We measure the loopback with the correction applied and
+// again with it bypassed (Dry), and compare their *difference*: delta = corrected − dry. That delta
+// is the EQ's own transfer function, because everything common to both captures — the pink source's
+// imperfect flatness, any foreign config.txt filters, fixed system coloration — cancels exactly. So
+// the leftover is purely CAGEq's contribution, which we correlate against the applied EQ curve.
+type SelfTestVerdict = { kind: "pass"; r: number } | { kind: "fail" } | { kind: "mismatch"; r: number } | { kind: "inconclusive" };
+type SelfTestState = { phase: "warn" } | { phase: "running" } | { phase: "done"; verdict: SelfTestVerdict };
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Average `frames`' per-bin dB into one Float64Array (empty → zeros). */
+function avgSpectrum(frames: SpectrumData[], n: number): Float64Array {
+  const a = new Float64Array(n);
+  if (frames.length === 0) return a;
+  for (const f of frames) for (let i = 0; i < n; i++) a[i] += f.db[i];
+  for (let i = 0; i < n; i++) a[i] /= frames.length;
+  return a;
+}
+
+function selfTestVerdict(corrected: SpectrumData[], dry: SpectrumData[], bands: Band[], fs?: number): SelfTestVerdict {
+  if (corrected.length < 3 || dry.length < 3) return { kind: "inconclusive" };
+  const N = corrected[0].db.length;
+  const Lc = avgSpectrum(corrected, N);
+  const Ld = avgSpectrum(dry, N);
+  const { f_min, f_max } = corrected[0];
+  const freqs = new Float64Array(N);
+  for (let i = 0; i < N; i++) freqs[i] = f_min * (f_max / f_min) ** (i / (N - 1));
+  const C = composedCurveDb(bands, freqs, fs); // expected EQ magnitude at each bin (at the device rate)
+  // Trust only bins with real energy in *both* captures (pink well above the display floor).
+  const idx: number[] = [];
+  for (let i = 0; i < N; i++) if (Lc[i] > -90 && Ld[i] > -90) idx.push(i);
+  if (idx.length < N / 3) return { kind: "inconclusive" };
+  const D = idx.map((i) => Lc[i] - Ld[i]); // measured EQ transfer function (dB)
+  const Ci = idx.map((i) => C[i]);
+  const n = idx.length;
+  const meanD = D.reduce((a, v) => a + v, 0) / n; // constant offset (preamp difference) — irrelevant to shape
+  const meanC = Ci.reduce((a, v) => a + v, 0) / n;
+  let sDD = 0, sCC = 0, sDC = 0;
+  for (let k = 0; k < n; k++) {
+    const d = D[k] - meanD;
+    const c = Ci[k] - meanC;
+    sDD += d * d;
+    sCC += c * c;
+    sDC += d * c;
+  }
+  const stdD = Math.sqrt(sDD / n); // how much the measured EQ effect actually varies (dB RMS)
+  const stdC = Math.sqrt(sCC / n); // how much the correction predicts
+  // NOTE: thresholds are estimates; want a little live tuning against known-good/known-broken setups.
+  if (stdC < 1.5) return { kind: "inconclusive" }; // correction too flat to measure against
+  if (stdD < 0.8) return { kind: "fail" }; // corrected ≈ dry → CAGEq's config isn't reaching the output
+  const r = sDC / (Math.sqrt(sDD * sCC) || 1);
+  // stdD can sit below stdC because the 120-bin spectrum smooths sharp high-Q filters, so allow that.
+  if (r > 0.75 && stdD > 0.5 * stdC) return { kind: "pass", r };
+  return { kind: "mismatch", r };
+}
+
 function App() {
   // i18n aliased to `tr` (App.tsx already uses `t` as a lambda param for templates/targets).
   const { t: tr, i18n } = useTranslation();
@@ -346,6 +401,7 @@ function App() {
   // Inline rename of a saved preset/template row (id + edited name). Committed on Enter/blur.
   const [renaming, setRenaming] = useState<{ kind: "preset" | "template"; id: string; name: string } | null>(null);
   const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
+  const [selfTest, setSelfTest] = useState<SelfTestState | null>(null); // §5.4 output self-test
   const [activeSlot, setActiveSlot] = useState<SlotName>("A");
   // Drop a stale cross-view highlight when the underlying band list changes out from under a
   // still pointer (stage tab switch, slot change) — no pointerleave fires in that case.
@@ -864,6 +920,57 @@ function App() {
   // Windows playback rate, shown compactly (48 kHz, 44.1 kHz, 96 kHz…).
   const fmtRate = (hz: number) => `${+(hz / 1000).toFixed(1)} kHz`;
 
+  // §5.4 output self-test: play pink noise (through EqAPO) and check the loopback spectrum's shape
+  // matches the applied correction — proving the EQ actually reaches the output. Runs entirely off
+  // the current correction (no config change); the backend only plays the signal.
+  async function runSelfTest() {
+    if (!result || dryActive || (activeSlot !== "A" && activeSlot !== "B")) return;
+    const bands = result.filters;
+    const originalSlot = activeSlot; // restored after the Dry reference capture
+    // Pre-check: if the correction is too flat there's no shape to measure — don't bother playing.
+    const grid = new Float64Array(120);
+    for (let i = 0; i < 120; i++) grid[i] = 20 * 1000 ** (i / 119); // 20 Hz … 20 kHz
+    const gc = composedCurveDb(bands, grid, sampleRate ?? undefined);
+    let mean = 0;
+    for (const v of gc) mean += v;
+    mean /= gc.length;
+    let varSum = 0;
+    for (const v of gc) varSum += (v - mean) ** 2;
+    if (Math.sqrt(varSum / gc.length) < 1.5) {
+      setSelfTest({ phase: "done", verdict: { kind: "inconclusive" } });
+      return;
+    }
+    // Capture the loopback spectrum for `ms`, after `settleMs` for the config change to take hold.
+    const capture = async (settleMs: number, ms: number): Promise<SpectrumData[]> => {
+      await sleep(settleMs);
+      const frames: SpectrumData[] = [];
+      const un = await listen<SpectrumData>("spectrum", (e) => frames.push(e.payload));
+      await sleep(ms);
+      un();
+      return frames;
+    };
+    setSelfTest({ phase: "running" });
+    let switched = false; // true while the applied config is temporarily forced to Dry
+    try {
+      setError("");
+      await invoke("start_test_signal", { device: deviceId || null });
+      // 1) measure the current correction, 2) bypass to Dry and measure the reference, 3) restore.
+      const corrected = await capture(500, 1500); // fade-in + settle, then capture
+      await invoke("activate_slot", { slot: "Dry" });
+      switched = true;
+      const dry = await capture(600, 1500); // EqAPO reload/crossfade + spectrum smoothing settle
+      await invoke("activate_slot", { slot: originalSlot });
+      switched = false;
+      setSelfTest({ phase: "done", verdict: selfTestVerdict(corrected, dry, bands, sampleRate ?? undefined) });
+    } catch (e) {
+      setError(String(e));
+      setSelfTest(null);
+    } finally {
+      if (switched) await invoke("activate_slot", { slot: originalSlot }).catch(() => {}); // never leave Dry applied
+      await invoke("stop_test_signal").catch(() => {});
+    }
+  }
+
   // §3.4 tone editing — every change auto-applies (throttled). Edits target the *active
   // stage's* band list (the grid + chart nodes show only that stage); indices are into it.
   const setStageBands = (stage: StageId, updater: (bands: CustomFilter[]) => CustomFilter[]) =>
@@ -1259,6 +1366,55 @@ function App() {
                 {confirmBox.confirmLabel}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {selfTest && (
+        <div
+          onClick={() => selfTest.phase !== "running" && setSelfTest(null)}
+          style={{ position: "fixed", inset: 0, background: "#0006", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10 }}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            {selfTest.phase === "warn" && (
+              <>
+                <p style={{ marginTop: 0, fontWeight: 600 }}>{tr("selfTest.warnTitle")}</p>
+                <p style={{ fontSize: "0.9em" }}>{tr("selfTest.warnBody", { device: selectedDevice?.name ?? "" })}</p>
+                <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
+                  <button type="button" onClick={() => setSelfTest(null)}>
+                    {tr("selfTest.cancel")}
+                  </button>
+                  <button type="button" onClick={runSelfTest}>
+                    {tr("selfTest.run")}
+                  </button>
+                </div>
+              </>
+            )}
+            {selfTest.phase === "running" && <p style={{ margin: 0 }}>{tr("selfTest.running")}</p>}
+            {selfTest.phase === "done" &&
+              (() => {
+                const v = selfTest.verdict;
+                const pct = v.kind === "pass" || v.kind === "mismatch" ? Math.round(Math.max(0, v.r) * 100) : 0;
+                const titleKey =
+                  v.kind === "pass" ? "passTitle" : v.kind === "fail" ? "failTitle" : v.kind === "mismatch" ? "mismatchTitle" : "inconclusiveTitle";
+                const color = v.kind === "pass" ? "#16a34a" : v.kind === "fail" ? "#c0392b" : "#b8860b";
+                return (
+                  <>
+                    <p style={{ marginTop: 0, color, fontWeight: 600 }}>{tr(`selfTest.${titleKey}`)}</p>
+                    <p style={{ fontSize: "0.9em", whiteSpace: "pre-line" }}>{tr(`selfTest.${v.kind}`, { r: pct })}</p>
+                    <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
+                      {v.kind !== "pass" && (
+                        <button type="button" onClick={() => setSelfTest({ phase: "warn" })}>
+                          {tr("selfTest.retry")}
+                        </button>
+                      )}
+                      <button type="button" onClick={() => setSelfTest(null)}>
+                        {tr("selfTest.close")}
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
           </div>
         </div>
       )}
@@ -1709,6 +1865,15 @@ function App() {
                 </button>
                 <button type="button" onClick={() => copySlot("B", "A")} disabled={!slotInputs.B} style={{ fontSize: "0.8em" }}>
                   B→A
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelfTest({ phase: "warn" })}
+                  disabled={dryActive || !result}
+                  title={tr("selfTest.buttonTitle")}
+                  style={{ fontSize: "0.8em", marginLeft: "auto" }}
+                >
+                  {tr("selfTest.button")}
                 </button>
               </div>
               <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.5em 0 0" }}>{tr("compare.shortcuts")}</p>
