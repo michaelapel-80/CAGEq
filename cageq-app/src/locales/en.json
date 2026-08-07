@@ -137,6 +137,8 @@
     "fail": "The output didn't change with your correction — Equalizer APO isn't affecting this device. Check:\n• Audio enhancements are enabled for the device (Windows Sound → device → Properties).\n• Equalizer APO is installed on it (run its DeviceSelector).\n• No other filters in config.txt are interfering.",
     "mismatchTitle": "⚠ Output doesn't match your correction",
     "mismatch": "Something is shaping the output, but not the way your correction predicts (match {{r}}%). Other active filters in config.txt may be stacking on top.",
+    "nosignalTitle": "No signal captured",
+    "nosignal": "The loopback captured almost nothing, so there's nothing to compare — the output device was likely disabled or removed. Check it's active, then retry. (The device's own volume/mute don't affect this test; only muting CAGEq itself in the Windows volume mixer would.)",
     "inconclusiveTitle": "Couldn't measure",
     "inconclusive": "Your current correction is too flat to test reliably. Pick a headphone correction with more shape (Slot A or B), then retry."
   },

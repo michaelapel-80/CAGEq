@@ -252,7 +252,12 @@ const PHASE_COLOR = "#f59e0b"; // the filter chain's phase, on the secondary axi
 // is the EQ's own transfer function, because everything common to both captures — the pink source's
 // imperfect flatness, any foreign config.txt filters, fixed system coloration — cancels exactly. So
 // the leftover is purely CAGEq's contribution, which we correlate against the applied EQ curve.
-type SelfTestVerdict = { kind: "pass"; r: number } | { kind: "fail" } | { kind: "mismatch"; r: number } | { kind: "inconclusive" };
+type SelfTestVerdict =
+  | { kind: "pass"; r: number }
+  | { kind: "fail" }
+  | { kind: "mismatch"; r: number }
+  | { kind: "nosignal" }
+  | { kind: "inconclusive" };
 type SelfTestState = { phase: "warn" } | { phase: "running" } | { phase: "done"; verdict: SelfTestVerdict };
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -266,7 +271,9 @@ function avgSpectrum(frames: SpectrumData[], n: number): Float64Array {
 }
 
 function selfTestVerdict(corrected: SpectrumData[], dry: SpectrumData[], bands: Band[], fs?: number): SelfTestVerdict {
-  if (corrected.length < 3 || dry.length < 3) return { kind: "inconclusive" };
+  // No (or barely any) captured frames ⇒ the loopback produced nothing — e.g. the device was
+  // disabled/removed mid-test and the capture is stuck reopening. That's no-signal, not "too flat".
+  if (corrected.length < 3 || dry.length < 3) return { kind: "nosignal" };
   const N = corrected[0].db.length;
   const Lc = avgSpectrum(corrected, N);
   const Ld = avgSpectrum(dry, N);
@@ -277,7 +284,9 @@ function selfTestVerdict(corrected: SpectrumData[], dry: SpectrumData[], bands: 
   // Trust only bins with real energy in *both* captures (pink well above the display floor).
   const idx: number[] = [];
   for (let i = 0; i < N; i++) if (Lc[i] > -90 && Ld[i] > -90) idx.push(i);
-  if (idx.length < N / 3) return { kind: "inconclusive" };
+  // Too few live bins ⇒ the test signal never really reached the loopback (wrong/muted/disabled
+  // device) — that's "nothing vs nothing", not evidence the EQ is broken. Report it as such.
+  if (idx.length < N / 2) return { kind: "nosignal" };
   const D = idx.map((i) => Lc[i] - Ld[i]); // measured EQ transfer function (dB)
   const Ci = idx.map((i) => C[i]);
   const n = idx.length;
@@ -956,6 +965,11 @@ function App() {
       await invoke("start_test_signal", { device: deviceId || null });
       // 1) measure the current correction, 2) bypass to Dry and measure the reference, 3) restore.
       const corrected = await capture(500, 1500); // fade-in + settle, then capture
+      if (corrected.length < 3) {
+        // Loopback produced nothing (device disabled/removed) — don't bother toggling Dry.
+        setSelfTest({ phase: "done", verdict: { kind: "nosignal" } });
+        return;
+      }
       await invoke("activate_slot", { slot: "Dry" });
       switched = true;
       const dry = await capture(600, 1500); // EqAPO reload/crossfade + spectrum smoothing settle
@@ -1396,7 +1410,15 @@ function App() {
                 const v = selfTest.verdict;
                 const pct = v.kind === "pass" || v.kind === "mismatch" ? Math.round(Math.max(0, v.r) * 100) : 0;
                 const titleKey =
-                  v.kind === "pass" ? "passTitle" : v.kind === "fail" ? "failTitle" : v.kind === "mismatch" ? "mismatchTitle" : "inconclusiveTitle";
+                  v.kind === "pass"
+                    ? "passTitle"
+                    : v.kind === "fail"
+                      ? "failTitle"
+                      : v.kind === "mismatch"
+                        ? "mismatchTitle"
+                        : v.kind === "nosignal"
+                          ? "nosignalTitle"
+                          : "inconclusiveTitle";
                 const color = v.kind === "pass" ? "#16a34a" : v.kind === "fail" ? "#c0392b" : "#b8860b";
                 return (
                   <>
