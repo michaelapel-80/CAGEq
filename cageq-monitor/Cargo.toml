@@ -4,7 +4,7 @@
 # the workspace stays cross-platform, matching the rest of the codebase (e.g. list_render_devices).
 [package]
 name = "cageq-monitor"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 
 [dependencies]

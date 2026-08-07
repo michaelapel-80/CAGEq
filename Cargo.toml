@@ -13,3 +13,10 @@ members = [
     "cageq-core",
     "cageq-monitor",
 ]
+
+# Single source of truth for the internal library crates' version (each member sets
+# `version.workspace = true`). The Tauri app (cageq-app/src-tauri) is a deliberately separate
+# workspace, so it carries the same number in its own manifest + tauri.conf.json (the authoritative
+# product/bundle version that `getVersion()` surfaces in the UI). Bump all together per release.
+[workspace.package]
+version = "0.2.0"

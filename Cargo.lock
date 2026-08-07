@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-config-writer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "sha2",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cageq-config-writer",
  "cageq-sidecar",
@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-monitor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ebur128",
  "realfft",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-sidecar"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-watchdog"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cageq-config-writer",
  "cageq-sidecar",

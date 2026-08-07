@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { useTranslation, Trans } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
 import { Band, composedCurveDb } from "./biquad";
@@ -417,6 +418,12 @@ function App() {
   const [foreignConfig, setForeignConfig] = useState<string[] | null>(null);
   const [foreignReview, setForeignReview] = useState<null | "review" | "done">(null);
   const [foreignDismissed, setForeignDismissed] = useState(false);
+  // App version (from tauri.conf.json via getVersion) — shown in the footer so a deployed build is
+  // identifiable ("I'm on vX"). The single authoritative product version.
+  const [appVersion, setAppVersion] = useState("");
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => {});
+  }, []);
   const [activeSlot, setActiveSlot] = useState<SlotName>("A");
   // Drop a stale cross-view highlight when the underlying band list changes out from under a
   // still pointer (stage tab switch, slot change) — no pointerleave fires in that case.
@@ -2271,6 +2278,11 @@ function App() {
       {error && <p style={{ color: "crimson" }}>{error}</p>}
 
       <footer className="app-footer">
+        {appVersion && (
+          <>
+            <span className="app-version">CAGEq v{appVersion}</span> ·{" "}
+          </>
+        )}
         <Trans
           i18nKey="footer.text"
           components={[
