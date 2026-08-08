@@ -118,6 +118,9 @@
     "copy": "Copy:",
     "slotTitle": "{{slot}} (key {{key}})",
     "slotEmptySuffix": " — empty",
+    "loadedTitle": "Slot {{slot}}: loaded from preset “{{name}}” {{ver}}",
+    "loadedDirtyTitle": "Slot {{slot}}: “{{name}}” {{ver}} — edited since loading (unsaved)",
+    "dirtyAria": "edited since loading",
     "shortcuts": "A / S / D switch slots, W toggles the loudness mode — even without looking at the screen.",
     "finalWarning": "⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched — a louder slot can just sound \"better\". Press <0>W</0> for Comparison to A/B fairly."
   },

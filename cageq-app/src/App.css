@@ -785,6 +785,7 @@ select:disabled {
    phosphor language of the meters; inactive chips sit as unlit, recessed keys. */
 .slot-chip {
   --slot: #888;
+  flex: 1; /* split the row evenly so the loaded-preset caption can align beneath each */
   border: 1px solid rgba(128, 128, 128, 0.3);
   border-radius: 6px;
   background: linear-gradient(
@@ -820,6 +821,48 @@ select:disabled {
 .slot-chip kbd {
   font-size: 0.7em;
   opacity: 0.6;
+}
+
+/* Loaded-preset attribution under the slot row: a caption per slot that carries a preset,
+   tinted in the slot colour, with a vN tag and a dot when the editor has diverged (dirty).
+   Laid out as the same three even columns as the chips (0.4em gap) so each sits beneath its
+   button; the Dry column stays empty. */
+.slot-loaded {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0 0.4em;
+  margin-top: 0.4em;
+  font-size: 0.76em;
+}
+.sl-item {
+  --slot: #888;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.3em;
+  min-width: 0;
+  opacity: 0.72;
+}
+.sl-item.active {
+  opacity: 1;
+}
+.sl-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--slot); /* the slot's colour already identifies which slot this is */
+}
+.sl-ver {
+  font-size: 0.85em;
+  opacity: 0.6;
+}
+.sl-dirty {
+  color: #b8860b;
+  font-size: 0.7em;
+  line-height: 1;
 }
 
 /* --- §5.2 tone grid (stage 3): graphic-EQ channel strips -----------------------------

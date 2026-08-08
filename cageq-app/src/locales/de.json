@@ -118,6 +118,9 @@
     "copy": "Kopieren:",
     "slotTitle": "{{slot}} (Taste {{key}})",
     "slotEmptySuffix": " – leer",
+    "loadedTitle": "Slot {{slot}}: geladen aus Preset „{{name}}“ {{ver}}",
+    "loadedDirtyTitle": "Slot {{slot}}: „{{name}}“ {{ver}} – seit dem Laden geändert (ungespeichert)",
+    "dirtyAria": "seit dem Laden geändert",
     "shortcuts": "A / S / D wechseln Slots, W schaltet den Lautheitsmodus – auch ohne auf den Bildschirm zu sehen.",
     "finalWarning": "⚠ Finale Lautstärke: Jeder Slot spielt auf seiner eigenen Maximallautstärke, A/B/Dry sind also nicht lautheitsangeglichen – ein lauterer Slot kann einfach „besser“ klingen. <0>W</0> drücken für Vergleich, um fair A/B zu hören."
   },

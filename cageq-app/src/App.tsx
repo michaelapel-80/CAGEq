@@ -126,6 +126,12 @@ function normalizeStages(raw?: Partial<Stages> | null): Stages {
   return { fit: stage(raw?.fit, false), content: stage(raw?.content, false), tone: stage(raw?.tone, true) };
 }
 
+/** A stable fingerprint of a slot's *document* (model + measurement + target + all stages),
+ *  used to tell whether the editor has diverged from the preset last loaded into a slot
+ *  (the "dirty" flag). Compared against the sig captured at load time — see `slotPreset`. */
+const presetSig = (model: string, measurementPath: string, targetPath: string, stages: Stages) =>
+  JSON.stringify({ model, measurementPath, targetPath, stages });
+
 /** The custom bands actually written: every enabled stage's enabled bands, in stage order —
  *  what rides to the sidecar (appended to the AutoEq fit) and drives the §4.1/§4.2 policy. */
 const appliedBands = (st: Stages): CustomFilter[] =>
@@ -506,6 +512,12 @@ function App() {
   useEffect(() => setHoverBand(null), [activeStage, activeSlot]);
   // Last-applied inputs per editable slot (for display + reloading the controls).
   const [slotInputs, setSlotInputs] = useState<Record<"A" | "B", SlotInputs | null>>({ A: null, B: null });
+  // Which preset (or archived version) was last loaded into each editable slot, with the
+  // document sig captured at load time — so each slot can show its loaded preset name and a
+  // "dirty" marker once the editor diverges from it. Session-scoped (not persisted): a fresh
+  // launch shows no attribution until the user loads a preset. `ver` is the vN tag shown.
+  type LoadedRef = { id: string; name: string; ver?: string; sig: string };
+  const [slotPreset, setSlotPreset] = useState<Record<"A" | "B", LoadedRef | null>>({ A: null, B: null });
   // Last computed fit per editable slot, persisted into the resume blob so the next launch
   // writes EQ immediately from cache instead of waiting on the cold sidecar fit (§3.5).
   const [slotFits, setSlotFits] = useState<Record<"A" | "B", PersistedFit | null>>({ A: null, B: null });
@@ -1015,6 +1027,7 @@ function App() {
       setError("");
       const applied = await invoke<ApplyResult>("copy_slot", { from, to });
       setSlotInputs((prev) => ({ ...prev, [to]: src }));
+      setSlotPreset((prev) => ({ ...prev, [to]: prev[from] })); // carry the source's preset attribution
       setHydrated((prev) => ({ ...prev, [to]: true }));
       setActiveSlot(to);
       setQuery(src.model);
@@ -1215,16 +1228,31 @@ function App() {
     commitHistory();
   };
   // Loads a preset *or* one of its archived versions (both are PresetState) into the active slot.
-  const loadPreset = (p: PresetState) => {
+  // `ref` carries the parent preset's identity + the vN tag so the slot can show what's loaded
+  // and flag divergence (dirty). The sig is captured from the exact normalized state applied.
+  const loadPreset = (p: PresetState, ref?: { id: string; name: string; ver?: string }) => {
     if (activeSlot === "Dry") return;
+    const stages = normalizeStages(p.stages);
     setQuery(p.model);
     setMeasurementPath(p.measurementPath);
     setTargetPath(p.targetPath);
-    setStages(normalizeStages(p.stages));
+    setStages(stages);
     requestApply(0);
     // A full preset swaps measurement + target + all stages — a new document, not an edit; undo
     // can't half-restore those (they're outside history), so start fresh rather than mislead.
     resetHistory();
+    if (activeSlot === "A" || activeSlot === "B")
+      setSlotPreset((sp) => ({
+        ...sp,
+        [activeSlot]: ref ? { ...ref, sig: presetSig(p.model, p.measurementPath, p.targetPath, stages) } : null,
+      }));
+  };
+  // Re-anchor the active slot's loaded-preset attribution to a freshly saved state (so a
+  // save/overwrite clears the dirty flag and updates the vN tag). Uses the current editor
+  // state as the new clean baseline.
+  const setActiveSlotLoaded = (id: string, name: string, ver?: string) => {
+    if (activeSlot !== "A" && activeSlot !== "B") return;
+    setSlotPreset((sp) => ({ ...sp, [activeSlot]: { id, name, ver, sig: presetSig(query, measurementPath, targetPath, stages) } }));
   };
 
   // Save the current controls as a preset or template. Empty name → inline field error.
@@ -1251,6 +1279,7 @@ function App() {
           ? { ...lib, presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, stages, versions: existingVersions }) }
           : { ...lib, templates: upsert(lib.templates, { id, name, stage: activeStage, bands: stages[activeStage].bands }) },
       );
+      if (kind === "preset") setActiveSlotLoaded(id, name, `v${(existingVersions?.length ?? 0) + 1}`);
       setSaveForm(null);
     };
     if (existing) {
@@ -1272,17 +1301,19 @@ function App() {
   // doesn't mean retyping the name. Confirms first (reusing the overwrite dialog).
   // Overwrite the preset's current state in place with the editor state (no new history entry) —
   // the "Overwrite current" choice of the save dialog. Preserves the version history.
-  const overwritePresetInPlace = (p: UserPreset) =>
+  const overwritePresetInPlace = (p: UserPreset) => {
     setLibrary((lib) => ({
       ...lib,
       presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, stages, versions: p.versions }),
     }));
+    setActiveSlotLoaded(p.id, p.name, `v${(p.versions?.length ?? 0) + 1}`);
+  };
 
   // §3.5 preset versioning — explicit only. "Save version" archives the preset's *current stored*
   // state into its history and advances the preset to the current editor state, so refining →
   // save-version keeps the prior state to A/B against. Capped; nothing is captured automatically.
   const MAX_VERSIONS = 10;
-  const saveNewVersion = (p: UserPreset) =>
+  const saveNewVersion = (p: UserPreset) => {
     setLibrary((lib) => ({
       ...lib,
       presets: upsert(lib.presets, {
@@ -1298,6 +1329,10 @@ function App() {
         ].slice(-MAX_VERSIONS),
       }),
     }));
+    // The prior stored head becomes a version and the editor state becomes the new head, so the
+    // slot now sits on vN+1 (capped at MAX_VERSIONS+1 once the ring fills), clean.
+    setActiveSlotLoaded(p.id, p.name, `v${Math.min((p.versions?.length ?? 0) + 2, MAX_VERSIONS + 1)}`);
+  };
   const deleteVersion = (p: UserPreset, idx: number) =>
     setLibrary((lib) => ({
       ...lib,
@@ -1378,6 +1413,16 @@ function App() {
 
   const selectedDevice = devices.find((d) => d.id === deviceId);
   const dryActive = activeSlot === "Dry";
+
+  // Has a slot's document diverged from the preset last loaded into it? For the active slot the
+  // live editor is the source of truth; an inactive slot compares its last-applied snapshot.
+  const slotDirty = (s: "A" | "B") => {
+    const ref = slotPreset[s];
+    if (!ref) return false;
+    if (s === activeSlot) return presetSig(query, measurementPath, targetPath, stages) !== ref.sig;
+    const inp = slotInputs[s];
+    return !inp || presetSig(inp.model, inp.measurementPath, inp.targetPath, inp.stages) !== ref.sig;
+  };
 
   // Measure the chart's rendered SVG so the meter bars can match its plot-area Y extent. EqChart's
   // viewBox is 720×215 with PAD.t=12 / PAD.b=24 → the plot spans y 12..191 of 215.
@@ -2190,6 +2235,27 @@ function App() {
                   );
                 })}
               </div>
+              {(slotPreset.A || slotPreset.B) && (
+                <div className="slot-loaded">
+                  {(["A", "B"] as const).map((s) => {
+                    const ref = slotPreset[s];
+                    if (!ref) return null;
+                    const dirty = slotDirty(s);
+                    return (
+                      <span
+                        key={s}
+                        className={`sl-item${s === activeSlot ? " active" : ""}`}
+                        style={{ "--slot": SLOT_COLOR[s], gridColumn: s === "A" ? 1 : 2 } as CSSProperties}
+                        title={tr(dirty ? "compare.loadedDirtyTitle" : "compare.loadedTitle", { slot: slotLabel(s), name: ref.name, ver: ref.ver ?? "" })}
+                      >
+                        <span className="sl-name">{ref.name}</span>
+                        {ref.ver && <span className="sl-ver">{ref.ver}</span>}
+                        {dirty && <span className="sl-dirty" aria-label={tr("compare.dirtyAria")}>●</span>}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
               <div className="row" style={{ gap: "0.4em", marginTop: "0.4em" }}>
                 <span style={{ fontSize: "0.75em", opacity: 0.6 }}>{tr("compare.copy")}</span>
                 <button type="button" onClick={() => copySlot("A", "B")} disabled={!slotInputs.A} style={{ fontSize: "0.8em" }}>
@@ -2434,7 +2500,7 @@ function App() {
                               {p.name}
                             </span>
                           )}
-                          <button type="button" disabled={dryActive} onClick={() => loadPreset(p)}>
+                          <button type="button" disabled={dryActive} onClick={() => loadPreset(p, { id: p.id, name: p.name, ver: `v${(p.versions?.length ?? 0) + 1}` })}>
                             {tr("presets.load")}
                           </button>
                           <button
@@ -2485,7 +2551,7 @@ function App() {
                                       <span className="pl-ver-when">
                                         v{i + 1} · {fmtWhen(v.at)}
                                       </span>
-                                      <button type="button" disabled={dryActive} onClick={() => loadPreset(v)}>
+                                      <button type="button" disabled={dryActive} onClick={() => loadPreset(v, { id: p.id, name: p.name, ver: `v${i + 1}` })}>
                                         {tr("presets.load")}
                                       </button>
                                       <button
