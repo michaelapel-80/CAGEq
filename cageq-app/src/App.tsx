@@ -1470,24 +1470,30 @@ function App() {
   const visibleTemplates = showAllStages ? library.templates : library.templates.filter((t) => t.stage === activeStage);
   const showCurated = showAllStages || activeStage === "tone";
 
-  // The active slot's composed bands split into its AutoEq fit and the custom tail. The
-  // sidecar appends the (summed) custom filters after the AutoEq bands, so the fit is
-  // everything before that tail. Drawn as fixed diamonds; the tone bands stay draggable.
+  // The active slot's cached composed fit. Slot-synced: it indexes straight off `activeSlot`, so
+  // it's already correct in the same paint as a slot switch — unlike the live `result`, which
+  // arrives a beat later once activate_slot / the re-fit resolves.
+  const activeFit = activeSlot === "A" || activeSlot === "B" ? slotFits[activeSlot] : null;
+
+  // The active slot's composed bands split into its AutoEq fit and the custom tail. The sidecar
+  // appends the (summed) custom filters after the AutoEq bands, so the fit is everything before
+  // that tail. Drawn as fixed diamonds; the tone bands stay draggable. Sourced from the cached
+  // fit first so the read-only AutoEq stage doesn't flash a wrong-length slice of the *previous*
+  // slot's `result` during a switch (result lags `stages`/`appliedCustom` by a beat); falls back
+  // to the live `result` only for a slot with no cached fit yet.
+  const autoEqSource = activeFit?.filters ?? (result && !dryActive ? result.filters : null);
   const autoEqBands = useMemo(() => {
-    if (!result || dryActive) return [];
-    const n = Math.max(0, result.filters.length - appliedCustom.length);
-    return result.filters.slice(0, n);
-  }, [result, appliedCustom, dryActive]);
+    if (dryActive || !autoEqSource) return [];
+    const n = Math.max(0, autoEqSource.length - appliedCustom.length);
+    return autoEqSource.slice(0, n);
+  }, [autoEqSource, appliedCustom, dryActive]);
   // Drop the read-only AutoEq view when there's nothing to show (Dry, or no fit yet) so its tab
   // never lingers active over an empty grid.
   useEffect(() => {
     if (autoEqBands.length === 0) setAutoEqView(false);
   }, [autoEqBands.length]);
-  // The AutoEq tab's band count, taken from the *live* fit but falling back to the active slot's
-  // cached fit so the tab renders in the same paint as the editable tabs on a slot switch — the
-  // live `result` arrives a beat after `stages`, which otherwise made the tab pop in late.
-  const activeFit = activeSlot === "A" || activeSlot === "B" ? slotFits[activeSlot] : null;
-  const autoEqCount = autoEqBands.length || (activeFit ? Math.max(0, activeFit.filters.length - appliedCustom.length) : 0);
+  // Tab count comes straight from the same slot-synced source, so it renders in the same paint.
+  const autoEqCount = autoEqBands.length;
 
   // In Comparison mode, hold the chart's Y-scale steady across A/B switches by flooring it at the
   // larger of both editable slots' curve ranges — otherwise switching to the flatter slot rescales
