@@ -134,7 +134,7 @@ mod windows_impl {
     /// Hop is a quarter of the (per-rate) FFT size → 75% overlap, Welch-style averaging.
     const FFT_OVERLAP_DIV: usize = 4;
     /// Number of log-frequency display bins spanning [SPEC_F_MIN, SPEC_F_MAX].
-    const N_LOG_BINS: usize = 120;
+    const N_LOG_BINS: usize = 240;
     const SPEC_F_MIN: f32 = 20.0;
     const SPEC_F_MAX: f32 = 20_000.0;
     /// dB floor for empty/silent spectrum bins.
