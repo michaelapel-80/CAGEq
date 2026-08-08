@@ -485,6 +485,7 @@ function App() {
   // Inline rename of a saved preset/template row (id + edited name). Committed on Enter/blur.
   const [renaming, setRenaming] = useState<{ kind: "preset" | "template"; id: string; name: string } | null>(null);
   const [expandedPreset, setExpandedPreset] = useState<string | null>(null); // which preset's version history is open
+  const [presetSave, setPresetSave] = useState<UserPreset | null>(null); // the preset whose save dialog is open
   const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
   const [selfTest, setSelfTest] = useState<SelfTestState | null>(null); // §5.4 output self-test
   // Finding #1: active directives in config.txt outside CAGEq's block that stack on top of every
@@ -1264,17 +1265,13 @@ function App() {
   // Overwrite an existing saved entry in place with the *current* controls (same id +
   // name) — the per-row "update" button, so tweaking a loaded preset and saving it back
   // doesn't mean retyping the name. Confirms first (reusing the overwrite dialog).
-  const updatePreset = (p: UserPreset) =>
-    setConfirmBox({
-      message: tr("dialog.updatePreset", { name: p.name }),
-      confirmLabel: tr("dialog.overwrite"),
-      onConfirm: () =>
-        setLibrary((lib) => ({
-          ...lib,
-          // Preserve the version history — an overwrite must not silently drop it.
-          presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, stages, versions: p.versions }),
-        })),
-    });
+  // Overwrite the preset's current state in place with the editor state (no new history entry) —
+  // the "Overwrite current" choice of the save dialog. Preserves the version history.
+  const overwritePresetInPlace = (p: UserPreset) =>
+    setLibrary((lib) => ({
+      ...lib,
+      presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, stages, versions: p.versions }),
+    }));
 
   // §3.5 preset versioning — explicit only. "Save version" archives the preset's *current stored*
   // state into its history and advances the preset to the current editor state, so refining →
@@ -1570,6 +1567,42 @@ function App() {
                 }}
               >
                 {confirmBox.confirmLabel}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {presetSave && (
+        <div
+          onClick={() => setPresetSave(null)}
+          style={{ position: "fixed", inset: 0, background: "#0006", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 10 }}
+        >
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <p style={{ marginTop: 0, fontWeight: 600 }}>{tr("dialog.savePresetTitle", { name: presetSave.name })}</p>
+            <p style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("dialog.savePresetHint")}</p>
+            <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
+              <button type="button" onClick={() => setPresetSave(null)}>
+                {tr("dialog.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  overwritePresetInPlace(presetSave);
+                  setPresetSave(null);
+                }}
+              >
+                {tr("dialog.overwriteCurrent")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  saveNewVersion(presetSave);
+                  setExpandedPreset(presetSave.id); // reveal the freshly-archived version
+                  setPresetSave(null);
+                }}
+              >
+                {tr("dialog.saveNewVersion")}
               </button>
             </div>
           </div>
@@ -2419,9 +2452,9 @@ function App() {
                           <button
                             type="button"
                             className="pl-upd"
-                            title={measurementPath ? tr("presets.updatePresetTitle") : tr("presets.updatePresetDisabledTitle")}
+                            title={measurementPath ? tr("presets.savePresetTitle") : tr("presets.updatePresetDisabledTitle")}
                             disabled={dryActive || !measurementPath}
-                            onClick={() => updatePreset(p)}
+                            onClick={() => setPresetSave(p)}
                           >
                             💾
                           </button>
@@ -2433,15 +2466,6 @@ function App() {
                           <div className="pl-versions">
                             <div className="pl-versions-head">
                               <span>{tr("presets.versions")}</span>
-                              <button
-                                type="button"
-                                className="pl-save-ver"
-                                disabled={dryActive || !measurementPath}
-                                title={tr("presets.saveVersionTitle")}
-                                onClick={() => saveNewVersion(p)}
-                              >
-                                {tr("presets.saveVersion")}
-                              </button>
                             </div>
                             {(p.versions?.length ?? 0) === 0 ? (
                               <p className="pl-versions-empty">{tr("presets.noVersions")}</p>
