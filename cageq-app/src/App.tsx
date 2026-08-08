@@ -1071,9 +1071,14 @@ function App() {
   };
   // Windows playback rate, shown compactly (48 kHz, 44.1 kHz, 96 kHz…).
   const fmtRate = (hz: number) => `${+(hz / 1000).toFixed(1)} kHz`;
-  // Compact timestamp for a saved preset version (localized); legacy versions have at=0.
-  const fmtWhen = (at: number) =>
-    at > 0 ? new Date(at).toLocaleString(i18n.language, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+  // Compact local ISO timestamp for a saved preset version (YYYY-MM-DD HH:MM — unambiguous across
+  // locales and aligns cleanly in the list); legacy/migrated versions have at=0 → "—".
+  const fmtWhen = (at: number) => {
+    if (at <= 0) return "—";
+    const d = new Date(at);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
 
   // §5.4 output self-test: play pink noise (through EqAPO) and check the loopback spectrum's shape
   // matches the applied correction — proving the EQ actually reaches the output. Runs entirely off
@@ -1581,9 +1586,17 @@ function App() {
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
             <p style={{ marginTop: 0, fontWeight: 600 }}>{tr("dialog.savePresetTitle", { name: presetSave.name })}</p>
             <p style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("dialog.savePresetHint")}</p>
-            <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
-              <button type="button" onClick={() => setPresetSave(null)}>
-                {tr("dialog.cancel")}
+            {/* Stacked, full-width: three verbose choices (esp. in German) wrap badly side by side. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.4em", marginTop: "0.8em" }}>
+              <button
+                type="button"
+                onClick={() => {
+                  saveNewVersion(presetSave);
+                  setExpandedPreset(presetSave.id); // reveal the freshly-archived version
+                  setPresetSave(null);
+                }}
+              >
+                {tr("dialog.saveNewVersion")}
               </button>
               <button
                 type="button"
@@ -1594,15 +1607,8 @@ function App() {
               >
                 {tr("dialog.overwriteCurrent")}
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  saveNewVersion(presetSave);
-                  setExpandedPreset(presetSave.id); // reveal the freshly-archived version
-                  setPresetSave(null);
-                }}
-              >
-                {tr("dialog.saveNewVersion")}
+              <button type="button" onClick={() => setPresetSave(null)}>
+                {tr("dialog.cancel")}
               </button>
             </div>
           </div>
