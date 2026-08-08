@@ -144,10 +144,11 @@ mod windows_impl {
     /// Per-bin peak-hold decay (dB/s) — fast, essentially disabling the hold: the front-end
     /// phosphor emulation already provides all the peak persistence the display needs.
     const SPEC_PEAK_DROP_DB_PER_SEC: f32 = 60.0;
-    /// Spectrum emit cadence (FFT is heavier than the meter and needn't run at 60 fps).
-    const SPECTRUM_INTERVAL: Duration = Duration::from_millis(33);
+    /// Spectrum emit cadence — 60 fps, matching the level meter. The FFT is heavier than the
+    /// meter but the fold + emit is cheap enough that the full rate reads noticeably smoother.
+    const SPECTRUM_INTERVAL: Duration = Duration::from_millis(16);
     /// Power multiplier applied per emit when no fresh FFT arrived (silence) — fades the stored
-    /// spectrum toward the floor instead of freezing it lit (≈17 dB/s at the 33 ms cadence).
+    /// spectrum toward the floor instead of freezing it lit (≈35 dB/s at the 16 ms cadence).
     const SPEC_IDLE_DECAY: f32 = 0.88;
 
     /// A running loopback monitor. Dropping it (or calling [`Monitor::stop`]) ends the thread.
