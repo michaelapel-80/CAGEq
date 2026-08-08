@@ -141,8 +141,9 @@ mod windows_impl {
     const SPEC_FLOOR: f32 = -120.0;
     /// Power-spectrum smoothing time constant (seconds) — steadies the display.
     const SPEC_TAU_SECS: f32 = 0.15;
-    /// Per-bin peak-hold decay (dB/s) — slow, so resonances linger and read.
-    const SPEC_PEAK_DROP_DB_PER_SEC: f32 = 12.0;
+    /// Per-bin peak-hold decay (dB/s) — fast, essentially disabling the hold: the front-end
+    /// phosphor emulation already provides all the peak persistence the display needs.
+    const SPEC_PEAK_DROP_DB_PER_SEC: f32 = 60.0;
     /// Spectrum emit cadence (FFT is heavier than the meter and needn't run at 60 fps).
     const SPECTRUM_INTERVAL: Duration = Duration::from_millis(50);
     /// Power multiplier applied per emit when no fresh FFT arrived (silence) — fades the stored
