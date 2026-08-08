@@ -102,6 +102,7 @@
     "kindCycleAria": "Filter type: {{kind}}. Activate to cycle.",
     "gainAria": "Gain ({{unit}}), {{name}}",
     "gainFaderAria": "Gain fader, {{name}}",
+    "faderTitle": "Gain fader — double-click to reset to 0 dB",
     "fcAria": "Centre frequency ({{unit}}), {{kind}} band",
     "qAria": "Q, {{kind}} band at {{hz}}",
     "removeTitle": "Remove this band",

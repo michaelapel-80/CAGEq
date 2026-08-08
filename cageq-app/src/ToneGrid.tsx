@@ -244,8 +244,10 @@ export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focu
                 disabled={inert}
                 style={{ "--fill": fillPct } as CSSProperties}
                 aria-label={t("bands.gainFaderAria", { name })}
+                title={t("bands.faderTitle")}
                 onChange={(e) => onInput(i, { gain_db: Number(e.currentTarget.value) })}
                 onPointerUp={() => onCommit(i, { gain_db: f.gain_db })}
+                onDoubleClick={() => !inert && onCommit(i, { gain_db: 0 })}
               />
             </div>
 
