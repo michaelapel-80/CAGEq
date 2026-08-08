@@ -52,6 +52,8 @@
     "frequencyTitle": "Frequency domain — magnitude (and phase)",
     "timeTitle": "Time domain — impulse-response decay",
     "domainAria": "Chart domain",
+    "monitor": "Monitor",
+    "monitorTitle": "Clean view — hide all curves, show only the live spectrum",
     "preamp": "Preamp",
     "preampMax": "max",
     "preampMatched": "matched",

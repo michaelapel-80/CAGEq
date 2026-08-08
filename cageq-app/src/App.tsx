@@ -495,6 +495,7 @@ function App() {
   const historyBaseline = useRef<Stages | null>(null);
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
   const [impulseView, setImpulseView] = useState(false); // §5.2: swap the chart for the impulse response
+  const [monitorView, setMonitorView] = useState(false); // clean view: strip all curves, show only the live spectrum
   const [rawCurve, setRawCurve] = useState<{ f: number; db: number }[] | null>(null); // raw measured FR (nerd overlay)
   const [targetCurve, setTargetCurve] = useState<{ f: number; db: number }[] | null>(null); // the target curve (nerd overlay)
   const [result, setResult] = useState<ApplyResult | null>(null);
@@ -1991,28 +1992,45 @@ function App() {
                     for Dry, but removing the toggle collapsed the header row and jumped the layout. */}
                 {result && (
                   <div
-                    className="chart-view"
-                    style={{ margin: 0, visibility: dryActive ? "hidden" : "visible" }}
-                    role="group"
-                    aria-label={tr("correction.domainAria")}
+                    className="row"
+                    style={{ margin: 0, gap: "0.5em", alignItems: "center", visibility: dryActive ? "hidden" : "visible" }}
                     aria-hidden={dryActive || undefined}
                   >
+                    {/* Clean monitoring view: hide every curve/handle so only the live FFT (and the
+                        preamp readout) remain. A frequency-only view — it forces the freq chart. */}
                     <button
                       type="button"
-                      className={!impulseView ? "on" : ""}
-                      title={tr("correction.frequencyTitle")}
-                      onClick={() => setImpulseView(false)}
+                      className={`chart-monitor${monitorView ? " on" : ""}`}
+                      title={tr("correction.monitorTitle")}
+                      aria-pressed={monitorView}
+                      onClick={() => {
+                        setMonitorView((v) => !v);
+                        setImpulseView(false);
+                      }}
                     >
-                      {tr("correction.frequency")}
+                      {tr("correction.monitor")}
                     </button>
-                    <button
-                      type="button"
-                      className={impulseView ? "on" : ""}
-                      title={tr("correction.timeTitle")}
-                      onClick={() => setImpulseView(true)}
-                    >
-                      {tr("correction.time")}
-                    </button>
+                    <div className="chart-view" style={{ margin: 0 }} role="group" aria-label={tr("correction.domainAria")}>
+                      <button
+                        type="button"
+                        className={!impulseView ? "on" : ""}
+                        title={tr("correction.frequencyTitle")}
+                        onClick={() => setImpulseView(false)}
+                      >
+                        {tr("correction.frequency")}
+                      </button>
+                      <button
+                        type="button"
+                        className={impulseView ? "on" : ""}
+                        title={tr("correction.timeTitle")}
+                        onClick={() => {
+                          setImpulseView(true);
+                          setMonitorView(false); // Time is an impulse view; the clean spectrum is frequency-only
+                        }}
+                      >
+                        {tr("correction.time")}
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -2036,14 +2054,15 @@ function App() {
                       (above). Phase rides the frequency chart's secondary axis (legend). */}
                   <div className="chart-row">
                   <div className="chart-wrap" ref={chartWrapRef}>
-                    {impulseView && !dryActive ? (
+                    {impulseView && !dryActive && !monitorView ? (
                       <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
                     ) : (
                       <EqChart
-                        series={chartSeries}
-                        markers={chartMarkers}
-                        refs={chartRefs}
-                        phase={chartPhase}
+                        // Monitor view strips every curve/marker/ref/phase so only the spectrum shows.
+                        series={monitorView ? [] : chartSeries}
+                        markers={monitorView ? [] : chartMarkers}
+                        refs={monitorView ? [] : chartRefs}
+                        phase={monitorView ? undefined : chartPhase}
                         spectrum={spectrum}
                         eqBands={dryActive || selfTest?.phase === "running" ? undefined : result.filters}
                         legendHost={legendHost}
@@ -2053,8 +2072,9 @@ function App() {
                           bands: activeBands,
                           color: STAGE_COLOR[activeStage],
                           // Clear the editable drag handles while the read-only AutoEq stage is shown
-                          // (same as Dry) — otherwise the last editable stage's nodes linger on top.
-                          disabled: dryActive || autoEqView,
+                          // (same as Dry) or in the clean monitor view — otherwise the last editable
+                          // stage's nodes linger on top.
+                          disabled: dryActive || autoEqView || monitorView,
                           onChange: (i, patch) => updateFilter(i, patch, 70),
                           onDragEnd: () => {
                             requestApply(0);

@@ -52,6 +52,8 @@
     "frequencyTitle": "Frequenzbereich – Magnitude (und Phase)",
     "timeTitle": "Zeitbereich – Impulsantwort-Abklingen",
     "domainAria": "Diagramm-Bereich",
+    "monitor": "Monitor",
+    "monitorTitle": "Klare Ansicht – alle Kurven ausblenden, nur das Live-Spektrum zeigen",
     "preamp": "Preamp",
     "preampMax": "max",
     "preampMatched": "angeglichen",
