@@ -551,13 +551,13 @@ impl Core {
         Some(write_active_locked(&self.inner))
     }
 
-    /// Change the §4.0 loudness settings and push them onto the active config. A change
-    /// that **raises** the volume (e.g. Comparison → Finale Lautstärke, or raising the
-    /// base pre-gain) is ramped in at [`RAMP_RATE_DB_PER_SEC`] (§7.5) rather than
-    /// jumping — this call blocks for the ramp duration (~`Δ/6` s). A change that
-    /// lowers or keeps the volume is applied directly (a drop is no hazard). `None` if
-    /// nothing is active yet; a ramp interrupted by a safe state returns
-    /// [`CoreError::RampAborted`].
+    /// Change the §4.0 loudness settings and push them onto the active config. Only the
+    /// deliberate switch **into** Final volume (§7.5 — deactivating the base pre-gain buffer,
+    /// a large jump) is ramped in at [`RAMP_RATE_DB_PER_SEC`], blocking for the ramp duration
+    /// (~`Δ/6` s); everything else — including interactive base-pre-gain edits (which stay in
+    /// Comparison mode, bounded by the §4.1 loudness match / §4.2 ceiling) and any decrease — is
+    /// applied directly so the field stays responsive. `None` if nothing is active yet; a ramp
+    /// interrupted by a safe state returns [`CoreError::RampAborted`].
     pub fn update_loudness(&self, settings: LoudnessSettings) -> Option<Result<Applied, CoreError>> {
         let prev = {
             let mut l = self.inner.loudness.lock().unwrap();
@@ -573,8 +573,13 @@ impl Core {
         // otherwise fight over the preamp.
         claim_write(&self.inner);
 
-        // Ramp only a real increase; a decrease/no-change writes directly.
-        if target > start + 0.05 {
+        // Ramp only the deliberate, confirm-gated switch *into* Final volume (§7.5 — deactivating
+        // the base pre-gain buffer, a large jump). A base-pre-gain adjustment stays in Comparison
+        // mode (where the field lives) and is bounded by the §4.1 loudness match / §4.2 ceiling, so
+        // it writes directly — a multi-second blocking ramp per interactive step made the field
+        // stall the UI. A decrease or no-change also writes directly (never a hazard).
+        let entering_final = settings.mode == LoudnessMode::FinalVolume && prev.mode != LoudnessMode::FinalVolume;
+        if entering_final && target > start + 0.05 {
             Some(ramp_preamp(&self.supervisor, &self.inner, start, target))
         } else {
             let _guard = self.inner.apply_lock.lock().unwrap();

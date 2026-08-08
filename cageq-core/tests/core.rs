@@ -282,6 +282,26 @@ fn loudness_increase_ramps_but_decrease_is_direct() {
 }
 
 #[test]
+fn base_pregain_edit_in_comparison_is_direct_not_ramped() {
+    let tmp = TempDir::new("pregain");
+    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+
+    core.set_loudness(LoudnessSettings { base_pregain_db: -12.0, mode: LoudnessMode::Comparison });
+    core.apply(CalcRequest::for_device("DAC")).expect("apply"); // stub is flat -> preamp -12.0
+    assert!(tmp.cageq().contains("Preamp: -12.0 dB"), "{}", tmp.cageq());
+    let after_apply = core.applied_count();
+
+    // Raising the base pre-gain a lot (-12 -> 0, +12 dB louder) but *staying in Comparison* is
+    // interactive editing, not the §7.5 Final-volume switch — it must write directly (one write),
+    // not ramp over ~2 s of blocking writes (which stalled the UI while holding the arrow).
+    core.update_loudness(LoudnessSettings { base_pregain_db: 0.0, mode: LoudnessMode::Comparison })
+        .expect("something active")
+        .expect("direct ok");
+    assert!(tmp.cageq().contains("Preamp: 0.0 dB"), "{}", tmp.cageq());
+    assert_eq!(core.applied_count() - after_apply, 1, "a base-pre-gain edit is one direct write, never a ramp");
+}
+
+#[test]
 fn apply_calculates_and_writes_config() {
     let tmp = TempDir::new("apply");
     let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();

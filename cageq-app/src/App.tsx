@@ -9,6 +9,7 @@ import { Band, composedCurveDb } from "./biquad";
 import { EqChart, Marker, PhaseCurve, RefCurve, Series, SpectrumData } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
+import { ScrubNumber } from "./ScrubNumber";
 import { Meter } from "./Meter";
 import "./App.css";
 
@@ -310,6 +311,64 @@ function selfTestVerdict(corrected: SpectrumData[], dry: SpectrumData[], bands: 
   // stdD can sit below stdC because the 120-bin spectrum smooths sharp high-Q filters, so allow that.
   if (r > 0.75 && stdD > 0.5 * stdC) return { kind: "pass", r };
   return { kind: "mismatch", r };
+}
+
+// The base pre-gain field, deliberately isolated from App state. Holding an arrow updates only this
+// component's local value — the whole-App re-render (chart + meters + grid) that `loudness` state
+// would trigger on every step is what stalled the UI thread. It commits to the parent (which owns
+// the backend apply) only when you settle (debounced) or on blur/Enter. `value` re-syncs the local
+// value on an *external* change (addHeadroom, restore) but ignores the echo of our own commit.
+function PreampField({
+  value,
+  disabled,
+  ariaLabel,
+  onCommit,
+}: {
+  value: number;
+  disabled: boolean;
+  ariaLabel: string;
+  onCommit: (db: number) => void;
+}) {
+  const [local, setLocal] = useState(value);
+  const localRef = useRef(local);
+  localRef.current = local;
+  const lastCommit = useRef(value);
+  const timer = useRef<number | null>(null);
+  useEffect(() => {
+    if (value !== lastCommit.current) {
+      setLocal(value);
+      lastCommit.current = value;
+    }
+  }, [value]);
+  const schedule = (delay: number) => {
+    if (timer.current != null) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      lastCommit.current = localRef.current;
+      onCommit(localRef.current);
+    }, delay);
+  };
+  return (
+    <ScrubNumber
+      value={local}
+      min={-40}
+      max={0}
+      mode="add"
+      arrowStep={1}
+      decimals={0}
+      disabled={disabled}
+      ariaLabel={ariaLabel}
+      style={{ width: "4em", textAlign: "right" }}
+      onInput={(v) => {
+        setLocal(v);
+        schedule(180);
+      }}
+      onCommit={(v) => {
+        setLocal(v);
+        schedule(0);
+      }}
+    />
+  );
 }
 
 function App() {
@@ -673,6 +732,31 @@ function App() {
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  // The pre-gain field is a ScrubNumber (like the band fields), so ↑/↓ are handled in JS on a
+  // read-only text input — no native spinner racing the controlled value. It updates the local
+  // value at once (responsive) and commits the backend on a **coalescing** throttle that mirrors
+  // the tone `requestApply`: at most one set_loudness in flight, latest value wins, and the
+  // response updates only `result` (the chart), never the field — so a held arrow can't be
+  // clobbered. `loudnessRef` feeds the apply the latest settings without a stale closure.
+  const loudnessRef = useRef(loudness);
+  loudnessRef.current = loudness;
+  // Commit a settled base-pre-gain change (PreampField owns the live editing + debounce, so this only
+  // fires when the user settles): update App state once and apply. The response updates the chart
+  // (`result`), never the field.
+  function commitBasePregain(db: number) {
+    const base = loudnessRef.current;
+    if (!base) return;
+    const next: LoudnessSettings = { ...base, base_pregain_db: Math.max(-40, Math.min(0, Math.round(db))) };
+    setLoudness(next);
+    loudnessRef.current = next;
+    invoke<LoudnessUpdate>("set_loudness", { settings: next })
+      .then((update) => {
+        setError("");
+        if (update.applied) setResult(update.applied);
+      })
+      .catch((e) => setError(String(e)));
   }
 
   // Route mode/pre-gain changes; gate a switch to Final volume behind the §7.5 confirm
@@ -2058,15 +2142,11 @@ function App() {
               </div>
               <label className="row" style={{ opacity: loudness.mode === "Comparison" ? 1 : 0.4, fontSize: "0.85em" }}>
                 {tr("loudness.basePregain")}
-                <input
-                  type="number"
-                  min={-40}
-                  max={0}
-                  step={1}
+                <PreampField
                   value={loudness.base_pregain_db}
                   disabled={loudness.mode !== "Comparison"}
-                  onChange={(e) => updateLoudness({ ...loudness, base_pregain_db: Number(e.currentTarget.value) })}
-                  style={{ width: "4em", textAlign: "right" }}
+                  ariaLabel={tr("loudness.basePregain")}
+                  onCommit={commitBasePregain}
                 />
                 dB
               </label>
