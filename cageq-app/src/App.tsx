@@ -358,7 +358,7 @@ function PreampField({
       decimals={0}
       disabled={disabled}
       ariaLabel={ariaLabel}
-      style={{ width: "4em", textAlign: "right" }}
+      style={{ width: "2em", textAlign: "right" }}
       onInput={(v) => {
         setLocal(v);
         schedule(180);
