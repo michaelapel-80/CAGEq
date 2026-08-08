@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
-import { Band, composedCurveDb } from "./biquad";
+import { Band, composedCurveDb, logGrid } from "./biquad";
 import { EqChart, Marker, PhaseCurve, RefCurve, Series, SpectrumData } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
@@ -1374,6 +1374,23 @@ function App() {
   const activeFit = activeSlot === "A" || activeSlot === "B" ? slotFits[activeSlot] : null;
   const autoEqCount = autoEqBands.length || (activeFit ? Math.max(0, activeFit.filters.length - appliedCustom.length) : 0);
 
+  // In Comparison mode, hold the chart's Y-scale steady across A/B switches by flooring it at the
+  // larger of both editable slots' curve ranges — otherwise switching to the flatter slot rescales
+  // the graph, which is jarring when A/B-ing. Only in Comparison (where A/B are meant to be read
+  // against each other); Final volume auto-ranges per slot. It's a floor, so a live edit still grows
+  // the scale as needed.
+  const comparisonSpan = useMemo(() => {
+    if (loudness?.mode !== "Comparison") return undefined;
+    const freqs = logGrid(240, 20, 20000);
+    let m = 0;
+    for (const s of ["A", "B"] as const) {
+      const fit = slotFits[s];
+      if (!fit) continue;
+      for (const v of composedCurveDb(fit.filters, freqs)) m = Math.max(m, Math.abs(v));
+    }
+    return m > 0 ? Math.max(6, Math.ceil(m + 1)) : undefined;
+  }, [loudness?.mode, slotFits]);
+
   // §5.2 chart: only the *active* slot's total (drawing every slot at once crowded the
   // legend once the per-stage lines were added — the A/B comparison is primarily by ear).
   // Plus a line per enabled stage — the active stage prominent (it carries the drag nodes),
@@ -1872,6 +1889,7 @@ function App() {
                         spectrum={spectrum}
                         eqBands={dryActive || selfTest?.phase === "running" ? undefined : result.filters}
                         legendHost={legendHost}
+                        minSpan={comparisonSpan}
                         height={215}
                         nodes={{
                           bands: activeBands,

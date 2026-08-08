@@ -126,6 +126,7 @@ export function EqChart({
   spectrum,
   eqBands,
   legendHost,
+  minSpan,
   height = 210,
 }: {
   series: Series[];
@@ -133,6 +134,9 @@ export function EqChart({
   refs?: RefCurve[];
   phase?: PhaseCurve;
   nodes?: Nodes;
+  /** Floor for the symmetric Y range (± dB). Lets the caller keep the scale stable across a slot
+   *  switch (e.g. the larger of both slots' ranges in Comparison mode) instead of rescaling. */
+  minSpan?: number;
   /** Live loopback-FFT spectrum drawn as a backdrop on the log-Hz axis, own scale. */
   spectrum?: SpectrumData | null;
   /** The applied filter cascade (AutoEq fit + custom). Its magnitude response is removed from
@@ -213,12 +217,13 @@ export function EqChart({
         if (p.db > hi) hi = p.db;
       }
     }
-    // Symmetric range with a sane floor so a flat curve isn't wildly zoomed.
-    const span = Math.max(6, Math.ceil(Math.max(Math.abs(lo), Math.abs(hi)) + 1));
+    // Symmetric range with a sane floor so a flat curve isn't wildly zoomed. `minSpan` (if given)
+    // holds the scale steady across a slot switch — never smaller than what the caller asked for.
+    const span = Math.max(6, minSpan ?? 0, Math.ceil(Math.max(Math.abs(lo), Math.abs(hi)) + 1));
     const step = span <= 9 ? 3 : span <= 18 ? 6 : 12;
     return { freqs, curves, yMin: -span, yMax: span, step };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [series, markers, refs, overrides, defaultHidden]);
+  }, [series, markers, refs, overrides, defaultHidden, minSpan]);
 
   // Phase curve on the secondary axis (computed on the same freq grid). Its degrees range
   // is symmetric and snapped to 45°, independent of the dB axis.
