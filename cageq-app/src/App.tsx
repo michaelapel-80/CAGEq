@@ -65,6 +65,7 @@ type Resume = {
   slots: { A: SlotInputs | null; B: SlotInputs | null };
   fits?: { A: PersistedFit | null; B: PersistedFit | null };
   activeStage?: StageId; // which stage tab was last selected (defaults to fit on first run)
+  slotPreset?: { A: LoadedRef | null; B: LoadedRef | null }; // which preset each slot was loaded from
 };
 
 // §3.4 tone layer — three always-present **fixed** grid bands (0 dB by default,
@@ -126,11 +127,28 @@ function normalizeStages(raw?: Partial<Stages> | null): Stages {
   return { fit: stage(raw?.fit, false), content: stage(raw?.content, false), tone: stage(raw?.tone, true) };
 }
 
+/** Deterministic JSON with object keys sorted recursively (arrays keep their order). So the
+ *  same *values* always produce the same string regardless of key insertion order — which
+ *  differs between a fresh in-memory object and one reparsed from the persisted resume blob
+ *  (serde may reorder map keys). Lets a stored signature compare by value, not by text. */
+function stableStringify(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
+  const o = v as Record<string, unknown>;
+  return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(o[k])}`).join(",")}}`;
+}
+
 /** A stable fingerprint of a slot's *document* (model + measurement + target + all stages),
  *  used to tell whether the editor has diverged from the preset last loaded into a slot
- *  (the "dirty" flag). Compared against the sig captured at load time — see `slotPreset`. */
+ *  (the "dirty" flag). Compared against the sig captured at load time — see `slotPreset`.
+ *  Canonical (sorted-key) so it survives a persist→reload round-trip unchanged. */
 const presetSig = (model: string, measurementPath: string, targetPath: string, stages: Stages) =>
-  JSON.stringify({ model, measurementPath, targetPath, stages });
+  stableStringify({ model, measurementPath, targetPath, stages });
+
+/** Which preset (or archived version) a slot was last loaded from, plus the document sig at
+ *  load time — so the slot can show the preset name and flag divergence. Persisted in the
+ *  resume blob; `ver` is the vN tag shown, `sig` the clean baseline for the dirty check. */
+type LoadedRef = { id: string; name: string; ver?: string; sig: string };
 
 /** The custom bands actually written: every enabled stage's enabled bands, in stage order —
  *  what rides to the sidecar (appended to the AutoEq fit) and drives the §4.1/§4.2 policy. */
@@ -514,9 +532,8 @@ function App() {
   const [slotInputs, setSlotInputs] = useState<Record<"A" | "B", SlotInputs | null>>({ A: null, B: null });
   // Which preset (or archived version) was last loaded into each editable slot, with the
   // document sig captured at load time — so each slot can show its loaded preset name and a
-  // "dirty" marker once the editor diverges from it. Session-scoped (not persisted): a fresh
-  // launch shows no attribution until the user loads a preset. `ver` is the vN tag shown.
-  type LoadedRef = { id: string; name: string; ver?: string; sig: string };
+  // "dirty" marker once the editor diverges from it. Persisted in the resume blob (below), so
+  // the attribution — and any unsaved-edit dirty state — survives a restart. `ver` is the tag.
   const [slotPreset, setSlotPreset] = useState<Record<"A" | "B", LoadedRef | null>>({ A: null, B: null });
   // Last computed fit per editable slot, persisted into the resume blob so the next launch
   // writes EQ immediately from cache instead of waiting on the cold sidecar fit (§3.5).
@@ -598,6 +615,7 @@ function App() {
           setSlotInputs({ A: resume.slots.A ?? null, B: resume.slots.B ?? null });
           setActiveSlot(activeSlotName);
         }
+        if (resume?.slotPreset) setSlotPreset({ A: resume.slotPreset.A ?? null, B: resume.slotPreset.B ?? null });
         if (resume?.activeStage) setActiveStage(resume.activeStage); // else stays "fit"
 
         // §3.5 launch-from-cache: seed each slot's persisted fit into the backend so both
@@ -687,11 +705,12 @@ function App() {
         slots: { A: slotInputs.A, B: slotInputs.B },
         fits: { A: slotFits.A, B: slotFits.B }, // §3.5: persist the fits for launch-from-cache
         activeStage,
+        slotPreset: { A: slotPreset.A, B: slotPreset.B }, // which preset each slot was loaded from
       };
       invoke("set_resume", { resume }).catch(() => {});
     }, 400);
     return () => window.clearTimeout(id);
-  }, [restored, activeSlot, deviceId, slotInputs, slotFits, activeStage]);
+  }, [restored, activeSlot, deviceId, slotInputs, slotFits, activeStage, slotPreset]);
 
   // §3.5: persist the preset library (saved presets + filter templates) on change, same
   // debounce + `restored` gate as the resume blob.
