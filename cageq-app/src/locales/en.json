@@ -196,6 +196,12 @@
     "updatePresetDisabledTitle": "Pick a headphone to overwrite this preset",
     "renameTitle": "Rename",
     "renameAria": "Rename {{name}}",
+    "versionsTitle": "Version history — save and A/B earlier refinements",
+    "versions": "Versions",
+    "saveVersion": "＋ Save version",
+    "saveVersionTitle": "Save the current setup as a new version of this preset (keeps the previous one)",
+    "noVersions": "No saved versions yet. Refine the loaded preset, then save a version to keep this state to A/B against.",
+    "deleteVersionTitle": "Delete this version",
     "deleteTitle": "Delete",
     "emptyPresets": "Pick a headphone + target, then 💾 Save a full preset to recall the whole setup."
   },

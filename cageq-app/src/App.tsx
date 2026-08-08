@@ -147,6 +147,7 @@ type LegacyTemplate = { id: string; name: string; stage?: StageId; bands?: Custo
 type LegacyPreset = {
   id: string; name: string; model: string; measurementPath: string; targetPath: string;
   stages?: Partial<Stages>; customFilters?: CustomFilter[];
+  versions?: (Partial<PresetState> & { at?: number })[];
 };
 function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyPreset[] } | null): Library {
   const templates: FilterTemplate[] = (lib?.templates ?? []).map((t) =>
@@ -161,6 +162,13 @@ function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyP
     measurementPath: p.measurementPath,
     targetPath: p.targetPath,
     stages: p.stages ? normalizeStages(p.stages) : normalizeStages({ tone: { enabled: true, bands: p.customFilters ?? defaultTone() } }),
+    versions: (p.versions ?? []).map((v) => ({
+      at: v.at ?? 0,
+      model: v.model ?? p.model,
+      measurementPath: v.measurementPath ?? p.measurementPath,
+      targetPath: v.targetPath ?? p.targetPath,
+      stages: normalizeStages(v.stages),
+    })),
   }));
   return { presets, templates };
 }
@@ -187,7 +195,14 @@ const TONE_PRESET_KEY: Record<string, string> = Object.fromEntries(TONE_PRESETS.
 // Both persist in settings.json's opaque `library` blob (get_library/set_library), the
 // same UI-owned-blob treatment as the resume state — no per-field Rust change.
 type FilterTemplate = { id: string; name: string; stage: StageId; bands: CustomFilter[] };
-type UserPreset = { id: string; name: string; model: string; measurementPath: string; targetPath: string; stages: Stages };
+// The loadable payload shared by a preset and its archived versions (everything a full load needs).
+type PresetState = { model: string; measurementPath: string; targetPath: string; stages: Stages };
+// A past state of a preset, kept when the user explicitly saves a new version. `at` = timestamp.
+type PresetVersion = PresetState & { at: number };
+// A UserPreset is its *current* state plus a linear history of explicitly-saved previous versions
+// (§3.5 versioning). Newest archived version is last. Loading a version drops it into the active
+// slot like a preset — the built-in level-matched A/B does the actual comparison.
+type UserPreset = { id: string; name: string; versions?: PresetVersion[] } & PresetState;
 type Library = { presets: UserPreset[]; templates: FilterTemplate[] };
 
 // The curated (built-in, read-only) filter templates: the classic tone shapes as the three
@@ -469,6 +484,7 @@ function App() {
   const [saveForm, setSaveForm] = useState<{ kind: "preset" | "template"; name: string; error: boolean } | null>(null);
   // Inline rename of a saved preset/template row (id + edited name). Committed on Enter/blur.
   const [renaming, setRenaming] = useState<{ kind: "preset" | "template"; id: string; name: string } | null>(null);
+  const [expandedPreset, setExpandedPreset] = useState<string | null>(null); // which preset's version history is open
   const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
   const [selfTest, setSelfTest] = useState<SelfTestState | null>(null); // §5.4 output self-test
   // Finding #1: active directives in config.txt outside CAGEq's block that stack on top of every
@@ -1054,6 +1070,9 @@ function App() {
   };
   // Windows playback rate, shown compactly (48 kHz, 44.1 kHz, 96 kHz…).
   const fmtRate = (hz: number) => `${+(hz / 1000).toFixed(1)} kHz`;
+  // Compact timestamp for a saved preset version (localized); legacy versions have at=0.
+  const fmtWhen = (at: number) =>
+    at > 0 ? new Date(at).toLocaleString(i18n.language, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
 
   // §5.4 output self-test: play pink noise (through EqAPO) and check the loopback spectrum's shape
   // matches the applied correction — proving the EQ actually reaches the output. Runs entirely off
@@ -1189,7 +1208,8 @@ function App() {
     requestApply(0);
     commitHistory();
   };
-  const loadPreset = (p: UserPreset) => {
+  // Loads a preset *or* one of its archived versions (both are PresetState) into the active slot.
+  const loadPreset = (p: PresetState) => {
     if (activeSlot === "Dry") return;
     setQuery(p.model);
     setMeasurementPath(p.measurementPath);
@@ -1217,10 +1237,12 @@ function App() {
         ? library.presets.find((p) => p.name.toLowerCase() === name.toLowerCase())
         : library.templates.find((t) => t.stage === activeStage && t.name.toLowerCase() === name.toLowerCase());
     const id = existing?.id ?? crypto.randomUUID();
+    // Overwriting an existing preset by name keeps its version history.
+    const existingVersions = kind === "preset" ? (existing as UserPreset | undefined)?.versions : undefined;
     const write = () => {
       setLibrary((lib) =>
         kind === "preset"
-          ? { ...lib, presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, stages }) }
+          ? { ...lib, presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, stages, versions: existingVersions }) }
           : { ...lib, templates: upsert(lib.templates, { id, name, stage: activeStage, bands: stages[activeStage].bands }) },
       );
       setSaveForm(null);
@@ -1249,9 +1271,36 @@ function App() {
       onConfirm: () =>
         setLibrary((lib) => ({
           ...lib,
-          presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, stages }),
+          // Preserve the version history — an overwrite must not silently drop it.
+          presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, stages, versions: p.versions }),
         })),
     });
+
+  // §3.5 preset versioning — explicit only. "Save version" archives the preset's *current stored*
+  // state into its history and advances the preset to the current editor state, so refining →
+  // save-version keeps the prior state to A/B against. Capped; nothing is captured automatically.
+  const MAX_VERSIONS = 10;
+  const saveNewVersion = (p: UserPreset) =>
+    setLibrary((lib) => ({
+      ...lib,
+      presets: upsert(lib.presets, {
+        id: p.id,
+        name: p.name,
+        model: query,
+        measurementPath,
+        targetPath,
+        stages,
+        versions: [
+          ...(p.versions ?? []),
+          { at: Date.now(), model: p.model, measurementPath: p.measurementPath, targetPath: p.targetPath, stages: p.stages },
+        ].slice(-MAX_VERSIONS),
+      }),
+    }));
+  const deleteVersion = (p: UserPreset, idx: number) =>
+    setLibrary((lib) => ({
+      ...lib,
+      presets: lib.presets.map((x) => (x.id === p.id ? { ...x, versions: (x.versions ?? []).filter((_, i) => i !== idx) } : x)),
+    }));
   // A template row's "update" saves the current bands of *that template's* stage.
   const updateTemplate = (t: FilterTemplate) =>
     setConfirmBox({
@@ -2323,52 +2372,106 @@ function App() {
                 {library.presets.length > 0 ? (
                   <ul className="pl-list">
                     {library.presets.map((p) => (
-                      <li key={p.id} className="pl-item">
-                        {renaming?.kind === "preset" && renaming.id === p.id ? (
-                          <input
-                            className="pl-rename"
-                            autoFocus
-                            value={renaming.name}
-                            onChange={(e) => setRenaming({ ...renaming, name: e.currentTarget.value })}
-                            onBlur={commitRename}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") commitRename();
-                              else if (e.key === "Escape") setRenaming(null);
-                            }}
-                          />
-                        ) : (
-                          <span
-                            className="pl-name"
-                            title={`${p.name} — ${p.model || tr("presets.noMeasurement")}`}
-                            onDoubleClick={() => setRenaming({ kind: "preset", id: p.id, name: p.name })}
+                      <li key={p.id} className="pl-preset">
+                        <div className="pl-item">
+                          {renaming?.kind === "preset" && renaming.id === p.id ? (
+                            <input
+                              className="pl-rename"
+                              autoFocus
+                              value={renaming.name}
+                              onChange={(e) => setRenaming({ ...renaming, name: e.currentTarget.value })}
+                              onBlur={commitRename}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") commitRename();
+                                else if (e.key === "Escape") setRenaming(null);
+                              }}
+                            />
+                          ) : (
+                            <span
+                              className="pl-name"
+                              title={`${p.name} — ${p.model || tr("presets.noMeasurement")}`}
+                              onDoubleClick={() => setRenaming({ kind: "preset", id: p.id, name: p.name })}
+                            >
+                              {p.name}
+                            </span>
+                          )}
+                          <button type="button" disabled={dryActive} onClick={() => loadPreset(p)}>
+                            {tr("presets.load")}
+                          </button>
+                          <button
+                            type="button"
+                            className={`pl-ver-toggle${expandedPreset === p.id ? " open" : ""}`}
+                            title={tr("presets.versionsTitle")}
+                            aria-expanded={expandedPreset === p.id}
+                            onClick={() => setExpandedPreset((cur) => (cur === p.id ? null : p.id))}
                           >
-                            {p.name}
-                          </span>
+                            v{(p.versions?.length ?? 0) + 1}
+                          </button>
+                          <button
+                            type="button"
+                            className="pl-ren"
+                            title={tr("presets.renameTitle")}
+                            aria-label={tr("presets.renameAria", { name: p.name })}
+                            onClick={() => setRenaming({ kind: "preset", id: p.id, name: p.name })}
+                          >
+                            ✎
+                          </button>
+                          <button
+                            type="button"
+                            className="pl-upd"
+                            title={measurementPath ? tr("presets.updatePresetTitle") : tr("presets.updatePresetDisabledTitle")}
+                            disabled={dryActive || !measurementPath}
+                            onClick={() => updatePreset(p)}
+                          >
+                            💾
+                          </button>
+                          <button type="button" className="pl-del" title={tr("presets.deleteTitle")} onClick={() => deletePreset(p)}>
+                            🗑
+                          </button>
+                        </div>
+                        {expandedPreset === p.id && (
+                          <div className="pl-versions">
+                            <div className="pl-versions-head">
+                              <span>{tr("presets.versions")}</span>
+                              <button
+                                type="button"
+                                className="pl-save-ver"
+                                disabled={dryActive || !measurementPath}
+                                title={tr("presets.saveVersionTitle")}
+                                onClick={() => saveNewVersion(p)}
+                              >
+                                {tr("presets.saveVersion")}
+                              </button>
+                            </div>
+                            {(p.versions?.length ?? 0) === 0 ? (
+                              <p className="pl-versions-empty">{tr("presets.noVersions")}</p>
+                            ) : (
+                              <ul className="pl-versions-list">
+                                {(p.versions ?? [])
+                                  .map((v, i) => ({ v, i }))
+                                  .reverse()
+                                  .map(({ v, i }) => (
+                                    <li key={i}>
+                                      <span className="pl-ver-when">
+                                        v{i + 1} · {fmtWhen(v.at)}
+                                      </span>
+                                      <button type="button" disabled={dryActive} onClick={() => loadPreset(v)}>
+                                        {tr("presets.load")}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="pl-del"
+                                        title={tr("presets.deleteVersionTitle")}
+                                        onClick={() => deleteVersion(p, i)}
+                                      >
+                                        🗑
+                                      </button>
+                                    </li>
+                                  ))}
+                              </ul>
+                            )}
+                          </div>
                         )}
-                        <button type="button" disabled={dryActive} onClick={() => loadPreset(p)}>
-                          {tr("presets.load")}
-                        </button>
-                        <button
-                          type="button"
-                          className="pl-ren"
-                          title={tr("presets.renameTitle")}
-                          aria-label={tr("presets.renameAria", { name: p.name })}
-                          onClick={() => setRenaming({ kind: "preset", id: p.id, name: p.name })}
-                        >
-                          ✎
-                        </button>
-                        <button
-                          type="button"
-                          className="pl-upd"
-                          title={measurementPath ? tr("presets.updatePresetTitle") : tr("presets.updatePresetDisabledTitle")}
-                          disabled={dryActive || !measurementPath}
-                          onClick={() => updatePreset(p)}
-                        >
-                          💾
-                        </button>
-                        <button type="button" className="pl-del" title={tr("presets.deleteTitle")} onClick={() => deletePreset(p)}>
-                          🗑
-                        </button>
                       </li>
                     ))}
                   </ul>

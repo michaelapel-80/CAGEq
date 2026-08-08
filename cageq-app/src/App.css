@@ -1369,6 +1369,85 @@ select:disabled {
   opacity: 0.55;
   padding: 0.15em 0.35em;
 }
+
+/* --- §3.5 preset version history ------------------------------------------ */
+/* A preset row is now a column: the controls row + an optional expanded history. */
+.pl-preset {
+  display: flex;
+  flex-direction: column;
+}
+/* The "vN" version toggle: the current version number, opens the history list. */
+.pl-ver-toggle {
+  border-color: transparent;
+  opacity: 0.6;
+  padding: 0.15em 0.4em;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+.pl-ver-toggle:hover:not(:disabled),
+.pl-ver-toggle.open {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+/* Expanded history: a slightly inset, recessed panel under the row. */
+.pl-versions {
+  margin: 0.15rem 0 0.3rem 0.6rem;
+  padding: 0.35rem 0.5rem;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border-radius: 0 5px 5px 0;
+}
+.pl-versions-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.6;
+  margin-bottom: 0.25rem;
+}
+.pl-save-ver {
+  font-size: 0.72rem;
+  padding: 0.1em 0.5em;
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.9;
+}
+.pl-versions-empty {
+  font-size: 0.72rem;
+  opacity: 0.6;
+  margin: 0.1rem 0;
+  line-height: 1.4;
+}
+.pl-versions-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.pl-versions-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.pl-ver-when {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pl-versions-list button {
+  font-size: 0.72rem;
+  padding: 0.1em 0.45em;
+}
 .pl-ren:hover:not(:disabled),
 .pl-upd:hover:not(:disabled) {
   opacity: 1;
