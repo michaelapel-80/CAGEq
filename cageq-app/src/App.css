@@ -18,6 +18,9 @@
   --surface: #ffffff;
   --border: rgba(0, 0, 0, 0.22);
   --accent: #396cd8;
+  /* Vectorscope tube backdrop. A real scope is dark, but near-black against the light UI is
+     jarring, so light mode uses a softer dark slate; dark mode stays near-black. */
+  --scope-bg: #1c2226;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -91,6 +94,7 @@ select:disabled {
     --fg: #f6f6f6;
     --surface: #262626;
     --border: rgba(255, 255, 255, 0.2);
+    --scope-bg: #0a0d0c;
   }
   :root:not([data-theme]) a:hover {
     color: #24c8db;
@@ -103,6 +107,7 @@ select:disabled {
   --fg: #f6f6f6;
   --surface: #262626;
   --border: rgba(255, 255, 255, 0.2);
+  --scope-bg: #0a0d0c;
 }
 :root[data-theme="dark"] a:hover {
   color: #24c8db;
@@ -602,15 +607,24 @@ select:disabled {
   width: 100%;
   height: 100%;
 }
+/* Inline: dock the tube against the meter column (right) rather than floating it centred in the
+   wide chart area — groups it with the other monitoring instruments and frees the whole left side
+   for the tuning panel. */
+.vectorscope-wrap:not(.fill) {
+  justify-content: flex-end;
+}
 /* The screen carries the dark backdrop + tube framing; the two canvases (static graticule +
    fading trace) stack on top of it, both transparent. */
 .vs-screen {
   position: relative; /* anchors the canvases + toolbar + tuning overlay */
   border-radius: 8px;
-  background: rgb(9, 12, 11);
+  background: var(--scope-bg);
+  /* Softer framing than a hard black square on white: a gentle inner vignette, a theme-aware
+     hairline, and a diffuse drop shadow that lifts the tube off the page and eases the edge. */
   box-shadow:
-    inset 0 0 22px -6px rgba(0, 0, 0, 0.9),
-    0 0 0 1px rgba(128, 128, 128, 0.25);
+    inset 0 0 24px -9px rgba(0, 0, 0, 0.55),
+    0 0 0 1px var(--border),
+    0 3px 14px -6px rgba(0, 0, 0, 0.22);
 }
 .vectorscope-canvas {
   position: absolute;
@@ -655,7 +669,7 @@ select:disabled {
   align-items: center;
   justify-content: center;
   padding: 12px;
-  background: rgb(9, 12, 11);
+  background: var(--scope-bg);
 }
 /* Live tuning panel — a compact instrument HUD. In the pop-out window it overlays the tube's
    top-left corner (plenty of room); inline it sits in the empty gutter to the LEFT of the small

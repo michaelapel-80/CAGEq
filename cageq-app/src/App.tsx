@@ -2086,7 +2086,12 @@ function App() {
               </div>
               <div className="row" style={{ gap: "0.5em" }}>
                 <label style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("correction.target")}</label>
-                <select value={targetPath} onChange={(e) => setTargetPath(e.currentTarget.value)} disabled={dryActive}>
+                <select
+                  value={targetPath}
+                  onChange={(e) => setTargetPath(e.currentTarget.value)}
+                  disabled={dryActive}
+                  style={{ minWidth: 0, maxWidth: "28em" }}
+                >
                   {targets.map((t) => (
                     <option key={t.path} value={t.path}>
                       {t.name}

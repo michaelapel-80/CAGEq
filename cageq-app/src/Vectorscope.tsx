@@ -210,8 +210,6 @@ export function Vectorscope({
     let raf = 0;
     let last = performance.now();
     let drawn: ScopeData | null = null; // last payload already traced (draw each once)
-    let lastX = NaN; // final beam point of the previous window, to bridge frames continuously
-    let lastY = NaN; //   (reset to NaN on idle so a silence gap doesn't draw a stray bridge)
     let spotX = NaN; // the beam's dwell spot — position + brightness, redrawn every frame so it
     let spotY = NaN; //   holds during silence; updated per window from the beam's mean + path length
     let spotB = 0;
@@ -271,8 +269,6 @@ export function Vectorscope({
       const idle = !s || !s.signal || s.xy.length < 4;
       if (idle) {
         if (s) drawn = s;
-        lastX = NaN;
-        lastY = NaN;
         spotX = c; // resting beam parks at centre, full intensity
         spotY = c;
         spotB = p.glow;
@@ -286,6 +282,11 @@ export function Vectorscope({
         let sumY = 0;
         let cnt = 0;
         let pathLen = 0;
+        // Connect only *within* the window — no bridge from the previous window's last point. Windows
+        // aren't guaranteed contiguous (tail-cap drops at high rates, timing jitter), so bridging drew
+        // long stray lines that piled into a haze box. The 1-sample gap at each boundary is invisible.
+        let prevX = NaN;
+        let prevY = NaN;
         for (let i = 0; i + 1 < xy.length; i += 2) {
           let l = xy[i];
           let r = xy[i + 1];
@@ -301,22 +302,22 @@ export function Vectorscope({
           const yp = p.rotate ? (l + r) / SQRT2 : r;
           const px = c + xp * scale;
           const py = c - yp * scale; // canvas y is down
-          if (!Number.isNaN(lastX)) {
-            const dx = px - lastX;
-            const dy = py - lastY;
+          if (!Number.isNaN(prevX)) {
+            const dx = px - prevX;
+            const dy = py - prevY;
             const dist = Math.sqrt(dx * dx + dy * dy);
             pathLen += dist;
             const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
             let b = (f * VEL_BUCKETS) | 0;
             if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
-            buckets[b].moveTo(lastX, lastY);
+            buckets[b].moveTo(prevX, prevY);
             buckets[b].lineTo(px, py);
           }
           sumX += px;
           sumY += py;
           cnt++;
-          lastX = px;
-          lastY = py;
+          prevX = px;
+          prevY = py;
         }
         ctx.globalCompositeOperation = "lighter";
         ctx.lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE));
