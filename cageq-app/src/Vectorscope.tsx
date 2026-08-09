@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { type Band, type BiquadCoeffs, inverseBiquadCoeffs } from "./biquad";
 
 /** A stereo vectorscope window from the loopback (see cageq-monitor `ScopeUpdate`): interleaved
@@ -22,28 +23,32 @@ function stepBiquad(c: BiquadCoeffs, s: BiquadState, x: number): number {
   return y;
 }
 
-// The scope is its own always-dark "instrument screen" (independent of the app theme): a real
-// oscilloscope glows bright traces on a dark tube, and additive ('lighter') accumulation only reads
-// as a glow on a dark background — on a light one it would wash to white. So we fade toward a fixed
-// dark backdrop rather than to transparent.
-const BG: [number, number, number] = [9, 12, 11];
+// The scope's dark "instrument screen" backdrop is a CSS background on .vs-screen (theme-independent).
+// The trace lives on a **transparent** canvas over it and fades with `destination-out` (alpha decay),
+// so a faded pixel stalls at ~1/255 alpha ≈ 1 LSB over the backdrop — no additive burn-in and no
+// per-pixel clamp (a multiplicative fade toward an *opaque* backdrop can't reach it in 8-bit).
 
 /** Live-tunable render parameters (adjustable in the on-screen panel so tuning isn't a recompile).
  *  `rotate` picks orientation: off = raw X-Y (L→horizontal, R→vertical, mono = 45° diagonal — the
  *  view oscilloscope-music is authored for); on = rotated so mono is vertical, anti-phase horizontal. */
 type Params = {
   trailTau: number; // phosphor decay time constant (s) — time-based, so the trail is refresh-independent
-  glow: number; // beam brightness (additive) — overlaps/slow segments build the glow
+  glow: number; // beam brightness at full (slow-beam) intensity; velocity glow dims it from here
   beam: number; // beam line width, in reference px (scaled by the tube size)
+  focus: number; // velocity-glow reference: segments shorter than this (ref px) draw full-bright,
+  //                longer (faster beam = higher freq) dim as ~1/length — a CRT's constant
+  //                energy-per-sample. Larger = weaker effect (more of the trace stays bright).
   radiusFrac: number; // full-scale ring radius as a fraction of the half-size
   gridAlpha: number; // graticule brightness
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
-const DEFAULTS: Params = { trailTau: 0.16, glow: 0.5, beam: 1.5, radiusFrac: 0.44, gridAlpha: 0.22, rotate: false, invert: false };
+const DEFAULTS: Params = { trailTau: 0.09, glow: 0.55, beam: 1.0, focus: 4, radiusFrac: 0.5, gridAlpha: 0.22, rotate: false, invert: true };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
+const VEL_BUCKETS = 16; // brightness quantisation for velocity glow (batched strokes, not per-segment)
+const VEL_FLOOR = 0.05; // dimmest a fast segment goes (keeps sharp transitions faintly visible)
 
 /** Parse a `#rrggbb` hex (the `--accent` CSS var) to [r,g,b]; a green phosphor fallback. */
 function parseHex(hex: string): [number, number, number] {
@@ -59,6 +64,10 @@ function parseHex(hex: string): [number, number, number] {
  * persistence: fade-then-draw on rAF turns motion into a glowing, decaying figure. Continuous lines
  * (not decimated dots) are what render oscilloscope-music Lissajous shapes. Purely a monitor.
  *
+ * Two stacked canvases over the dark backdrop: a **static** graticule and a **transparent** trace
+ * that fades via `destination-out`. Keeping the graticule off the fading canvas avoids it building
+ * up, and the alpha fade avoids the additive-on-opaque burn-in.
+ *
  * `fill` sizes the square tube to its container (for the pop-out window); otherwise it's `height`
  * px. `onPopOut`, when given, shows a button to detach the scope into its own larger window.
  */
@@ -73,7 +82,8 @@ export function Vectorscope({
 }) {
   const { t } = useTranslation();
   const wrapRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const gridRef = useRef<HTMLCanvasElement>(null);
+  const trailRef = useRef<HTMLCanvasElement>(null);
   // Latest payload, written by the listener and read by the rAF loop — a ref, not state, so the
   // 60 fps stream drives the imperative canvas without ever re-rendering React.
   const scopeRef = useRef<ScopeData | null>(null);
@@ -102,7 +112,7 @@ export function Vectorscope({
   const res = Math.round(side * dpr); // canvas backing-store resolution
 
   // The active EQ cascade (for undistort) + the built inverse cascade and its running state. Rebuilt
-  // by the rAF loop when the filters/rate change (keyed by `invSig`); state persists across frames.
+  // by the rAF loop when the filters/rate change; state persists across frames.
   const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0 });
   const invRef = useRef<{
     active: boolean;
@@ -139,26 +149,72 @@ export function Vectorscope({
     };
   }, []);
 
-  // Prime the backdrop whenever the backing store is (re)sized — setting canvas.width clears it.
+  // Register as a scope viewer so the backend emits the scope stream (gated to when a view is
+  // open). The inline view registers itself; the pop-out window's count is managed by the main
+  // window (App) via the window's lifecycle, since a closed OS window may not run React cleanup.
   useEffect(() => {
-    const ctx = canvasRef.current?.getContext("2d");
-    if (!ctx) return;
-    ctx.fillStyle = `rgb(${BG[0]},${BG[1]},${BG[2]})`;
-    ctx.fillRect(0, 0, res, res);
-  }, [res]);
+    if (fill) return;
+    void invoke("set_scope_viewer", { active: true });
+    return () => void invoke("set_scope_viewer", { active: false });
+  }, [fill]);
 
+  // Static graticule — drawn on its own canvas, so it never accumulates under the fading trace.
+  // Redrawn only when the size or a graticule-affecting parameter changes.
   useEffect(() => {
-    const cv = canvasRef.current;
+    const cv = gridRef.current;
     const ctx = cv?.getContext("2d");
     if (!cv || !ctx) return;
-    const cs = getComputedStyle(cv);
-    const [ar, ag, ab] = parseHex(cs.getPropertyValue("--accent"));
+    const S = cv.width;
+    const c = S / 2;
+    const R = S * params.radiusFrac;
+    ctx.clearRect(0, 0, S, S);
+    const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
+
+    ctx.strokeStyle = `rgba(${ar},${ag},${ab},${params.gridAlpha})`;
+    ctx.lineWidth = Math.max(1, S / REF_SIZE);
+    ctx.beginPath();
+    ctx.arc(c, c, R, 0, Math.PI * 2);
+    ctx.moveTo(c, c - R);
+    ctx.lineTo(c, c + R);
+    ctx.moveTo(c - R, c);
+    ctx.lineTo(c + R, c);
+    if (!params.rotate) {
+      const d = R / SQRT2; // raw X-Y: mono runs the 45° diagonal — draw it as a guide
+      ctx.moveTo(c - d, c + d);
+      ctx.lineTo(c + d, c - d);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = `rgba(${ar},${ag},${ab},${LABEL_ALPHA})`;
+    ctx.font = `${Math.round(S * 0.045)}px system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    if (params.rotate) {
+      ctx.fillText("M", c, c - R * 0.9);
+      ctx.fillText("L", c - R * 0.6, c - R * 0.6);
+      ctx.fillText("R", c + R * 0.6, c - R * 0.6);
+    } else {
+      ctx.fillText("L", c + R * 0.88, c - R * 0.1);
+      ctx.fillText("R", c + R * 0.1, c - R * 0.88);
+      ctx.fillText("M", c + R * 0.55, c - R * 0.55);
+    }
+  }, [res, params.rotate, params.radiusFrac, params.gridAlpha]);
+
+  // The trace: a transparent canvas that fades via destination-out and draws the beam additively.
+  useEffect(() => {
+    const cv = trailRef.current;
+    const ctx = cv?.getContext("2d");
+    if (!cv || !ctx) return;
+    const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
 
     let raf = 0;
     let last = performance.now();
     let drawn: ScopeData | null = null; // last payload already traced (draw each once)
     let lastX = NaN; // final beam point of the previous window, to bridge frames continuously
     let lastY = NaN; //   (reset to NaN on idle so a silence gap doesn't draw a stray bridge)
+    let spotX = NaN; // the beam's dwell spot — position + brightness, redrawn every frame so it
+    let spotY = NaN; //   holds during silence; updated per window from the beam's mean + path length
+    let spotB = 0;
 
     const render = () => {
       const now = performance.now();
@@ -168,46 +224,16 @@ export function Vectorscope({
 
       const S = cv.width;
       const c = S / 2;
-      const R = S * p.radiusFrac; // full-scale ring radius
-      // Raw X-Y maps a full-scale channel (±1) to the ring; the rotated view maps mono full-scale
-      // (|y'| = √2) to it, so single channels land at ~0.7 R — the audio-standard −3 dB corner.
+      const R = S * p.radiusFrac;
       const scale = p.rotate ? R / SQRT2 : R;
+      const r0 = Math.max(1.5, p.beam * (S / REF_SIZE)); // beam/spot base radius
 
-      // 1) Fade the whole screen toward the backdrop (time-based → refresh-rate independent).
+      // 1) Fade the trace toward transparent (alpha decay) — time-based, so the trail length is
+      //    identical at any refresh rate. Stalls at ~1/255 alpha, invisible over the backdrop.
       const fade = 1 - Math.exp(-dt / p.trailTau);
-      ctx.globalCompositeOperation = "source-over";
-      ctx.fillStyle = `rgba(${BG[0]},${BG[1]},${BG[2]},${fade})`;
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.fillStyle = `rgba(0,0,0,${fade})`;
       ctx.fillRect(0, 0, S, S);
-
-      // 2) Graticule — redrawn every frame at constant alpha so it stays put while the trace decays.
-      ctx.strokeStyle = `rgba(${ar},${ag},${ab},${p.gridAlpha})`;
-      ctx.lineWidth = Math.max(1, S / REF_SIZE);
-      ctx.beginPath();
-      ctx.arc(c, c, R, 0, Math.PI * 2);
-      ctx.moveTo(c, c - R);
-      ctx.lineTo(c, c + R);
-      ctx.moveTo(c - R, c);
-      ctx.lineTo(c + R, c);
-      if (!p.rotate) {
-        const d = R / SQRT2; // raw X-Y: mono runs the 45° diagonal — draw it as a guide
-        ctx.moveTo(c - d, c + d);
-        ctx.lineTo(c + d, c - d);
-      }
-      ctx.stroke();
-
-      ctx.fillStyle = `rgba(${ar},${ag},${ab},${LABEL_ALPHA})`;
-      ctx.font = `${Math.round(S * 0.045)}px system-ui, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      if (p.rotate) {
-        ctx.fillText("M", c, c - R * 0.9);
-        ctx.fillText("L", c - R * 0.6, c - R * 0.6);
-        ctx.fillText("R", c + R * 0.6, c - R * 0.6);
-      } else {
-        ctx.fillText("L", c + R * 0.88, c - R * 0.1);
-        ctx.fillText("R", c + R * 0.1, c - R * 0.88);
-        ctx.fillText("M", c + R * 0.55, c - R * 0.55);
-      }
 
       // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns on,
       // then run each sample back through it to recover the pre-EQ source image. State persists
@@ -230,46 +256,102 @@ export function Vectorscope({
       }
       const undistort = p.invert && iv.coeffs.length > 0;
 
-      // 3) Trace the newest window once — a polyline through consecutive samples (the beam path),
-      //    bridged from the previous window's last point so the trace is continuous across frames.
+      // 2) Trace + resting spot. The beam is always somewhere: while it moves we draw the connected
+      //    trace (velocity-graded — a fast/high-frequency sweep dims, a slow dwell brightens, the
+      //    CRT's constant energy per sample), and every frame we mark the beam's *dwell* with a spot
+      //    at the window's mean position. Its brightness rises as the window's path length shrinks
+      //    (that same energy concentrated). So silence — samples collapsed to centre, line segments
+      //    ~zero-length and invisible — renders as an immediate saturated spot; an empty/absent
+      //    window parks it at centre. No silence detection, no dark gap. (Bucketed strokes keep the
+      //    velocity glow to VEL_BUCKETS stroke calls, not one per segment.)
       const s = scopeRef.current;
-      if (s && s !== drawn) {
+      const idle = !s || !s.signal || s.xy.length < 4;
+      if (idle) {
+        if (s) drawn = s;
+        lastX = NaN;
+        lastY = NaN;
+        spotX = c; // resting beam parks at centre, full intensity
+        spotY = c;
+        spotB = p.glow;
+      } else if (s !== drawn) {
         drawn = s;
-        if (s.signal && s.xy.length >= 4) {
-          ctx.globalCompositeOperation = "lighter";
-          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${p.glow})`;
-          ctx.lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE));
-          ctx.lineJoin = "round";
-          ctx.lineCap = "round";
-          const xy = s.xy;
-          ctx.beginPath();
-          if (!Number.isNaN(lastX)) ctx.moveTo(lastX, lastY);
-          for (let i = 0; i + 1 < xy.length; i += 2) {
-            let l = xy[i];
-            let r = xy[i + 1];
-            if (undistort) {
-              l /= iv.gain; // undo the preamp, then run the inverse cascade sample-by-sample
-              r /= iv.gain;
-              for (let k = 0; k < iv.coeffs.length; k++) {
-                l = stepBiquad(iv.coeffs[k], iv.stateL[k], l);
-                r = stepBiquad(iv.coeffs[k], iv.stateR[k], r);
-              }
+        const buckets: Path2D[] = [];
+        for (let b = 0; b < VEL_BUCKETS; b++) buckets.push(new Path2D());
+        const kRef = Math.max(0.001, p.focus * (S / REF_SIZE)); // full-bright segment length (px)
+        const xy = s.xy;
+        let sumX = 0;
+        let sumY = 0;
+        let cnt = 0;
+        let pathLen = 0;
+        for (let i = 0; i + 1 < xy.length; i += 2) {
+          let l = xy[i];
+          let r = xy[i + 1];
+          if (undistort) {
+            l /= iv.gain; // undo the preamp, then run the inverse cascade sample-by-sample
+            r /= iv.gain;
+            for (let k = 0; k < iv.coeffs.length; k++) {
+              l = stepBiquad(iv.coeffs[k], iv.stateL[k], l);
+              r = stepBiquad(iv.coeffs[k], iv.stateR[k], r);
             }
-            const xp = p.rotate ? (r - l) / SQRT2 : l; // rotate −45°: L→up-left, R→up-right, mono→up
-            const yp = p.rotate ? (l + r) / SQRT2 : r;
-            const px = c + xp * scale;
-            const py = c - yp * scale; // canvas y is down
-            if (i === 0 && Number.isNaN(lastX)) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-            lastX = px;
-            lastY = py;
           }
-          ctx.stroke();
-          ctx.globalCompositeOperation = "source-over";
-        } else {
-          lastX = NaN; // idle window → drop the bridge so silence doesn't streak the screen
-          lastY = NaN;
+          const xp = p.rotate ? (r - l) / SQRT2 : l; // rotate −45°: L→up-left, R→up-right, mono→up
+          const yp = p.rotate ? (l + r) / SQRT2 : r;
+          const px = c + xp * scale;
+          const py = c - yp * scale; // canvas y is down
+          if (!Number.isNaN(lastX)) {
+            const dx = px - lastX;
+            const dy = py - lastY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            pathLen += dist;
+            const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
+            let b = (f * VEL_BUCKETS) | 0;
+            if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
+            buckets[b].moveTo(lastX, lastY);
+            buckets[b].lineTo(px, py);
+          }
+          sumX += px;
+          sumY += py;
+          cnt++;
+          lastX = px;
+          lastY = py;
         }
+        ctx.globalCompositeOperation = "lighter";
+        ctx.lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE));
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        for (let b = 0; b < VEL_BUCKETS; b++) {
+          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * (b + 0.5)) / VEL_BUCKETS})`;
+          ctx.stroke(buckets[b]);
+        }
+        // Dwell spot: the window's whole beam energy concentrated where it barely moved. refL small,
+        // so ordinary (moving) material gives ~0 while a still window (DC / silence zeros) saturates.
+        const refL = r0 * 2.5;
+        spotX = cnt > 0 ? sumX / cnt : c;
+        spotY = cnt > 0 ? sumY / cnt : c;
+        spotB = (p.glow * refL) / (pathLen + refL);
+      }
+
+      // Draw the beam spot every frame (source-over → pinned to full intensity, no charge-up): a
+      // white-hot saturated core + accent halo. Skipped once the beam is clearly moving (spotB ≈ 0).
+      if (spotB > 0.05 && !Number.isNaN(spotX)) {
+        ctx.globalCompositeOperation = "source-over";
+        const haloR = r0 * 4;
+        const halo = ctx.createRadialGradient(spotX, spotY, 0, spotX, spotY, haloR);
+        halo.addColorStop(0, `rgba(${ar},${ag},${ab},${Math.min(1, spotB * 0.2)})`);
+        halo.addColorStop(1, `rgba(${ar},${ag},${ab},0)`);
+        ctx.fillStyle = halo;
+        ctx.beginPath();
+        ctx.arc(spotX, spotY, haloR, 0, Math.PI * 2);
+        ctx.fill();
+        const coreR = r0 * 2.5;
+        const core = ctx.createRadialGradient(spotX, spotY, 0, spotX, spotY, coreR);
+        core.addColorStop(0, `rgba(255,255,255,${Math.min(1, spotB * 2)})`); // white-hot centre
+        core.addColorStop(0.4, `rgba(${ar},${ag},${ab},${Math.min(1, spotB * 1.5)})`);
+        core.addColorStop(1, `rgba(${ar},${ag},${ab},0)`);
+        ctx.fillStyle = core;
+        ctx.beginPath();
+        ctx.arc(spotX, spotY, coreR, 0, Math.PI * 2);
+        ctx.fill();
       }
 
       raf = requestAnimationFrame(render);
@@ -283,21 +365,17 @@ export function Vectorscope({
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "glow", label: t("scope.glow"), min: 0.05, max: 1, step: 0.05 },
     { key: "beam", label: t("scope.beam"), min: 0.5, max: 5, step: 0.1 },
+    { key: "focus", label: t("scope.focus"), min: 1, max: 24, step: 0.5 },
     { key: "radiusFrac", label: t("scope.scale"), min: 0.3, max: 0.5, step: 0.01 },
     { key: "gridAlpha", label: t("scope.grid"), min: 0, max: 0.5, step: 0.02 },
   ];
 
+  const canvasStyle = { width: `${side}px`, height: `${side}px` } as const;
   return (
     <div className={`vectorscope-wrap${fill ? " fill" : ""}`} ref={wrapRef} style={fill ? undefined : { height: `${height}px` }}>
-      <div className="vs-screen" style={{ width: `${side}px`, height: `${side}px` }}>
-        <canvas
-          ref={canvasRef}
-          className="vectorscope-canvas"
-          width={res}
-          height={res}
-          style={{ width: `${side}px`, height: `${side}px` }}
-          aria-hidden="true"
-        />
+      <div className="vs-screen" style={canvasStyle}>
+        <canvas ref={gridRef} className="vectorscope-canvas vs-grid" width={res} height={res} style={canvasStyle} aria-hidden="true" />
+        <canvas ref={trailRef} className="vectorscope-canvas vs-trail" width={res} height={res} style={canvasStyle} aria-hidden="true" />
         <div className="vs-tools">
           {onPopOut && (
             <button type="button" className="vs-tool" title={t("scope.popOut")} onClick={onPopOut}>

@@ -92,7 +92,7 @@ mod windows_impl {
     use super::{MeterUpdate, ScopeUpdate, SpectrumUpdate};
     use std::collections::VecDeque;
     use std::error::Error;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
@@ -184,8 +184,12 @@ mod windows_impl {
         /// GUID); the matching WASAPI endpoint is found by suffix (its id is `{0.0.0.0…}.{guid}`),
         /// falling back to the default render endpoint when `None` or unmatched. `on_update` is
         /// called from the capture thread ~20×/s.
+        /// `scope_viewers` is a shared count of open vectorscope views (inline + pop-out window);
+        /// the loopback only accumulates and emits the (heavier) `scope` stream while it's > 0, so
+        /// nothing's serialized when no one is watching the scope.
         pub fn start<F, G, H>(
             endpoint_id: Option<String>,
+            scope_viewers: Arc<AtomicUsize>,
             on_update: F,
             on_spectrum: G,
             on_scope: H,
@@ -200,7 +204,7 @@ mod windows_impl {
             let handle = thread::Builder::new()
                 .name("cageq-loopback".into())
                 .spawn(move || {
-                    if let Err(e) = capture_loop(endpoint_id, &stop_thread, on_update, on_spectrum, on_scope) {
+                    if let Err(e) = capture_loop(endpoint_id, &stop_thread, &scope_viewers, on_update, on_spectrum, on_scope) {
                         // A failed monitor simply yields no updates; surface why for debugging.
                         eprintln!("[cageq-monitor] capture ended: {e}");
                     }
@@ -514,6 +518,7 @@ mod windows_impl {
     fn capture_loop<F, G, H>(
         endpoint_id: Option<String>,
         stop: &AtomicBool,
+        scope_viewers: &AtomicUsize,
         on_update: F,
         on_spectrum: G,
         on_scope: H,
@@ -532,7 +537,7 @@ mod windows_impl {
         // until the user toggled it off/on), tear down and reopen: get_mixformat re-reads the new
         // rate and the loudness state is rebuilt for it, so a rate change self-heals.
         while !stop.load(Ordering::Relaxed) {
-            if let Err(e) = run_session(&endpoint_id, stop, &on_update, &on_spectrum, &on_scope) {
+            if let Err(e) = run_session(&endpoint_id, stop, scope_viewers, &on_update, &on_spectrum, &on_scope) {
                 eprintln!("[cageq-monitor] reopening capture after: {e}");
                 // Show the UI an idle state during the gap, then back off before reopening.
                 on_update(MeterUpdate {
@@ -581,6 +586,7 @@ mod windows_impl {
     fn run_session<F, G, H>(
         endpoint_id: &Option<String>,
         stop: &AtomicBool,
+        scope_viewers: &AtomicUsize,
         on_update: &F,
         on_spectrum: &G,
         on_scope: &H,
@@ -646,6 +652,11 @@ mod windows_impl {
             if got_data {
                 last_signal = Instant::now();
             }
+            // Only do the (heavier) vectorscope work when a scope view is actually open.
+            let scope_on = scope_viewers.load(Ordering::Relaxed) > 0;
+            if !scope_on && !scope_lr.is_empty() {
+                scope_lr.clear();
+            }
 
             frames.clear();
             mono.clear();
@@ -677,8 +688,10 @@ mod windows_impl {
                     block_count += 1;
                 }
                 mono.push(frame_sum / channels as f32);
-                scope_lr.push(ch0);
-                scope_lr.push(ch1);
+                if scope_on {
+                    scope_lr.push(ch0);
+                    scope_lr.push(ch1);
+                }
             }
             if !frames.is_empty() {
                 let _ = ebu.add_frames_f32(&frames);
@@ -754,9 +767,9 @@ mod windows_impl {
                 last_spectrum = Instant::now();
             }
 
-            // Vectorscope: stride-decimate the window's (l, r) pairs down to SCOPE_POINTS and emit.
-            // The front-end phosphor trail carries the persistence, so we just send a fresh scatter.
-            if last_scope.elapsed() >= SCOPE_INTERVAL {
+            // Vectorscope: emit the contiguous (l, r) window (see tail_pairs) — but only while a
+            // scope view is open, so the heavier stream costs nothing when nobody's watching.
+            if scope_on && last_scope.elapsed() >= SCOPE_INTERVAL {
                 let signal = last_signal.elapsed() < SILENCE_GAP;
                 on_scope(ScopeUpdate {
                     xy: if signal { tail_pairs(&scope_lr, SCOPE_MAX_POINTS) } else { Vec::new() },
@@ -788,6 +801,7 @@ mod stub {
     impl Monitor {
         pub fn start<F, G, H>(
             _endpoint_id: Option<String>,
+            _scope_viewers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
             _on_update: F,
             _on_spectrum: G,
             _on_scope: H,

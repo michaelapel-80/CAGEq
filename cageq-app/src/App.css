@@ -602,16 +602,25 @@ select:disabled {
   width: 100%;
   height: 100%;
 }
+/* The screen carries the dark backdrop + tube framing; the two canvases (static graticule +
+   fading trace) stack on top of it, both transparent. */
 .vs-screen {
-  position: relative; /* anchors the toolbar + tuning overlay to the screen */
-}
-.vectorscope-canvas {
-  display: block;
+  position: relative; /* anchors the canvases + toolbar + tuning overlay */
   border-radius: 8px;
   background: rgb(9, 12, 11);
   box-shadow:
     inset 0 0 22px -6px rgba(0, 0, 0, 0.9),
     0 0 0 1px rgba(128, 128, 128, 0.25);
+}
+.vectorscope-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none; /* decorative — never intercept clicks meant for the toolbar/tuning panel */
+}
+.vs-trail {
+  /* the trace sits above the graticule */
+  z-index: 1;
 }
 /* Corner toolbar (pop-out + tuning gear): dim until hovered/open, so the scope stays the focus. */
 .vs-tools {
@@ -620,6 +629,7 @@ select:disabled {
   right: 6px;
   display: flex;
   gap: 4px;
+  z-index: 2; /* above the trace canvas */
 }
 .vs-tool {
   padding: 0.05em 0.3em;
@@ -661,6 +671,7 @@ select:disabled {
   border: 1px solid rgba(255, 255, 255, 0.12);
   color: rgba(255, 255, 255, 0.85);
   font-size: 0.72em;
+  z-index: 2; /* above the trace canvas */
 }
 .vs-tune-row {
   display: grid;

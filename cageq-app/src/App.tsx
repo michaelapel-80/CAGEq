@@ -1094,7 +1094,23 @@ function App() {
       minHeight: 320,
       resizable: true,
     });
-    w.once("tauri://error", (e) => setError(String(e.payload)));
+    // Count the pop-out as a scope viewer for its whole lifetime (so the backend emits the scope
+    // stream) and release it on close — tracked here, in the always-alive main window, because the
+    // pop-out's own React cleanup may not run when its OS window is destroyed. Counted optimistically
+    // (the window object exists); released on destroy or a creation error, once.
+    void invoke("set_scope_viewer", { active: true });
+    let counted = true;
+    const release = () => {
+      if (counted) {
+        counted = false;
+        void invoke("set_scope_viewer", { active: false });
+      }
+    };
+    w.once("tauri://destroyed", release);
+    w.once("tauri://error", (e) => {
+      setError(String(e.payload));
+      release();
+    });
   }
 
   // Finding #1: detect foreign config.txt directives once the backend is up (read-only).

@@ -28,6 +28,12 @@ struct MonitorState(std::sync::Mutex<Option<cageq_monitor::Monitor>>);
 #[derive(Default)]
 struct TestSignalState(std::sync::Mutex<Option<cageq_monitor::TestSignal>>);
 
+/// Number of open vectorscope views (inline chart view + the pop-out window). The loopback only
+/// accumulates/emits the heavier `scope` stream while this is > 0. Shared into the monitor so it
+/// survives monitor restarts (device changes); toggled by `set_scope_viewer`.
+#[derive(Default)]
+struct ScopeViewers(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
 #[derive(serde::Serialize)]
 struct ApplyResult {
     hash: String,
@@ -304,7 +310,12 @@ fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
 /// for the default render endpoint). Opens WASAPI loopback and emits a `monitor` event
 /// (`MeterUpdate`) ~20×/s. Replaces any monitor already running (e.g. after a device change).
 #[tauri::command]
-fn start_monitor(device: Option<String>, app: tauri::AppHandle, state: State<MonitorState>) -> Result<(), String> {
+fn start_monitor(
+    device: Option<String>,
+    app: tauri::AppHandle,
+    state: State<MonitorState>,
+    scope_viewers: State<ScopeViewers>,
+) -> Result<(), String> {
     use tauri::Emitter;
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.take() {
@@ -315,6 +326,7 @@ fn start_monitor(device: Option<String>, app: tauri::AppHandle, state: State<Mon
     let scope_sink = app.clone();
     let monitor = cageq_monitor::Monitor::start(
         device,
+        scope_viewers.0.clone(),
         move |update| {
             // A dropped listener just means no one's watching; ignore send failures.
             let _ = sink.emit("monitor", update);
@@ -328,6 +340,21 @@ fn start_monitor(device: Option<String>, app: tauri::AppHandle, state: State<Mon
     )?;
     *guard = Some(monitor);
     Ok(())
+}
+
+/// A vectorscope view opened (`active = true`) or closed (`false`). Refcounted so the loopback
+/// emits the `scope` stream only while at least one view (inline or the pop-out window) is open.
+#[tauri::command]
+fn set_scope_viewer(active: bool, scope_viewers: State<ScopeViewers>) {
+    use std::sync::atomic::Ordering;
+    if active {
+        scope_viewers.0.fetch_add(1, Ordering::Relaxed);
+    } else {
+        // Saturating decrement — never underflow if a stray "close" arrives.
+        let _ = scope_viewers
+            .0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+    }
 }
 
 /// §5.3c: stop loopback monitoring (idempotent — no-op if nothing is running).
@@ -809,6 +836,7 @@ pub fn run() {
             app.manage(build_backend(bundled));
             app.manage(MonitorState::default());
             app.manage(TestSignalState::default());
+            app.manage(ScopeViewers::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -826,6 +854,7 @@ pub fn run() {
             restore_foreign_config,
             start_monitor,
             stop_monitor,
+            set_scope_viewer,
             start_test_signal,
             stop_test_signal,
             open_output_settings,
