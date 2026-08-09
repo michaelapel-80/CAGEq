@@ -49,6 +49,8 @@ const REF_SIZE = 512; // beam width is authored against this tube size, then sca
 const SQRT2 = Math.SQRT2;
 const VEL_BUCKETS = 16; // brightness quantisation for velocity glow (batched strokes, not per-segment)
 const VEL_FLOOR = 0.05; // dimmest a fast segment goes (keeps sharp transitions faintly visible)
+const VEL_REF_RATE = 48000; // the velocity glow judges beam speed in *time*; the per-sample segment
+//   length is scaled to this rate so a given speed reads the same at 44.1/48/96/192 kHz.
 
 /** Parse a `#rrggbb` hex (the `--accent` CSS var) to [r,g,b]; a green phosphor fallback. */
 function parseHex(hex: string): [number, number, number] {
@@ -276,7 +278,10 @@ export function Vectorscope({
         drawn = s;
         const buckets: Path2D[] = [];
         for (let b = 0; b < VEL_BUCKETS; b++) buckets.push(new Path2D());
-        const kRef = Math.max(0.001, p.focus * (S / REF_SIZE)); // full-bright segment length (px)
+        // Full-bright segment length (px), scaled to a reference rate: at a higher rate the beam
+        // moves less per sample, so shrink the threshold to match → the velocity glow tracks beam
+        // *speed* (px/s), not px/sample, and the intensity no longer jumps with the sample rate.
+        const kRef = Math.max(0.001, p.focus * (S / REF_SIZE) * (VEL_REF_RATE / rate));
         const xy = s.xy;
         let sumX = 0;
         let sumY = 0;
