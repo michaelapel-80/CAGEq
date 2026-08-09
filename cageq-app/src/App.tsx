@@ -1483,7 +1483,9 @@ function App() {
   // Broadcast the active EQ cascade to any scope view (inline or the detached window) so its
   // inverse-filter ("undistort") mode can recover the pre-EQ image. Dry → no filters (already
   // pristine). Emitted on change, and replayed on request when a scope window mounts and asks.
-  const scopeEq = { filters: dryActive ? [] : result?.filters ?? [], preampDb: dryActive ? 0 : result?.preamp_db ?? 0 };
+  // Dry has no EQ to invert, but it DOES carry a preamp (the §4.1 loudness match in Comparison
+  // mode), so undistort must undo it too — else Dry's scope excursion wouldn't match A/B's.
+  const scopeEq = { filters: dryActive ? [] : result?.filters ?? [], preampDb: result?.preamp_db ?? 0 };
   const scopeEqRef = useRef(scopeEq);
   scopeEqRef.current = scopeEq;
   useEffect(() => {

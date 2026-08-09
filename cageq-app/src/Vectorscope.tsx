@@ -254,7 +254,10 @@ export function Vectorscope({
       } else {
         iv.active = false;
       }
-      const undistort = p.invert && iv.coeffs.length > 0;
+      // Undistort still runs with an empty cascade when there's a preamp to undo — e.g. Dry, which
+      // has no EQ but carries the §4.1 loudness-match gain; without this its excursion wouldn't
+      // match A/B (whose preamp the inverse also removes).
+      const undistort = p.invert && (iv.coeffs.length > 0 || iv.gain !== 1);
 
       // 2) Trace + resting spot. The beam is always somewhere: while it moves we draw the connected
       //    trace (velocity-graded — a fast/high-frequency sweep dims, a slow dwell brightens, the
