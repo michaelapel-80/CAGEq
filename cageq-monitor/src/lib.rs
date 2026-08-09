@@ -62,6 +62,9 @@ pub struct ScopeUpdate {
     pub xy: Vec<f32>,
     /// `false` when the endpoint produced no audio this window — the UI idles the scope.
     pub signal: bool,
+    /// The endpoint's mix sample rate (Hz) — the rate these samples (and thus the applied EQ) are
+    /// at, so the scope's inverse-filter ("undistort") mode can build coefficients at the same fs.
+    pub rate: u32,
 }
 
 #[cfg(windows)]
@@ -541,7 +544,7 @@ mod windows_impl {
                     bins: Vec::new(),
                     sample_rate: 0, // unknown until the session reopens and re-reads the mix format
                 });
-                on_scope(ScopeUpdate { xy: Vec::new(), signal: false });
+                on_scope(ScopeUpdate { xy: Vec::new(), signal: false, rate: 0 });
                 sleep_unless_stopped(stop, Duration::from_millis(500));
             }
         }
@@ -758,6 +761,7 @@ mod windows_impl {
                 on_scope(ScopeUpdate {
                     xy: if signal { tail_pairs(&scope_lr, SCOPE_MAX_POINTS) } else { Vec::new() },
                     signal,
+                    rate,
                 });
                 scope_lr.clear();
                 last_scope = Instant::now();

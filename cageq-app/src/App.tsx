@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useTranslation, Trans } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -1463,6 +1463,23 @@ function App() {
 
   const selectedDevice = devices.find((d) => d.id === deviceId);
   const dryActive = activeSlot === "Dry";
+
+  // Broadcast the active EQ cascade to any scope view (inline or the detached window) so its
+  // inverse-filter ("undistort") mode can recover the pre-EQ image. Dry → no filters (already
+  // pristine). Emitted on change, and replayed on request when a scope window mounts and asks.
+  const scopeEq = { filters: dryActive ? [] : result?.filters ?? [], preampDb: dryActive ? 0 : result?.preamp_db ?? 0 };
+  const scopeEqRef = useRef(scopeEq);
+  scopeEqRef.current = scopeEq;
+  useEffect(() => {
+    void emit("scope-eq", scopeEqRef.current);
+  }, [result, dryActive]);
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void (async () => {
+      un = await listen("scope-eq-request", () => void emit("scope-eq", scopeEqRef.current));
+    })();
+    return () => un?.();
+  }, []);
 
   // Has a slot's document diverged from the preset last loaded into it? For the active slot the
   // live editor is the source of truth; an inactive slot compares its last-applied snapshot.

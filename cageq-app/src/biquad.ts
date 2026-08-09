@@ -54,6 +54,23 @@ function coefficients(kind: FilterKind, fc: number, gainDb: number, q: number, f
   return [1.0, a1, a2, b0, b1, b2] as const;
 }
 
+/** Difference-equation coefficients (a0 = 1) for one band's biquad in the direct-form convention
+ *  `y = b0·x + b1·x₁ + b2·x₂ − a1·y₁ − a2·y₂` — the a's un-negated from {@link coefficients}. */
+export type BiquadCoeffs = { b0: number; b1: number; b2: number; a1: number; a2: number };
+export function biquadCoeffs(band: Band, fs = FS): BiquadCoeffs {
+  const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);
+  return { b0, b1, b2, a1: -a1, a2: -a2 };
+}
+
+/** The **inverse** biquad: fed a sample that band already filtered, it returns the original —
+ *  1/H(z), i.e. numerator and denominator swapped (then renormalised to a0 = 1). Cascade the
+ *  inverses of every band (reverse order) to undo an EQ chain in the time domain. Exact for the
+ *  minimum-phase EQ this app builds; deep cuts become peaks in the inverse (noise-amplifying). */
+export function inverseBiquadCoeffs(band: Band, fs = FS): BiquadCoeffs {
+  const { b0, b1, b2, a1, a2 } = biquadCoeffs(band, fs);
+  return { b0: 1 / b0, b1: a1 / b0, b2: a2 / b0, a1: b1 / b0, a2: b2 / b0 };
+}
+
 /** One band's magnitude response in dB over `freqs` (mirrors `PEQFilter.fr`). */
 export function filterResponseDb(band: Band, freqs: Float64Array, fs = FS): Float64Array {
   let [a0, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);

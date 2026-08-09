@@ -126,6 +126,8 @@
     "scale": "Scale",
     "grid": "Grid",
     "rotate": "Rotate (mono ↑)",
+    "undistort": "Undistort",
+    "undistortHint": "Inverse-filter the loopback to show the pre-EQ image (for oscilloscope music with correction on)",
     "reset": "Reset"
   },
 

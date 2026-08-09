@@ -1,10 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
+import { type Band, type BiquadCoeffs, inverseBiquadCoeffs } from "./biquad";
 
 /** A stereo vectorscope window from the loopback (see cageq-monitor `ScopeUpdate`): interleaved
- *  `l0, r0, l1, r1, …` sample pairs (≈ -1..1) in capture order, plus a signal flag for idle. */
-export type ScopeData = { xy: number[]; signal: boolean };
+ *  `l0, r0, l1, r1, …` sample pairs (≈ -1..1) in capture order, a signal flag, and the mix rate. */
+export type ScopeData = { xy: number[]; signal: boolean; rate: number };
+
+/** The active EQ cascade, broadcast by the main window (App) so the scope can inverse-filter the
+ *  post-EQ loopback back to the pre-EQ source image (the "undistort" mode). */
+type ScopeEq = { filters: Band[]; preampDb: number };
+/** Per-biquad running state for the inverse cascade (Direct Form I), one set per channel. */
+type BiquadState = { x1: number; x2: number; y1: number; y2: number };
+const zeroState = (): BiquadState => ({ x1: 0, x2: 0, y1: 0, y2: 0 });
+function stepBiquad(c: BiquadCoeffs, s: BiquadState, x: number): number {
+  const y = c.b0 * x + c.b1 * s.x1 + c.b2 * s.x2 - c.a1 * s.y1 - c.a2 * s.y2;
+  s.x2 = s.x1;
+  s.x1 = x;
+  s.y2 = s.y1;
+  s.y1 = y;
+  return y;
+}
 
 // The scope is its own always-dark "instrument screen" (independent of the app theme): a real
 // oscilloscope glows bright traces on a dark tube, and additive ('lighter') accumulation only reads
@@ -22,8 +38,9 @@ type Params = {
   radiusFrac: number; // full-scale ring radius as a fraction of the half-size
   gridAlpha: number; // graticule brightness
   rotate: boolean;
+  invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
-const DEFAULTS: Params = { trailTau: 0.16, glow: 0.5, beam: 1.5, radiusFrac: 0.44, gridAlpha: 0.22, rotate: false };
+const DEFAULTS: Params = { trailTau: 0.16, glow: 0.5, beam: 1.5, radiusFrac: 0.44, gridAlpha: 0.22, rotate: false, invert: false };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
@@ -84,19 +101,41 @@ export function Vectorscope({
   const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
   const res = Math.round(side * dpr); // canvas backing-store resolution
 
-  // Own the loopback `scope` subscription: it exists only while this view is mounted (inline view
-  // or pop-out window), so no scope traffic touches React elsewhere.
+  // The active EQ cascade (for undistort) + the built inverse cascade and its running state. Rebuilt
+  // by the rAF loop when the filters/rate change (keyed by `invSig`); state persists across frames.
+  const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0 });
+  const invRef = useRef<{
+    active: boolean;
+    filtersRef: Band[] | null; // identity of the cascade the coeffs were built from (rebuild on change)
+    rate: number;
+    coeffs: BiquadCoeffs[];
+    stateL: BiquadState[];
+    stateR: BiquadState[];
+    gain: number;
+  }>({ active: false, filtersRef: null, rate: 0, coeffs: [], stateL: [], stateR: [], gain: 1 });
+
+  // Own the loopback `scope` subscription (samples) + the `scope-eq` broadcast (cascade). Both exist
+  // only while this view is mounted (inline or pop-out), so nothing touches React elsewhere. On
+  // mount we ask the main window to (re)send the cascade, since events aren't retained.
   useEffect(() => {
     let active = true;
-    let unlisten: (() => void) | undefined;
+    const unlisteners: (() => void)[] = [];
     void (async () => {
-      unlisten = await listen<ScopeData>("scope", (e) => {
-        if (active) scopeRef.current = e.payload;
-      });
+      unlisteners.push(
+        await listen<ScopeData>("scope", (e) => {
+          if (active) scopeRef.current = e.payload;
+        }),
+      );
+      unlisteners.push(
+        await listen<ScopeEq>("scope-eq", (e) => {
+          if (active) eqRef.current = e.payload;
+        }),
+      );
+      if (active) void emit("scope-eq-request");
     })();
     return () => {
       active = false;
-      unlisten?.();
+      unlisteners.forEach((u) => u());
     };
   }, []);
 
@@ -170,6 +209,27 @@ export function Vectorscope({
         ctx.fillText("M", c + R * 0.55, c - R * 0.55);
       }
 
+      // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns on,
+      // then run each sample back through it to recover the pre-EQ source image. State persists
+      // across frames (the stream is contiguous at ≤48 kHz), so the inverse IIR stays settled.
+      const eq = eqRef.current;
+      const rate = scopeRef.current?.rate && scopeRef.current.rate > 0 ? scopeRef.current.rate : 48000;
+      const iv = invRef.current;
+      if (p.invert) {
+        if (!iv.active || iv.filtersRef !== eq.filters || iv.rate !== rate) {
+          iv.active = true;
+          iv.filtersRef = eq.filters;
+          iv.rate = rate;
+          iv.coeffs = eq.filters.map((b) => inverseBiquadCoeffs(b, rate)).reverse(); // undo in reverse order
+          iv.stateL = iv.coeffs.map(zeroState);
+          iv.stateR = iv.coeffs.map(zeroState);
+          iv.gain = Math.pow(10, eq.preampDb / 20);
+        }
+      } else {
+        iv.active = false;
+      }
+      const undistort = p.invert && iv.coeffs.length > 0;
+
       // 3) Trace the newest window once — a polyline through consecutive samples (the beam path),
       //    bridged from the previous window's last point so the trace is continuous across frames.
       const s = scopeRef.current;
@@ -185,8 +245,16 @@ export function Vectorscope({
           ctx.beginPath();
           if (!Number.isNaN(lastX)) ctx.moveTo(lastX, lastY);
           for (let i = 0; i + 1 < xy.length; i += 2) {
-            const l = xy[i];
-            const r = xy[i + 1];
+            let l = xy[i];
+            let r = xy[i + 1];
+            if (undistort) {
+              l /= iv.gain; // undo the preamp, then run the inverse cascade sample-by-sample
+              r /= iv.gain;
+              for (let k = 0; k < iv.coeffs.length; k++) {
+                l = stepBiquad(iv.coeffs[k], iv.stateL[k], l);
+                r = stepBiquad(iv.coeffs[k], iv.stateR[k], r);
+              }
+            }
             const xp = p.rotate ? (r - l) / SQRT2 : l; // rotate −45°: L→up-left, R→up-right, mono→up
             const yp = p.rotate ? (l + r) / SQRT2 : r;
             const px = c + xp * scale;
@@ -265,6 +333,10 @@ export function Vectorscope({
             <label className="vs-tune-row vs-tune-check">
               <span>{t("scope.rotate")}</span>
               <input type="checkbox" checked={params.rotate} onChange={(e) => set("rotate", e.currentTarget.checked)} />
+            </label>
+            <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
+              <span>{t("scope.undistort")}</span>
+              <input type="checkbox" checked={params.invert} onChange={(e) => set("invert", e.currentTarget.checked)} />
             </label>
             <button type="button" className="vs-tune-reset" onClick={() => setParams(DEFAULTS)}>
               {t("scope.reset")}
