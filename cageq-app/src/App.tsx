@@ -3,6 +3,7 @@ import { useTranslation, Trans } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
 import { Band, composedCurveDb, logGrid } from "./biquad";
@@ -11,6 +12,7 @@ import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import { ScrubNumber } from "./ScrubNumber";
 import { Meter } from "./Meter";
+import { Vectorscope } from "./Vectorscope";
 import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
@@ -494,8 +496,15 @@ function App() {
   const [commitToken, setCommitToken] = useState(0);
   const historyBaseline = useRef<Stages | null>(null);
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
-  const [impulseView, setImpulseView] = useState(false); // §5.2: swap the chart for the impulse response
-  const [monitorView, setMonitorView] = useState(false); // clean view: strip all curves, show only the live spectrum
+  // The chart area shows one of four mutually-exclusive views (a single segmented control):
+  //   freq    — magnitude curves + spectrum backdrop (the default, editable)
+  //   time    — impulse-response decay (§5.2)
+  //   monitor — clean spectrum: curves stripped, spectrum + preamp only
+  //   scope   — stereo vectorscope (X-Y goniometer) of the live loopback
+  const [chartView, setChartView] = useState<"freq" | "time" | "monitor" | "scope">("freq");
+  const impulseView = chartView === "time";
+  const monitorView = chartView === "monitor";
+  const scopeView = chartView === "scope";
   const [rawCurve, setRawCurve] = useState<{ f: number; db: number }[] | null>(null); // raw measured FR (nerd overlay)
   const [targetCurve, setTargetCurve] = useState<{ f: number; db: number }[] | null>(null); // the target curve (nerd overlay)
   const [result, setResult] = useState<ApplyResult | null>(null);
@@ -1067,6 +1076,27 @@ function App() {
     if (dev) await invoke("set_device", { device: dev.eqapo_pattern });
   }
 
+  // Detach the vectorscope into its own resizable window (index.html#scope → ScopeWindow). The
+  // loopback monitor keeps running here; the scope events are app-global, so the new window just
+  // listens. Focuses the existing one instead of spawning a duplicate.
+  async function openScopeWindow() {
+    const existing = await WebviewWindow.getByLabel("scope");
+    if (existing) {
+      await existing.setFocus();
+      return;
+    }
+    const w = new WebviewWindow("scope", {
+      url: "index.html#scope",
+      title: "CAGEq — Vectorscope",
+      width: 760,
+      height: 800,
+      minWidth: 320,
+      minHeight: 320,
+      resizable: true,
+    });
+    w.once("tauri://error", (e) => setError(String(e.payload)));
+  }
+
   // Finding #1: detect foreign config.txt directives once the backend is up (read-only).
   useEffect(() => {
     if (loading) return;
@@ -1448,10 +1478,9 @@ function App() {
   // viewBox is 720×215 with PAD.t=12 / PAD.b=24 → the plot spans y 12..191 of 215.
   useEffect(() => {
     const svg = chartWrapRef.current?.querySelector("svg");
-    if (!svg) {
-      setPlotBox(null);
-      return;
-    }
+    // The scope view is a canvas (no SVG); keep the last measured box so the meters beside it don't
+    // jump. When there's genuinely no chart (result cleared) the whole row unmounts anyway.
+    if (!svg) return;
     const measure = () => {
       const h = svg.getBoundingClientRect().height;
       setPlotBox(h > 0 ? { top: (12 / 215) * h, height: (179 / 215) * h } : null);
@@ -1461,7 +1490,7 @@ function App() {
     measure();
     return () => ro.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [impulseView, dryActive, loading, !!result]);
+  }, [chartView, dryActive, loading, !!result]);
 
   // The active stage's bands (the grid/nodes edit these) and the full applied custom set.
   const activeBands = stages[activeStage].bands;
@@ -1992,45 +2021,31 @@ function App() {
                     for Dry, but removing the toggle collapsed the header row and jumped the layout. */}
                 {result && (
                   <div
-                    className="row"
-                    style={{ margin: 0, gap: "0.5em", alignItems: "center", visibility: dryActive ? "hidden" : "visible" }}
+                    className="chart-view"
+                    style={{ margin: 0, visibility: dryActive ? "hidden" : "visible" }}
+                    role="group"
+                    aria-label={tr("correction.domainAria")}
                     aria-hidden={dryActive || undefined}
                   >
-                    {/* Clean monitoring view: hide every curve/handle so only the live FFT (and the
-                        preamp readout) remain. A frequency-only view — it forces the freq chart. */}
-                    <button
-                      type="button"
-                      className={`chart-monitor${monitorView ? " on" : ""}`}
-                      title={tr("correction.monitorTitle")}
-                      aria-pressed={monitorView}
-                      onClick={() => {
-                        setMonitorView((v) => !v);
-                        setImpulseView(false);
-                      }}
-                    >
-                      {tr("correction.monitor")}
-                    </button>
-                    <div className="chart-view" style={{ margin: 0 }} role="group" aria-label={tr("correction.domainAria")}>
+                    {(
+                      [
+                        ["freq", tr("correction.frequency"), tr("correction.frequencyTitle")],
+                        ["time", tr("correction.time"), tr("correction.timeTitle")],
+                        ["monitor", tr("correction.monitor"), tr("correction.monitorTitle")],
+                        ["scope", tr("correction.scope"), tr("correction.scopeTitle")],
+                      ] as const
+                    ).map(([id, label, title]) => (
                       <button
+                        key={id}
                         type="button"
-                        className={!impulseView ? "on" : ""}
-                        title={tr("correction.frequencyTitle")}
-                        onClick={() => setImpulseView(false)}
+                        className={chartView === id ? "on" : ""}
+                        title={title}
+                        aria-pressed={chartView === id}
+                        onClick={() => setChartView(id)}
                       >
-                        {tr("correction.frequency")}
+                        {label}
                       </button>
-                      <button
-                        type="button"
-                        className={impulseView ? "on" : ""}
-                        title={tr("correction.timeTitle")}
-                        onClick={() => {
-                          setImpulseView(true);
-                          setMonitorView(false); // Time is an impulse view; the clean spectrum is frequency-only
-                        }}
-                      >
-                        {tr("correction.time")}
-                      </button>
-                    </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -2054,7 +2069,9 @@ function App() {
                       (above). Phase rides the frequency chart's secondary axis (legend). */}
                   <div className="chart-row">
                   <div className="chart-wrap" ref={chartWrapRef}>
-                    {impulseView && !dryActive && !monitorView ? (
+                    {scopeView ? (
+                      <Vectorscope height={215} onPopOut={openScopeWindow} />
+                    ) : impulseView && !dryActive ? (
                       <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
                     ) : (
                       <EqChart
@@ -2088,13 +2105,17 @@ function App() {
                         }}
                       />
                     )}
-                    <div
-                      className="chart-preamp"
-                      title={loudness?.mode === "FinalVolume" ? tr("correction.preampTitleMax") : tr("correction.preampTitleMatched")}
-                    >
-                      {tr("correction.preamp")} <b>{result.preamp_db.toFixed(1)} dB</b>
-                      <span className="chart-preamp-mode">{loudness?.mode === "FinalVolume" ? tr("correction.preampMax") : tr("correction.preampMatched")}</span>
-                    </div>
+                    {/* Preamp is a property of the correction, not the live signal — hide it on the
+                        scope (which shows the stereo image, not a level). */}
+                    {!scopeView && (
+                      <div
+                        className="chart-preamp"
+                        title={loudness?.mode === "FinalVolume" ? tr("correction.preampTitleMax") : tr("correction.preampTitleMatched")}
+                      >
+                        {tr("correction.preamp")} <b>{result.preamp_db.toFixed(1)} dB</b>
+                        <span className="chart-preamp-mode">{loudness?.mode === "FinalVolume" ? tr("correction.preampMax") : tr("correction.preampMatched")}</span>
+                      </div>
+                    )}
                   </div>
                     {/* §5.3c post-EQ meters beside the chart (loopback, post-EQ) — always on. */}
                     <div className="meter-col">

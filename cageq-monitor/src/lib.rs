@@ -54,6 +54,16 @@ pub struct SpectrumUpdate {
     pub f_max: f32,
 }
 
+/// A stereo vectorscope window (loopback X-Y goniometer): decimated (left, right) sample pairs
+/// for the front-end phosphor scope. `xy` is interleaved `l0, r0, l1, r1, …` at raw sample
+/// amplitude (≈ -1..1); a mono endpoint sends `l == r`. Empty while idle. Platform-independent.
+#[derive(Clone, Debug, Serialize)]
+pub struct ScopeUpdate {
+    pub xy: Vec<f32>,
+    /// `false` when the endpoint produced no audio this window — the UI idles the scope.
+    pub signal: bool,
+}
+
 #[cfg(windows)]
 pub use windows_impl::{Monitor, TestSignal};
 
@@ -76,7 +86,7 @@ pub fn default_render_id() -> Option<String> {
 
 #[cfg(windows)]
 mod windows_impl {
-    use super::{MeterUpdate, SpectrumUpdate};
+    use super::{MeterUpdate, ScopeUpdate, SpectrumUpdate};
     use std::collections::VecDeque;
     use std::error::Error;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -151,6 +161,15 @@ mod windows_impl {
     /// spectrum toward the floor instead of freezing it lit (≈35 dB/s at the 16 ms cadence).
     const SPEC_IDLE_DECAY: f32 = 0.88;
 
+    // --- stereo vectorscope (loopback X-Y goniometer) ---
+    /// Vectorscope emit cadence (60 fps — the front-end phosphor persistence does the smoothing).
+    const SCOPE_INTERVAL: Duration = Duration::from_millis(16);
+    /// Max (l, r) pairs sent per emit — the *contiguous tail* of the window, in order and **not**
+    /// stride-decimated, so the front-end can connect them into a continuous beam trace. Decimation
+    /// would shred the drawn Lissajous figures of oscilloscope-music. A 16 ms window at ≤48 kHz
+    /// (~768 pairs) fits under this; higher rates send their most recent SCOPE_MAX_POINTS.
+    const SCOPE_MAX_POINTS: usize = 2048;
+
     /// A running loopback monitor. Dropping it (or calling [`Monitor::stop`]) ends the thread.
     pub struct Monitor {
         stop: Arc<AtomicBool>,
@@ -162,21 +181,23 @@ mod windows_impl {
         /// GUID); the matching WASAPI endpoint is found by suffix (its id is `{0.0.0.0…}.{guid}`),
         /// falling back to the default render endpoint when `None` or unmatched. `on_update` is
         /// called from the capture thread ~20×/s.
-        pub fn start<F, G>(
+        pub fn start<F, G, H>(
             endpoint_id: Option<String>,
             on_update: F,
             on_spectrum: G,
+            on_scope: H,
         ) -> Result<Monitor, String>
         where
             F: Fn(MeterUpdate) + Send + 'static,
             G: Fn(SpectrumUpdate) + Send + 'static,
+            H: Fn(ScopeUpdate) + Send + 'static,
         {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_thread = stop.clone();
             let handle = thread::Builder::new()
                 .name("cageq-loopback".into())
                 .spawn(move || {
-                    if let Err(e) = capture_loop(endpoint_id, &stop_thread, on_update, on_spectrum) {
+                    if let Err(e) = capture_loop(endpoint_id, &stop_thread, on_update, on_spectrum, on_scope) {
                         // A failed monitor simply yields no updates; surface why for debugging.
                         eprintln!("[cageq-monitor] capture ended: {e}");
                     }
@@ -487,15 +508,17 @@ mod windows_impl {
         dev.get_id().ok()
     }
 
-    fn capture_loop<F, G>(
+    fn capture_loop<F, G, H>(
         endpoint_id: Option<String>,
         stop: &AtomicBool,
         on_update: F,
         on_spectrum: G,
+        on_scope: H,
     ) -> Result<(), Box<dyn Error>>
     where
         F: Fn(MeterUpdate),
         G: Fn(SpectrumUpdate),
+        H: Fn(ScopeUpdate),
     {
         initialize_mta().ok()?;
 
@@ -506,7 +529,7 @@ mod windows_impl {
         // until the user toggled it off/on), tear down and reopen: get_mixformat re-reads the new
         // rate and the loudness state is rebuilt for it, so a rate change self-heals.
         while !stop.load(Ordering::Relaxed) {
-            if let Err(e) = run_session(&endpoint_id, stop, &on_update, &on_spectrum) {
+            if let Err(e) = run_session(&endpoint_id, stop, &on_update, &on_spectrum, &on_scope) {
                 eprintln!("[cageq-monitor] reopening capture after: {e}");
                 // Show the UI an idle state during the gap, then back off before reopening.
                 on_update(MeterUpdate {
@@ -518,10 +541,24 @@ mod windows_impl {
                     bins: Vec::new(),
                     sample_rate: 0, // unknown until the session reopens and re-reads the mix format
                 });
+                on_scope(ScopeUpdate { xy: Vec::new(), signal: false });
                 sleep_unless_stopped(stop, Duration::from_millis(500));
             }
         }
         Ok(())
+    }
+
+    /// Take the most recent (contiguous) `max_pairs` from interleaved `(l, r)` data, order intact —
+    /// so consecutive samples stay adjacent and the front-end can join them into the beam trace.
+    /// No decimation (that would break oscilloscope-music figures); an already-small window passes
+    /// through whole.
+    fn tail_pairs(lr: &[f32], max_pairs: usize) -> Vec<f32> {
+        let pairs = lr.len() / 2;
+        if pairs == 0 || max_pairs == 0 {
+            return Vec::new();
+        }
+        let take = pairs.min(max_pairs);
+        lr[(pairs - take) * 2..pairs * 2].to_vec()
     }
 
     /// Sleep up to `dur`, returning early if a stop is requested.
@@ -538,15 +575,17 @@ mod windows_impl {
     /// One capture session: open loopback on the (re-resolved) endpoint at its current mix format
     /// and meter until stopped (returns `Ok`) or the stream errors/invalidates (returns `Err`, so
     /// the supervisor reopens — e.g. after a sample-rate change).
-    fn run_session<F, G>(
+    fn run_session<F, G, H>(
         endpoint_id: &Option<String>,
         stop: &AtomicBool,
         on_update: &F,
         on_spectrum: &G,
+        on_scope: &H,
     ) -> Result<(), Box<dyn Error>>
     where
         F: Fn(MeterUpdate),
         G: Fn(SpectrumUpdate),
+        H: Fn(ScopeUpdate),
     {
         let enumerator = DeviceEnumerator::new()?;
         let device = resolve_device(&enumerator, endpoint_id)?;
@@ -582,6 +621,7 @@ mod windows_impl {
         let mut queue: VecDeque<u8> = VecDeque::new();
         let mut frames: Vec<f32> = Vec::new(); // interleaved, reused each read for ebur128
         let mut mono: Vec<f32> = Vec::new(); // per-read mono downmix, fed to the FFT
+        let mut scope_lr: Vec<f32> = Vec::new(); // (l, r) pairs since the last scope emit
         // Per-tick block accumulators (reset every emit).
         let mut block_peak = 0.0f32;
         let mut block_sum_sq = 0.0f64;
@@ -593,6 +633,7 @@ mod windows_impl {
         let mut intensity = vec![0.0f32; N_BINS]; // phosphor histogram brightness per segment
         let mut last_tick = Instant::now();
         let mut last_spectrum = Instant::now();
+        let mut last_scope = Instant::now();
         let mut last_signal = Instant::now();
 
         while !stop.load(Ordering::Relaxed) {
@@ -607,7 +648,9 @@ mod windows_impl {
             mono.clear();
             while queue.len() >= bytes_per_frame {
                 let mut frame_sum = 0.0f32;
-                for _ in 0..channels {
+                let mut ch0 = 0.0f32; // first channel (L) for the vectorscope
+                let mut ch1 = 0.0f32; // second channel (R); stays == L for a mono endpoint
+                for c in 0..channels {
                     let b = [
                         queue.pop_front().unwrap(),
                         queue.pop_front().unwrap(),
@@ -615,6 +658,12 @@ mod windows_impl {
                         queue.pop_front().unwrap(),
                     ];
                     let s = f32::from_le_bytes(b);
+                    if c == 0 {
+                        ch0 = s;
+                        ch1 = s;
+                    } else if c == 1 {
+                        ch1 = s;
+                    }
                     frames.push(s);
                     frame_sum += s;
                     let a = s.abs();
@@ -625,6 +674,8 @@ mod windows_impl {
                     block_count += 1;
                 }
                 mono.push(frame_sum / channels as f32);
+                scope_lr.push(ch0);
+                scope_lr.push(ch1);
             }
             if !frames.is_empty() {
                 let _ = ebu.add_frames_f32(&frames);
@@ -700,6 +751,18 @@ mod windows_impl {
                 last_spectrum = Instant::now();
             }
 
+            // Vectorscope: stride-decimate the window's (l, r) pairs down to SCOPE_POINTS and emit.
+            // The front-end phosphor trail carries the persistence, so we just send a fresh scatter.
+            if last_scope.elapsed() >= SCOPE_INTERVAL {
+                let signal = last_signal.elapsed() < SILENCE_GAP;
+                on_scope(ScopeUpdate {
+                    xy: if signal { tail_pairs(&scope_lr, SCOPE_MAX_POINTS) } else { Vec::new() },
+                    signal,
+                });
+                scope_lr.clear();
+                last_scope = Instant::now();
+            }
+
             // Nothing ready — yield briefly so we don't spin a core polling an idle endpoint.
             if !got_data {
                 thread::sleep(Duration::from_millis(5));
@@ -713,20 +776,22 @@ mod windows_impl {
 
 #[cfg(not(windows))]
 mod stub {
-    use super::{MeterUpdate, SpectrumUpdate};
+    use super::{MeterUpdate, ScopeUpdate, SpectrumUpdate};
 
     /// Non-Windows stub: loopback monitoring needs WASAPI, so [`Monitor::start`] just errors.
     pub struct Monitor;
 
     impl Monitor {
-        pub fn start<F, G>(
+        pub fn start<F, G, H>(
             _endpoint_id: Option<String>,
             _on_update: F,
             _on_spectrum: G,
+            _on_scope: H,
         ) -> Result<Monitor, String>
         where
             F: Fn(MeterUpdate) + Send + 'static,
             G: Fn(SpectrumUpdate) + Send + 'static,
+            H: Fn(ScopeUpdate) + Send + 'static,
         {
             Err("loopback monitoring is only available on Windows".to_string())
         }

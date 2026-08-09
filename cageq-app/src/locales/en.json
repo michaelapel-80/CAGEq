@@ -54,6 +54,8 @@
     "domainAria": "Chart domain",
     "monitor": "Monitor",
     "monitorTitle": "Clean view — hide all curves, show only the live spectrum",
+    "scope": "Scope",
+    "scopeTitle": "Vectorscope — the live stereo image (L/R goniometer)",
     "preamp": "Preamp",
     "preampMax": "max",
     "preampMatched": "matched",
@@ -114,6 +116,18 @@
   },
 
   "macros": { "Bass": "Bass", "Treble": "Treble", "Air": "Air" },
+
+  "scope": {
+    "tune": "Tuning",
+    "popOut": "Open in a separate window",
+    "trail": "Trail",
+    "glow": "Glow",
+    "beam": "Beam",
+    "scale": "Scale",
+    "grid": "Grid",
+    "rotate": "Rotate (mono ↑)",
+    "reset": "Reset"
+  },
 
   "compare": {
     "title": "Compare",

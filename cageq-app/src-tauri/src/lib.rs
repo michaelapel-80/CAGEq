@@ -312,6 +312,7 @@ fn start_monitor(device: Option<String>, app: tauri::AppHandle, state: State<Mon
     }
     let sink = app.clone();
     let spectrum_sink = app.clone();
+    let scope_sink = app.clone();
     let monitor = cageq_monitor::Monitor::start(
         device,
         move |update| {
@@ -320,6 +321,9 @@ fn start_monitor(device: Option<String>, app: tauri::AppHandle, state: State<Mon
         },
         move |spectrum| {
             let _ = spectrum_sink.emit("spectrum", spectrum);
+        },
+        move |scope| {
+            let _ = scope_sink.emit("scope", scope);
         },
     )?;
     *guard = Some(monitor);

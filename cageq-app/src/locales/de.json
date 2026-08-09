@@ -54,6 +54,8 @@
     "domainAria": "Diagramm-Bereich",
     "monitor": "Monitor",
     "monitorTitle": "Klare Ansicht – alle Kurven ausblenden, nur das Live-Spektrum zeigen",
+    "scope": "Scope",
+    "scopeTitle": "Vektorskop – das Live-Stereobild (L/R-Goniometer)",
     "preamp": "Preamp",
     "preampMax": "max",
     "preampMatched": "angeglichen",
@@ -114,6 +116,18 @@
   },
 
   "macros": { "Bass": "Bass", "Treble": "Höhen", "Air": "Luft" },
+
+  "scope": {
+    "tune": "Feinabstimmung",
+    "popOut": "In separatem Fenster öffnen",
+    "trail": "Nachleuchten",
+    "glow": "Leuchten",
+    "beam": "Strahl",
+    "scale": "Skala",
+    "grid": "Raster",
+    "rotate": "Drehen (Mono ↑)",
+    "reset": "Zurücksetzen"
+  },
 
   "compare": {
     "title": "Vergleich",
