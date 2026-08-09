@@ -118,18 +118,19 @@
   "macros": { "Bass": "Bass", "Treble": "Höhen", "Air": "Luft" },
 
   "scope": {
-    "tune": "Feinabstimmung",
+    "tune": "Abstimmung",
+    "close": "Schließen",
     "popOut": "In separatem Fenster öffnen",
-    "trail": "Nachleuchten",
-    "glow": "Leuchten",
+    "trail": "Schweif",
+    "glow": "Glühen",
     "beam": "Strahl",
     "focus": "Fokus",
     "scale": "Skala",
     "grid": "Raster",
-    "rotate": "Drehen (Mono ↑)",
+    "rotate": "Drehen",
     "undistort": "Entzerren",
     "undistortHint": "Loopback invers filtern, um das Bild vor der EQ-Korrektur zu zeigen (für Oszilloskop-Musik bei aktiver Korrektur)",
-    "reset": "Zurücksetzen"
+    "reset": "Reset"
   },
 
   "compare": {

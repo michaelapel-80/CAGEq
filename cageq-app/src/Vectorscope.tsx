@@ -43,7 +43,7 @@ type Params = {
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
-const DEFAULTS: Params = { trailTau: 0.09, glow: 0.55, beam: 1.0, focus: 4, radiusFrac: 0.5, gridAlpha: 0.22, rotate: false, invert: true };
+const DEFAULTS: Params = { trailTau: 0.09, glow: 0.55, beam: 1.0, focus: 4, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
@@ -194,7 +194,7 @@ export function Vectorscope({
       ctx.fillText("L", c - R * 0.6, c - R * 0.6);
       ctx.fillText("R", c + R * 0.6, c - R * 0.6);
     } else {
-      ctx.fillText("L", c + R * 0.88, c - R * 0.1);
+      ctx.fillText("L", c - R * 0.88, c - R * 0.1); // Left channel → left end of the horizontal axis
       ctx.fillText("R", c + R * 0.1, c - R * 0.88);
       ctx.fillText("M", c + R * 0.55, c - R * 0.55);
     }
@@ -397,31 +397,41 @@ export function Vectorscope({
         </div>
         {tuning && (
           <div className="vs-tuning">
-            {CONTROLS.map((cc) => (
-              <label key={cc.key} className="vs-tune-row">
-                <span>{cc.label}</span>
-                <input
-                  type="range"
-                  min={cc.min}
-                  max={cc.max}
-                  step={cc.step}
-                  value={params[cc.key] as number}
-                  onChange={(e) => set(cc.key, Number(e.currentTarget.value) as Params[typeof cc.key])}
-                />
-                <b>{(params[cc.key] as number).toFixed(2)}</b>
-              </label>
-            ))}
+            <div className="vs-tune-head">
+              <span className="vs-tune-title">{t("scope.tune")}</span>
+              <button type="button" className="vs-tune-reset" onClick={() => setParams(DEFAULTS)}>
+                {t("scope.reset")}
+              </button>
+              <button type="button" className="vs-tune-close" title={t("scope.close")} aria-label={t("scope.close")} onClick={() => setTuning(false)}>
+                ×
+              </button>
+            </div>
+            {CONTROLS.map((cc) => {
+              const dp = cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : 2;
+              return (
+                <label key={cc.key} className="vs-tune-row">
+                  <span className="vs-tune-label">{cc.label}</span>
+                  <input
+                    type="range"
+                    min={cc.min}
+                    max={cc.max}
+                    step={cc.step}
+                    value={params[cc.key] as number}
+                    onChange={(e) => set(cc.key, Number(e.currentTarget.value) as Params[typeof cc.key])}
+                  />
+                  <b>{(params[cc.key] as number).toFixed(dp)}</b>
+                </label>
+              );
+            })}
+            <div className="vs-tune-sep" />
             <label className="vs-tune-row vs-tune-check">
-              <span>{t("scope.rotate")}</span>
+              <span className="vs-tune-label">{t("scope.rotate")}</span>
               <input type="checkbox" checked={params.rotate} onChange={(e) => set("rotate", e.currentTarget.checked)} />
             </label>
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
-              <span>{t("scope.undistort")}</span>
+              <span className="vs-tune-label">{t("scope.undistort")}</span>
               <input type="checkbox" checked={params.invert} onChange={(e) => set("invert", e.currentTarget.checked)} />
             </label>
-            <button type="button" className="vs-tune-reset" onClick={() => setParams(DEFAULTS)}>
-              {t("scope.reset")}
-            </button>
           </div>
         )}
       </div>
