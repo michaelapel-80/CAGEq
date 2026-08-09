@@ -43,7 +43,7 @@ type Params = {
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
-const DEFAULTS: Params = { trailTau: 0.09, glow: 0.55, beam: 1.0, focus: 4, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
+const DEFAULTS: Params = { trailTau: 0.05, glow: 0.60, beam: 1.0, focus: 6, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
@@ -327,9 +327,16 @@ export function Vectorscope({
         ctx.globalCompositeOperation = "lighter";
         ctx.lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE));
         ctx.lineJoin = "round";
-        ctx.lineCap = "round";
-        for (let b = 0; b < VEL_BUCKETS; b++) {
-          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * (b + 0.5)) / VEL_BUCKETS})`;
+        // Butt (not round) caps: consecutive samples that land in different velocity buckets are
+        // stroked separately, and round caps at their shared point would overlap and add into a
+        // bright dot at every such sample. Flat caps meet at the point instead of stacking.
+        ctx.lineCap = "butt";
+        // Beam blanking: brightness ∝ velocity factor, reaching **zero** at the fastest bucket (a
+        // beam moving too fast to expose the phosphor draws nothing). Skipping bucket 0 removes the
+        // long straight lines that high-frequency jumps would otherwise leave — the faint web —
+        // while the slow/dwell buckets keep their brightness. (b0 is blank, so start at 1.)
+        for (let b = 1; b < VEL_BUCKETS; b++) {
+          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * b) / (VEL_BUCKETS - 1)})`;
           ctx.stroke(buckets[b]);
         }
         // Dwell spot: the window's whole beam energy concentrated where it barely moved. refL small,
