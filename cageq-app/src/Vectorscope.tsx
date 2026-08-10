@@ -51,6 +51,7 @@ const VEL_BUCKETS = 16; // brightness quantisation for velocity glow (batched st
 const VEL_FLOOR = 0.05; // dimmest a fast segment goes (keeps sharp transitions faintly visible)
 const VEL_REF_RATE = 48000; // the velocity glow judges beam speed in *time*; the per-sample segment
 //   length is scaled to this rate so a given speed reads the same at 44.1/48/96/192 kHz.
+const SPOT_TAU = 0.12; // resting-spot fade-in/out time constant (s) — eases it on/off, no popping
 
 /** Parse a `#rrggbb` hex (the `--accent` CSS var) to [r,g,b]; a green phosphor fallback. */
 function parseHex(hex: string): [number, number, number] {
@@ -214,7 +215,8 @@ export function Vectorscope({
     let drawn: ScopeData | null = null; // last payload already traced (draw each once)
     let spotX = NaN; // the beam's dwell spot — position + brightness, redrawn every frame so it
     let spotY = NaN; //   holds during silence; updated per window from the beam's mean + path length
-    let spotB = 0;
+    let spotB = 0; // target brightness
+    let spotVis = 0; // eased toward spotB so the spot fades in/out instead of popping
 
     const render = () => {
       const now = performance.now();
@@ -347,22 +349,36 @@ export function Vectorscope({
         spotB = (p.glow * refL) / (pathLen + refL);
       }
 
-      // Draw the beam spot every frame (source-over → pinned to full intensity, no charge-up): a
-      // white-hot saturated core + accent halo. Skipped once the beam is clearly moving (spotB ≈ 0).
-      if (spotB > 0.05 && !Number.isNaN(spotX)) {
+      // Draw the beam spot every frame — the beam's energy dumped on one point, like a CRT dot.
+      // Its brightness eases toward the target (spotVis → spotB) so it fades in when silence lands
+      // and fades out when the trace resumes, instead of popping. Skipped once it's fully faded.
+      spotVis += (spotB - spotVis) * (1 - Math.exp(-dt / SPOT_TAU));
+      if (spotVis > 0.01 && !Number.isNaN(spotX)) {
+        // source-over, not additive: the radii below *are* the spot size. (Additive keeps
+        // accumulating every frame, so the visible spot grows past the drawn radius by a factor
+        // that depends on the trail — unpredictable and too big.) Sized to the tube (S) so it
+        // scales proportionally inline and in the pop-out, independent of the beam width.
         ctx.globalCompositeOperation = "source-over";
-        const haloR = r0 * 4;
-        const halo = ctx.createRadialGradient(spotX, spotY, 0, spotX, spotY, haloR);
-        halo.addColorStop(0, `rgba(${ar},${ag},${ab},${Math.min(1, spotB * 0.2)})`);
-        halo.addColorStop(1, `rgba(${ar},${ag},${ab},0)`);
-        ctx.fillStyle = halo;
+        // Bloom: a steep *exponential* falloff (not a flat gradient disk, which reads fake) —
+        // intense at the core, dropping fast into a faint tail, the real phosphor point-spread.
+        // `bloomR` (tube-relative) is the one size knob; the core is a fixed fraction of it.
+        const bloomR = S * 0.018;
+        const bloom = ctx.createRadialGradient(spotX, spotY, 0, spotX, spotY, bloomR);
+        const STOPS = 8;
+        for (let i = 0; i <= STOPS; i++) {
+          const t = i / STOPS;
+          const a = i === STOPS ? 0 : Math.min(1, spotVis * 0.85) * Math.exp(-t * 20);
+          bloom.addColorStop(t, `rgba(${ar},${ag},${ab},${a})`);
+        }
+        ctx.fillStyle = bloom;
         ctx.beginPath();
-        ctx.arc(spotX, spotY, haloR, 0, Math.PI * 2);
+        ctx.arc(spotX, spotY, bloomR, 0, Math.PI * 2);
         ctx.fill();
-        const coreR = r0 * 2.5;
+        // tight white-hot core — a saturated point
+        const coreR = bloomR * 0.13;
         const core = ctx.createRadialGradient(spotX, spotY, 0, spotX, spotY, coreR);
-        core.addColorStop(0, `rgba(255,255,255,${Math.min(1, spotB * 2)})`); // white-hot centre
-        core.addColorStop(0.4, `rgba(${ar},${ag},${ab},${Math.min(1, spotB * 1.5)})`);
+        core.addColorStop(0, `rgba(255,255,255,${Math.min(1, spotVis * 2)})`); // white-hot centre
+        core.addColorStop(0.55, `rgba(${ar},${ag},${ab},${Math.min(1, spotVis * 1.3)})`);
         core.addColorStop(1, `rgba(${ar},${ag},${ab},0)`);
         ctx.fillStyle = core;
         ctx.beginPath();
