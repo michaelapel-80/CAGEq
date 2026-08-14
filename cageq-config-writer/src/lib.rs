@@ -396,8 +396,10 @@ pub struct AudioDevice {
     pub id: String,
     /// Human-readable name for the UI, e.g. "Lautsprecher (SPL Phonitor One)".
     pub name: String,
-    /// The string to write on the `Device:` line — [`name`](Self::name) normalised to
-    /// EqAPO's word-match form (see [`eqapo_device_pattern`]).
+    /// The string to write on the `Device:` line. This is the endpoint **GUID** (same as
+    /// [`id`](Self::id)), not the name: EqAPO's match string includes the GUID, and matching by it
+    /// is exact (one device) and ASCII — the name route mojibake'd non-ASCII device names into
+    /// cageq.txt (the registry read is UTF-16, not the file's encoding) and word-matched fuzzily.
     pub eqapo_pattern: String,
     /// Whether Equalizer APO's APO is actually installed on this endpoint (§3.0). When
     /// `false`, a `Device:`-scoped config for it is inert — the UI warns and points at
@@ -467,9 +469,10 @@ fn render_devices_from_registry() -> Vec<AudioDevice> {
             (None, Some(i)) => i,
             (None, None) => guid.clone(),
         };
-        let eqapo_pattern = eqapo_device_pattern(&name);
         let eqapo_enabled = endpoint_has_eqapo_apo(&endpoint);
-        devices.push(AudioDevice { id: guid, name, eqapo_pattern, eqapo_enabled });
+        // Scope the `Device:` line by the endpoint GUID (in EqAPO's match string, exact + ASCII),
+        // not the (possibly non-ASCII, fuzzily-matched) name.
+        devices.push(AudioDevice { id: guid.clone(), name, eqapo_pattern: guid, eqapo_enabled });
     }
     devices
 }
@@ -915,12 +918,11 @@ mod tests {
 
     #[test]
     fn list_render_devices_honours_its_contract() {
-        // Environment-dependent. Contract: never panics; every entry carries a non-empty
-        // id and an eqapo_pattern that is exactly the normalised name (no stray
-        // punctuation the Device: line couldn't match).
+        // Environment-dependent. Contract: never panics; every entry carries a non-empty id, and
+        // the Device:-line pattern is that GUID (exact, ASCII match — not the fuzzy/non-ASCII name).
         for d in list_render_devices() {
             assert!(!d.id.is_empty(), "device id should be non-empty");
-            assert_eq!(d.eqapo_pattern, eqapo_device_pattern(&d.name));
+            assert_eq!(d.eqapo_pattern, d.id);
         }
     }
 }

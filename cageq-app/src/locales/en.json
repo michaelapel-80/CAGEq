@@ -179,7 +179,8 @@
     "nosignalTitle": "No signal captured",
     "nosignal": "The loopback captured almost nothing, so there's nothing to compare — the output device was likely disabled or removed. Check it's active, then retry. (The device's own volume/mute don't affect this test; only muting CAGEq itself in the Windows volume mixer would.)",
     "inconclusiveTitle": "Couldn't measure",
-    "inconclusive": "Your current correction is too flat to test reliably. Pick a headphone correction with more shape (Slot A or B), then retry."
+    "inconclusive": "Your current correction is too flat to test reliably. Pick a headphone correction with more shape (Slot A or B), then retry.",
+    "deviceColor": "⚠ The Dry signal isn't flat (±{{db}} dB) — the output device seems to apply its own processing (audio enhancements, spatial sound, a fixed EQ). Disable those for a truthful correction and A/B."
   },
 
   "loudness": {

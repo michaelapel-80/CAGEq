@@ -179,7 +179,8 @@
     "nosignalTitle": "Kein Signal erfasst",
     "nosignal": "Der Loopback hat fast nichts aufgenommen, es gibt also nichts zu vergleichen – das Ausgabegerät wurde vermutlich deaktiviert oder entfernt. Prüfe, ob es aktiv ist, und versuche es erneut. (Lautstärke/Stummschaltung des Geräts beeinflussen diesen Test nicht; nur das Stummschalten von CAGEq selbst im Windows-Lautstärkemixer würde es.)",
     "inconclusiveTitle": "Messung nicht möglich",
-    "inconclusive": "Deine aktuelle Korrektur ist zu flach für einen zuverlässigen Test. Wähle eine Kopfhörer-Korrektur mit mehr Form (Slot A oder B) und versuche es erneut."
+    "inconclusive": "Deine aktuelle Korrektur ist zu flach für einen zuverlässigen Test. Wähle eine Kopfhörer-Korrektur mit mehr Form (Slot A oder B) und versuche es erneut.",
+    "deviceColor": "⚠ Das Dry-Signal ist nicht flach (±{{db}} dB) – das Ausgabegerät wendet offenbar eigene Verarbeitung an (Audioverbesserungen, Raumklang, ein fester EQ). Deaktiviere diese für eine wahrheitsgemäße Korrektur und A/B."
   },
 
   "loudness": {

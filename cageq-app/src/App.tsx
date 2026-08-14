@@ -296,11 +296,40 @@ const PHASE_COLOR = "#f59e0b"; // the filter chain's phase, on the secondary axi
 // imperfect flatness, any foreign config.txt filters, fixed system coloration — cancels exactly. So
 // the leftover is purely CAGEq's contribution, which we correlate against the applied EQ curve.
 type SelfTestVerdict =
-  | { kind: "pass"; r: number }
+  // `deviceColorDb` (on pass/mismatch, where a real Dry capture exists) is how far the Dry pink
+  // noise deviates from flat — the device's *own* processing, which the delta method cancels. See
+  // §5.4 dry-flatness below.
+  | { kind: "pass"; r: number; deviceColorDb?: number }
   | { kind: "fail" }
-  | { kind: "mismatch"; r: number }
+  | { kind: "mismatch"; r: number; deviceColorDb?: number }
   | { kind: "nosignal" }
   | { kind: "inconclusive" };
+// Residual RMS of `y` after removing its best-fit line vs `x` — i.e. how much the curve deviates
+// from a straight (tilted) line. Used to judge Dry-pink flatness: a broadband tilt/gain is allowed
+// (source slope, device volume), but spectral shaping (peaks/dips/roll-off) shows up in the residual.
+function flatnessResidual(x: number[], y: number[]): number {
+  const n = x.length;
+  if (n < 3) return 0;
+  const mx = x.reduce((a, v) => a + v, 0) / n;
+  const my = y.reduce((a, v) => a + v, 0) / n;
+  let sxx = 0;
+  let sxy = 0;
+  for (let k = 0; k < n; k++) {
+    const dx = x[k] - mx;
+    sxx += dx * dx;
+    sxy += dx * (y[k] - my);
+  }
+  const slope = sxx > 0 ? sxy / sxx : 0;
+  let ss = 0;
+  for (let k = 0; k < n; k++) {
+    const resid = y[k] - my - slope * (x[k] - mx);
+    ss += resid * resid;
+  }
+  return Math.sqrt(ss / n);
+}
+/** Dry-pink deviation (dB RMS) above which the device is likely applying its own processing.
+ *  An estimate — tune against known-transparent vs known-colouring (enhancements-on) devices. */
+const DEVICE_COLOR_DB = 1.2;
 type SelfTestState = { phase: "warn" } | { phase: "running" } | { phase: "done"; verdict: SelfTestVerdict };
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -345,13 +374,18 @@ function selfTestVerdict(corrected: SpectrumData[], dry: SpectrumData[], bands: 
   }
   const stdD = Math.sqrt(sDD / n); // how much the measured EQ effect actually varies (dB RMS)
   const stdC = Math.sqrt(sCC / n); // how much the correction predicts
+  // §5.4 dry-flatness: the generated pink reads flat in the log spectrum, so a *transparent* device
+  // returns a flat Dry capture. Its deviation from flat (residual after a linear fit, so a tilt or
+  // broadband gain doesn't count) is the device's own processing — the thing the delta method
+  // cancels and can't see. Surfaced as an advisory alongside the EQ verdict.
+  const deviceColorDb = flatnessResidual(idx.map((i) => Math.log(freqs[i])), idx.map((i) => Ld[i]));
   // NOTE: thresholds are estimates; want a little live tuning against known-good/known-broken setups.
   if (stdC < 1.5) return { kind: "inconclusive" }; // correction too flat to measure against
   if (stdD < 0.8) return { kind: "fail" }; // corrected ≈ dry → CAGEq's config isn't reaching the output
   const r = sDC / (Math.sqrt(sDD * sCC) || 1);
   // stdD can sit below stdC because the 120-bin spectrum smooths sharp high-Q filters, so allow that.
-  if (r > 0.75 && stdD > 0.5 * stdC) return { kind: "pass", r };
-  return { kind: "mismatch", r };
+  if (r > 0.75 && stdD > 0.5 * stdC) return { kind: "pass", r, deviceColorDb };
+  return { kind: "mismatch", r, deviceColorDb };
 }
 
 // The base pre-gain field, deliberately isolated from App state. Holding an arrow updates only this
@@ -1795,6 +1829,11 @@ function App() {
                   <>
                     <p style={{ marginTop: 0, color, fontWeight: 600 }}>{tr(`selfTest.${titleKey}`)}</p>
                     <p style={{ fontSize: "0.9em", whiteSpace: "pre-line" }}>{tr(`selfTest.${v.kind}`, { r: pct })}</p>
+                    {(v.kind === "pass" || v.kind === "mismatch") && (v.deviceColorDb ?? 0) > DEVICE_COLOR_DB && (
+                      <p style={{ fontSize: "0.85em", color: "#b8860b", marginTop: "-0.3em" }}>
+                        {tr("selfTest.deviceColor", { db: (v.deviceColorDb ?? 0).toFixed(1) })}
+                      </p>
+                    )}
                     <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
                       {v.kind !== "pass" && (
                         <button type="button" onClick={() => setSelfTest({ phase: "warn" })}>
