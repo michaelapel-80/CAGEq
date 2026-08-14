@@ -51,6 +51,10 @@ export type ToneGridProps = {
   hoverIndex?: number | null;
   /** Reports the band the pointer is over so the chart can echo the highlight; null on leave. */
   onHover?: (index: number | null) => void;
+  /** §5.2 solo: storage index of the soloed band (only it is heard within the stage), or null. */
+  soloIndex?: number | null;
+  /** Toggle solo for a band (its storage index). Absent → no solo affordance. */
+  onSolo?: (index: number) => void;
 };
 
 const KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
@@ -128,7 +132,7 @@ function KindGlyph({ kind }: { kind: FilterKind }) {
   );
 }
 
-export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focusNonce, hoverIndex, onHover, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
+export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focusNonce, hoverIndex, onHover, soloIndex, onSolo, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
   const { t } = useTranslation();
   const inert = disabled || readOnly; // no interaction while read-only, even without `disabled`
   // Display order: sort indices by Fc; storage order (and thus the indices we pass back)
@@ -175,12 +179,27 @@ export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focu
         const qAmt = clamp01(Math.abs(Math.log(f.q)) / (f.q >= 1 ? Math.log(20) : -Math.log(0.1))) * 100;
         return (
           <div
-            className={`tg-col${f.fixed ? " tg-col-fixed" : ""}${on ? "" : " tg-col-off"}${hoverIndex === i ? " tg-col-hover" : ""}`}
+            className={`tg-col${f.fixed ? " tg-col-fixed" : ""}${on ? "" : " tg-col-off"}${hoverIndex === i ? " tg-col-hover" : ""}${
+              soloIndex === i ? " tg-col-solo" : soloIndex != null ? " tg-col-solo-off" : ""
+            }`}
             key={i}
             data-idx={i}
             onPointerEnter={() => onHover?.(i)}
             onPointerLeave={() => onHover?.(null)}
           >
+            {!readOnly && onSolo && (
+              <button
+                type="button"
+                className={`tg-solo${soloIndex === i ? " on" : ""}`}
+                disabled={disabled}
+                aria-pressed={soloIndex === i}
+                title={soloIndex === i ? t("bands.unsolo") : t("bands.solo", { name })}
+                aria-label={soloIndex === i ? t("bands.unsolo") : t("bands.solo", { name })}
+                onClick={() => onSolo(i)}
+              >
+                S
+              </button>
+            )}
             {readOnly ? (
               <span className={`tg-enable${on ? " on" : ""}`} aria-hidden="true">
                 <span className="tg-led" />

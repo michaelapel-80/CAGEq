@@ -99,6 +99,8 @@
     "autoeqReadonly": "Schreibgeschützt – diese Bänder stammen direkt aus AutoEqs Fit. Ändere die Zielkurve oder deine eigenen Stages, um den Klang zu formen.",
     "bypass": "{{name}} überbrücken",
     "enable": "{{name}} aktivieren",
+    "solo": "{{name}} solo – nur dieses Band in dieser Stufe hören (pegelangepasst)",
+    "unsolo": "Solo aus – wieder die ganze Stufe hören",
     "bandAt": "Band bei {{hz}}",
     "kindFixed": "{{macro}}-Macro ({{kind}}) – Typ ist fest",
     "kindCycle": "{{kind}} – zum Ändern des Typs klicken",

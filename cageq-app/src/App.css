@@ -1084,6 +1084,7 @@ select:disabled {
   padding: 0.2rem 0.1rem 0.4rem;
 }
 .tg-col {
+  position: relative; /* anchors the solo button */
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1111,6 +1112,40 @@ select:disabled {
   box-shadow:
     0 0 0 1px color-mix(in srgb, var(--tg) 45%, transparent),
     0 0 11px -3px color-mix(in srgb, var(--tg) 55%, transparent);
+}
+
+/* Solo (§5.2): a small "S" in the strip's top-right; dims the other columns while one is soloed. */
+.tg-solo {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  opacity: 0.45;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.tg-solo:hover {
+  opacity: 0.9;
+}
+.tg-solo.on {
+  opacity: 1;
+  color: var(--tg);
+  border-color: var(--tg);
+  box-shadow: 0 0 8px -2px color-mix(in srgb, var(--tg) 70%, transparent);
+}
+.tg-col-solo {
+  border-color: color-mix(in srgb, var(--tg) 60%, var(--border));
+}
+.tg-col-solo-off {
+  opacity: 0.4;
 }
 
 /* Filter-bands panel header: title on the left, undo/redo on the right. The wrapper displaces

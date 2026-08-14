@@ -157,6 +157,21 @@ type LoadedRef = { id: string; name: string; ver?: string; sig: string };
 const appliedBands = (st: Stages): CustomFilter[] =>
   STAGE_ORDER.flatMap((id) => (st[id].enabled ? st[id].bands.filter((b) => b.enabled !== false) : []));
 
+/** §5.2 solo: which band, in which stage, is soloed (hear only it, within its stage). */
+type Solo = { stage: StageId; idx: number };
+/** Apply a solo to a stage set for the *applied* cascade only — never mutates the stored bands.
+ *  Forces the soloed band's stage on and every other band in that stage off; other stages are
+ *  untouched. The §4.1 loudness match then recomputes the preamp for the reduced cascade (auto-gain). */
+function soloStages(stages: Stages, solo: Solo | null): Stages {
+  if (!solo) return stages;
+  const st = stages[solo.stage];
+  if (!st || solo.idx < 0 || solo.idx >= st.bands.length) return stages;
+  return {
+    ...stages,
+    [solo.stage]: { enabled: true, bands: st.bands.map((b, i) => ({ ...b, enabled: i === solo.idx })) },
+  };
+}
+
 /** Migrate a slot's inputs to the stages shape — new blobs already carry `stages`; a
  *  pre-stages blob had a single `customFilters` list, which becomes the Tone stage. */
 function migrateInputs(inp: SlotInputs & { customFilters?: CustomFilter[] }): SlotInputs {
@@ -556,6 +571,11 @@ function App() {
   const [presetSave, setPresetSave] = useState<UserPreset | null>(null); // the preset whose save dialog is open
   const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
   const [selfTest, setSelfTest] = useState<SelfTestState | null>(null); // §5.4 output self-test
+  // §5.2 solo: hear only one band within its stage (transient — never edits stored bands). A ref
+  // mirror lets writeFit read the live value, and it auto-clears on any edit / slot / stage change.
+  const [solo, setSolo] = useState<Solo | null>(null);
+  const soloRef = useRef<Solo | null>(null);
+  soloRef.current = solo;
   // Finding #1: active directives in config.txt outside CAGEq's block that stack on top of every
   // correction (e.g. EqAPO's fresh-install default preamp/example filters). Detected once after
   // load; surfaced passively (never a first-run modal) as a line + reversible review panel.
@@ -596,6 +616,9 @@ function App() {
   // Fit `inp` into `slot` via the sidecar and record it (cached bands, hydrated flag).
   // The single place a slot is (re)fitted; callers set `result` from the return value.
   async function writeFit(slot: "A" | "B", inp: SlotInputs, dev: AudioDevice): Promise<ApplyResult> {
+    // §5.2 solo: while a band is soloed, the *applied* cascade is the soloed view (auto-gain via the
+    // §4.1 match), but we still store the real `inp` — solo is a monitoring state, not an edit.
+    const soloing = soloRef.current != null;
     const applied = await invoke<ApplyResult>("apply", {
       device: dev.eqapo_pattern, // the EqAPO-matchable device pattern, not the headphone
       headphone: inp.measurementPath,
@@ -603,21 +626,23 @@ function App() {
       slot,
       // Every enabled stage's enabled bands, summed into one list (§3.4). Bypassed bands and
       // disabled stages stay in the UI but are excluded from what's written.
-      customFilters: appliedBands(inp.stages),
+      customFilters: appliedBands(soloStages(inp.stages, soloRef.current)),
     });
     setSlotInputs((prev) => ({ ...prev, [slot]: inp }));
     setHydrated((prev) => ({ ...prev, [slot]: true }));
-    // Remember the composed fit so the next launch can restore this slot from cache (§3.5).
-    setSlotFits((prev) => ({
-      ...prev,
-      [slot]: {
-        device: applied.device,
-        filters: applied.filters,
-        g_target_db: applied.g_target_db,
-        g_max_peak_db: applied.g_max_peak_db,
-        reference_curve: applied.reference_curve,
-      },
-    }));
+    // Remember the composed fit so the next launch can restore this slot from cache (§3.5) — but not
+    // the soloed cascade; keep the real cached fit so a solo can't leak into the persisted slot.
+    if (!soloing)
+      setSlotFits((prev) => ({
+        ...prev,
+        [slot]: {
+          device: applied.device,
+          filters: applied.filters,
+          g_target_db: applied.g_target_db,
+          g_max_peak_db: applied.g_max_peak_db,
+          reference_curve: applied.reference_curve,
+        },
+      }));
     return applied;
   }
 
@@ -980,6 +1005,28 @@ function App() {
     }, delay);
   }
 
+  // §5.2 solo — toggle "hear only this band" for the active stage. Setting `solo` re-applies the
+  // soloed cascade; toggling off re-applies the normal one. Only on A/B (Dry isn't editable).
+  const toggleSolo = (idx: number) => {
+    if (dryActive) return;
+    const cur = soloRef.current;
+    const next = cur && cur.stage === activeStage && cur.idx === idx ? null : { stage: activeStage, idx };
+    soloRef.current = next; // writeFit reads this immediately; the delayed apply picks it up
+    setSolo(next);
+    requestApply(0);
+  };
+  // Auto-clear solo (it's a transient monitoring state) and restore the normal cascade. A no-op
+  // when nothing is soloed; the re-apply folds into an edit's own apply when one is already queued.
+  const clearSolo = () => {
+    if (soloRef.current == null) return;
+    soloRef.current = null;
+    setSolo(null);
+    requestApply(0);
+  };
+  // Any band edit changes `stages`; a stage-tab switch changes `activeStage`. Either exits solo.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => clearSolo(), [stages, activeStage]);
+
   // --- undo/redo history --------------------------------------------------------------------
   // Remember the state *before* the current gesture (the first edit since the last commit); a
   // no-op if a gesture is already in progress, so a 200-frame drag captures one baseline.
@@ -1040,6 +1087,13 @@ function App() {
   // empty A/B just becomes the editable target.
   async function switchSlot(slot: SlotName) {
     if (slot === activeSlot) return;
+    // Leaving a soloed slot: restore its *normal* cascade first (the backend slot cache is soloed),
+    // so switching back later re-writes the real correction, not the solo.
+    if (soloRef.current) {
+      soloRef.current = null;
+      setSolo(null);
+      await apply(true);
+    }
     setActiveSlot(slot);
     if (slot !== "Dry") {
       const raw = slotInputs[slot];
@@ -2340,6 +2394,8 @@ function App() {
                         focusNonce={newBand?.nonce}
                         hoverIndex={hoverBand}
                         onHover={setHoverBand}
+                        soloIndex={solo?.stage === activeStage ? solo.idx : null}
+                        onSolo={toggleSolo}
                         onInput={(i, patch) => updateFilter(i, patch, 70)}
                         onCommit={(i, patch) => updateFilter(i, patch, 0)}
                         onAdd={addFilter}

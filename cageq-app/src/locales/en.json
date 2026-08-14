@@ -99,6 +99,8 @@
     "autoeqReadonly": "Read-only — these bands come straight from AutoEq's fit. Change the target or your own stages to reshape the sound.",
     "bypass": "Bypass {{name}}",
     "enable": "Enable {{name}}",
+    "solo": "Solo {{name}} — hear only it in this stage (level-matched)",
+    "unsolo": "Unsolo — hear the whole stage again",
     "bandAt": "band at {{hz}}",
     "kindFixed": "{{macro}} macro ({{kind}}) — type is fixed",
     "kindCycle": "{{kind}} — click to change type",
