@@ -407,23 +407,6 @@ pub struct AudioDevice {
     pub eqapo_enabled: bool,
 }
 
-/// Normalise a Windows device name into an EqAPO `Device:` pattern.
-///
-/// EqAPO matches a `Device:` pattern as space-separated words that must *all* appear
-/// (as substrings) in the endpoint's combined "device-name connection-name GUID"
-/// string (verified against EqAPO's Configuration reference). A raw friendly name like
-/// `Lautsprecher (SPL Phonitor One)` would tokenise to `(SPL` / `One)`, which don't
-/// substring-match — so we replace every non-alphanumeric character with a space and
-/// collapse runs of whitespace, leaving clean words that do match.
-pub fn eqapo_device_pattern(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Enumerate active Windows playback (render) endpoints (§3.0), for the device
 /// picker. Read-only registry access; returns an empty list on non-Windows, when the
 /// key is unreadable, or when nothing is active. Order follows the registry.
@@ -903,17 +886,6 @@ mod tests {
         if let Some(dir) = detect_eqapo_config_dir() {
             assert!(dir.is_dir(), "returned {dir:?}, which is not an existing directory");
         }
-    }
-
-    #[test]
-    fn eqapo_pattern_strips_punctuation_to_matchable_words() {
-        // The real case: parentheses would otherwise yield non-matching "(SPL"/"One)".
-        assert_eq!(eqapo_device_pattern("Lautsprecher (SPL Phonitor One)"), "Lautsprecher SPL Phonitor One");
-        // Collapses runs of separators and trims.
-        assert_eq!(eqapo_device_pattern("  Speakers  -  Realtek(R)  "), "Speakers Realtek R");
-        // "all" (the EqAPO wildcard) and plain names pass through unchanged.
-        assert_eq!(eqapo_device_pattern("all"), "all");
-        assert_eq!(eqapo_device_pattern("Headphones"), "Headphones");
     }
 
     #[test]
