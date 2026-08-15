@@ -14,6 +14,16 @@ type Params = { trailTau: number; glow: number; beam: number; undistort: boolean
 const DEFAULTS: Params = { trailTau: 0.07, glow: 0.75, beam: 3.0, undistort: true };
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
+// Peak-hold ballistics for the faint clip-reference lines — instant attack, brief hold, then
+// linear-dB release (a PPM-style follower, same shape as the level meter's — values mirror
+// cageq-monitor's PEAK_RELEASE_DB_PER_SEC/PEAK_HOLD/DB_FLOOR for a consistent feel app-wide).
+// Tracked locally per lane from the *displayed* samples (not the meter's own value) so it stays
+// correct in both modes: with undistort on, the meter's raw-output peak wouldn't match a trace
+// that's now been amplified/reshaped — the line would sit *inside* the beam it's supposed to
+// reference. Tracking the same outL/outR the trace itself draws is correct by construction.
+const PEAK_RELEASE_DB_PER_SEC = 20;
+const PEAK_HOLD_MS = 350;
+const DB_FLOOR = -120;
 
 /** Lane geometry (vertical centre + amplitude scale + label) for the current channel mode — shared
  *  between the graticule and the trace so they always agree. `amp` leaves a small margin (0.5 of
@@ -167,6 +177,11 @@ export function TimeScope({ height = 215 }: { height?: number }) {
     let raf = 0;
     let last = performance.now();
     let drawn: ScopeData | null = null;
+    // Per-lane peak-hold (dBFS) and the timestamp its release may resume after — indexed to match
+    // `lanes` each frame; resized (and reset) on a mode switch, since "lane 0" means something
+    // different in L/R vs mixdown. A brief reset on an intentional mode change is unsurprising.
+    let peakDb: number[] = [];
+    let peakHoldUntil: number[] = [];
 
     const render = () => {
       const now = performance.now();
@@ -176,22 +191,33 @@ export function TimeScope({ height = 215 }: { height?: number }) {
       const mode = modeRef.current;
       const W = cv.width;
       const H = cv.height;
+      const lanes = laneLayout(mode, H);
 
-      const fade = 1 - Math.exp(-dt / p.trailTau);
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.fillStyle = `rgba(0,0,0,${fade})`;
-      ctx.fillRect(0, 0, W, H);
+      if (peakDb.length !== lanes.length) {
+        peakDb = lanes.map(() => DB_FLOOR);
+        peakHoldUntil = lanes.map(() => 0);
+      }
+      // Release: continuous decay once past the hold window, every frame regardless of whether new
+      // data arrived this frame (so it doesn't step, it eases down smoothly between scope emits).
+      for (let lane = 0; lane < lanes.length; lane++) {
+        if (now >= peakHoldUntil[lane]) peakDb[lane] = Math.max(peakDb[lane] - PEAK_RELEASE_DB_PER_SEC * dt, DB_FLOOR);
+      }
 
       const s = scopeRef.current;
       const n = s ? Math.floor(s.xy.length / 2) : 0;
-      if (s && s.signal && n >= 2 && s !== drawn) {
+      const isNew = !!s && s.signal && n >= 2 && s !== drawn;
+      // Computed up front (before drawing) when new data arrives, so the peak-hold attack below and
+      // the trace path further down both read the identical (possibly undistorted) samples.
+      let outL: Float64Array | null = null;
+      let outR: Float64Array | null = null;
+      if (isNew) {
         drawn = s;
-        const xy = s.xy;
+        const xy = s!.xy;
 
         // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns
         // on, then run each sample back through it — same machinery/rationale as Vectorscope's.
         const eq = eqRef.current;
-        const rate = s.rate && s.rate > 0 ? s.rate : 48000;
+        const rate = s!.rate && s!.rate > 0 ? s!.rate : 48000;
         const iv = invRef.current;
         if (p.undistort) {
           if (!iv.active || iv.filtersRef !== eq.filters || iv.rate !== rate) {
@@ -209,8 +235,8 @@ export function TimeScope({ height = 215 }: { height?: number }) {
         // Runs with an empty cascade too when there's just a preamp to undo (e.g. Dry, which
         // carries the §4.1 loudness-match gain but no EQ) — pure gain recovery, no filtering.
         const undistort = p.undistort && (iv.coeffs.length > 0 || iv.gain !== 1);
-        const outL = new Float64Array(n);
-        const outR = new Float64Array(n);
+        outL = new Float64Array(n);
+        outR = new Float64Array(n);
         for (let i = 0; i < n; i++) {
           let l = xy[2 * i];
           let r = xy[2 * i + 1];
@@ -226,10 +252,51 @@ export function TimeScope({ height = 215 }: { height?: number }) {
           outR[i] = r;
         }
 
-        const lanes = laneLayout(mode, H);
+        // Attack: this window's peak per lane, from the exact values about to be drawn — correct
+        // in both modes by construction (it's the same array the trace path reads below).
+        for (let lane = 0; lane < lanes.length; lane++) {
+          let blockPeak = 0;
+          for (let i = 0; i < n; i++) {
+            const v = Math.abs(mode === "mix" ? (outL[i] + outR[i]) / 2 : lane === 0 ? outL[i] : outR[i]);
+            if (v > blockPeak) blockPeak = v;
+          }
+          const blockDb = 20 * Math.log10(Math.max(blockPeak, 1e-6));
+          if (blockDb >= peakDb[lane]) {
+            peakDb[lane] = blockDb;
+            peakHoldUntil[lane] = now + PEAK_HOLD_MS;
+          }
+        }
+      }
+
+      // 1) Fade the trace toward transparent.
+      const fade = 1 - Math.exp(-dt / p.trailTau);
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.fillStyle = `rgba(0,0,0,${fade})`;
+      ctx.fillRect(0, 0, W, H);
+
+      // 2) Faint peak-hold line(s), mirrored ± around each lane's centreline (a waveform is
+      // bipolar; the peak tracked above is a magnitude). Drawn *before* the trace (source-over, not
+      // the additive beam blend) so the beam can sit visibly over it wherever they cross, rather
+      // than the line painting over the beam.
+      ctx.globalCompositeOperation = "source-over";
+      ctx.strokeStyle = "rgba(230,162,60,0.35)"; // #e6a23c — same amber as .vbar-peak
+      ctx.lineWidth = Math.max(1, H / REF_SIZE);
+      ctx.beginPath();
+      for (let lane = 0; lane < lanes.length; lane++) {
+        const { cy, amp } = lanes[lane];
+        const dy = Math.pow(10, peakDb[lane] / 20) * amp;
+        ctx.moveTo(0, cy - dy);
+        ctx.lineTo(W, cy - dy);
+        ctx.moveTo(0, cy + dy);
+        ctx.lineTo(W, cy + dy);
+      }
+      ctx.stroke();
+
+      // 3) The trace itself.
+      if (isNew && outL && outR) {
         // L/R: one path per channel/lane. Mixdown: one path, mono sum, the single full-height lane.
         const paths = lanes.map(() => new Path2D());
-        const valueAt = (i: number, lane: number): number => (mode === "mix" ? (outL[i] + outR[i]) / 2 : lane === 0 ? outL[i] : outR[i]);
+        const valueAt = (i: number, lane: number): number => (mode === "mix" ? (outL![i] + outR![i]) / 2 : lane === 0 ? outL![i] : outR![i]);
         for (let lane = 0; lane < lanes.length; lane++) {
           const { cy, amp } = lanes[lane];
           const path = paths[lane];
