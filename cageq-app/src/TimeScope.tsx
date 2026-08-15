@@ -21,7 +21,7 @@ type Params = { trailTau: number; glow: number; beam: number; undistort: boolean
 // (DIVISIONS) is the standard horizontal graticule count, so total span = ms/div × 10.
 const MS_PER_DIV_STEPS = [0.2, 0.5, 1, 2, 5, 10];
 const DIVISIONS = 10;
-const DEFAULTS: Params = { trailTau: 0.07, glow: 0.6, beam: 3.0, undistort: true, msPerDivIdx: 3, trigger: true, triggerFilterHz: 100 }; // 2 ms/div × 10 = 20 ms
+const DEFAULTS: Params = { trailTau: 0.05, glow: 0.6, beam: 3.0, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 80 }; // 2 ms/div × 10 = 20 ms
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
 const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler than the lane centrelines
