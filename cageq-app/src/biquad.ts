@@ -79,6 +79,20 @@ export function inverseBiquadCoeffs(band: Band, fs = FS): BiquadCoeffs {
   return { b0: 1 / b0, b1: a1 / b0, b2: a2 / b0, a1: b1 / b0, a2: b2 / b0 };
 }
 
+/** Per-biquad running state for sample-by-sample filtering (Direct Form I), one set per channel —
+ *  used to run a cascade (e.g. the inverse cascade above, for undistort) live over a sample stream,
+ *  as opposed to the frequency-domain `filterResponseDb`/`composedCurveDb` used for chart curves. */
+export type BiquadState = { x1: number; x2: number; y1: number; y2: number };
+export const zeroState = (): BiquadState => ({ x1: 0, x2: 0, y1: 0, y2: 0 });
+export function stepBiquad(c: BiquadCoeffs, s: BiquadState, x: number): number {
+  const y = c.b0 * x + c.b1 * s.x1 + c.b2 * s.x2 - c.a1 * s.y1 - c.a2 * s.y2;
+  s.x2 = s.x1;
+  s.x1 = x;
+  s.y2 = s.y1;
+  s.y1 = y;
+  return y;
+}
+
 /** One band's magnitude response in dB over `freqs` (mirrors `PEQFilter.fr`). */
 export function filterResponseDb(band: Band, freqs: Float64Array, fs = FS): Float64Array {
   let [a0, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);

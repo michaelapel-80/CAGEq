@@ -2,26 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { type Band, type BiquadCoeffs, inverseBiquadCoeffs } from "./biquad";
+import { type Band, type BiquadCoeffs, type BiquadState, inverseBiquadCoeffs, zeroState, stepBiquad } from "./biquad";
 
 /** A stereo vectorscope window from the loopback (see cageq-monitor `ScopeUpdate`): interleaved
  *  `l0, r0, l1, r1, …` sample pairs (≈ -1..1) in capture order, a signal flag, and the mix rate. */
 export type ScopeData = { xy: number[]; signal: boolean; rate: number };
 
-/** The active EQ cascade, broadcast by the main window (App) so the scope can inverse-filter the
- *  post-EQ loopback back to the pre-EQ source image (the "undistort" mode). */
-type ScopeEq = { filters: Band[]; preampDb: number };
-/** Per-biquad running state for the inverse cascade (Direct Form I), one set per channel. */
-type BiquadState = { x1: number; x2: number; y1: number; y2: number };
-const zeroState = (): BiquadState => ({ x1: 0, x2: 0, y1: 0, y2: 0 });
-function stepBiquad(c: BiquadCoeffs, s: BiquadState, x: number): number {
-  const y = c.b0 * x + c.b1 * s.x1 + c.b2 * s.x2 - c.a1 * s.y1 - c.a2 * s.y2;
-  s.x2 = s.x1;
-  s.x1 = x;
-  s.y2 = s.y1;
-  s.y1 = y;
-  return y;
-}
+/** The active EQ cascade, broadcast by the main window (App) so a scope view can inverse-filter the
+ *  post-EQ loopback back to the pre-EQ source image (the "undistort" mode) — shared with TimeScope,
+ *  which broadcasts/consumes the identical `scope-eq` event for its own undistort toggle. */
+export type ScopeEq = { filters: Band[]; preampDb: number };
 
 // The scope's dark "instrument screen" backdrop is a CSS background on .vs-screen (theme-independent).
 // The trace lives on a **transparent** canvas over it and fades with `destination-out` (alpha decay),

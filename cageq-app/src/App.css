@@ -600,8 +600,23 @@ select:disabled {
   color: var(--accent);
 }
 
-/* Vectorscope view: an always-dark "instrument screen" centred in the chart column (it's square,
-   the chart is wide), framed to read as a CRT tube regardless of the app theme. */
+/* Scope chart view (v1, free-running — filter.md §5.3d): the time-domain scope and the vectorscope
+   side by side, sharing the row the vectorscope alone used to fill. */
+.scope-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  height: 100%;
+}
+/* The time scope takes the leftover width; the vectorscope tube stays its fixed square size. */
+.timescope-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Vectorscope view: an always-dark "instrument screen" (it's square, the chart is wide), framed
+   to read as a CRT tube regardless of the app theme. */
 .vectorscope-wrap {
   display: flex;
   align-items: center;
@@ -612,11 +627,10 @@ select:disabled {
   width: 100%;
   height: 100%;
 }
-/* Inline: dock the tube against the meter column (right) rather than floating it centred in the
-   wide chart area — groups it with the other monitoring instruments and frees the whole left side
-   for the tuning panel. */
+/* Inline: a fixed-size item in `.scope-row` (or, before the time scope existed, the chart row's
+   sole content) rather than stretching to fill it. */
 .vectorscope-wrap:not(.fill) {
-  justify-content: flex-end;
+  flex: 0 0 auto;
 }
 /* The screen carries the dark backdrop + tube framing; the two canvases (static graticule +
    fading trace) stack on top of it, both transparent. */
@@ -665,6 +679,12 @@ select:disabled {
   opacity: 1;
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+/* A text-label tool (e.g. the time scope's L/R ⇄ Mix toggle) rather than a single glyph — a touch
+   more horizontal padding so the label doesn't crowd its border. */
+.vs-tool-text {
+  padding: 0.05em 0.45em;
+  font-variant-numeric: tabular-nums;
 }
 /* The detached vectorscope window: a full-viewport dark screen with the scope filling it. */
 .scope-window {

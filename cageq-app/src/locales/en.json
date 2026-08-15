@@ -134,6 +134,10 @@
     "rotate": "Rotate",
     "undistort": "Undistort",
     "undistortHint": "Inverse-filter the loopback to show the pre-EQ image (for oscilloscope music with correction on)",
+    "modeLr": "L/R",
+    "modeMix": "Mix",
+    "toMixTitle": "Switch to mono mixdown — one full-height trace instead of split L/R lanes",
+    "toLrTitle": "Switch to split L/R lanes",
     "reset": "Reset"
   },
 

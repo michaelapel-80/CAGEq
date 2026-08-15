@@ -13,6 +13,7 @@ import { ToneGrid } from "./ToneGrid";
 import { ScrubNumber } from "./ScrubNumber";
 import { Meter } from "./Meter";
 import { Vectorscope } from "./Vectorscope";
+import { TimeScope } from "./TimeScope";
 import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
@@ -2361,7 +2362,10 @@ function App() {
                   <div className="chart-row">
                   <div className="chart-wrap" ref={chartWrapRef}>
                     {scopeView ? (
-                      <Vectorscope height={215} onPopOut={openScopeWindow} />
+                      <div className="scope-row">
+                        <TimeScope height={215} />
+                        <Vectorscope height={215} onPopOut={openScopeWindow} />
+                      </div>
                     ) : impulseView && !dryActive ? (
                       <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
                     ) : (

@@ -134,6 +134,10 @@
     "rotate": "Drehen",
     "undistort": "Entzerren",
     "undistortHint": "Loopback invers filtern, um das Bild vor der EQ-Korrektur zu zeigen (für Oszilloskop-Musik bei aktiver Korrektur)",
+    "modeLr": "L/R",
+    "modeMix": "Mix",
+    "toMixTitle": "Zu Mono-Mixdown wechseln – eine Spur über die volle Höhe statt getrennter L/R-Spuren",
+    "toLrTitle": "Zu getrennten L/R-Spuren wechseln",
     "reset": "Reset"
   },
 
