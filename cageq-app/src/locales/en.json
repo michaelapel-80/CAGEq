@@ -228,6 +228,7 @@
     "versions": "Versions",
     "noVersions": "No saved versions yet. Refine the loaded preset, then 💾 → Save as new version to keep this state to A/B against.",
     "deleteVersionTitle": "Delete this version",
+    "deleteHeadVersionTitle": "Delete the newest version ({{ver}}), reverting to the one below it",
     "deleteTitle": "Delete",
     "emptyPresets": "Pick a headphone + target, then 💾 Save a full preset to recall the whole setup."
   },
@@ -271,6 +272,8 @@
     "updateTemplate": "Overwrite the {{stage}} template “{{name}}” with the current {{stage}} bands?",
     "deletePreset": "Delete the preset “{{name}}”? This can't be undone.",
     "deleteTemplate": "Delete the filter template “{{name}}”? This can't be undone.",
+    "deleteVersion": "Delete {{ver}} of “{{name}}”? This can't be undone.",
+    "deleteHeadVersion": "Delete the newest version ({{ver}}) of “{{name}}”? It reverts to {{prevVer}}, which becomes the new current state. This can't be undone.",
     "delete": "Delete"
   },
 

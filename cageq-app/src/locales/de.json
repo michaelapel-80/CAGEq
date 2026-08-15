@@ -228,6 +228,7 @@
     "versions": "Versionen",
     "noVersions": "Noch keine gespeicherten Versionen. Verfeinere das geladene Preset und dann 💾 → Als neue Version speichern, um diesen Stand zum A/B-Vergleich zu behalten.",
     "deleteVersionTitle": "Diese Version löschen",
+    "deleteHeadVersionTitle": "Neueste Version ({{ver}}) löschen – setzt auf die darunterliegende zurück",
     "deleteTitle": "Löschen",
     "emptyPresets": "Kopfhörer + Ziel wählen, dann 💾 ein volles Preset speichern, um das ganze Setup abzurufen."
   },
@@ -271,6 +272,8 @@
     "updateTemplate": "Die {{stage}}-Vorlage „{{name}}“ mit den aktuellen {{stage}}-Bändern überschreiben?",
     "deletePreset": "Das Preset „{{name}}“ löschen? Kann nicht rückgängig gemacht werden.",
     "deleteTemplate": "Die Filter-Vorlage „{{name}}“ löschen? Kann nicht rückgängig gemacht werden.",
+    "deleteVersion": "{{ver}} von „{{name}}“ löschen? Kann nicht rückgängig gemacht werden.",
+    "deleteHeadVersion": "Die neueste Version ({{ver}}) von „{{name}}“ löschen? Sie wird auf {{prevVer}} zurückgesetzt, die damit zum neuen aktuellen Stand wird. Kann nicht rückgängig gemacht werden.",
     "delete": "Löschen"
   },
 

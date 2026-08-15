@@ -150,9 +150,14 @@ const presetSig = (model: string, measurementPath: string, targetPath: string, s
   stableStringify({ model, measurementPath, targetPath, stages });
 
 /** Which preset (or archived version) a slot was last loaded from, plus the document sig at
- *  load time — so the slot can show the preset name and flag divergence. Persisted in the
- *  resume blob; `ver` is the vN tag shown, `sig` the clean baseline for the dirty check. */
-type LoadedRef = { id: string; name: string; ver?: string; sig: string };
+ *  load time — so the slot can show the preset name and flag divergence. Persisted in the resume
+ *  blob; `sig` is the clean baseline for the dirty check. `at` identifies *which* version was
+ *  loaded — `"head"` for the preset's current state, or an archived version's own timestamp —
+ *  rather than caching its vN label: the label is position-based (v1, v2, …) and every other
+ *  version's position shifts whenever one is deleted, so a cached string goes stale the moment
+ *  that happens elsewhere. The label is derived live from `library` at render time instead (see
+ *  `presetVerLabel`), so it always matches what the versions list itself shows. */
+type LoadedRef = { id: string; name: string; at?: number | "head"; sig: string };
 
 /** The custom bands actually written: every enabled stage's enabled bands, in stage order —
  *  what rides to the sidecar (appended to the AutoEq fit) and drives the §4.1/§4.2 policy. */
@@ -1492,9 +1497,9 @@ function App() {
     commitHistory();
   };
   // Loads a preset *or* one of its archived versions (both are PresetState) into the active slot.
-  // `ref` carries the parent preset's identity + the vN tag so the slot can show what's loaded
-  // and flag divergence (dirty). The sig is captured from the exact normalized state applied.
-  const loadPreset = (p: PresetState, ref?: { id: string; name: string; ver?: string }) => {
+  // `ref` carries the parent preset's identity + which version, so the slot can show what's
+  // loaded and flag divergence (dirty). The sig is captured from the exact normalized state applied.
+  const loadPreset = (p: PresetState, ref?: { id: string; name: string; at?: number | "head" }) => {
     if (activeSlot === "Dry") return;
     dropAudition();
     const stages = normalizeStages(p.stages);
@@ -1514,10 +1519,11 @@ function App() {
   };
   // Re-anchor the active slot's loaded-preset attribution to a freshly saved state (so a
   // save/overwrite clears the dirty flag and updates the vN tag). Uses the current editor
-  // state as the new clean baseline.
-  const setActiveSlotLoaded = (id: string, name: string, ver?: string) => {
+  // state as the new clean baseline. Always the preset's head — a save/overwrite/version-save
+  // always writes (or promotes the editor state to) the head.
+  const setActiveSlotLoaded = (id: string, name: string) => {
     if (activeSlot !== "A" && activeSlot !== "B") return;
-    setSlotPreset((sp) => ({ ...sp, [activeSlot]: { id, name, ver, sig: presetSig(query, measurementPath, targetPath, stages) } }));
+    setSlotPreset((sp) => ({ ...sp, [activeSlot]: { id, name, at: "head", sig: presetSig(query, measurementPath, targetPath, stages) } }));
   };
 
   // Save the current controls as a preset or template. Empty name → inline field error.
@@ -1544,7 +1550,7 @@ function App() {
           ? { ...lib, presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, stages, versions: existingVersions }) }
           : { ...lib, templates: upsert(lib.templates, { id, name, stage: activeStage, bands: stages[activeStage].bands }) },
       );
-      if (kind === "preset") setActiveSlotLoaded(id, name, `v${(existingVersions?.length ?? 0) + 1}`);
+      if (kind === "preset") setActiveSlotLoaded(id, name);
       setSaveForm(null);
     };
     if (existing) {
@@ -1571,7 +1577,7 @@ function App() {
       ...lib,
       presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, stages, versions: p.versions }),
     }));
-    setActiveSlotLoaded(p.id, p.name, `v${(p.versions?.length ?? 0) + 1}`);
+    setActiveSlotLoaded(p.id, p.name);
   };
 
   // §3.5 preset versioning — explicit only. "Save version" archives the preset's *current stored*
@@ -1594,15 +1600,43 @@ function App() {
         ].slice(-MAX_VERSIONS),
       }),
     }));
-    // The prior stored head becomes a version and the editor state becomes the new head, so the
-    // slot now sits on vN+1 (capped at MAX_VERSIONS+1 once the ring fills), clean.
-    setActiveSlotLoaded(p.id, p.name, `v${Math.min((p.versions?.length ?? 0) + 2, MAX_VERSIONS + 1)}`);
+    // The prior stored head becomes a version and the editor state becomes the new head, clean.
+    setActiveSlotLoaded(p.id, p.name);
   };
+  // Delete asks first — same confirm overlay as the other destructive actions (deletePreset et al).
   const deleteVersion = (p: UserPreset, idx: number) =>
-    setLibrary((lib) => ({
-      ...lib,
-      presets: lib.presets.map((x) => (x.id === p.id ? { ...x, versions: (x.versions ?? []).filter((_, i) => i !== idx) } : x)),
-    }));
+    setConfirmBox({
+      message: tr("dialog.deleteVersion", { name: p.name, ver: `v${idx + 1}` }),
+      confirmLabel: tr("dialog.delete"),
+      onConfirm: () =>
+        setLibrary((lib) => ({
+          ...lib,
+          presets: lib.presets.map((x) => (x.id === p.id ? { ...x, versions: (x.versions ?? []).filter((_, i) => i !== idx) } : x)),
+        })),
+    });
+  // Delete the preset's *newest* version — the head — reverting it to the most recent archived
+  // version, which becomes the new head. The counterpart to "save version" (which pushes the old
+  // head onto the stack); this pops it back off. Only offered when there's a prior version to
+  // fall back to — with none, "deleting the newest version" is deleting the whole preset, which
+  // the row's own trash button already does.
+  const deleteHeadVersion = (p: UserPreset) => {
+    const versions = p.versions ?? [];
+    if (versions.length === 0) return;
+    const prev = versions[versions.length - 1];
+    setConfirmBox({
+      message: tr("dialog.deleteHeadVersion", { name: p.name, ver: `v${versions.length + 1}`, prevVer: `v${versions.length}` }),
+      confirmLabel: tr("dialog.delete"),
+      onConfirm: () =>
+        setLibrary((lib) => ({
+          ...lib,
+          presets: lib.presets.map((x) =>
+            x.id === p.id
+              ? { id: x.id, name: x.name, model: prev.model, measurementPath: prev.measurementPath, targetPath: prev.targetPath, stages: prev.stages, versions: versions.slice(0, -1) }
+              : x,
+          ),
+        })),
+    });
+  };
   // A template row's "update" saves the current bands of *that template's* stage.
   const updateTemplate = (t: FilterTemplate) =>
     setConfirmBox({
@@ -1706,6 +1740,19 @@ function App() {
     if (s === activeSlot) return presetSig(query, measurementPath, targetPath, stages) !== ref.sig;
     const inp = slotInputs[s];
     return !inp || presetSig(inp.model, inp.measurementPath, inp.targetPath, inp.stages) !== ref.sig;
+  };
+  // The vN label for a loaded ref, derived live from the current library instead of a cached
+  // string — position-based labels (v1, v2, …) shift whenever *any* version of that preset is
+  // added or deleted, so a value captured at load time goes stale the moment that happens. Null
+  // when the preset (or, for an archived load, that specific version) no longer exists.
+  const presetVerLabel = (ref: LoadedRef): string | null => {
+    const p = library.presets.find((x) => x.id === ref.id);
+    if (!p) return null;
+    const versions = p.versions ?? [];
+    if (ref.at === "head") return `v${versions.length + 1}`;
+    if (ref.at == null) return null; // legacy resume blob from before `at` existed
+    const idx = versions.findIndex((v) => v.at === ref.at);
+    return idx === -1 ? null : `v${idx + 1}`;
   };
 
   // Measure the chart's rendered SVG so the meter bars can match its plot-area Y extent. EqChart's
@@ -2555,15 +2602,16 @@ function App() {
                     const ref = slotPreset[s];
                     if (!ref) return null;
                     const dirty = slotDirty(s);
+                    const ver = presetVerLabel(ref);
                     return (
                       <span
                         key={s}
                         className={`sl-item${s === activeSlot ? " active" : ""}`}
                         style={{ "--slot": SLOT_COLOR[s], gridColumn: s === "A" ? 1 : 2 } as CSSProperties}
-                        title={tr(dirty ? "compare.loadedDirtyTitle" : "compare.loadedTitle", { slot: slotLabel(s), name: ref.name, ver: ref.ver ?? "" })}
+                        title={tr(dirty ? "compare.loadedDirtyTitle" : "compare.loadedTitle", { slot: slotLabel(s), name: ref.name, ver: ver ?? "" })}
                       >
                         <span className="sl-name">{ref.name}</span>
-                        {ref.ver && <span className="sl-ver">{ref.ver}</span>}
+                        {ver && <span className="sl-ver">{ver}</span>}
                         {dirty && <span className="sl-dirty" aria-label={tr("compare.dirtyAria")}>●</span>}
                       </span>
                     );
@@ -2814,7 +2862,7 @@ function App() {
                               {p.name}
                             </span>
                           )}
-                          <button type="button" disabled={dryActive} onClick={() => loadPreset(p, { id: p.id, name: p.name, ver: `v${(p.versions?.length ?? 0) + 1}` })}>
+                          <button type="button" disabled={dryActive} onClick={() => loadPreset(p, { id: p.id, name: p.name, at: "head" })}>
                             {tr("presets.load")}
                           </button>
                           <button
@@ -2852,6 +2900,22 @@ function App() {
                           <div className="pl-versions">
                             <div className="pl-versions-head">
                               <span>{tr("presets.versions")}</span>
+                              {/* Deletes the *newest* version (the head), reverting to the version
+                                  below it — the head isn't itself an entry in `p.versions`, so it
+                                  has no row/trash-icon of its own in the list below. Only offered
+                                  when there's a version to fall back to; with none, deleting the
+                                  head is deleting the whole preset (the row's own trash button). */}
+                              {(p.versions?.length ?? 0) > 0 && (
+                                <button
+                                  type="button"
+                                  className="pl-del pl-del-head"
+                                  disabled={dryActive}
+                                  title={tr("presets.deleteHeadVersionTitle", { ver: `v${(p.versions?.length ?? 0) + 1}` })}
+                                  onClick={() => deleteHeadVersion(p)}
+                                >
+                                  🗑 v{(p.versions?.length ?? 0) + 1}
+                                </button>
+                              )}
                             </div>
                             {(p.versions?.length ?? 0) === 0 ? (
                               <p className="pl-versions-empty">{tr("presets.noVersions")}</p>
@@ -2865,7 +2929,7 @@ function App() {
                                       <span className="pl-ver-when">
                                         v{i + 1} · {fmtWhen(v.at)}
                                       </span>
-                                      <button type="button" disabled={dryActive} onClick={() => loadPreset(v, { id: p.id, name: p.name, ver: `v${i + 1}` })}>
+                                      <button type="button" disabled={dryActive} onClick={() => loadPreset(v, { id: p.id, name: p.name, at: v.at })}>
                                         {tr("presets.load")}
                                       </button>
                                       <button

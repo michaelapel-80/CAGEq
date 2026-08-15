@@ -1710,6 +1710,12 @@ select:disabled {
   letter-spacing: 0;
   opacity: 0.9;
 }
+.pl-del-head {
+  font-size: 0.68rem;
+  text-transform: none;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
 .pl-versions-empty {
   font-size: 0.72rem;
   opacity: 0.6;
