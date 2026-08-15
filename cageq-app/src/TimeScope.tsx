@@ -9,15 +9,22 @@ import type { ScopeData, ScopeEq } from "./Vectorscope";
  *  recompile). `undistort` shares Vectorscope's meaning and machinery: it undoes the §4.1/§4.2
  *  preamp *and* inverse-filters the applied EQ, recovering the pre-EQ level and shape rather than
  *  just amplifying the post-EQ trace — a manual gain knob would need re-tuning every time the
- *  preamp changes (a different headphone/target/slot), this tracks it automatically. `windowMs` is
- *  the displayed time span — decoupled from the backend's ~16 ms emission size once a ring buffer
- *  is needed for triggering anyway, so it's exposed in both modes, not just when triggered.
+ *  preamp changes (a different headphone/target/slot), this tracks it automatically. `msPerDivIdx`
+ *  is an index into `MS_PER_DIV_STEPS` (a classic scope-dial time/div, not a free-form span) —
+ *  decoupled from the backend's ~16 ms emission size once a ring buffer is needed for triggering
+ *  anyway, so it's exposed in both modes, not just when triggered; there's deliberately no
+ *  longer-timescale/envelope mode, this stays a short-timescale instrument.
  *  `trigger`/`triggerFilterHz` are surfaced separately (`trigger` as a quick toolbar toggle, not a
  *  panel slider — it's a mode switch flipped often, same reasoning as the L/R⇄Mix toggle). */
-type Params = { trailTau: number; glow: number; beam: number; undistort: boolean; windowMs: number; trigger: boolean; triggerFilterHz: number };
-const DEFAULTS: Params = { trailTau: 0.07, glow: 0.6, beam: 3.0, undistort: true, windowMs: 20, trigger: true, triggerFilterHz: 100 };
+type Params = { trailTau: number; glow: number; beam: number; undistort: boolean; msPerDivIdx: number; trigger: boolean; triggerFilterHz: number };
+// Classic 1-2-5 time/div sequence, same convention a real scope's dial steps through. 10 divisions
+// (DIVISIONS) is the standard horizontal graticule count, so total span = ms/div × 10.
+const MS_PER_DIV_STEPS = [0.2, 0.5, 1, 2, 5, 10];
+const DIVISIONS = 10;
+const DEFAULTS: Params = { trailTau: 0.07, glow: 0.6, beam: 3.0, undistort: true, msPerDivIdx: 3, trigger: true, triggerFilterHz: 100 }; // 2 ms/div × 10 = 20 ms
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
+const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler than the lane centrelines
 // Peak-hold ballistics for the faint clip-reference lines — instant attack, brief hold, then
 // linear-dB release (a PPM-style follower, same shape as the level meter's — values mirror
 // cageq-monitor's PEAK_RELEASE_DB_PER_SEC/PEAK_HOLD/DB_FLOOR for a consistent feel app-wide).
@@ -85,7 +92,7 @@ function parseHex(hex: string): [number, number, number] {
  * §5.3d time-domain scope (v2, with triggering — see filter.md discussion): the loopback's L/R
  * channels plotted against time, stacked in two lanes (L on top, R on bottom), each with its own
  * zero-centreline, phosphor-style persistence. `trigger` off (default) is free-running — a fixed
- * `windowMs` span of the most recent samples, redrawn each `scope` event; on non-periodic material
+ * span (ms/div × DIVISIONS) of the most recent samples, redrawn each `scope` event; on non-periodic material
  * (most real mixes) consecutive windows won't retrace the same shape, so persistence reads as a
  * soft blur rather than a locked waveform. `trigger` on searches a lowpass-filtered mono version of
  * the signal (HF-reject trigger coupling — the display itself stays full-bandwidth) for the most
@@ -201,6 +208,17 @@ export function TimeScope({ height = 215 }: { height?: number }) {
       ctx.lineTo(W, lane.cy);
     }
     ctx.stroke();
+    // Time divisions — the classic scope graticule (see ms/div in the tuning panel). Fixed count
+    // (DIVISIONS), independent of the actual ms/div value: only the *labelled* span changes with
+    // that slider, the grid itself doesn't need to know it. Subtler than the lane centrelines.
+    ctx.strokeStyle = `rgba(${ar},${ag},${ab},${DIV_LINE_ALPHA})`;
+    ctx.beginPath();
+    for (let i = 1; i < DIVISIONS; i++) {
+      const x = (i / DIVISIONS) * W;
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+    }
+    ctx.stroke();
     ctx.fillStyle = `rgba(${ar},${ag},${ab},0.5)`;
     ctx.font = `${Math.round(H * 0.05)}px system-ui, sans-serif`;
     ctx.textBaseline = "middle";
@@ -263,8 +281,9 @@ export function TimeScope({ height = 215 }: { height?: number }) {
       // the trace path further down both read the identical (possibly undistorted) samples.
       let outL: Float64Array | null = null;
       let outR: Float64Array | null = null;
-      // The window actually drawn — free-run: the newest `windowMs`; triggered: anchored at the
-      // most recent qualifying edge found in the ring buffer. Set below, after outL/outR exist.
+      // The window actually drawn — free-run: the newest ms/div × DIVISIONS span; triggered:
+      // anchored at the most recent qualifying edge found in the ring buffer. Set below, after
+      // outL/outR exist.
       let dispL: Float64Array | null = null;
       let dispR: Float64Array | null = null;
       let dispN = 0;
@@ -352,7 +371,8 @@ export function TimeScope({ height = 215 }: { height?: number }) {
         // in the filtered trigger signal, falling back to the free-run anchor if none qualifies —
         // that fallback *is* the auto-trigger/timeout behaviour, no separate timer needed since the
         // search window itself is bounded fresh every frame.
-        const windowSamples = Math.max(2, Math.round(rate * (p.windowMs / 1000)));
+        const msPerDiv = MS_PER_DIV_STEPS[p.msPerDivIdx] ?? MS_PER_DIV_STEPS[0];
+        const windowSamples = Math.max(2, Math.round(rate * ((msPerDiv * DIVISIONS) / 1000)));
         const preSamples = Math.round(windowSamples * TRIGGER_PRE_FRAC);
         const postSamples = windowSamples - preSamples;
         const ringCount = Math.min(totalWritten, RING_CAP);
@@ -405,9 +425,9 @@ export function TimeScope({ height = 215 }: { height?: number }) {
       ctx.stroke();
 
       // 3) The trace itself — the extracted (free-run or triggered) display window, not the raw
-      // per-event samples: the window is a fixed `windowMs` span, decoupled from the backend's
-      // emission size, and (when triggered) anchored at the found edge rather than "whatever just
-      // arrived".
+      // per-event samples: the window is a fixed ms/div × DIVISIONS span, decoupled from the
+      // backend's emission size, and (when triggered) anchored at the found edge rather than
+      // "whatever just arrived".
       if (isNew && dispL && dispR && dispN >= 2) {
         // L/R: one path per channel/lane. Mixdown: one path, mono sum, the single full-height lane.
         const paths = lanes.map(() => new Path2D());
@@ -432,14 +452,14 @@ export function TimeScope({ height = 215 }: { height?: number }) {
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "glow" | "beam" | "windowMs" | "triggerFilterHz";
+  type NumKey = "trailTau" | "glow" | "beam" | "triggerFilterHz";
   const CONTROLS: { key: NumKey; label: string; min: number; max: number; step: number }[] = [
-    { key: "windowMs", label: t("scope.span"), min: 3, max: 60, step: 1 },
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "glow", label: t("scope.glow"), min: 0.05, max: 1, step: 0.05 },
     { key: "beam", label: t("scope.beam"), min: 0.5, max: 8, step: 0.1 },
     { key: "triggerFilterHz", label: t("scope.trigFilter"), min: 40, max: 1000, step: 10 },
   ];
+  const msPerDiv = MS_PER_DIV_STEPS[params.msPerDivIdx] ?? MS_PER_DIV_STEPS[0];
 
   return (
     <div className="timescope-wrap" ref={wrapRef} style={{ height: `${height}px` }}>
@@ -499,6 +519,18 @@ export function TimeScope({ height = 215 }: { height?: number }) {
                 ×
               </button>
             </div>
+            <label className="vs-tune-row" title={t("scope.msPerDivHint", { total: (msPerDiv * DIVISIONS).toFixed(1) })}>
+              <span className="vs-tune-label">{t("scope.msPerDiv")}</span>
+              <input
+                type="range"
+                min={0}
+                max={MS_PER_DIV_STEPS.length - 1}
+                step={1}
+                value={params.msPerDivIdx}
+                onChange={(e) => set("msPerDivIdx", Number(e.currentTarget.value))}
+              />
+              <b>{msPerDiv < 1 ? msPerDiv.toFixed(1) : msPerDiv}</b>
+            </label>
             {CONTROLS.map((cc) => (
               <label key={cc.key} className="vs-tune-row">
                 <span className="vs-tune-label">{cc.label}</span>

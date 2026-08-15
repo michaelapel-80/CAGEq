@@ -142,7 +142,8 @@
     "modeFree": "Free",
     "toTrigTitle": "Lock to the most recent trigger edge instead of free-running",
     "toFreeTitle": "Switch to free-running (no trigger lock)",
-    "span": "Span",
+    "msPerDiv": "ms/div",
+    "msPerDivHint": "{{total}} ms across the full width (10 divisions)",
     "trigFilter": "Trig filter",
     "reset": "Reset"
   },

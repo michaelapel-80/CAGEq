@@ -142,7 +142,8 @@
     "modeFree": "Frei",
     "toTrigTitle": "Auf die letzte Trigger-Flanke einrasten statt frei zu laufen",
     "toFreeTitle": "Zu freilaufend wechseln (keine Trigger-Verriegelung)",
-    "span": "Zeitfenster",
+    "msPerDiv": "ms/Div",
+    "msPerDivHint": "{{total}} ms über die volle Breite (10 Teile)",
     "trigFilter": "Trigger-Filter",
     "reset": "Reset"
   },
