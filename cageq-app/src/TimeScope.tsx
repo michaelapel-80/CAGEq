@@ -113,7 +113,7 @@ function parseHex(hex: string): [number, number, number] {
  * "loopback monitor" family, sharing its `scope` event stream, its `scope-eq`-driven undistort
  * (inverse-filter cascade), and viewer-count gating with Vectorscope.
  */
-export function TimeScope({ height = 215 }: { height?: number }) {
+export function TimeScope() {
   const { t } = useTranslation();
   const wrapRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLCanvasElement>(null);
@@ -131,14 +131,23 @@ export function TimeScope({ height = 215 }: { height?: number }) {
   const modeRef = useRef(mode);
   modeRef.current = mode;
 
-  // Width tracks the flex row's leftover space (not square, unlike the vectorscope); height is fixed.
+  // Width tracks the flex row's leftover space (not square, unlike the vectorscope); height tracks
+  // `.chart-wrap`'s own `aspect-ratio:720/215` (App.css) via the same wrapper's rendered box, so
+  // this instrument's height agrees with the Frequency/Time views' viewBox-scaled SVGs instead of
+  // drifting from a hardcoded value and shifting the layout on every chart-view switch.
   const [width, setWidth] = useState(320);
+  const [height, setHeight] = useState(215);
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setWidth(Math.max(80, Math.floor(el.getBoundingClientRect().width))));
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      setWidth(Math.max(80, Math.floor(r.width)));
+      setHeight(Math.max(60, Math.floor(r.height)));
+    };
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    setWidth(Math.max(80, Math.floor(el.getBoundingClientRect().width)));
+    measure();
     return () => ro.disconnect();
   }, []);
   const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
@@ -462,14 +471,19 @@ export function TimeScope({ height = 215 }: { height?: number }) {
   const msPerDiv = MS_PER_DIV_STEPS[params.msPerDivIdx] ?? MS_PER_DIV_STEPS[0];
 
   return (
-    <div className="timescope-wrap" ref={wrapRef} style={{ height: `${height}px` }}>
-      <div className="vs-screen" style={{ width: "100%", height: `${height}px` }}>
+    <div className="timescope-wrap" ref={wrapRef}>
+      {/* width/height here are CSS "100%" (matching the wrap exactly, sub-pixel precise) — the
+          JS-measured `width`/`resW`/`resH` state feeds only the canvas backing-store *resolution*
+          attributes below, never the display size. A JS-measured, floored pixel value here would
+          drift by up to 1px from the wrap's true (CSS-computed) height and show up as exactly the
+          kind of small persistent misalignment against EqChart's own height:auto SVG sizing. */}
+      <div className="vs-screen" style={{ width: "100%", height: "100%" }}>
         <canvas
           ref={gridRef}
           className="vectorscope-canvas vs-grid"
           width={resW}
           height={resH}
-          style={{ width: `${width}px`, height: `${height}px` }}
+          style={{ width: "100%", height: "100%" }}
           aria-hidden="true"
         />
         <canvas
@@ -477,7 +491,7 @@ export function TimeScope({ height = 215 }: { height?: number }) {
           className="vectorscope-canvas vs-trail"
           width={resW}
           height={resH}
-          style={{ width: `${width}px`, height: `${height}px` }}
+          style={{ width: "100%", height: "100%" }}
           aria-hidden="true"
         />
         <div className="vs-tools">

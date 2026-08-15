@@ -61,15 +61,18 @@ function parseHex(hex: string): [number, number, number] {
  * that fades via `destination-out`. Keeping the graticule off the fading canvas avoids it building
  * up, and the alpha fade avoids the additive-on-opaque burn-in.
  *
- * `fill` sizes the square tube to its container (for the pop-out window); otherwise it's `height`
- * px. `onPopOut`, when given, shows a button to detach the scope into its own larger window.
+ * Always sized by measuring its own container (`ResizeObserver`, both inline and in the pop-out
+ * window) rather than a fixed prop — `.vectorscope-wrap:not(.fill)` is `height:100%;
+ * aspect-ratio:1` in CSS (App.css), matching `.chart-wrap`'s own `aspect-ratio:720/215` so the
+ * tube's row-height agrees with whatever the Frequency/Time views' viewBox-scaled SVGs render at,
+ * instead of a hardcoded height drifting from their width-driven one and shifting the layout on
+ * every chart-view switch. `onPopOut`, when given, shows a button to detach the scope into its
+ * own larger window.
  */
 export function Vectorscope({
-  height = 215,
   fill = false,
   onPopOut,
 }: {
-  height?: number;
   fill?: boolean;
   onPopOut?: () => void;
 }) {
@@ -85,13 +88,12 @@ export function Vectorscope({
   const paramsRef = useRef(params);
   paramsRef.current = params;
 
-  // The square tube side, in CSS px: fixed `height` inline, or the container's min side when filling.
-  const [side, setSide] = useState(height);
+  // The square tube side, in CSS px — the container's min side, measured directly (both inline,
+  // where CSS already constrains the wrap to a square, and in the pop-out window, where it's
+  // genuinely free-form). `min(width,height)` is a defensive floor: the inline wrap should already
+  // report a square box via `aspect-ratio:1`, but this stays correct even if that ever drifts.
+  const [side, setSide] = useState(215);
   useEffect(() => {
-    if (!fill) {
-      setSide(height);
-      return;
-    }
     const el = wrapRef.current;
     if (!el) return;
     const ro = new ResizeObserver(() => {
@@ -100,7 +102,7 @@ export function Vectorscope({
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [fill, height]);
+  }, []);
   const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
   const res = Math.round(side * dpr); // canvas backing-store resolution
 
@@ -414,9 +416,14 @@ export function Vectorscope({
     { key: "gridAlpha", label: t("scope.grid"), min: 0, max: 0.5, step: 0.02 },
   ];
 
-  const canvasStyle = { width: `${side}px`, height: `${side}px` } as const;
+  // Inline (not fill): `.vectorscope-wrap:not(.fill)` is already an exact CSS square
+  // (`height:100%; aspect-ratio:1`), so "100%" here matches it precisely — no rounding from the
+  // JS-measured `side`, which stays floored-to-integer for the canvas backing-store resolution
+  // only. Fill (pop-out window): the wrap genuinely isn't square, so the tube needs the measured
+  // pixel size to center correctly within it.
+  const canvasStyle = fill ? ({ width: `${side}px`, height: `${side}px` } as const) : ({ width: "100%", height: "100%" } as const);
   return (
-    <div className={`vectorscope-wrap${fill ? " fill" : ""}`} ref={wrapRef} style={fill ? undefined : { height: `${height}px` }}>
+    <div className={`vectorscope-wrap${fill ? " fill" : ""}`} ref={wrapRef}>
       <div className="vs-screen" style={canvasStyle}>
         <canvas ref={gridRef} className="vectorscope-canvas vs-grid" width={res} height={res} style={canvasStyle} aria-hidden="true" />
         <canvas ref={trailRef} className="vectorscope-canvas vs-trail" width={res} height={res} style={canvasStyle} aria-hidden="true" />

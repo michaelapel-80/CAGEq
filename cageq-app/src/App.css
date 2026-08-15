@@ -370,6 +370,12 @@ select:disabled {
 /* --- preamp readout overlaid on the chart's top-right (reclaims vertical space) --- */
 .chart-wrap {
   position: relative;
+  /* Same ratio as EqChart/ImpulseChart's `viewBox="0 0 720 215"` (+ their `height:auto` SVG
+     sizing) — their real rendered height already scales with width this way; locking chart-wrap
+     itself to the same ratio makes the canvas-based instruments (Monitor/Scope, which measure this
+     box directly rather than rendering an SVG) agree with that height instead of drifting from a
+     hardcoded one and shifting the whole panel's layout on every chart-view switch. */
+  aspect-ratio: 720 / 215;
 }
 .chart-preamp {
   position: absolute;
@@ -413,6 +419,14 @@ select:disabled {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
+}
+/* Reserves the same height as `.eq-legend`'s own `min-height` (below) even when nothing is
+   portaled into it — Monitor/Scope don't populate a legend at all, and without this the host
+   collapses to 0 height there while Frequency/Time (which always portal an `.eq-legend`) keep
+   theirs, so the panel's total height still differed between views even after the chart itself
+   was made consistent (§ chart-wrap aspect-ratio, above). */
+.chart-legend-host {
+  min-height: 1.9rem;
 }
 .monitor-toggle {
   display: inline-flex;
@@ -601,24 +615,36 @@ select:disabled {
 }
 
 /* Scope chart view (v1, free-running — filter.md §5.3d): the time-domain scope and the vectorscope
-   side by side, sharing the row the vectorscope alone used to fill. */
+   side by side, sharing the row the vectorscope alone used to fill. Inset from the top a little —
+   `.chart-wrap`'s own height (from its `aspect-ratio:720/215`, above) is untouched, only this
+   row's own share of it shrinks by the same amount as the margin, so the panel's total height
+   stays identical to Frequency/Time; only the content within visibly sits a bit lower. This
+   selector only ever matches the scope view's own row, so Frequency/Time are never affected. */
 .scope-row {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   width: 100%;
-  height: 100%;
+  height: calc(100% - 0.5rem);
+  margin-top: 0.5rem;
 }
-/* The time scope takes the leftover width; the vectorscope tube stays its fixed square size. */
+/* The time scope takes the leftover width, at `.scope-row`'s full (chart-wrap-derived) height —
+   `.scope-row`'s own `align-items:center` doesn't stretch children, so this needs it explicitly. */
 .timescope-wrap {
   flex: 1 1 auto;
   min-width: 0;
+  height: 100%;
 }
 
 /* Monitor chart view: the CRT spectrum analyzer fills the whole chart-wrap alone, same as EqChart
-   does for the Frequency view (no row-sharing, unlike the time scope/vectorscope pair). */
+   does for the Frequency view (no row-sharing, unlike the time scope/vectorscope pair). Inset from
+   the top a little, same reasoning as `.scope-row` above — the height reduction matches the
+   margin, so `.chart-wrap`'s (and the panel's) total height is unaffected, and this selector only
+   ever matches the Monitor view's own element, so Frequency/Time are never touched. */
 .spectrumscope-wrap {
   width: 100%;
+  height: calc(100% - 0.5rem);
+  margin-top: 0.5rem;
 }
 
 /* Vectorscope view: an always-dark "instrument screen" (it's square, the chart is wide), framed
@@ -633,10 +659,13 @@ select:disabled {
   width: 100%;
   height: 100%;
 }
-/* Inline: a fixed-size item in `.scope-row` (or, before the time scope existed, the chart row's
-   sole content) rather than stretching to fill it. */
+/* Inline: square, at `.scope-row`'s full height — `aspect-ratio:1` derives the width from that
+   (rather than a fixed pixel size), so the tube's height always agrees with whatever
+   `.chart-wrap`'s own `aspect-ratio:720/215` computes, instead of a hardcoded height drifting from
+   the Frequency/Time views' width-driven one and shifting the layout on every chart-view switch. */
 .vectorscope-wrap:not(.fill) {
-  flex: 0 0 auto;
+  height: 100%;
+  aspect-ratio: 1;
 }
 /* The screen carries the dark backdrop + tube framing; the two canvases (static graticule +
    fading trace) stack on top of it, both transparent. */

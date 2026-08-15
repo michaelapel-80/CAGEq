@@ -543,6 +543,14 @@ function App() {
   // letting them stretch past it (the chart-wrap also holds the legend). Measured near the return.
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const [plotBox, setPlotBox] = useState<{ top: number; height: number } | null>(null);
+  // The combined chart-row + legend area's total rendered height, captured whenever Frequency/Time
+  // (SVG-based) is showing and reused to size Monitor/Scope's canvas-based views to the exact same
+  // pixel height — see the measuring effect near plotBox's. Chart-wrap's own aspect-ratio (App.css)
+  // already keeps the *chart* portion consistent across views; this covers the legend strip below
+  // it too, whose real height (a variable number of toggle chips, wrapping or not) isn't worth
+  // separately reverse-engineering when the real Frequency/Time value is right there to measure.
+  const chartAreaRef = useRef<HTMLDivElement>(null);
+  const [chartAreaHeight, setChartAreaHeight] = useState<number | null>(null);
   // The chart legend renders (via portal) into this full-width host *below* the chart-row, so its
   // toggle chips can use the whole width (incl. under the meters) instead of the chart's column —
   // long (localized) labels then have room. State (not a ref) so the portal target triggers a
@@ -1775,6 +1783,25 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chartView, dryActive, loading, !!result]);
 
+  // Same "measure the real thing, remember it" idea as plotBox above, one level up: capture the
+  // combined chart-row + legend area's total height whenever it's SVG-driven, so Monitor/Scope can
+  // be forced to that exact pixel value (below) instead of the panel's total height drifting by
+  // however many px the legend's real (possibly multi-line) content differs from a fixed guess.
+  useEffect(() => {
+    const svg = chartWrapRef.current?.querySelector("svg");
+    const el = chartAreaRef.current;
+    if (!svg || !el) return;
+    const measure = () => {
+      const h = el.getBoundingClientRect().height;
+      if (h > 0) setChartAreaHeight(h);
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    measure();
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartView, dryActive, loading, !!result]);
+
   // The active stage's bands (the grid/nodes edit these) and the full applied custom set.
   const activeBands = stages[activeStage].bands;
   const appliedCustom = useMemo(() => appliedBands(stages), [stages]);
@@ -2358,19 +2385,23 @@ function App() {
 
               {result && (
                 <>
-                  {/* The Frequency/Time (domain) view swap lives in the panel header row
-                      (above). Phase rides the frequency chart's secondary axis (legend). */}
+                  {/* The Frequency/Time (domain) view swap lives in the panel header row (above).
+                      Phase rides the frequency chart's secondary axis (legend). Forced to
+                      `chartAreaHeight` (measured below) on Monitor/Scope — its own natural height
+                      there (chart-wrap's aspect-ratio + the legend host's own, now-empty, height)
+                      won't exactly match Frequency/Time's real legend height on its own. */}
+                  <div ref={chartAreaRef} style={monitorView || scopeView ? { height: chartAreaHeight ?? undefined } : undefined}>
                   <div className="chart-row">
                   <div className="chart-wrap" ref={chartWrapRef}>
                     {scopeView ? (
                       <div className="scope-row">
-                        <TimeScope height={215} />
-                        <Vectorscope height={215} onPopOut={openScopeWindow} />
+                        <TimeScope />
+                        <Vectorscope onPopOut={openScopeWindow} />
                       </div>
                     ) : impulseView && !dryActive ? (
                       <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
                     ) : monitorView ? (
-                      <SpectrumScope height={215} />
+                      <SpectrumScope />
                     ) : (
                       <EqChart
                         series={chartSeries}
@@ -2422,6 +2453,7 @@ function App() {
                   {/* Full-width host for the chart legend (portaled from the chart) — spans under
                       the meters too, so long/localized toggle labels have room. */}
                   <div ref={setLegendHost} className="chart-legend-host" />
+                  </div>
                   {result.clipping_warning && (
                     <p style={{ color: "#b8860b", fontSize: "0.8em", margin: "0.2em 0 0" }}>
                       {tr("correction.clipping")}
