@@ -14,6 +14,7 @@ import { ScrubNumber } from "./ScrubNumber";
 import { Meter } from "./Meter";
 import { Vectorscope } from "./Vectorscope";
 import { TimeScope } from "./TimeScope";
+import { SpectrumScope } from "./SpectrumScope";
 import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
@@ -2368,13 +2369,14 @@ function App() {
                       </div>
                     ) : impulseView && !dryActive ? (
                       <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
+                    ) : monitorView ? (
+                      <SpectrumScope height={215} />
                     ) : (
                       <EqChart
-                        // Monitor view strips every curve/marker/ref/phase so only the spectrum shows.
-                        series={monitorView ? [] : chartSeries}
-                        markers={monitorView ? [] : chartMarkers}
-                        refs={monitorView ? [] : chartRefs}
-                        phase={monitorView ? undefined : chartPhase}
+                        series={chartSeries}
+                        markers={chartMarkers}
+                        refs={chartRefs}
+                        phase={chartPhase}
                         spectrumRef={spectrumRef}
                         eqBands={dryActive || selfTest?.phase === "running" ? undefined : result.filters}
                         legendHost={legendHost}
@@ -2384,9 +2386,8 @@ function App() {
                           bands: activeBands,
                           color: STAGE_COLOR[activeStage],
                           // Clear the editable drag handles while the read-only AutoEq stage is shown
-                          // (same as Dry) or in the clean monitor view — otherwise the last editable
-                          // stage's nodes linger on top.
-                          disabled: dryActive || autoEqView || monitorView,
+                          // (same as Dry) — otherwise the last editable stage's nodes linger on top.
+                          disabled: dryActive || autoEqView,
                           onChange: (i, patch) => updateFilter(i, patch, 70),
                           onDragEnd: () => {
                             requestApply(0);
@@ -2401,8 +2402,9 @@ function App() {
                       />
                     )}
                     {/* Preamp is a property of the correction, not the live signal — hide it on the
-                        scope (which shows the stereo image, not a level). */}
-                    {!scopeView && (
+                        scope (which shows the stereo image, not a level) and on the CRT spectrum
+                        analyzer (its own clean instrument screen, no chart-style overlay). */}
+                    {!scopeView && !monitorView && (
                       <div
                         className="chart-preamp"
                         title={loudness?.mode === "FinalVolume" ? tr("correction.preampTitleMax") : tr("correction.preampTitleMatched")}

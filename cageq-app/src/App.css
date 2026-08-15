@@ -615,6 +615,12 @@ select:disabled {
   min-width: 0;
 }
 
+/* Monitor chart view: the CRT spectrum analyzer fills the whole chart-wrap alone, same as EqChart
+   does for the Frequency view (no row-sharing, unlike the time scope/vectorscope pair). */
+.spectrumscope-wrap {
+  width: 100%;
+}
+
 /* Vectorscope view: an always-dark "instrument screen" (it's square, the chart is wide), framed
    to read as a CRT tube regardless of the app theme. */
 .vectorscope-wrap {
@@ -654,6 +660,11 @@ select:disabled {
 .vs-trail {
   /* the trace sits above the graticule */
   z-index: 1;
+}
+/* The spectrum analyzer's peak-hold caps live on their own layer, above the bars' phosphor trail —
+   cleared crisply every frame (no persistence of their own), see SpectrumScope.tsx. */
+.vs-peak {
+  z-index: 2;
 }
 /* Corner toolbar (pop-out + tuning gear): dim until hovered/open, so the scope stays the focus. */
 .vs-tools {
