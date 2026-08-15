@@ -60,6 +60,7 @@ pub enum FilterType {
     Peaking,   // PK
     LowShelf,  // LSC
     HighShelf, // HSC
+    Bandpass,  // BP — no gain (unity-peak); used only by the §5.2 "isolate" audition
 }
 
 impl FilterType {
@@ -73,6 +74,7 @@ impl FilterType {
             FilterType::Peaking => "PK",
             FilterType::LowShelf => "LSC",
             FilterType::HighShelf => "HSC",
+            FilterType::Bandpass => "BP",
         }
     }
 }
@@ -507,15 +509,20 @@ fn render_device_block(cfg: &DeviceConfig) -> String {
     let mut filters: Vec<&Filter> = cfg.filters.iter().collect();
     filters.sort_by(|a, b| a.freq_hz.total_cmp(&b.freq_hz));
     for (i, f) in filters.iter().enumerate() {
-        let _ = write!(
-            s,
-            "Filter {}: ON {} Fc {:.0} Hz Gain {:.1} dB Q {:.2}{NL}",
-            i + 1,
-            f.kind.eqapo_token(),
-            f.freq_hz,
-            f.gain_db,
-            f.q,
-        );
+        // A bandpass carries no gain (unity-peak), and EqAPO's BP line takes only Fc + Q.
+        if f.kind == FilterType::Bandpass {
+            let _ = write!(s, "Filter {}: ON BP Fc {:.0} Hz Q {:.2}{NL}", i + 1, f.freq_hz, f.q);
+        } else {
+            let _ = write!(
+                s,
+                "Filter {}: ON {} Fc {:.0} Hz Gain {:.1} dB Q {:.2}{NL}",
+                i + 1,
+                f.kind.eqapo_token(),
+                f.freq_hz,
+                f.gain_db,
+                f.q,
+            );
+        }
     }
     s
 }

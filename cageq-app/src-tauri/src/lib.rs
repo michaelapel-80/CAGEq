@@ -207,6 +207,19 @@ fn activate_slot(slot: Slot, state: State<Backend>) -> Result<ApplyResult, Strin
     }
 }
 
+/// §5.2 isolate: write a bandpass-only config for the active slot (audition one band's region).
+/// Transient — the frontend re-applies the real correction to clear it.
+#[tauri::command]
+fn isolate(freq_hz: f64, q: f64, state: State<Backend>) -> Result<ApplyResult, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, config_dir, .. } => {
+            let applied = core.apply_isolate(freq_hz, q).map_err(|e| e.to_string())?;
+            Ok(apply_result(applied, config_dir))
+        }
+    }
+}
+
 /// Copy slot `from` onto slot `to` (A/B) and make `to` active — a starting point for
 /// a variant (filter.md §5.2). Returns the newly-written config.
 #[tauri::command]
@@ -844,6 +857,7 @@ pub fn run() {
             seed_slot,
             warm_fit,
             activate_slot,
+            isolate,
             copy_slot,
             set_device,
             status,

@@ -1114,11 +1114,11 @@ select:disabled {
     0 0 11px -3px color-mix(in srgb, var(--tg) 55%, transparent);
 }
 
-/* Solo (§5.2): a small "S" in the strip's top-right; dims the other columns while one is soloed. */
-.tg-solo {
+/* Audition buttons (§5.2): "S" (solo) and "I" (isolate) flank the enable LED — S top-left, I
+   top-right — so neither overlaps it. The active one lights up; the other columns dim. */
+.tg-aud {
   position: absolute;
   top: 2px;
-  right: 2px;
   width: 15px;
   height: 15px;
   padding: 0;
@@ -1132,10 +1132,16 @@ select:disabled {
   opacity: 0.45;
   transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
 }
-.tg-solo:hover {
+.tg-aud-l {
+  left: 2px;
+}
+.tg-aud-r {
+  right: 2px;
+}
+.tg-aud:hover {
   opacity: 0.9;
 }
-.tg-solo.on {
+.tg-aud.on {
   opacity: 1;
   color: var(--tg);
   border-color: var(--tg);

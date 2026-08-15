@@ -485,6 +485,29 @@ impl Core {
         morph_to_active(&self.supervisor, &self.inner, ticket)
     }
 
+    /// §5.2 isolate: write a **bandpass-only** config for the active slot — audition one band's
+    /// region with every other filter off. Base pre-gain only (no §4.1 loudness match: a bandpass
+    /// discards most of the energy, so a match would just chase it). Writes directly and does *not*
+    /// touch the slot cache, so a subsequent `activate_slot`/`apply` restores the real correction
+    /// with no extra bookkeeping. Errors if the active slot has no device to scope to.
+    pub fn apply_isolate(&self, freq_hz: f64, q: f64) -> Result<Applied, CoreError> {
+        let _guard = self.inner.apply_lock.lock().unwrap();
+        let device = {
+            let store = self.inner.slots.lock().unwrap();
+            let active = store.active;
+            store.effective().map(|e| e.device).ok_or(CoreError::EmptySlot(active))?
+        };
+        let effective = CalcResult {
+            device,
+            filters: vec![Filter { kind: FilterType::Bandpass, freq_hz, gain_db: 0.0, q }],
+            g_target_db: 0.0,
+            g_max_peak_db: 0.0,
+            reference_curve: Vec::new(),
+        };
+        let base = self.inner.loudness.lock().unwrap().base_pregain_db;
+        write_effective(&self.inner, effective, base, false)
+    }
+
     /// The currently active slot.
     pub fn active_slot(&self) -> Slot {
         self.inner.slots.lock().unwrap().active

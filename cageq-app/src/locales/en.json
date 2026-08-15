@@ -101,6 +101,8 @@
     "enable": "Enable {{name}}",
     "solo": "Solo {{name}} — hear only it in this stage (level-matched)",
     "unsolo": "Unsolo — hear the whole stage again",
+    "isolate": "Isolate {{name}} — a bandpass of just this region (all other filters off)",
+    "unisolate": "Stop isolating — restore the full correction",
     "bandAt": "band at {{hz}}",
     "kindFixed": "{{macro}} macro ({{kind}}) — type is fixed",
     "kindCycle": "{{kind}} — click to change type",

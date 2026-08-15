@@ -55,6 +55,10 @@ export type ToneGridProps = {
   soloIndex?: number | null;
   /** Toggle solo for a band (its storage index). Absent → no solo affordance. */
   onSolo?: (index: number) => void;
+  /** §5.2 isolate: storage index of the band whose region is bandpassed (peaking only), or null. */
+  isolateIndex?: number | null;
+  /** Toggle isolate for a band (its storage index). Shown only for peaking bands. */
+  onIsolate?: (index: number) => void;
 };
 
 const KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
@@ -132,7 +136,7 @@ function KindGlyph({ kind }: { kind: FilterKind }) {
   );
 }
 
-export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focusNonce, hoverIndex, onHover, soloIndex, onSolo, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
+export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focusNonce, hoverIndex, onHover, soloIndex, onSolo, isolateIndex, onIsolate, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
   const { t } = useTranslation();
   const inert = disabled || readOnly; // no interaction while read-only, even without `disabled`
   // Display order: sort indices by Fc; storage order (and thus the indices we pass back)
@@ -180,7 +184,11 @@ export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focu
         return (
           <div
             className={`tg-col${f.fixed ? " tg-col-fixed" : ""}${on ? "" : " tg-col-off"}${hoverIndex === i ? " tg-col-hover" : ""}${
-              soloIndex === i ? " tg-col-solo" : soloIndex != null ? " tg-col-solo-off" : ""
+              soloIndex === i || isolateIndex === i
+                ? " tg-col-solo"
+                : soloIndex != null || isolateIndex != null
+                  ? " tg-col-solo-off"
+                  : ""
             }`}
             key={i}
             data-idx={i}
@@ -190,7 +198,7 @@ export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focu
             {!readOnly && onSolo && (
               <button
                 type="button"
-                className={`tg-solo${soloIndex === i ? " on" : ""}`}
+                className={`tg-aud tg-aud-l${soloIndex === i ? " on" : ""}`}
                 disabled={disabled}
                 aria-pressed={soloIndex === i}
                 title={soloIndex === i ? t("bands.unsolo") : t("bands.solo", { name })}
@@ -198,6 +206,19 @@ export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focu
                 onClick={() => onSolo(i)}
               >
                 S
+              </button>
+            )}
+            {!readOnly && onIsolate && f.kind === "Peaking" && !f.fixed && (
+              <button
+                type="button"
+                className={`tg-aud tg-aud-r${isolateIndex === i ? " on" : ""}`}
+                disabled={disabled}
+                aria-pressed={isolateIndex === i}
+                title={isolateIndex === i ? t("bands.unisolate") : t("bands.isolate", { name })}
+                aria-label={isolateIndex === i ? t("bands.unisolate") : t("bands.isolate", { name })}
+                onClick={() => onIsolate(i)}
+              >
+                I
               </button>
             )}
             {readOnly ? (

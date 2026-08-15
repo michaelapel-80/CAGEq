@@ -149,6 +149,17 @@ fn coefficients(band: &Filter) -> [f64; 6] {
                 (a * (a + 1.0 + (a - 1.0) * cosw - 2.0 * sqrt_a * alpha)) / a0,
             )
         }
+        // RBJ band-pass, 0 dB peak (gain is ignored — the isolate audition uses unity peak).
+        FilterType::Bandpass => {
+            let a0 = 1.0 + alpha;
+            (
+                -(-2.0 * cosw) / a0,
+                -(1.0 - alpha) / a0,
+                alpha / a0,
+                0.0,
+                -alpha / a0,
+            )
+        }
     };
     [1.0, a1, a2, b0, b1, b2]
 }
@@ -214,6 +225,7 @@ fn key(f: &Filter) -> (u8, i64, i64) {
         FilterType::LowShelf => 0,
         FilterType::HighShelf => 1,
         FilterType::Peaking => 2,
+        FilterType::Bandpass => 3,
     };
     (kind, (f.freq_hz * 1000.0).round() as i64, (f.q * 1000.0).round() as i64)
 }

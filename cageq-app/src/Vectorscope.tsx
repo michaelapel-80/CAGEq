@@ -43,7 +43,7 @@ type Params = {
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
-const DEFAULTS: Params = { trailTau: 0.05, glow: 0.60, beam: 1.0, focus: 6, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
+const DEFAULTS: Params = { trailTau: 0.05, glow: 0.60, beam: 1.0, focus: 8, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;

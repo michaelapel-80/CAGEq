@@ -43,7 +43,9 @@ type LoudnessMode = "Comparison" | "FinalVolume";
 type LoudnessSettings = { base_pregain_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 type SlotName = "A" | "B" | "Dry";
-type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
+// Mirrors biquad's FilterKind. "Bandpass" only ever appears in the §5.2 isolate *result* (drawn on
+// the chart), never as an editable band — the grid cycles just Peaking/LowShelf/HighShelf.
+type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass";
 type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean; enabled?: boolean; macro?: string };
 // §3.4 custom EQ is split into three per-slot **stages** — organizational groups of bands
 // that all sum into the one biquad cascade (EqAPO flattens everything; the Rust core still
@@ -576,6 +578,11 @@ function App() {
   const [solo, setSolo] = useState<Solo | null>(null);
   const soloRef = useRef<Solo | null>(null);
   soloRef.current = solo;
+  // §5.2 isolate: audition one (peaking) band's region — a bandpass, everything else off. A separate
+  // apply path (the `isolate` command writes a bandpass-only config); mutually exclusive with solo.
+  const [isolate, setIsolate] = useState<Solo | null>(null);
+  const isolateRef = useRef<Solo | null>(null);
+  isolateRef.current = isolate;
   // Finding #1: active directives in config.txt outside CAGEq's block that stack on top of every
   // correction (e.g. EqAPO's fresh-install default preamp/example filters). Detected once after
   // load; surfaced passively (never a first-run modal) as a line + reversible review panel.
@@ -980,6 +987,20 @@ function App() {
     }
   }
 
+  // §5.2 isolate write: a bandpass-only config at the band's current Fc/Q. In-flight-guarded like
+  // apply() so it shares the coalescing throttle below — the backend reads the isolated device from
+  // the slot cache, so no headphone/target args are needed.
+  async function applyIsolate(freqHz: number, q: number) {
+    try {
+      inFlight.current = true;
+      setResult(await invoke<ApplyResult>("isolate", { freqHz, q }));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      inFlight.current = false;
+    }
+  }
+
   // --- live tone editing -----------------------------------------------------
   // Tone changes auto-apply so they're audible immediately. A coalescing throttle
   // keeps a drag streaming updates (rather than only firing when you let go) without
@@ -988,11 +1009,21 @@ function App() {
   const applyTimer = useRef<number | null>(null);
   const autoApplyRef = useRef<() => void>(() => {});
 
-  // Refreshed every render so a queued timer never fires against stale state.
+  // Refreshed every render so a queued timer never fires against stale state. While a band is
+  // isolated the queued write is a bandpass re-write at its *latest* Fc/Q (so a drag sweeps it),
+  // routed through the same throttle as a normal apply — one write in flight, drag frames fold.
   autoApplyRef.current = () => {
     if (inFlight.current) {
       requestApply(60); // a write is in progress — retry shortly
       return;
+    }
+    const iso = isolateRef.current;
+    if (iso) {
+      const band = stages[iso.stage]?.bands[iso.idx];
+      if (band) {
+        void applyIsolate(band.freq_hz, band.q);
+        return;
+      }
     }
     void apply(true);
   };
@@ -1009,23 +1040,68 @@ function App() {
   // soloed cascade; toggling off re-applies the normal one. Only on A/B (Dry isn't editable).
   const toggleSolo = (idx: number) => {
     if (dryActive) return;
+    isolateRef.current = null;
+    setIsolate(null); // solo and isolate are mutually exclusive audition modes
     const cur = soloRef.current;
     const next = cur && cur.stage === activeStage && cur.idx === idx ? null : { stage: activeStage, idx };
     soloRef.current = next; // writeFit reads this immediately; the delayed apply picks it up
     setSolo(next);
     requestApply(0);
   };
-  // Auto-clear solo (it's a transient monitoring state) and restore the normal cascade. A no-op
-  // when nothing is soloed; the re-apply folds into an edit's own apply when one is already queued.
+  // §5.2 isolate — toggle a bandpass audition of one band's region (peaking bands only; a bandpass
+  // is meaningless for a shelf). Writes a bandpass-only config via the `isolate` command; toggling
+  // off (or any auto-clear) re-applies the normal cascade. Mutually exclusive with solo.
+  const toggleIsolate = (idx: number) => {
+    if (dryActive) return;
+    const band = stages[activeStage].bands[idx];
+    if (!band || band.kind !== "Peaking") return;
+    const cur = isolateRef.current;
+    if (cur && cur.stage === activeStage && cur.idx === idx) {
+      clearIsolate();
+      return;
+    }
+    soloRef.current = null;
+    setSolo(null); // mutual exclusion
+    isolateRef.current = { stage: activeStage, idx };
+    setIsolate({ stage: activeStage, idx });
+    setError("");
+    requestApply(0); // autoApplyRef sees isolateRef → writes the bandpass (throttled, coalesced)
+  };
+  // Auto-clear the transient audition modes and restore the normal cascade. No-ops when inactive;
+  // the re-apply folds into an edit's own apply when one is already queued.
   const clearSolo = () => {
     if (soloRef.current == null) return;
     soloRef.current = null;
     setSolo(null);
     requestApply(0);
   };
-  // Any band edit changes `stages`; a stage-tab switch changes `activeStage`. Either exits solo.
+  const clearIsolate = () => {
+    if (isolateRef.current == null) return;
+    isolateRef.current = null;
+    setIsolate(null);
+    requestApply(0); // overwrite the bandpass config with the real cascade
+  };
+  // Exit any audition *without* re-applying — for structural edits (add/remove/load/undo/toggleStage)
+  // that already fire their own apply; nulling the refs first makes that apply write the normal
+  // cascade. The reset is driven imperatively from each handler rather than a `stages`-watching
+  // effect, so editing the audition band itself (which also changes `stages`) can't trip it.
+  const dropAudition = () => {
+    if (soloRef.current) {
+      soloRef.current = null;
+      setSolo(null);
+    }
+    if (isolateRef.current) {
+      isolateRef.current = null;
+      setIsolate(null);
+    }
+  };
+  // A stage-tab switch exits the audition (the band isn't visible in another stage) and restores
+  // the normal cascade — the one auto-exit that isn't already covered by an edit's own apply.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => clearSolo(), [stages, activeStage]);
+  useEffect(() => {
+    clearSolo();
+    clearIsolate();
+  }, [activeStage]);
 
   // --- undo/redo history --------------------------------------------------------------------
   // Remember the state *before* the current gesture (the first edit since the last commit); a
@@ -1066,6 +1142,7 @@ function App() {
     if (activeSlot === "Dry" || undoStack.length === 0) return;
     const prev = undoStack[undoStack.length - 1];
     historyBaseline.current = null; // the restore itself must not seal a new entry
+    dropAudition();
     setRedoStack((r) => [...r, stages].slice(-50));
     setUndoStack((u) => u.slice(0, -1));
     setStages(prev);
@@ -1075,6 +1152,7 @@ function App() {
     if (activeSlot === "Dry" || redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
     historyBaseline.current = null;
+    dropAudition();
     setUndoStack((u) => [...u, stages].slice(-50));
     setRedoStack((r) => r.slice(0, -1));
     setStages(next);
@@ -1093,6 +1171,12 @@ function App() {
       soloRef.current = null;
       setSolo(null);
       await apply(true);
+    }
+    // Isolate writes directly (doesn't touch the slot cache), so just drop the state — activating
+    // the target slot below overwrites the bandpass config with that slot's real correction.
+    if (isolateRef.current) {
+      isolateRef.current = null;
+      setIsolate(null);
     }
     setActiveSlot(slot);
     if (slot !== "Dry") {
@@ -1142,6 +1226,7 @@ function App() {
     }
     try {
       setError("");
+      dropAudition(); // switching to the copy replaces the document — exit any solo/isolate
       const applied = await invoke<ApplyResult>("copy_slot", { from, to });
       setSlotInputs((prev) => ({ ...prev, [to]: src }));
       setSlotPreset((prev) => ({ ...prev, [to]: prev[from] })); // carry the source's preset attribution
@@ -1318,6 +1403,7 @@ function App() {
   // path → pulse only, no grid focus-steal (you stay on the chart to drag/wheel it).
   const addFilterAt = (freq_hz: number, gain_db: number) => {
     captureBaseline();
+    dropAudition(); // a new band is a structural change — exit any solo/isolate
     const idx = stages[activeStage].bands.length;
     setStageBands(activeStage, (cf) => [...cf, { kind: "Peaking", freq_hz, gain_db, q: 1 }]);
     markNewBand(idx, false);
@@ -1329,6 +1415,7 @@ function App() {
   // and open its Fc for typing straight away (keyboard-first).
   const addFilter = () => {
     captureBaseline();
+    dropAudition(); // a new band is a structural change — exit any solo/isolate
     const bands = stages[activeStage].bands;
     const idx = bands.length;
     setStageBands(activeStage, (cf) => [...cf, { kind: "Peaking", freq_hz: widestGapHz(bands), gain_db: 0, q: 1 }]);
@@ -1338,8 +1425,20 @@ function App() {
   };
   const updateFilter = (i: number, patch: Partial<CustomFilter>, delay = 0) => {
     captureBaseline();
+    const iso = isolateRef.current;
+    const sol = soloRef.current;
+    const editingIso = iso != null && iso.stage === activeStage && iso.idx === i;
+    const editingSolo = sol != null && sol.stage === activeStage && sol.idx === i;
     setStageBands(activeStage, (cf) => cf.map((f, j) => (j === i ? { ...f, ...patch } : f)));
-    requestApply(delay);
+    if (editingIso || editingSolo) {
+      // Editing the audition band itself keeps it alive: the throttled apply re-reads the isolated
+      // band's latest Fc/Q (sweeps the bandpass) or re-applies the soloed cascade with the edit.
+      requestApply(delay);
+    } else {
+      // Editing any *other* band exits the audition and returns to the normal cascade.
+      if (sol || iso) dropAudition();
+      requestApply(delay);
+    }
     // delay 0 is the final/commit call (scrub release, blur, Enter, kind cycle, bypass toggle);
     // delay 70 is a live throttled input mid-drag, which must not seal a history entry.
     if (delay === 0) commitHistory();
@@ -1349,6 +1448,7 @@ function App() {
     // chart's double-click-to-remove would otherwise slip past that). Guard at the source.
     if (stages[activeStage].bands[i]?.fixed) return;
     captureBaseline();
+    dropAudition(); // removing a band shifts indices — exit any solo/isolate
     setStageBands(activeStage, (cf) => cf.filter((_, j) => j !== i));
     setNewBand(null); // storage indices shift on removal — drop any stale highlight
     requestApply(0);
@@ -1364,6 +1464,7 @@ function App() {
   // Enable/disable a whole stage — a big tonal jump the §5.3a morph smooths.
   const toggleStage = (id: StageId) => {
     captureBaseline();
+    dropAudition(); // enabling/disabling a stage changes the cascade — exit any solo/isolate
     setStages((st) => ({ ...st, [id]: { ...st[id], enabled: !st[id].enabled } }));
     requestApply(0);
     commitHistory();
@@ -1375,6 +1476,7 @@ function App() {
   const loadTemplate = (t: FilterTemplate) => {
     if (activeSlot === "Dry") return;
     captureBaseline(); // dropping a template's bands into a stage is one undoable step
+    dropAudition();
     const bands = t.stage === "tone" ? ensureMacros(t.bands) : t.bands;
     setStages((st) => ({ ...st, [t.stage]: { enabled: true, bands } }));
     setActiveStage(t.stage);
@@ -1386,6 +1488,7 @@ function App() {
   // and flag divergence (dirty). The sig is captured from the exact normalized state applied.
   const loadPreset = (p: PresetState, ref?: { id: string; name: string; ver?: string }) => {
     if (activeSlot === "Dry") return;
+    dropAudition();
     const stages = normalizeStages(p.stages);
     setQuery(p.model);
     setMeasurementPath(p.measurementPath);
@@ -2396,6 +2499,8 @@ function App() {
                         onHover={setHoverBand}
                         soloIndex={solo?.stage === activeStage ? solo.idx : null}
                         onSolo={toggleSolo}
+                        isolateIndex={isolate?.stage === activeStage ? isolate.idx : null}
+                        onIsolate={toggleIsolate}
                         onInput={(i, patch) => updateFilter(i, patch, 70)}
                         onCommit={(i, patch) => updateFilter(i, patch, 0)}
                         onAdd={addFilter}

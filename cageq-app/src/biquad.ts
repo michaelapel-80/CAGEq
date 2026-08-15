@@ -11,7 +11,7 @@
  * frame (filter.md §5.2 performance rule: a drag recomputes only the additive curve).
  */
 
-export type FilterKind = "Peaking" | "LowShelf" | "HighShelf";
+export type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass";
 export type Band = { kind: FilterKind; freq_hz: number; gain_db: number; q: number };
 
 /** Sample rate the filters are defined against (matches the sidecar's `fs` default). */
@@ -29,7 +29,15 @@ function coefficients(kind: FilterKind, fc: number, gainDb: number, q: number, f
   const sqrtA = Math.sqrt(a);
 
   let a0: number, a1: number, a2: number, b0: number, b1: number, b2: number;
-  if (kind === "Peaking") {
+  if (kind === "Bandpass") {
+    // RBJ band-pass, 0 dB peak (gain ignored — the §5.2 isolate audition uses unity peak).
+    a0 = 1 + alpha;
+    a1 = -(-2 * cosw) / a0;
+    a2 = -(1 - alpha) / a0;
+    b0 = alpha / a0;
+    b1 = 0;
+    b2 = -alpha / a0;
+  } else if (kind === "Peaking") {
     a0 = 1 + alpha / a;
     a1 = -(-2 * cosw) / a0;
     a2 = -(1 - alpha / a) / a0;

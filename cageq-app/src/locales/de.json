@@ -101,6 +101,8 @@
     "enable": "{{name}} aktivieren",
     "solo": "{{name}} solo – nur dieses Band in dieser Stufe hören (pegelangepasst)",
     "unsolo": "Solo aus – wieder die ganze Stufe hören",
+    "isolate": "{{name}} isolieren – ein Bandpass nur dieser Region (alle anderen Filter aus)",
+    "unisolate": "Isolieren aus – die volle Korrektur wiederherstellen",
     "bandAt": "Band bei {{hz}}",
     "kindFixed": "{{macro}}-Macro ({{kind}}) – Typ ist fest",
     "kindCycle": "{{kind}} – zum Ändern des Typs klicken",
