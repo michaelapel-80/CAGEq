@@ -34,6 +34,32 @@ struct TestSignalState(std::sync::Mutex<Option<cageq_monitor::TestSignal>>);
 #[derive(Default)]
 struct ScopeViewers(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
+/// §5.3c data plane: per-stream `Channel` subscribers. These streams used to ride `app.emit`,
+/// but Tauri delivers each backend→frontend *event* by evaluating a script in the webview — at
+/// this app's sustained ~120 events/s (meter + spectrum at 60 fps each) that churned memory in
+/// WebView2 at ~100 MiB/min, faster than its GC kept up (the "out of memory" crash class).
+/// `tauri::ipc::Channel` rides the raw IPC pipe instead — the documented transport for exactly
+/// this kind of streaming. Each webview registers one channel per stream for its whole lifetime
+/// (see frontend `streams.ts`); a dead channel (closed pop-out, reloaded webview) is dropped the
+/// first time a send to it fails. Arcs so the monitor's capture-thread closures can hold them
+/// across monitor restarts (device changes), same pattern as `ScopeViewers`.
+#[derive(Default)]
+struct StreamSubs {
+    meter: std::sync::Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<cageq_monitor::MeterUpdate>>>>,
+    spectrum: std::sync::Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<cageq_monitor::SpectrumUpdate>>>>,
+    scope: std::sync::Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<cageq_monitor::ScopeUpdate>>>>,
+}
+
+/// Send one stream payload to every live subscriber, dropping any whose webview is gone.
+fn fan_out<T: Clone + serde::Serialize>(
+    subs: &std::sync::Mutex<Vec<tauri::ipc::Channel<T>>>,
+    value: T,
+) {
+    if let Ok(mut list) = subs.lock() {
+        list.retain(|ch| ch.send(value.clone()).is_ok());
+    }
+}
+
 #[derive(serde::Serialize)]
 struct ApplyResult {
     hash: String,
@@ -320,39 +346,58 @@ fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
 }
 
 /// §5.3c: start post-EQ loudness monitoring on `device` (the selected endpoint's id, or `None`
-/// for the default render endpoint). Opens WASAPI loopback and emits a `monitor` event
-/// (`MeterUpdate`) ~20×/s. Replaces any monitor already running (e.g. after a device change).
+/// for the default render endpoint). Opens WASAPI loopback and streams `MeterUpdate`s (and the
+/// spectrum/scope streams) to every channel registered via `subscribe_*` — see [`StreamSubs`] for
+/// why channels, not events. Replaces any monitor already running (e.g. after a device change).
 #[tauri::command]
 fn start_monitor(
     device: Option<String>,
-    app: tauri::AppHandle,
     state: State<MonitorState>,
     scope_viewers: State<ScopeViewers>,
+    subs: State<StreamSubs>,
 ) -> Result<(), String> {
-    use tauri::Emitter;
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.take() {
         existing.stop();
     }
-    let sink = app.clone();
-    let spectrum_sink = app.clone();
-    let scope_sink = app.clone();
+    let meter_subs = subs.meter.clone();
+    let spectrum_subs = subs.spectrum.clone();
+    let scope_subs = subs.scope.clone();
     let monitor = cageq_monitor::Monitor::start(
         device,
         scope_viewers.0.clone(),
-        move |update| {
-            // A dropped listener just means no one's watching; ignore send failures.
-            let _ = sink.emit("monitor", update);
-        },
-        move |spectrum| {
-            let _ = spectrum_sink.emit("spectrum", spectrum);
-        },
-        move |scope| {
-            let _ = scope_sink.emit("scope", scope);
-        },
+        move |update| fan_out(&meter_subs, update),
+        move |spectrum| fan_out(&spectrum_subs, spectrum),
+        move |scope| fan_out(&scope_subs, scope),
     )?;
     *guard = Some(monitor);
     Ok(())
+}
+
+/// Register this webview's meter-stream channel — once per webview lifetime (frontend
+/// `streams.ts` guards against re-registering); cleaned up by `fan_out` when the webview dies.
+#[tauri::command]
+fn subscribe_meter(channel: tauri::ipc::Channel<cageq_monitor::MeterUpdate>, subs: State<StreamSubs>) {
+    if let Ok(mut list) = subs.meter.lock() {
+        list.push(channel);
+    }
+}
+
+/// Register this webview's spectrum-stream channel (see `subscribe_meter`).
+#[tauri::command]
+fn subscribe_spectrum(channel: tauri::ipc::Channel<cageq_monitor::SpectrumUpdate>, subs: State<StreamSubs>) {
+    if let Ok(mut list) = subs.spectrum.lock() {
+        list.push(channel);
+    }
+}
+
+/// Register this webview's scope-stream channel (see `subscribe_meter`). Whether the scope
+/// stream carries data at all stays gated by `set_scope_viewer`, orthogonal to the transport.
+#[tauri::command]
+fn subscribe_scope(channel: tauri::ipc::Channel<cageq_monitor::ScopeUpdate>, subs: State<StreamSubs>) {
+    if let Ok(mut list) = subs.scope.lock() {
+        list.push(channel);
+    }
 }
 
 /// A vectorscope view opened (`active = true`) or closed (`false`). Refcounted so the loopback
@@ -850,6 +895,7 @@ pub fn run() {
             app.manage(MonitorState::default());
             app.manage(TestSignalState::default());
             app.manage(ScopeViewers::default());
+            app.manage(StreamSubs::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -869,6 +915,9 @@ pub fn run() {
             start_monitor,
             stop_monitor,
             set_scope_viewer,
+            subscribe_meter,
+            subscribe_spectrum,
+            subscribe_scope,
             start_test_signal,
             stop_test_signal,
             open_output_settings,

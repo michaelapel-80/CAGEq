@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type Band, type BiquadCoeffs, type BiquadState, inverseBiquadCoeffs, zeroState, stepBiquad } from "./biquad";
+import { scopeStream } from "./streams";
 
 /** A stereo vectorscope window from the loopback (see cageq-monitor `ScopeUpdate`): interleaved
  *  `l0, r0, l1, r1, …` sample pairs (≈ -1..1) in capture order, a signal flag, and the mix rate. */
@@ -119,28 +120,28 @@ export function Vectorscope({
     gain: number;
   }>({ active: false, filtersRef: null, rate: 0, coeffs: [], stateL: [], stateR: [], gain: 1 });
 
-  // Own the loopback `scope` subscription (samples) + the `scope-eq` broadcast (cascade). Both exist
-  // only while this view is mounted (inline or pop-out), so nothing touches React elsewhere. On
-  // mount we ask the main window to (re)send the cascade, since events aren't retained.
+  // Own the loopback scope-stream subscription (samples, a Channel-backed bus — see streams.ts
+  // for why not `listen` events) + the `scope-eq` broadcast (cascade; a real event, it only fires
+  // on EQ changes). Both exist only while this view is mounted (inline or pop-out), so nothing
+  // touches React elsewhere. On mount we ask the main window to (re)send the cascade, since
+  // events aren't retained. In the pop-out window this subscription is also what registers that
+  // webview's own scope channel with the backend.
   useEffect(() => {
     let active = true;
-    const unlisteners: (() => void)[] = [];
+    const unsubScope = scopeStream.subscribe((s) => {
+      if (active) scopeRef.current = s;
+    });
+    let unlistenEq: (() => void) | undefined;
     void (async () => {
-      unlisteners.push(
-        await listen<ScopeData>("scope", (e) => {
-          if (active) scopeRef.current = e.payload;
-        }),
-      );
-      unlisteners.push(
-        await listen<ScopeEq>("scope-eq", (e) => {
-          if (active) eqRef.current = e.payload;
-        }),
-      );
+      unlistenEq = await listen<ScopeEq>("scope-eq", (e) => {
+        if (active) eqRef.current = e.payload;
+      });
       if (active) void emit("scope-eq-request");
     })();
     return () => {
       active = false;
-      unlisteners.forEach((u) => u());
+      unsubScope();
+      unlistenEq?.();
     };
   }, []);
 

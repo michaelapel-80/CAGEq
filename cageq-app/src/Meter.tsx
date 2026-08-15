@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { meterStream, type MeterData } from "./streams";
 
 /**
  * §5.3c post-EQ output meter, laid out vertically to sit beside the chart (no vertical growth, so
@@ -12,17 +12,8 @@ import { listen } from "@tauri-apps/api/event";
  * Independent of the custom-APO work. Mounting starts capture, unmounting stops it.
  */
 
-type MeterUpdate = {
-  peak_db: number;
-  rms_db: number;
-  momentary_lufs: number;
-  short_term_lufs: number;
-  signal: boolean;
-  /** Phosphor-persistence histogram: per-segment brightness 0..1, quietest segment first. */
-  bins: number[];
-  /** Endpoint mix sample rate (Hz); 0 while the session is (re)opening. */
-  sample_rate: number;
-};
+// Payload shape (`MeterData`, mirroring cageq-monitor's MeterUpdate) lives in streams.ts, which
+// owns the channel-based transport — see there for why channels, not `listen` events.
 
 // Level bar scale (dBFS). Must match the backend histogram range (BAR_MIN_DB) so the peak/RMS
 // marks line up with the phosphor fill.
@@ -53,31 +44,28 @@ export function Meter({
   onSampleRate?: (hz: number | null) => void;
 }) {
   const { t } = useTranslation();
-  const [bar, setBar] = useState<MeterUpdate | null>(null); // fast: bars + marks
-  const [nums, setNums] = useState<MeterUpdate | null>(null); // throttled: readouts
+  const [bar, setBar] = useState<MeterData | null>(null); // fast: bars + marks
+  const [nums, setNums] = useState<MeterData | null>(null); // throttled: readouts
   const [err, setErr] = useState<string | null>(null);
   const lastNums = useRef(0);
   const lastRate = useRef<number | null>(null);
 
   useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
     lastRate.current = null; // a new session may report a different (or the same) rate — re-emit it
+    const unsub = meterStream.subscribe((update) => {
+      setBar(update);
+      const rate = update.sample_rate || null;
+      if (rate !== lastRate.current) {
+        lastRate.current = rate;
+        onSampleRate?.(rate);
+      }
+      const now = performance.now();
+      if (now - lastNums.current >= NUMS_INTERVAL_MS) {
+        lastNums.current = now;
+        setNums(update);
+      }
+    });
     (async () => {
-      unlisten = await listen<MeterUpdate>("monitor", (e) => {
-        if (!active) return;
-        setBar(e.payload);
-        const rate = e.payload.sample_rate || null;
-        if (rate !== lastRate.current) {
-          lastRate.current = rate;
-          onSampleRate?.(rate);
-        }
-        const now = performance.now();
-        if (now - lastNums.current >= NUMS_INTERVAL_MS) {
-          lastNums.current = now;
-          setNums(e.payload);
-        }
-      });
       try {
         await invoke("start_monitor", { device: deviceId || null });
         setErr(null);
@@ -86,8 +74,7 @@ export function Meter({
       }
     })();
     return () => {
-      active = false;
-      unlisten?.();
+      unsub();
       onSampleRate?.(null); // monitor is stopping — the header rate is no longer live
       invoke("stop_monitor").catch(() => {});
     };

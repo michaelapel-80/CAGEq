@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type Band, type BiquadCoeffs, type BiquadState, inverseBiquadCoeffs, zeroState, stepBiquad } from "./biquad";
+import { scopeStream } from "./streams";
 import type { ScopeData, ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters (see Vectorscope's identical rationale — a live panel beats a
@@ -168,29 +169,28 @@ export function TimeScope() {
     gain: number;
   }>({ active: false, filtersRef: null, rate: 0, coeffs: [], stateL: [], stateR: [], gain: 1 });
 
-  // Own the `scope` + `scope-eq` subscriptions — independent of the vectorscope's, so either can be
-  // open alone. `set_scope_viewer` is a shared count (see Vectorscope/App), so both registering
-  // costs nothing extra beyond the one loopback stream already running while any scope view is open.
+  // Own the scope-stream + `scope-eq` subscriptions — independent of the vectorscope's, so either
+  // can be open alone. The sample stream is a Channel-backed bus (streams.ts — not `listen`
+  // events, whose per-event webview eval churned WebView2's memory at 60 fps); `scope-eq` stays a
+  // real event, it only fires on EQ changes. `set_scope_viewer` is a shared count (see
+  // Vectorscope/App) gating whether the backend produces scope data at all.
   useEffect(() => {
     let active = true;
-    const unlisteners: (() => void)[] = [];
+    const unsubScope = scopeStream.subscribe((s) => {
+      if (active) scopeRef.current = s;
+    });
+    let unlistenEq: (() => void) | undefined;
     void (async () => {
-      unlisteners.push(
-        await listen<ScopeData>("scope", (e) => {
-          if (active) scopeRef.current = e.payload;
-        }),
-      );
-      unlisteners.push(
-        await listen<ScopeEq>("scope-eq", (e) => {
-          if (active) eqRef.current = e.payload;
-        }),
-      );
+      unlistenEq = await listen<ScopeEq>("scope-eq", (e) => {
+        if (active) eqRef.current = e.payload;
+      });
       if (active) void emit("scope-eq-request");
     })();
     void invoke("set_scope_viewer", { active: true });
     return () => {
       active = false;
-      unlisteners.forEach((u) => u());
+      unsubScope();
+      unlistenEq?.();
       void invoke("set_scope_viewer", { active: false });
     };
   }, []);

@@ -12,6 +12,7 @@ import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import { ScrubNumber } from "./ScrubNumber";
 import { Meter } from "./Meter";
+import { spectrumStream } from "./streams";
 import { Vectorscope } from "./Vectorscope";
 import { TimeScope } from "./TimeScope";
 import { SpectrumScope } from "./SpectrumScope";
@@ -516,29 +517,19 @@ function App() {
   }, [theme]);
   const cycleTheme = () => setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
   // Live post-EQ spectrum (loopback FFT) drawn on the chart. The Meter component owns start/stop
-  // of the capture; here we just subscribe to the `spectrum` events it produces. A ref, not state:
-  // this arrives at up to ~60 fps for as long as the app is open, and `setState` would re-render
-  // the *entire* App tree (every panel, the grid, the library) on every frame indefinitely — real,
-  // continuous work that a plain function component doesn't skip just because its own JSX output
-  // doesn't end up changing. EqChart reads the ref itself via its own rAF loop (same pattern as
-  // Vectorscope's `scopeRef`), so arrival never touches React at all.
+  // of the capture; here we just subscribe to the spectrum stream it produces (a Channel-backed
+  // bus, see streams.ts — not `listen` events, whose per-event webview eval churned WebView2's
+  // memory at this rate). A ref, not state: this arrives at up to ~60 fps for as long as the app
+  // is open, and `setState` would re-render the *entire* App tree (every panel, the grid, the
+  // library) on every frame indefinitely — real, continuous work that a plain function component
+  // doesn't skip just because its own JSX output doesn't end up changing. EqChart reads the ref
+  // itself via its own rAF loop (same pattern as Vectorscope's `scopeRef`), so arrival never
+  // touches React at all.
   const spectrumRef = useRef<SpectrumData | null>(null);
   // The selected output's live mix sample rate (Hz), reported by the loopback monitor (§8 read-only
   // format display). Null when monitoring isn't running yet. Shown next to the device picker.
   const [sampleRate, setSampleRate] = useState<number | null>(null);
-  useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    void (async () => {
-      unlisten = await listen<SpectrumData>("spectrum", (e) => {
-        if (active) spectrumRef.current = e.payload;
-      });
-    })();
-    return () => {
-      active = false;
-      unlisten?.();
-    };
-  }, []);
+  useEffect(() => spectrumStream.subscribe((s) => (spectrumRef.current = s)), []);
   // Align the vertical meter bars to the chart's *plot area* (top gridline → X axis) rather than
   // letting them stretch past it (the chart-wrap also holds the legend). Measured near the return.
   const chartWrapRef = useRef<HTMLDivElement>(null);
@@ -1376,7 +1367,7 @@ function App() {
     const capture = async (settleMs: number, ms: number): Promise<SpectrumData[]> => {
       await sleep(settleMs);
       const frames: SpectrumData[] = [];
-      const un = await listen<SpectrumData>("spectrum", (e) => frames.push(e.payload));
+      const un = spectrumStream.subscribe((s) => frames.push(s));
       try {
         await sleep(ms);
       } finally {

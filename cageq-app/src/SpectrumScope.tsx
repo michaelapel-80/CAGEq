@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listen } from "@tauri-apps/api/event";
+import { spectrumStream } from "./streams";
 import type { SpectrumData } from "./EqChart";
 
 /** Live-tunable render parameters — same rationale as Vectorscope/TimeScope's panels. `trailTau`
@@ -109,21 +109,9 @@ export function SpectrumScope() {
   const resW = Math.round(width * dpr);
   const resH = Math.round(height * dpr);
 
-  // Passive listener — Meter.tsx owns starting/stopping the underlying capture (same pattern as
-  // App's `spectrum` subscription for EqChart's backdrop).
-  useEffect(() => {
-    let active = true;
-    let un: (() => void) | undefined;
-    void (async () => {
-      un = await listen<SpectrumData>("spectrum", (e) => {
-        if (active) dataRef.current = e.payload;
-      });
-    })();
-    return () => {
-      active = false;
-      un?.();
-    };
-  }, []);
+  // Passive subscriber — Meter.tsx owns starting/stopping the underlying capture; the stream is
+  // the Channel-backed bus (streams.ts, not `listen` events), same as EqChart's backdrop.
+  useEffect(() => spectrumStream.subscribe((s) => (dataRef.current = s)), []);
 
   // Static graticule: a few dBFS reference lines + one vertical guide per frequency decade
   // (100/1k/10k — deliberately minimal, this view's whole point is staying uncluttered). Redrawn

@@ -337,6 +337,16 @@ mod windows_impl {
         Ok(())
     }
 
+    /// Round to a fixed number of decimal digits before it goes out over IPC. `f32`'s shortest
+    /// round-trip text (what serde_json emits) can run to 8-9 significant digits even though only
+    /// ~1-2 decimals are ever meaningful here — at ~60Hz across a few hundred bins that difference
+    /// is real, sustained JSON-parse garbage on the JS side (a WebView2 GC-pressure finding, not a
+    /// display concern), so we quantize outgoing values instead of the physically-precise ones.
+    fn round_to(v: f32, decimals: i32) -> f32 {
+        let scale = 10f32.powi(decimals);
+        (v * scale).round() / scale
+    }
+
     fn to_db(linear: f32) -> f32 {
         if linear <= 0.0 {
             DB_FLOOR
@@ -481,9 +491,10 @@ mod windows_impl {
                     SPEC_FLOOR
                 };
                 self.peak_db[i] = (self.peak_db[i] - drop).max(cur);
-                db.push(cur);
+                db.push(round_to(cur, 1));
             }
-            SpectrumUpdate { db, peak_db: self.peak_db.clone(), f_min: SPEC_F_MIN, f_max: SPEC_F_MAX }
+            let peak_db = self.peak_db.iter().map(|&v| round_to(v, 1)).collect();
+            SpectrumUpdate { db, peak_db, f_min: SPEC_F_MIN, f_max: SPEC_F_MAX }
         }
     }
 
@@ -746,7 +757,7 @@ mod windows_impl {
                         ebu.loudness_shortterm().unwrap_or(f64::NEG_INFINITY),
                     ),
                     signal: last_signal.elapsed() < SILENCE_GAP,
-                    bins: intensity.clone(),
+                    bins: intensity.iter().map(|&v| round_to(v, 3)).collect(),
                     sample_rate: rate,
                 });
 
