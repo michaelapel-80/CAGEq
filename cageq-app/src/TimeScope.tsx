@@ -9,9 +9,13 @@ import type { ScopeData, ScopeEq } from "./Vectorscope";
  *  recompile). `undistort` shares Vectorscope's meaning and machinery: it undoes the §4.1/§4.2
  *  preamp *and* inverse-filters the applied EQ, recovering the pre-EQ level and shape rather than
  *  just amplifying the post-EQ trace — a manual gain knob would need re-tuning every time the
- *  preamp changes (a different headphone/target/slot), this tracks it automatically. */
-type Params = { trailTau: number; glow: number; beam: number; undistort: boolean };
-const DEFAULTS: Params = { trailTau: 0.07, glow: 0.75, beam: 3.0, undistort: true };
+ *  preamp changes (a different headphone/target/slot), this tracks it automatically. `windowMs` is
+ *  the displayed time span — decoupled from the backend's ~16 ms emission size once a ring buffer
+ *  is needed for triggering anyway, so it's exposed in both modes, not just when triggered.
+ *  `trigger`/`triggerFilterHz` are surfaced separately (`trigger` as a quick toolbar toggle, not a
+ *  panel slider — it's a mode switch flipped often, same reasoning as the L/R⇄Mix toggle). */
+type Params = { trailTau: number; glow: number; beam: number; undistort: boolean; windowMs: number; trigger: boolean; triggerFilterHz: number };
+const DEFAULTS: Params = { trailTau: 0.07, glow: 0.6, beam: 3.0, undistort: true, windowMs: 20, trigger: true, triggerFilterHz: 100 };
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
 // Peak-hold ballistics for the faint clip-reference lines — instant attack, brief hold, then
@@ -32,6 +36,29 @@ const DB_FLOOR = -120;
 // bandwidth) survives close to full height. Time-based, not sample-count, so it's identical at
 // 44.1/48/96/192 kHz. Only affects this reference line — the drawn trace itself is untouched.
 const PEAK_SMOOTH_MS = 0.3;
+
+// --- Triggering ---------------------------------------------------------------------------
+// A stable oscilloscope-style trigger needs pre/post-trigger history the raw ~16 ms `scope`
+// windows alone don't provide, so incoming samples are appended to a ring buffer (raw display
+// samples + a persistently-filtered mono trigger-detector signal, both written incrementally as
+// data streams in — never re-filtered from scratch each frame, which would both waste work on the
+// overlapping portion and reset the filter's state every frame, corrupting its settling).
+const RING_CAP = 1 << 17; // ~2.7 s at 48 kHz / ~680 ms at 192 kHz — generous, trivial memory
+const TRIGGER_PRE_FRAC = 0.25; // where the trigger point sits across the display window
+const TRIGGER_SEARCH_MS = 250; // how far back to look for a qualifying edge before giving up
+const TRIGGER_FILTER_Q = 0.707; // Butterworth — a clean rolloff, no resonant peaking
+
+/** RBJ low-pass biquad (cookbook form), in this file's `BiquadCoeffs` convention. Used only to
+ *  condition the *trigger-detector* signal (HF-reject trigger coupling, same idea a real scope's
+ *  trigger source filter uses) — the displayed trace is always full-bandwidth. Kept local: it's a
+ *  TimeScope-internal rendering detail, not part of the EQ pipeline other code needs to share. */
+function lowpassCoeffs(f0: number, q: number, fs: number): BiquadCoeffs {
+  const w0 = (2 * Math.PI * f0) / fs;
+  const cosw0 = Math.cos(w0);
+  const alpha = Math.sin(w0) / (2 * q);
+  const a0 = 1 + alpha;
+  return { b0: (1 - cosw0) / 2 / a0, b1: (1 - cosw0) / a0, b2: (1 - cosw0) / 2 / a0, a1: (-2 * cosw0) / a0, a2: (1 - alpha) / a0 };
+}
 
 /** Lane geometry (vertical centre + amplitude scale + label) for the current channel mode — shared
  *  between the graticule and the trace so they always agree. `amp` leaves a small margin (0.5 of
@@ -55,13 +82,18 @@ function parseHex(hex: string): [number, number, number] {
 }
 
 /**
- * §5.3d time-domain scope (v1, free-running — see filter.md discussion): the loopback's L/R
+ * §5.3d time-domain scope (v2, with triggering — see filter.md discussion): the loopback's L/R
  * channels plotted against time, stacked in two lanes (L on top, R on bottom), each with its own
- * zero-centreline. No triggering yet — each emitted window (§8 `scope` event, ~16 ms of audio) is
- * simply stretched across the full width and redrawn, phosphor-style, on top of the fading
- * previous one. On non-periodic material (most real mixes) consecutive windows won't retrace the
- * same shape, so persistence reads as a soft blur rather than a locked waveform — expected until
- * triggering lands.
+ * zero-centreline, phosphor-style persistence. `trigger` off (default) is free-running — a fixed
+ * `windowMs` span of the most recent samples, redrawn each `scope` event; on non-periodic material
+ * (most real mixes) consecutive windows won't retrace the same shape, so persistence reads as a
+ * soft blur rather than a locked waveform. `trigger` on searches a lowpass-filtered mono version of
+ * the signal (HF-reject trigger coupling — the display itself stays full-bandwidth) for the most
+ * recent rising zero-crossing within `TRIGGER_SEARCH_MS`, anchoring the display window there
+ * instead; no qualifying edge in range falls back to the same free-running position (the auto-
+ * trigger/timeout behaviour, for free — no separate timer needed since the search is itself bounded
+ * to a fixed lookback each frame). Best on bass/kick-heavy or genuinely periodic (oscilloscope-
+ * music) material; broadband, transient-heavy passages may still drift between frames.
  *
  * Deliberately does *not* auto-flag clipping (a v1 threshold highlight was tried and dropped): the
  * §4.2 headroom pre-gain already keeps normal operation away from true digital clipping, streaming
@@ -191,6 +223,19 @@ export function TimeScope({ height = 215 }: { height?: number }) {
     let peakDb: number[] = [];
     let peakHoldUntil: number[] = [];
 
+    // Triggering: a circular buffer of the (possibly undistorted) display samples, plus a parallel
+    // buffer of a lowpass-filtered mono trigger-detector value at the same indices — both written
+    // incrementally below as data arrives. `totalWritten` is a monotonic sample counter (not a
+    // wrapping pointer); physical ring index = `phys(globalIndex)`. See the module-level comment.
+    const ringL = new Float64Array(RING_CAP);
+    const ringR = new Float64Array(RING_CAP);
+    const ringTrig = new Float64Array(RING_CAP);
+    let totalWritten = 0;
+    const phys = (globalIdx: number) => (((globalIdx % RING_CAP) + RING_CAP) % RING_CAP);
+    // The trigger filter's running state persists across windows (a real filter, not re-zeroed each
+    // frame) — rebuilt only when the rate or the tuned cutoff changes, same pattern as `invRef`.
+    const trig = { coeffs: null as BiquadCoeffs | null, state: zeroState(), rate: 0, hz: 0 };
+
     const render = () => {
       const now = performance.now();
       const dt = Math.min(0.1, (now - last) / 1000);
@@ -218,6 +263,11 @@ export function TimeScope({ height = 215 }: { height?: number }) {
       // the trace path further down both read the identical (possibly undistorted) samples.
       let outL: Float64Array | null = null;
       let outR: Float64Array | null = null;
+      // The window actually drawn — free-run: the newest `windowMs`; triggered: anchored at the
+      // most recent qualifying edge found in the ring buffer. Set below, after outL/outR exist.
+      let dispL: Float64Array | null = null;
+      let dispR: Float64Array | null = null;
+      let dispN = 0;
       if (isNew) {
         drawn = s;
         const xy = s!.xy;
@@ -279,6 +329,55 @@ export function TimeScope({ height = 215 }: { height?: number }) {
             peakHoldUntil[lane] = now + PEAK_HOLD_MS;
           }
         }
+
+        // Feed the ring buffer: raw display samples plus a lowpass-filtered mono trigger-detector
+        // value, one sample at a time so the filter's state stays continuous across windows (no
+        // re-filtering, no transient reset). Rebuild the filter only when rate/cutoff changed.
+        if (!trig.coeffs || trig.rate !== rate || trig.hz !== p.triggerFilterHz) {
+          trig.coeffs = lowpassCoeffs(p.triggerFilterHz, TRIGGER_FILTER_Q, rate);
+          trig.state = zeroState();
+          trig.rate = rate;
+          trig.hz = p.triggerFilterHz;
+        }
+        for (let i = 0; i < n; i++) {
+          const idx = phys(totalWritten);
+          ringL[idx] = outL[i];
+          ringR[idx] = outR[i];
+          ringTrig[idx] = stepBiquad(trig.coeffs, trig.state, (outL[i] + outR[i]) / 2);
+          totalWritten++;
+        }
+
+        // Pick the display window: free-run always anchors at the newest valid position; triggered
+        // searches backward (bounded to TRIGGER_SEARCH_MS) for the most recent rising zero-crossing
+        // in the filtered trigger signal, falling back to the free-run anchor if none qualifies —
+        // that fallback *is* the auto-trigger/timeout behaviour, no separate timer needed since the
+        // search window itself is bounded fresh every frame.
+        const windowSamples = Math.max(2, Math.round(rate * (p.windowMs / 1000)));
+        const preSamples = Math.round(windowSamples * TRIGGER_PRE_FRAC);
+        const postSamples = windowSamples - preSamples;
+        const ringCount = Math.min(totalWritten, RING_CAP);
+        if (ringCount >= windowSamples) {
+          const tMax = totalWritten - postSamples; // newest position with enough post-trigger data
+          let t = tMax;
+          if (p.trigger) {
+            const searchSamples = Math.round(rate * (TRIGGER_SEARCH_MS / 1000));
+            const tMin = Math.max(totalWritten - ringCount + preSamples, tMax - searchSamples);
+            for (let c = tMax; c > tMin; c--) {
+              if (ringTrig[phys(c - 1)] <= 0 && ringTrig[phys(c)] > 0) {
+                t = c;
+                break;
+              }
+            }
+          }
+          dispN = windowSamples;
+          dispL = new Float64Array(windowSamples);
+          dispR = new Float64Array(windowSamples);
+          for (let j = 0; j < windowSamples; j++) {
+            const idx = phys(t - preSamples + j);
+            dispL[j] = ringL[idx];
+            dispR[j] = ringR[idx];
+          }
+        }
       }
 
       // 1) Fade the trace toward transparent.
@@ -305,16 +404,19 @@ export function TimeScope({ height = 215 }: { height?: number }) {
       }
       ctx.stroke();
 
-      // 3) The trace itself.
-      if (isNew && outL && outR) {
+      // 3) The trace itself — the extracted (free-run or triggered) display window, not the raw
+      // per-event samples: the window is a fixed `windowMs` span, decoupled from the backend's
+      // emission size, and (when triggered) anchored at the found edge rather than "whatever just
+      // arrived".
+      if (isNew && dispL && dispR && dispN >= 2) {
         // L/R: one path per channel/lane. Mixdown: one path, mono sum, the single full-height lane.
         const paths = lanes.map(() => new Path2D());
-        const valueAt = (i: number, lane: number): number => (mode === "mix" ? (outL![i] + outR![i]) / 2 : lane === 0 ? outL![i] : outR![i]);
+        const valueAt = (i: number, lane: number): number => (mode === "mix" ? (dispL![i] + dispR![i]) / 2 : lane === 0 ? dispL![i] : dispR![i]);
         for (let lane = 0; lane < lanes.length; lane++) {
           const { cy, amp } = lanes[lane];
           const path = paths[lane];
           path.moveTo(0, cy - valueAt(0, lane) * amp);
-          for (let i = 1; i < n; i++) path.lineTo((i / (n - 1)) * W, cy - valueAt(i, lane) * amp);
+          for (let i = 1; i < dispN; i++) path.lineTo((i / (dispN - 1)) * W, cy - valueAt(i, lane) * amp);
         }
         ctx.globalCompositeOperation = "lighter";
         ctx.lineWidth = Math.max(0.6, p.beam * (H / REF_SIZE));
@@ -330,11 +432,13 @@ export function TimeScope({ height = 215 }: { height?: number }) {
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "glow" | "beam";
+  type NumKey = "trailTau" | "glow" | "beam" | "windowMs" | "triggerFilterHz";
   const CONTROLS: { key: NumKey; label: string; min: number; max: number; step: number }[] = [
+    { key: "windowMs", label: t("scope.span"), min: 3, max: 60, step: 1 },
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "glow", label: t("scope.glow"), min: 0.05, max: 1, step: 0.05 },
     { key: "beam", label: t("scope.beam"), min: 0.5, max: 8, step: 0.1 },
+    { key: "triggerFilterHz", label: t("scope.trigFilter"), min: 40, max: 1000, step: 10 },
   ];
 
   return (
@@ -364,6 +468,15 @@ export function TimeScope({ height = 215 }: { height?: number }) {
             onClick={() => setMode((m) => (m === "lr" ? "mix" : "lr"))}
           >
             {mode === "lr" ? t("scope.modeLr") : t("scope.modeMix")}
+          </button>
+          <button
+            type="button"
+            className={`vs-tool vs-tool-text${params.trigger ? " on" : ""}`}
+            title={params.trigger ? t("scope.toFreeTitle") : t("scope.toTrigTitle")}
+            aria-pressed={params.trigger}
+            onClick={() => set("trigger", !params.trigger)}
+          >
+            {params.trigger ? t("scope.modeTrig") : t("scope.modeFree")}
           </button>
           <button
             type="button"

@@ -138,6 +138,12 @@
     "modeMix": "Mix",
     "toMixTitle": "Zu Mono-Mixdown wechseln – eine Spur über die volle Höhe statt getrennter L/R-Spuren",
     "toLrTitle": "Zu getrennten L/R-Spuren wechseln",
+    "modeTrig": "Trig",
+    "modeFree": "Frei",
+    "toTrigTitle": "Auf die letzte Trigger-Flanke einrasten statt frei zu laufen",
+    "toFreeTitle": "Zu freilaufend wechseln (keine Trigger-Verriegelung)",
+    "span": "Zeitfenster",
+    "trigFilter": "Trigger-Filter",
     "reset": "Reset"
   },
 

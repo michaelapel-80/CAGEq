@@ -138,6 +138,12 @@
     "modeMix": "Mix",
     "toMixTitle": "Switch to mono mixdown — one full-height trace instead of split L/R lanes",
     "toLrTitle": "Switch to split L/R lanes",
+    "modeTrig": "Trig",
+    "modeFree": "Free",
+    "toTrigTitle": "Lock to the most recent trigger edge instead of free-running",
+    "toFreeTitle": "Switch to free-running (no trigger lock)",
+    "span": "Span",
+    "trigFilter": "Trig filter",
     "reset": "Reset"
   },
 
