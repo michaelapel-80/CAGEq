@@ -24,6 +24,14 @@ const GRID_ALPHA = 0.22;
 const PEAK_RELEASE_DB_PER_SEC = 20;
 const PEAK_HOLD_MS = 350;
 const DB_FLOOR = -120;
+// Peak *detection* is smoothed through a short one-pole envelope before the block max is taken —
+// real peak meters do the same (a brief integration time) so an isolated glitch — lossy-codec
+// pre/post-echo artifacts, or ringing from the undistort inverse filter (a deep EQ cut inverts
+// into a resonant boost, see inverseBiquadCoeffs in biquad.ts) — reads as a spike smoothed down,
+// not a false peak, while a genuine transient (spread over many more samples at any real
+// bandwidth) survives close to full height. Time-based, not sample-count, so it's identical at
+// 44.1/48/96/192 kHz. Only affects this reference line — the drawn trace itself is untouched.
+const PEAK_SMOOTH_MS = 0.3;
 
 /** Lane geometry (vertical centre + amplitude scale + label) for the current channel mode — shared
  *  between the graticule and the trace so they always agree. `amp` leaves a small margin (0.5 of
@@ -253,12 +261,17 @@ export function TimeScope({ height = 215 }: { height?: number }) {
         }
 
         // Attack: this window's peak per lane, from the exact values about to be drawn — correct
-        // in both modes by construction (it's the same array the trace path reads below).
+        // in both modes by construction (it's the same array the trace path reads below). The
+        // rectified signal is run through the short envelope (see PEAK_SMOOTH_MS) before the max,
+        // so a single-sample outlier can't set the held peak on its own.
+        const smoothAlpha = 1 - Math.exp(-1 / (rate * (PEAK_SMOOTH_MS / 1000)));
         for (let lane = 0; lane < lanes.length; lane++) {
+          let env = 0;
           let blockPeak = 0;
           for (let i = 0; i < n; i++) {
             const v = Math.abs(mode === "mix" ? (outL[i] + outR[i]) / 2 : lane === 0 ? outL[i] : outR[i]);
-            if (v > blockPeak) blockPeak = v;
+            env += (v - env) * smoothAlpha;
+            if (env > blockPeak) blockPeak = env;
           }
           const blockDb = 20 * Math.log10(Math.max(blockPeak, 1e-6));
           if (blockDb >= peakDb[lane]) {
