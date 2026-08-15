@@ -5,7 +5,9 @@
   font-weight: 400;
 
   /* Always reserve the scrollbar gutter so a page that grows past the window (and gains a
-     scrollbar) doesn't narrow the content — which would rescale the width:100% charts. */
+     scrollbar) doesn't narrow the content — which would rescale the width:100% charts. Skipped
+     in the detached scope window (see main.tsx): its fixed, full-viewport view never scrolls, so
+     the reserved gutter would just sit there as a permanent empty bar. */
   scrollbar-gutter: stable;
 
   color: #0f0f0f;
@@ -27,6 +29,9 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
+}
+:root[data-window="scope"] {
+  scrollbar-gutter: auto;
 }
 
 a {
