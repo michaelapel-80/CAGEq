@@ -509,8 +509,13 @@ function App() {
   }, [theme]);
   const cycleTheme = () => setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
   // Live post-EQ spectrum (loopback FFT) drawn on the chart. The Meter component owns start/stop
-  // of the capture; here we just subscribe to the `spectrum` events it produces.
-  const [spectrum, setSpectrum] = useState<SpectrumData | null>(null);
+  // of the capture; here we just subscribe to the `spectrum` events it produces. A ref, not state:
+  // this arrives at up to ~60 fps for as long as the app is open, and `setState` would re-render
+  // the *entire* App tree (every panel, the grid, the library) on every frame indefinitely — real,
+  // continuous work that a plain function component doesn't skip just because its own JSX output
+  // doesn't end up changing. EqChart reads the ref itself via its own rAF loop (same pattern as
+  // Vectorscope's `scopeRef`), so arrival never touches React at all.
+  const spectrumRef = useRef<SpectrumData | null>(null);
   // The selected output's live mix sample rate (Hz), reported by the loopback monitor (§8 read-only
   // format display). Null when monitoring isn't running yet. Shown next to the device picker.
   const [sampleRate, setSampleRate] = useState<number | null>(null);
@@ -519,7 +524,7 @@ function App() {
     let unlisten: (() => void) | undefined;
     void (async () => {
       unlisten = await listen<SpectrumData>("spectrum", (e) => {
-        if (active) setSpectrum(e.payload);
+        if (active) spectrumRef.current = e.payload;
       });
     })();
     return () => {
@@ -1357,8 +1362,11 @@ function App() {
       await sleep(settleMs);
       const frames: SpectrumData[] = [];
       const un = await listen<SpectrumData>("spectrum", (e) => frames.push(e.payload));
-      await sleep(ms);
-      un();
+      try {
+        await sleep(ms);
+      } finally {
+        un(); // always detach — an exception here must not leave this pushing into `frames` forever
+      }
       return frames;
     };
     setSelfTest({ phase: "running" });
@@ -2316,7 +2324,7 @@ function App() {
                         markers={monitorView ? [] : chartMarkers}
                         refs={monitorView ? [] : chartRefs}
                         phase={monitorView ? undefined : chartPhase}
-                        spectrum={spectrum}
+                        spectrumRef={spectrumRef}
                         eqBands={dryActive || selfTest?.phase === "running" ? undefined : result.filters}
                         legendHost={legendHost}
                         minSpan={comparisonSpan}

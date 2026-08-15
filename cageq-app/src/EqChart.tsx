@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, logGrid, phaseDeg } from "./biquad";
@@ -123,7 +123,7 @@ export function EqChart({
   refs = [],
   phase,
   nodes,
-  spectrum,
+  spectrumRef,
   eqBands,
   legendHost,
   minSpan,
@@ -137,8 +137,11 @@ export function EqChart({
   /** Floor for the symmetric Y range (± dB). Lets the caller keep the scale stable across a slot
    *  switch (e.g. the larger of both slots' ranges in Comparison mode) instead of rescaling. */
   minSpan?: number;
-  /** Live loopback-FFT spectrum drawn as a backdrop on the log-Hz axis, own scale. */
-  spectrum?: SpectrumData | null;
+  /** Live loopback-FFT spectrum drawn as a backdrop on the log-Hz axis, own scale. A ref (not a
+   *  value prop): the caller updates it at up to ~60 fps without triggering a React re-render —
+   *  the canvas effect below owns its own rAF loop and reads the ref directly, the same pattern
+   *  Vectorscope uses for its sample stream. */
+  spectrumRef?: RefObject<SpectrumData | null>;
   /** The applied filter cascade (AutoEq fit + custom). Its magnitude response is removed from
    *  the post-EQ capture per bin so the backdrop shows the **pre-filter** source spectrum. */
   eqBands?: Band[];
@@ -152,6 +155,12 @@ export function EqChart({
   const H = height;
   const svgRef = useRef<SVGSVGElement>(null);
   const specCanvasRef = useRef<HTMLCanvasElement>(null); // phosphor spectrum backdrop (imperative)
+  // The spectrum glow gradient's stops depend only on theme + plot geometry, never on the spectrum
+  // data itself — cached and rebuilt only when those change, instead of every spectrum frame (up to
+  // 60/s). A fresh CanvasGradient costs the GPU compositor a shader/texture each time; left
+  // unbounded across a long session that's a steady GPU-memory drain invisible in the JS heap (see
+  // the identical fix in Vectorscope's dwell-spot bloom).
+  const specGradCache = useRef<{ key: string; grad: CanvasGradient } | null>(null);
   const clipId = useId(); // clips the plotted curves to the plot rect (see refPaths)
   // Manual double-click detection from bubbled `click` events. The native `dblclick` is
   // unreliable here: pointer-capture/preventDefault on a node disrupts its synthesis, and on
@@ -334,61 +343,83 @@ export function EqChart({
   // (dB) at each bin's frequency to recover the source spectrum — the resonances the EQ is
   // fighting show where they actually are, not flattened by the correction. (VU/LUFS keep the
   // raw post-EQ signal; only this display is un-EQ'd.)
+  // Render-time values the rAF loop below needs but can't close over directly — the loop is set up
+  // once at mount (like Vectorscope's), so anything from props/render has to come through a ref
+  // that's refreshed every render, read fresh each frame.
+  const specDrawCtx = useRef({ eqBands, PAD, H, W });
+  specDrawCtx.current = { eqBands, PAD, H, W };
   useEffect(() => {
     const cv = specCanvasRef.current;
     const ctx = cv?.getContext("2d");
     if (!cv || !ctx) return;
-    if (!spectrum || spectrum.db.length < 2) {
-      ctx.clearRect(0, 0, W, H);
-      return;
-    }
-    ctx.globalCompositeOperation = "destination-out";
-    ctx.fillStyle = `rgba(0,0,0,${SPEC_FADE})`;
-    ctx.fillRect(0, 0, W, H);
-    ctx.globalCompositeOperation = "source-over";
+    let raf = 0;
+    let drawn: SpectrumData | null | undefined; // last payload already drawn; undefined = none yet
+    const render = () => {
+      const spectrum = spectrumRef?.current ?? null;
+      if (spectrum !== drawn) {
+        drawn = spectrum;
+        const { eqBands, PAD, H, W } = specDrawCtx.current;
+        if (!spectrum || spectrum.db.length < 2) {
+          ctx.clearRect(0, 0, W, H);
+        } else {
+          ctx.globalCompositeOperation = "destination-out";
+          ctx.fillStyle = `rgba(0,0,0,${SPEC_FADE})`;
+          ctx.fillRect(0, 0, W, H);
+          ctx.globalCompositeOperation = "source-over";
 
-    const n = spectrum.db.length;
-    const lnF0 = Math.log(spectrum.f_min);
-    const lnF1 = Math.log(spectrum.f_max);
-    const binF = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
-    const fx = (i: number) => x(binF(i));
-    const plotTop = PAD.t;
-    const plotBot = H - PAD.b;
-    const sy = (db: number) => plotBot - clamp((db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN, 0, 1) * (plotBot - plotTop);
+          const n = spectrum.db.length;
+          const lnF0 = Math.log(spectrum.f_min);
+          const lnF1 = Math.log(spectrum.f_max);
+          const binF = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
+          const fx = (i: number) => PAD.l + ((Math.log(binF(i)) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
+          const plotTop = PAD.t;
+          const plotBot = H - PAD.b;
+          const sy = (db: number) => plotBot - clamp((db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN, 0, 1) * (plotBot - plotTop);
 
-    // The EQ response at each bin frequency — subtracted from the (post-EQ) capture to undo the
-    // filter. Null when nothing's applied (e.g. Dry), leaving the capture as-is.
-    let corr: Float64Array | null = null;
-    if (eqBands && eqBands.length) {
-      const bf = new Float64Array(n);
-      for (let i = 0; i < n; i++) bf[i] = binF(i);
-      corr = composedCurveDb(eqBands, bf);
-    }
+          // The EQ response at each bin frequency — subtracted from the (post-EQ) capture to undo
+          // the filter. Null when nothing's applied (e.g. Dry), leaving the capture as-is.
+          let corr: Float64Array | null = null;
+          if (eqBands && eqBands.length) {
+            const bf = new Float64Array(n);
+            for (let i = 0; i < n; i++) bf[i] = binF(i);
+            corr = composedCurveDb(eqBands, bf);
+          }
 
-    const cs = getComputedStyle(cv);
-    const [nr, ng, nb] = parseRgb(cs.color);
-    const acc = parseHex(cs.getPropertyValue("--accent"));
-    // A hint of the accent mixed into the neutral text colour — lifts the glow off flat grey
-    // without letting it read as another curve.
-    const [r, g, b] = acc
-      ? [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round)
-      : [nr, ng, nb];
-    // Light *text* ⇒ dark theme (test the neutral colour, not the tinted one). Light-on-dark
-    // accumulates brighter (sRGB/gamma compositing), so dim the glow there to match light mode.
-    const scale = 0.299 * nr + 0.587 * ng + 0.114 * nb > 140 ? SPEC_DARK_SCALE : 1;
-    const grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
-    grad.addColorStop(0, `rgba(${r},${g},${b},${SPEC_GLOW_BASE * scale})`); // brightest at the floor
-    grad.addColorStop(1, `rgba(${r},${g},${b},${SPEC_GLOW_TIP * scale})`); // fades out toward the top
-    ctx.fillStyle = grad;
-    for (let i = 0; i < n; i++) {
-      const x0 = fx(i);
-      const x1 = i < n - 1 ? fx(i + 1) : x0 + 1;
-      const db = corr ? spectrum.db[i] - corr[i] : spectrum.db[i];
-      const yTop = sy(db);
-      ctx.fillRect(x0, yTop, Math.max(1, x1 - x0), plotBot - yTop);
-    }
+          const cs = getComputedStyle(cv);
+          const [nr, ng, nb] = parseRgb(cs.color);
+          const acc = parseHex(cs.getPropertyValue("--accent"));
+          // A hint of the accent mixed into the neutral text colour — lifts the glow off flat grey
+          // without letting it read as another curve.
+          const [r, g, b] = acc
+            ? [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round)
+            : [nr, ng, nb];
+          // Light *text* ⇒ dark theme (test the neutral colour, not the tinted one). Light-on-dark
+          // accumulates brighter (sRGB/gamma compositing), so dim the glow there to match light mode.
+          const scale = 0.299 * nr + 0.587 * ng + 0.114 * nb > 140 ? SPEC_DARK_SCALE : 1;
+          const gradKey = `${plotBot}|${plotTop}|${r},${g},${b}|${scale}`;
+          let grad = specGradCache.current?.key === gradKey ? specGradCache.current.grad : null;
+          if (!grad) {
+            grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
+            grad.addColorStop(0, `rgba(${r},${g},${b},${SPEC_GLOW_BASE * scale})`); // brightest at the floor
+            grad.addColorStop(1, `rgba(${r},${g},${b},${SPEC_GLOW_TIP * scale})`); // fades out toward the top
+            specGradCache.current = { key: gradKey, grad };
+          }
+          ctx.fillStyle = grad;
+          for (let i = 0; i < n; i++) {
+            const x0 = fx(i);
+            const x1 = i < n - 1 ? fx(i + 1) : x0 + 1;
+            const db = corr ? spectrum.db[i] - corr[i] : spectrum.db[i];
+            const yTop = sy(db);
+            ctx.fillRect(x0, yTop, Math.max(1, x1 - x0), plotBot - yTop);
+          }
+        }
+      }
+      raf = requestAnimationFrame(render);
+    };
+    raf = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [spectrum, phaseOn, eqBands]);
+  }, []);
 
   const legendMarkup = (
     <div className="eq-legend">

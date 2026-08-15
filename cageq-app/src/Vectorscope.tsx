@@ -217,6 +217,19 @@ export function Vectorscope({
     let spotY = NaN; //   holds during silence; updated per window from the beam's mean + path length
     let spotB = 0; // target brightness
     let spotVis = 0; // eased toward spotB so the spot fades in/out instead of popping
+    // The bloom/core gradients below are rebuilt from spotVis every frame this runs (up to 60/s,
+    // for as long as the scope stays open — potentially hours). Each fresh CanvasGradient costs the
+    // GPU compositor a shader/texture upload; unbounded over a long session that's a steady
+    // GPU-memory drain that doesn't show up in the JS heap or Task Manager's default memory column
+    // (a plausible cause of a WebView2 "out of memory" crash with no visible memory growth).
+    // Cached here: built in local space (centred at the origin, so position is applied via
+    // ctx.translate at fill time) and keyed on spotVis quantized to 512 levels — far finer than
+    // the eye resolves at 8-bit output — so a steady dwell (the common, long-duration case) reuses
+    // the same two gradient objects indefinitely instead of reallocating every frame.
+    let gradS = -1;
+    let gradQ = -1;
+    let bloomGrad: CanvasGradient | null = null;
+    let coreGrad: CanvasGradient | null = null;
 
     const render = () => {
       const now = performance.now();
@@ -363,27 +376,36 @@ export function Vectorscope({
         // intense at the core, dropping fast into a faint tail, the real phosphor point-spread.
         // `bloomR` (tube-relative) is the one size knob; the core is a fixed fraction of it.
         const bloomR = S * 0.018;
-        const bloom = ctx.createRadialGradient(spotX, spotY, 0, spotX, spotY, bloomR);
-        const STOPS = 8;
-        for (let i = 0; i <= STOPS; i++) {
-          const t = i / STOPS;
-          const a = i === STOPS ? 0 : Math.min(1, spotVis * 0.85) * Math.exp(-t * 20);
-          bloom.addColorStop(t, `rgba(${ar},${ag},${ab},${a})`);
-        }
-        ctx.fillStyle = bloom;
-        ctx.beginPath();
-        ctx.arc(spotX, spotY, bloomR, 0, Math.PI * 2);
-        ctx.fill();
-        // tight white-hot core — a saturated point
         const coreR = bloomR * 0.13;
-        const core = ctx.createRadialGradient(spotX, spotY, 0, spotX, spotY, coreR);
-        core.addColorStop(0, `rgba(255,255,255,${Math.min(1, spotVis * 2)})`); // white-hot centre
-        core.addColorStop(0.55, `rgba(${ar},${ag},${ab},${Math.min(1, spotVis * 1.3)})`);
-        core.addColorStop(1, `rgba(${ar},${ag},${ab},0)`);
-        ctx.fillStyle = core;
+        const q = Math.round(spotVis * 511); // quantized cache key, see the comment above
+        if (gradS !== S || gradQ !== q || !bloomGrad || !coreGrad) {
+          gradS = S;
+          gradQ = q;
+          const vis = q / 511;
+          bloomGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, bloomR);
+          const STOPS = 8;
+          for (let i = 0; i <= STOPS; i++) {
+            const t = i / STOPS;
+            const a = i === STOPS ? 0 : Math.min(1, vis * 0.85) * Math.exp(-t * 20);
+            bloomGrad.addColorStop(t, `rgba(${ar},${ag},${ab},${a})`);
+          }
+          // tight white-hot core — a saturated point
+          coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, coreR);
+          coreGrad.addColorStop(0, `rgba(255,255,255,${Math.min(1, vis * 2)})`); // white-hot centre
+          coreGrad.addColorStop(0.55, `rgba(${ar},${ag},${ab},${Math.min(1, vis * 1.3)})`);
+          coreGrad.addColorStop(1, `rgba(${ar},${ag},${ab},0)`);
+        }
+        ctx.save();
+        ctx.translate(spotX, spotY);
+        ctx.fillStyle = bloomGrad;
         ctx.beginPath();
-        ctx.arc(spotX, spotY, coreR, 0, Math.PI * 2);
+        ctx.arc(0, 0, bloomR, 0, Math.PI * 2);
         ctx.fill();
+        ctx.fillStyle = coreGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, coreR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
       }
 
       raf = requestAnimationFrame(render);
