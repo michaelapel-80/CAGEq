@@ -89,12 +89,6 @@ export type Nodes = {
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-/** Parse a computed `rgb(r, g, b)` / `rgba(...)` colour string to [r,g,b]; grey fallback. */
-function parseRgb(col: string): [number, number, number] {
-  const m = col.match(/\d+(?:\.\d+)?/g);
-  return m && m.length >= 3 ? [Math.round(+m[0]), Math.round(+m[1]), Math.round(+m[2])] : [128, 128, 128];
-}
-
 /** Parse a `#rrggbb` hex (e.g. the `--accent` CSS var) to [r,g,b]; null if not a 6-digit hex. */
 function parseHex(hex: string): [number, number, number] | null {
   const m = hex.trim().match(/^#?([0-9a-f]{6})$/i);
@@ -106,11 +100,37 @@ function parseHex(hex: string): [number, number, number] | null {
 // --- FFT spectrum backdrop: its own tuning set, independent of the level meter's phosphor ---
 const SPEC_TOP_DB = 0; // top of the fixed dBFS scale
 const SPEC_DYN = 90; // dB shown below the top
-const SPEC_FADE = 0.11; // decay: alpha removed from the canvas per frame (higher = shorter trail)
-const SPEC_GLOW_BASE = 0.2; // brightness at the level floor (kept dim so it stays a backdrop)
 const SPEC_GLOW_TIP = 0.025; // brightness near the current level (vertical falloff)
-const SPEC_DARK_SCALE = 0.6; // dim the glow in dark mode: light-on-dark composites brighter (gamma)
-const SPEC_TINT = 0.42; // blend the accent this far into the neutral glow — a hint of colour, not a rival to the curves
+// The glow's neutral base before tinting toward the accent — fixed, not the theme's own text
+// colour (`--fg`, which is near-black in light mode and near-white in dark mode). Tinting a
+// near-white base toward the accent in dark mode, then compositing that over a dark backdrop
+// through many overlapping stamped layers, overshoots badly (light-on-dark alpha blending
+// accumulates brighter than dark-on-light in gamma-encoded sRGB space) — a flat SPEC_DARK_SCALE
+// multiplier tried to compensate for exactly this, but needed constant re-tuning as the renderer's
+// own layering changed, and the result is a wash from white toward the accent instead of the
+// intended dim colour hint. Just always using the same (light-theme) base sidesteps the asymmetry
+// instead of correcting for it — same tone, same visual weight in both themes.
+const SPEC_NEUTRAL: [number, number, number] = [15, 15, 15]; // light mode's --fg (#0f0f0f)
+const SPEC_TINT = 0.63; // blend the accent this far into the neutral glow — a hint of colour, not a rival to the curves
+
+/** Live-tunable trail/glow — a gear-icon panel (like the scope views' `.vs-tuning`) rather than
+ *  fixed constants, specifically so `tau` can be re-tuned without a recompile: it's re-tuned often
+ *  because it has no principled "correct" value — changes to how *smoothed* the incoming data
+ *  already is (e.g. cageq-monitor's SPEC_TAU_SECS) directly change how this reads even though
+ *  nothing here moved. `glowBase` (overall backdrop brightness) rides along for the same reason a
+ *  trail-length re-tune usually wants a brightness re-tune alongside it. `tau` is a genuine
+ *  time-constant (seconds), same meaning as every other trailTau in the app — see the backdrop
+ *  effect's doc comment for why this used to be `fade`, a flat inverted-direction per-event alpha
+ *  with no time-base, and no longer is. */
+type SpecParams = { tau: number; glowBase: number };
+const SPEC_DEFAULTS: SpecParams = { tau: 0.4, glowBase: 0.25 };
+// A stamp older than this many `tau` time constants is not drawn at all — e^-5 ≈ 0.7% of its
+// original brightness, safely invisible — the hard cutoff that makes burn-in structurally
+// impossible (see the backdrop effect). Generous cap on retained stamps so the ring can't grow
+// unboundedly if the tab was backgrounded (rAF throttled) with a very long tau selected; the age
+// cutoff above keeps it far smaller than this in normal operation.
+const SPEC_CUTOFF_EFOLDS = 5;
+const SPEC_MAX_STAMPS = 512;
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -171,6 +191,8 @@ export function EqChart({
   // unbounded across a long session that's a steady GPU-memory drain invisible in the JS heap (see
   // the identical fix in Vectorscope's dwell-spot bloom).
   const specGradCache = useRef<{ key: string; grad: CanvasGradient } | null>(null);
+  const [specParams, setSpecParams] = useState<SpecParams>(SPEC_DEFAULTS);
+  const [specTuning, setSpecTuning] = useState(false);
   const clipId = useId(); // clips the plotted curves to the plot rect (see refPaths)
   // Manual double-click detection from bubbled `click` events. The native `dblclick` is
   // unreliable here: pointer-capture/preventDefault on a node disrupts its synthesis, and on
@@ -357,78 +379,125 @@ export function EqChart({
   // Render-time values the rAF loop below needs but can't close over directly — the loop is set up
   // once at mount (like Vectorscope's), so anything from props/render has to come through a ref
   // that's refreshed every render, read fresh each frame.
-  const specDrawCtx = useRef({ eqBands, preampDb, PAD, H, W });
-  specDrawCtx.current = { eqBands, preampDb, PAD, H, W };
+  const specDrawCtx = useRef({ eqBands, preampDb, PAD, H, W, specParams });
+  specDrawCtx.current = { eqBands, preampDb, PAD, H, W, specParams };
+  // Redrawn IN FULL from a timestamped stamp ring every frame — the canvas is hard-cleared, then
+  // each retained stamp (a past spectrum reading) is filled as one polygon at
+  // `glowBase · exp(-age/tau)`, oldest first, newest on top, with anything older than
+  // SPEC_CUTOFF_EFOLDS·tau simply not drawn. This replaced a `destination-out` canvas fade for the
+  // same reason SpectrumScope's own trail did (see that component's trail effect for the full
+  // case history: a multiplicative fade never reaches exact zero, and on this rendering stack it
+  // stalls in 8-bit storage at a *visible* residual rather than an invisible one, worse the slower
+  // the fade — a live-tunable `tau` made that burn-in trivial to reproduce, since dialing in a
+  // long trail here previously meant dialing in a permanent ghost). Recomputing from timestamps
+  // instead of accumulating in a stored image makes that structurally impossible: there is no
+  // stored image to fail to decay.
+  //
+  // Unlike SpectrumScope's stamp ring, a stamp here is recorded once per *received spectrum
+  // event*, not once per rendered frame — this backdrop doesn't stroke a single continuous line
+  // that needs frame-to-frame interpolation to flow, and events already land at close to the frame
+  // rate, so the extra complexity of per-frame stamping (needed there for dwell-saturation to
+  // stack correctly) buys nothing here. Also unlike there, each stamp draws as ONE filled polygon
+  // (the bins' staircase outline, closed down to the baseline) rather than one `fillRect` per bin —
+  // 240 separate fill calls per stamp, times up to ~SPEC_MAX_STAMPS live stamps, would be a real
+  // per-frame cost; one `fill()` per stamp regardless of bin count is the same shape, the same
+  // visual result (adjacent same-height rectangles ARE that polygon), and cheap enough to redraw
+  // continuously.
   useEffect(() => {
     const cv = specCanvasRef.current;
     const ctx = cv?.getContext("2d");
     if (!cv || !ctx) return;
     let raf = 0;
-    let drawn: SpectrumData | null | undefined; // last payload already drawn; undefined = none yet
+    let lastRecorded: SpectrumData | null | undefined;
+    // {db, t}, oldest first — db is a direct reference to the received array (each incoming
+    // payload is a fresh, never-mutated deserialization, so no copy is needed to hold onto it).
+    const stamps: { db: number[]; t: number }[] = [];
+
     const render = () => {
+      const now = performance.now();
       const spectrum = spectrumRef?.current ?? null;
-      if (spectrum !== drawn) {
-        drawn = spectrum;
-        const { eqBands, preampDb, PAD, H, W } = specDrawCtx.current;
-        if (!spectrum || spectrum.db.length < 2) {
-          ctx.clearRect(0, 0, W, H);
-        } else {
-          ctx.globalCompositeOperation = "destination-out";
-          ctx.fillStyle = `rgba(0,0,0,${SPEC_FADE})`;
-          ctx.fillRect(0, 0, W, H);
-          ctx.globalCompositeOperation = "source-over";
-
-          const n = spectrum.db.length;
-          const lnF0 = Math.log(spectrum.f_min);
-          const lnF1 = Math.log(spectrum.f_max);
-          const binF = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
-          const fx = (i: number) => PAD.l + ((Math.log(binF(i)) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
-          const plotTop = PAD.t;
-          const plotBot = H - PAD.b;
-          const sy = (db: number) => plotBot - clamp((db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN, 0, 1) * (plotBot - plotTop);
-
-          // The EQ response at each bin frequency plus the preamp — both subtracted from the
-          // (post-EQ) capture to undo everything applied and recover the actual source. `eqBands`
-          // is `undefined` only mid self-test (correction fully off, capture as-is since the EQ
-          // is changing under it); empty (Dry — no filters, still the loudness-match preamp) still
-          // gets the preamp term.
-          const undoing = eqBands !== undefined;
-          let corr: Float64Array | null = null;
-          if (undoing && eqBands.length) {
-            const bf = new Float64Array(n);
-            for (let i = 0; i < n; i++) bf[i] = binF(i);
-            corr = composedCurveDb(eqBands, bf);
-          }
-
-          const cs = getComputedStyle(cv);
-          const [nr, ng, nb] = parseRgb(cs.color);
-          const acc = parseHex(cs.getPropertyValue("--accent"));
-          // A hint of the accent mixed into the neutral text colour — lifts the glow off flat grey
-          // without letting it read as another curve.
-          const [r, g, b] = acc
-            ? [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round)
-            : [nr, ng, nb];
-          // Light *text* ⇒ dark theme (test the neutral colour, not the tinted one). Light-on-dark
-          // accumulates brighter (sRGB/gamma compositing), so dim the glow there to match light mode.
-          const scale = 0.299 * nr + 0.587 * ng + 0.114 * nb > 140 ? SPEC_DARK_SCALE : 1;
-          const gradKey = `${plotBot}|${plotTop}|${r},${g},${b}|${scale}`;
-          let grad = specGradCache.current?.key === gradKey ? specGradCache.current.grad : null;
-          if (!grad) {
-            grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
-            grad.addColorStop(0, `rgba(${r},${g},${b},${SPEC_GLOW_BASE * scale})`); // brightest at the floor
-            grad.addColorStop(1, `rgba(${r},${g},${b},${SPEC_GLOW_TIP * scale})`); // fades out toward the top
-            specGradCache.current = { key: gradKey, grad };
-          }
-          ctx.fillStyle = grad;
-          for (let i = 0; i < n; i++) {
-            const x0 = fx(i);
-            const x1 = i < n - 1 ? fx(i + 1) : x0 + 1;
-            const db = undoing ? spectrum.db[i] - (corr ? corr[i] : 0) - preampDb : spectrum.db[i];
-            const yTop = sy(db);
-            ctx.fillRect(x0, yTop, Math.max(1, x1 - x0), plotBot - yTop);
-          }
-        }
+      if (spectrum && spectrum !== lastRecorded && spectrum.db.length >= 2) {
+        lastRecorded = spectrum;
+        stamps.push({ db: spectrum.db, t: now });
+        if (stamps.length > SPEC_MAX_STAMPS) stamps.shift();
+      } else if (!spectrum) {
+        lastRecorded = spectrum;
       }
+
+      const { eqBands, preampDb, PAD, H, W, specParams } = specDrawCtx.current;
+      const cutoffMs = specParams.tau * 1000 * SPEC_CUTOFF_EFOLDS;
+      while (stamps.length && now - stamps[0].t > cutoffMs) stamps.shift();
+
+      ctx.clearRect(0, 0, W, H);
+      if (!spectrum || stamps.length === 0) {
+        raf = requestAnimationFrame(render);
+        return;
+      }
+
+      // Geometry/correction are derived from the *latest* spectrum (bin count, f_min/f_max) and
+      // reused for every stamp — a stamp whose own bin count no longer matches (e.g. a device
+      // rate switch mid-trail) is skipped below rather than mapped through the wrong grid.
+      const n = spectrum.db.length;
+      const lnF0 = Math.log(spectrum.f_min);
+      const lnF1 = Math.log(spectrum.f_max);
+      const binF = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
+      const fx = (i: number) => PAD.l + ((Math.log(binF(i)) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
+      const plotTop = PAD.t;
+      const plotBot = H - PAD.b;
+      const sy = (db: number) => plotBot - clamp((db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN, 0, 1) * (plotBot - plotTop);
+
+      // The EQ response at each bin frequency plus the preamp — both subtracted from the
+      // (post-EQ) capture to undo everything applied and recover the actual source. `eqBands` is
+      // `undefined` only mid self-test (correction fully off, capture as-is since the EQ is
+      // changing under it); empty (Dry — no filters, still the loudness-match preamp) still gets
+      // the preamp term. Applied uniformly to every stamp from the *current* eqBands/preampDb, not
+      // baked in per-stamp at record time — same simplification SpectrumScope's undistort makes:
+      // the whole trail reflects "this raw history under the current correction", not a mix of
+      // whatever correction happened to be active when each stamp landed.
+      const undoing = eqBands !== undefined;
+      let corr: Float64Array | null = null;
+      if (undoing && eqBands.length) {
+        const bf = new Float64Array(n);
+        for (let i = 0; i < n; i++) bf[i] = binF(i);
+        corr = composedCurveDb(eqBands, bf);
+      }
+
+      const [nr, ng, nb] = SPEC_NEUTRAL;
+      const acc = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
+      // A hint of the accent mixed into the (fixed, theme-independent — see SPEC_NEUTRAL) neutral
+      // base — lifts the glow off flat grey without letting it read as another curve.
+      const [r, g, b] = acc
+        ? [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round)
+        : [nr, ng, nb];
+      const gradKey = `${plotBot}|${plotTop}|${r},${g},${b}|${specParams.glowBase}`;
+      let grad = specGradCache.current?.key === gradKey ? specGradCache.current.grad : null;
+      if (!grad) {
+        grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
+        grad.addColorStop(0, `rgba(${r},${g},${b},${specParams.glowBase})`); // brightest at the floor
+        grad.addColorStop(1, `rgba(${r},${g},${b},${SPEC_GLOW_TIP})`); // fades out toward the top
+        specGradCache.current = { key: gradKey, grad };
+      }
+      ctx.fillStyle = grad;
+
+      for (const stamp of stamps) {
+        if (stamp.db.length !== n) continue;
+        ctx.globalAlpha = Math.exp(-(now - stamp.t) / 1000 / specParams.tau);
+        ctx.beginPath();
+        ctx.moveTo(fx(0), plotBot); // baseline, left edge — closePath draws the return trip
+        for (let i = 0; i < n; i++) {
+          const x0 = fx(i);
+          const x1 = i < n - 1 ? fx(i + 1) : x0 + 1;
+          const db = undoing ? stamp.db[i] - (corr ? corr[i] : 0) - preampDb : stamp.db[i];
+          const yTop = sy(db);
+          ctx.lineTo(x0, yTop); // up (or down) to this bin's top
+          ctx.lineTo(x1, yTop); // across its width
+          if (i === n - 1) ctx.lineTo(x1, plotBot); // down to baseline at the right edge
+        }
+        ctx.closePath(); // straight line back along the baseline to the left edge
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -702,6 +771,78 @@ export function EqChart({
       })}
 
     </svg>
+
+      {/* Spectrum-backdrop tuning — only when there's a backdrop to tune (see SpecParams' doc
+          comment for why fade/glow are live-adjustable rather than fixed constants). Same
+          `.vs-tools`/`.vs-tuning` chrome as the scope views' own gear-icon panels. */}
+      {spectrumRef && (
+        <div className="vs-tools">
+          <button
+            type="button"
+            className={`vs-tool${specTuning ? " on" : ""}`}
+            title={t("scope.tune")}
+            aria-pressed={specTuning}
+            onClick={() => setSpecTuning((v) => !v)}
+          >
+            ⚙
+          </button>
+        </div>
+      )}
+      {spectrumRef && specTuning && (
+        <div className="vs-tuning">
+          <div className="vs-tune-head">
+            <span className="vs-tune-title">{t("scope.tune")}</span>
+            <button type="button" className="vs-tune-reset" onClick={() => setSpecParams(SPEC_DEFAULTS)}>
+              {t("scope.reset")}
+            </button>
+            <button
+              type="button"
+              className="vs-tune-close"
+              title={t("scope.close")}
+              aria-label={t("scope.close")}
+              onClick={() => setSpecTuning(false)}
+            >
+              ×
+            </button>
+          </div>
+          {/* `e.currentTarget.value` is read synchronously into a local *before* the functional
+              setSpecParams updater, not inside it — a functional updater isn't guaranteed to run
+              synchronously with the event, and by the time it does, React has already nulled out
+              the synthetic event's currentTarget, throwing on read. The scope views' own tuning
+              panels dodge this via a `set(key, value)` helper that captures the value the same
+              way, just less visibly; inlined here since this is only two fields. */}
+          <label className="vs-tune-row">
+            <span className="vs-tune-label">{t("scope.trail")}</span>
+            <input
+              type="range"
+              min={0.02}
+              max={0.6}
+              step={0.01}
+              value={specParams.tau}
+              onChange={(e) => {
+                const tau = Number(e.currentTarget.value);
+                setSpecParams((p) => ({ ...p, tau }));
+              }}
+            />
+            <b>{specParams.tau.toFixed(2)}</b>
+          </label>
+          <label className="vs-tune-row">
+            <span className="vs-tune-label">{t("scope.glow")}</span>
+            <input
+              type="range"
+              min={0.02}
+              max={0.8}
+              step={0.01}
+              value={specParams.glowBase}
+              onChange={(e) => {
+                const glowBase = Number(e.currentTarget.value);
+                setSpecParams((p) => ({ ...p, glowBase }));
+              }}
+            />
+            <b>{specParams.glowBase.toFixed(2)}</b>
+          </label>
+        </div>
+      )}
 
       {/* legend — below the plot; click a chip to hide/show. Portaled into `legendHost` (a
           full-width host below the chart+meters row) when given, else rendered inline. */}

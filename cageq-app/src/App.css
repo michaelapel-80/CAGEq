@@ -893,6 +893,19 @@ select:disabled {
 .eq-chart svg {
   position: relative;
 }
+/* The spectrum-backdrop tuning gear (.vs-tools, shared chrome with the scope views) defaults to
+   top-right, the same corner as .chart-preamp (top:4px/right:12px) — move it to top-left instead
+   of chasing that badge's (variable-width) size with an offset. The tuning panel defaults to
+   top-left too (the scope views put gear and panel in opposite corners), so push the panel down
+   below the gear's own row rather than flipping it to the right, which would just trade the badge
+   collision for the gear itself always sitting behind it. */
+.eq-chart .vs-tools {
+  left: 6px;
+  right: auto;
+}
+.eq-chart .vs-tuning {
+  top: 30px;
+}
 
 .eq-legend {
   display: flex;
