@@ -16,8 +16,19 @@ export type ScopeEq = { filters: Band[]; preampDb: number };
 
 // The scope's dark "instrument screen" backdrop is a CSS background on .vs-screen (theme-independent).
 // The trace lives on a **transparent** canvas over it and fades with `destination-out` (alpha decay),
-// so a faded pixel stalls at ~1/255 alpha ≈ 1 LSB over the backdrop — no additive burn-in and no
-// per-pixel clamp (a multiplicative fade toward an *opaque* backdrop can't reach it in 8-bit).
+// which can't reach zero: a multiplicative fade stalls in 8-bit storage wherever alpha drops below
+// ~0.5/(1-keep) LSB, since it then rounds back to itself. That threshold scales with the decay rate
+// — ~1.8 LSB (0.7%, invisible) at the default 0.05 s trail, but ~18 LSB (7%, a permanent ghost) at
+// the slider's 0.6 s end. So the faint burn-in here is real, deliberate, and bounded by keeping the
+// trail short; it is NOT the "harmlessly stalls at 1 LSB" that this note used to claim outright.
+//
+// SpectrumScope solved the same bug by hard-clearing and redrawing its whole trail from timestamped
+// history each frame. That was ported here and reverted: a stamp there is 240 points and one stroke,
+// but one here is ~768 connected sample-pairs across up to 15 velocity buckets, and re-stroking the
+// live window every frame dropped frames at default settings on a large tube — even with Path2D
+// caching (which is otherwise a natural fit, since undistort's streaming IIR bakes a window's
+// geometry in at record time and it never changes). 60 fps wins over a faint ghost here; don't
+// re-attempt without a plan for that geometry volume.
 
 /** Live-tunable render parameters (adjustable in the on-screen panel so tuning isn't a recompile).
  *  `rotate` picks orientation: off = raw X-Y (L→horizontal, R→vertical, mono = 45° diagonal — the

@@ -428,7 +428,10 @@ export function TimeScope() {
         }
       }
 
-      // 1) Fade the trace toward transparent.
+      // 1) Fade the trace toward transparent. This never reaches zero and stalls in 8-bit storage
+      // at a residual that scales with the decay rate — invisible at the default trail, a faint
+      // permanent ghost at long ones. Deliberate: see Vectorscope's file-level note for the math
+      // and for why the redraw-from-history fix SpectrumScope uses was ported here and reverted.
       const fade = 1 - Math.exp(-dt / p.trailTau);
       ctx.globalCompositeOperation = "destination-out";
       ctx.fillStyle = `rgba(0,0,0,${fade})`;
