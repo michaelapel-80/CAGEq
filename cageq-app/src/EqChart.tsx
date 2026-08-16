@@ -125,6 +125,7 @@ export function EqChart({
   nodes,
   spectrumRef,
   eqBands,
+  preampDb = 0,
   legendHost,
   minSpan,
   height = 210,
@@ -145,6 +146,11 @@ export function EqChart({
   /** The applied filter cascade (AutoEq fit + custom). Its magnitude response is removed from
    *  the post-EQ capture per bin so the backdrop shows the **pre-filter** source spectrum. */
   eqBands?: Band[];
+  /** The §4.1 loudness-match preamp (dB) applied alongside `eqBands` — also removed from the
+   *  backdrop, same as Vectorscope/TimeScope's undistort, so it reconstructs the actual *input*
+   *  signal rather than just undoing the filter shape and leaving the preamp's level offset in.
+   *  Applies even when `eqBands` is empty (Dry still carries this gain). */
+  preampDb?: number;
   /** If given, the legend renders (via portal) into this element instead of inline — used to
    *  place it full-width below the chart+meters row so long labels have room. */
   legendHost?: HTMLElement | null;
@@ -340,14 +346,15 @@ export function EqChart({
   // as a backdrop and the coloured EQ curves stay legible on top. X = log-Hz; Y = dBFS.
   //
   // Pre-filter view: the capture is the post-EQ output, so subtract the applied filter response
-  // (dB) at each bin's frequency to recover the source spectrum — the resonances the EQ is
-  // fighting show where they actually are, not flattened by the correction. (VU/LUFS keep the
-  // raw post-EQ signal; only this display is un-EQ'd.)
+  // (dB) *and* the preamp at each bin's frequency to recover the actual source spectrum — the
+  // resonances the EQ is fighting show where they actually are, not flattened by the correction,
+  // and Dry's loudness-match preamp doesn't leave a residual level offset. (VU/LUFS keep the raw
+  // post-EQ signal; only this display is un-EQ'd.)
   // Render-time values the rAF loop below needs but can't close over directly — the loop is set up
   // once at mount (like Vectorscope's), so anything from props/render has to come through a ref
   // that's refreshed every render, read fresh each frame.
-  const specDrawCtx = useRef({ eqBands, PAD, H, W });
-  specDrawCtx.current = { eqBands, PAD, H, W };
+  const specDrawCtx = useRef({ eqBands, preampDb, PAD, H, W });
+  specDrawCtx.current = { eqBands, preampDb, PAD, H, W };
   useEffect(() => {
     const cv = specCanvasRef.current;
     const ctx = cv?.getContext("2d");
@@ -358,7 +365,7 @@ export function EqChart({
       const spectrum = spectrumRef?.current ?? null;
       if (spectrum !== drawn) {
         drawn = spectrum;
-        const { eqBands, PAD, H, W } = specDrawCtx.current;
+        const { eqBands, preampDb, PAD, H, W } = specDrawCtx.current;
         if (!spectrum || spectrum.db.length < 2) {
           ctx.clearRect(0, 0, W, H);
         } else {
@@ -376,10 +383,14 @@ export function EqChart({
           const plotBot = H - PAD.b;
           const sy = (db: number) => plotBot - clamp((db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN, 0, 1) * (plotBot - plotTop);
 
-          // The EQ response at each bin frequency — subtracted from the (post-EQ) capture to undo
-          // the filter. Null when nothing's applied (e.g. Dry), leaving the capture as-is.
+          // The EQ response at each bin frequency plus the preamp — both subtracted from the
+          // (post-EQ) capture to undo everything applied and recover the actual source. `eqBands`
+          // is `undefined` only mid self-test (correction fully off, capture as-is since the EQ
+          // is changing under it); empty (Dry — no filters, still the loudness-match preamp) still
+          // gets the preamp term.
+          const undoing = eqBands !== undefined;
           let corr: Float64Array | null = null;
-          if (eqBands && eqBands.length) {
+          if (undoing && eqBands.length) {
             const bf = new Float64Array(n);
             for (let i = 0; i < n; i++) bf[i] = binF(i);
             corr = composedCurveDb(eqBands, bf);
@@ -408,7 +419,7 @@ export function EqChart({
           for (let i = 0; i < n; i++) {
             const x0 = fx(i);
             const x1 = i < n - 1 ? fx(i + 1) : x0 + 1;
-            const db = corr ? spectrum.db[i] - corr[i] : spectrum.db[i];
+            const db = undoing ? spectrum.db[i] - (corr ? corr[i] : 0) - preampDb : spectrum.db[i];
             const yTop = sy(db);
             ctx.fillRect(x0, yTop, Math.max(1, x1 - x0), plotBot - yTop);
           }

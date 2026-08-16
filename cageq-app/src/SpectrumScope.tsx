@@ -1,14 +1,45 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { listen, emit } from "@tauri-apps/api/event";
+import { composedCurveDb } from "./biquad";
 import { spectrumStream } from "./streams";
 import type { SpectrumData } from "./EqChart";
+import type { ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters — same rationale as Vectorscope/TimeScope's panels. `trailTau`
  *  is a genuine canvas-alpha phosphor decay time constant (like the other scope views' Trail),
  *  not a value-domain ease — see `steadyAlpha` below for how it avoids that approach's earlier
- *  flicker/saturation bug. */
-type Params = { trailTau: number; glow: number };
-const DEFAULTS: Params = { trailTau: 0.05, glow: 0.9 };
+ *  flicker/saturation bug. `undistort` shares the scope family's meaning and machinery (same
+ *  `scope-eq` broadcast, same "filters + preamp" correction EqChart's own spectrum backdrop now
+ *  applies) — see `getCorrection` below for why it's a frequency-domain subtraction here rather
+ *  than the scopes' sample-domain inverse cascade: this view never sees raw samples, only the
+ *  backend's already-FFT'd, already-log-binned dB values. */
+type Params = { trailTau: number; glow: number; undistort: boolean };
+const DEFAULTS: Params = { trailTau: 0.05, glow: 0.9, undistort: true };
+
+/** Cache for the per-bin correction curve (filter response + preamp, dB), keyed by reference/value
+ *  so it's rebuilt only when the EQ or bin layout actually changes — not on every 60 fps frame, and
+ *  not once per render loop (both the bars and the peak caps share one cache via `corrCacheRef`,
+ *  so whichever runs first each frame builds it and the other reuses it). */
+type CorrCache = { filters: ScopeEq["filters"] | null; preampDb: number; n: number; arr: Float64Array };
+function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: SpectrumData): Float64Array {
+  const c = cache.current;
+  if (c && c.filters === eq.filters && c.preampDb === eq.preampDb && c.n === s.db.length) return c.arr;
+  const n = s.db.length;
+  const arr = new Float64Array(n);
+  if (eq.filters.length) {
+    const lnF0 = Math.log(s.f_min);
+    const lnF1 = Math.log(s.f_max);
+    const bf = new Float64Array(n);
+    for (let i = 0; i < n; i++) bf[i] = Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
+    const curve = composedCurveDb(eq.filters, bf);
+    for (let i = 0; i < n; i++) arr[i] = curve[i] + eq.preampDb;
+  } else {
+    arr.fill(eq.preampDb); // Dry: no filters, still undo the §4.1 loudness-match preamp
+  }
+  cache.current = { filters: eq.filters, preampDb: eq.preampDb, n, arr };
+  return arr;
+}
 const REF_SIZE = 512;
 const GRID_ALPHA = 0.22;
 // Same fixed dBFS scale as EqChart's spectrum backdrop (§5.4) — consistent reading between the
@@ -81,6 +112,8 @@ export function SpectrumScope() {
   const trailRef = useRef<HTMLCanvasElement>(null);
   const peakRef = useRef<HTMLCanvasElement>(null);
   const dataRef = useRef<SpectrumData | null>(null);
+  const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0 });
+  const corrCacheRef = useRef<CorrCache | null>(null);
   const [params, setParams] = useState<Params>(DEFAULTS);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
@@ -110,8 +143,25 @@ export function SpectrumScope() {
   const resH = Math.round(height * dpr);
 
   // Passive subscriber — Meter.tsx owns starting/stopping the underlying capture; the stream is
-  // the Channel-backed bus (streams.ts, not `listen` events), same as EqChart's backdrop.
-  useEffect(() => spectrumStream.subscribe((s) => (dataRef.current = s)), []);
+  // the Channel-backed bus (streams.ts, not `listen` events), same as EqChart's backdrop. Also
+  // picks up the `scope-eq` broadcast for undistort — same event Vectorscope/TimeScope consume,
+  // requested on mount since events aren't retained.
+  useEffect(() => {
+    const unsubSpectrum = spectrumStream.subscribe((s) => (dataRef.current = s));
+    let active = true;
+    let unlistenEq: (() => void) | undefined;
+    void (async () => {
+      unlistenEq = await listen<ScopeEq>("scope-eq", (e) => {
+        if (active) eqRef.current = e.payload;
+      });
+      if (active) void emit("scope-eq-request");
+    })();
+    return () => {
+      active = false;
+      unsubSpectrum();
+      unlistenEq?.();
+    };
+  }, []);
 
   // Static graticule: a few dBFS reference lines + one vertical guide per frequency decade
   // (100/1k/10k — deliberately minimal, this view's whole point is staying uncluttered). Redrawn
@@ -206,6 +256,7 @@ export function SpectrumScope() {
         // stable value settles at exactly the intended glow (steadyAlpha), and when the reading
         // actually drops, the *abandoned* higher region simply isn't redrawn any more and fades
         // away on its own — the real phosphor trail, not a reconstruction from tracked values.
+        const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s) : null;
         ctx.fillStyle = grad!;
         for (let i = 0; i < n; i++) {
           const x0 = (i / n) * W;
@@ -213,7 +264,8 @@ export function SpectrumScope() {
           const slot = x1 - x0;
           const bx = x0 + (slot * BAR_GAP_FRAC) / 2;
           const bw = Math.max(1, slot * (1 - BAR_GAP_FRAC));
-          const frac = Math.max(0, Math.min(1, (s.db[i] - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
+          const db = corr ? s.db[i] - corr[i] : s.db[i];
+          const frac = Math.max(0, Math.min(1, (db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
           const yTop = plotBot - frac * (plotBot - plotTop);
           ctx.fillRect(bx, yTop, bw, plotBot - yTop);
         }
@@ -256,11 +308,14 @@ export function SpectrumScope() {
       const n = s?.db.length ?? 0;
       if (n >= 2 && s) {
         if (peakDb.length !== n) peakDb = new Array(n).fill(DB_FLOOR);
+        const corr = paramsRef.current.undistort ? getCorrection(corrCacheRef, eqRef.current, s) : null;
         for (let i = 0; i < n; i++) {
           // Release: continuous decay every frame, same rate as the backend's own peak_db, so the
           // cap slides smoothly between spectrum emits instead of only moving when one arrives;
           // attack snaps up to the backend's latest value wherever it's higher.
-          peakDb[i] = Math.max(peakDb[i] - SPEC_PEAK_DROP_DB_PER_SEC * dt, DB_FLOOR, i < s.peak_db.length ? s.peak_db[i] : DB_FLOOR);
+          const raw = i < s.peak_db.length ? s.peak_db[i] : DB_FLOOR;
+          const target = corr ? raw - corr[i] : raw;
+          peakDb[i] = Math.max(peakDb[i] - SPEC_PEAK_DROP_DB_PER_SEC * dt, DB_FLOOR, target);
         }
 
         ctx.strokeStyle = `rgba(${PEAK_RGB},0.9)`;
@@ -286,7 +341,8 @@ export function SpectrumScope() {
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  const CONTROLS: { key: keyof Params; label: string; min: number; max: number; step: number }[] = [
+  type NumKey = "trailTau" | "glow";
+  const CONTROLS: { key: NumKey; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "glow", label: t("scope.glow"), min: 0.05, max: 1, step: 0.05 },
   ];
@@ -359,6 +415,11 @@ export function SpectrumScope() {
                 <b>{params[cc.key].toFixed(cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : 2)}</b>
               </label>
             ))}
+            <div className="vs-tune-sep" />
+            <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
+              <span className="vs-tune-label">{t("scope.undistort")}</span>
+              <input type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
+            </label>
           </div>
         )}
       </div>

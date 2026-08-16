@@ -2400,7 +2400,8 @@ function App() {
                         refs={chartRefs}
                         phase={chartPhase}
                         spectrumRef={spectrumRef}
-                        eqBands={dryActive || selfTest?.phase === "running" ? undefined : result.filters}
+                        eqBands={selfTest?.phase === "running" ? undefined : dryActive ? [] : result.filters}
+                        preampDb={result?.preamp_db ?? 0}
                         legendHost={legendHost}
                         minSpan={comparisonSpan}
                         height={215}
