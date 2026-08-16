@@ -55,11 +55,15 @@ export type RefCurve = {
  *  Bode-style overlay, off by default. Computed from bands, so it tracks live edits. */
 export type PhaseCurve = { id: string; bands: Band[]; color: string; label: string; defaultHidden?: boolean };
 
-/** A live loopback-FFT spectrum snapshot — log-frequency magnitude bins + per-bin peak-hold,
- *  in dB (relative). The capture is the post-EQ output; the chart draws the **pre-filter**
- *  (source) view by removing the applied filter response per bin (see `eqBands`), so it reads
- *  against the EQ curve as "what's coming in" rather than the already-corrected output (§5.3c). */
-export type SpectrumData = { db: number[]; peak_db: number[]; f_min: number; f_max: number };
+/** A live loopback-FFT spectrum snapshot — log-frequency magnitude bins, in dB (relative), plus
+ *  the endpoint's silence flag (`signal`, same test as the meter's): during silence the backend
+ *  sweeps `db` down to the floor, and SpectrumScope blanks its beam on `signal` rather than
+ *  painting that sweep into its phosphor trail (this chart's own backdrop keeps drawing it — the
+ *  gentle fade-away is the intended look here). The capture is the post-EQ output; the chart draws
+ *  the **pre-filter** (source) view by removing the applied filter response per bin (see
+ *  `eqBands`), so it reads against the EQ curve as "what's coming in" rather than the
+ *  already-corrected output (§5.3c). */
+export type SpectrumData = { db: number[]; signal: boolean; f_min: number; f_max: number };
 
 /** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). */
 export type Nodes = {

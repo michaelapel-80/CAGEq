@@ -46,8 +46,13 @@ pub struct MeterUpdate {
 pub struct SpectrumUpdate {
     /// Smoothed magnitude per log-frequency bin, dB (relative), from low freq (index 0) up.
     pub db: Vec<f32>,
-    /// Per-bin peak-hold (slow decay) — the resonance catcher.
-    pub peak_db: Vec<f32>,
+    /// `false` when the endpoint produced no audio this window (same silence test as
+    /// [`MeterUpdate::signal`]). The analyzer view blanks its beam on this instead of painting the
+    /// idle-decay sweep: without it, the ~35 dB/s slide to the floor is *actively redrawn* into
+    /// the phosphor trail for seconds after the music stops — which reads as burn-in, and had been
+    /// chased as a (nonexistent) trail-decay bug through several rendering rewrites before the
+    /// rebuild-after-hard-clear behavior gave away that the content was being repainted, not stuck.
+    pub signal: bool,
     /// Centre frequency of bin 0 (Hz); bins are geometrically spaced up to `f_max`.
     pub f_min: f32,
     /// Centre frequency of the last bin (Hz).
@@ -152,15 +157,18 @@ mod windows_impl {
     const SPEC_F_MAX: f32 = 20_000.0;
     /// dB floor for empty/silent spectrum bins.
     const SPEC_FLOOR: f32 = -120.0;
-    /// Power-spectrum smoothing time constant (seconds) — steadies the display.
-    const SPEC_TAU_SECS: f32 = 0.15;
-    /// Per-bin peak-hold decay (dB/s) — fast, essentially disabling the hold: the front-end
-    /// phosphor emulation already provides all the peak persistence the display needs.
-    const SPEC_PEAK_DROP_DB_PER_SEC: f32 = 60.0;
+    /// Power-spectrum smoothing time constant (seconds) — just enough to settle pure FFT/windowing
+    /// noise across a couple of hops (~43 ms each, see fft_hop), not to steady the display over
+    /// time: that's the front-end's job now (canvas phosphor persistence, plus interpolating
+    /// between spectrum events instead of snapping). A slower constant here used to add its own
+    /// multi-hop lag *underneath* the front-end's persistence — two decays compounding into a
+    /// sluggish "slow fall" that no front-end tuning could get out from under, since it was baked
+    /// into the values themselves before they ever left the sidecar.
+    const SPEC_TAU_SECS: f32 = 0.02;
     /// Spectrum emit cadence — 60 fps, matching the level meter. The FFT is heavier than the
     /// meter but the fold + emit is cheap enough that the full rate reads noticeably smoother.
     const SPECTRUM_INTERVAL: Duration = Duration::from_millis(16);
-    /// Power multiplier applied per emit when no fresh FFT arrived (silence) — fades the stored
+    /// Power multiplier applied per emit while genuinely silent (endpoint idle) — fades the stored
     /// spectrum toward the floor instead of freezing it lit (≈35 dB/s at the 16 ms cadence).
     const SPEC_IDLE_DECAY: f32 = 0.88;
 
@@ -364,8 +372,8 @@ mod windows_impl {
     }
 
     /// Post-EQ spectrum analyzer: accumulates mono loopback samples, runs overlapping Hann-windowed
-    /// FFTs, exponentially averages the power spectrum, and collapses it onto log-frequency bins
-    /// with a slow per-bin peak-hold for resonance spotting.
+    /// FFTs, lightly averages the power spectrum across hops, and collapses it onto log-frequency
+    /// bins. No peak-hold here — the front-end's own persistence covers that job now.
     struct Spectrum {
         fft: Arc<dyn RealToComplex<f32>>,
         fft_size: usize,           // per-rate FFT length (BASE_FFT_SIZE scaled to the sample rate)
@@ -377,10 +385,8 @@ mod windows_impl {
         accum: VecDeque<f32>,      // mono sample accumulator
         avg_power: Vec<f32>,       // smoothed linear power per FFT bin
         ranges: Vec<(usize, usize)>, // per log bin: inclusive linear-bin span
-        peak_db: Vec<f32>,         // per log bin peak-hold, dB
         smoothing: f32,            // power-average coefficient per hop
         power_scale: f32,          // |X|² -> normalized power so a full-scale sine reads ~0 dBFS
-        fresh: bool,               // an FFT ran since the last emit (else the display is faded)
     }
 
     impl Spectrum {
@@ -433,10 +439,8 @@ mod windows_impl {
                 accum: VecDeque::new(),
                 avg_power: vec![0.0; n_lin],
                 ranges,
-                peak_db: vec![SPEC_FLOOR; N_LOG_BINS],
                 smoothing,
                 power_scale,
-                fresh: false,
             }
         }
 
@@ -456,17 +460,11 @@ mod windows_impl {
                     for (avg, c) in self.avg_power.iter_mut().zip(self.out_buf.iter()) {
                         *avg += a * (c.norm_sqr() - *avg);
                     }
-                    self.fresh = true;
                 }
                 for _ in 0..self.fft_hop {
                     self.accum.pop_front();
                 }
             }
-        }
-
-        /// Consume the "an FFT ran" flag (true since the last call).
-        fn take_fresh(&mut self) -> bool {
-            std::mem::take(&mut self.fresh)
         }
 
         /// Fade the stored power toward the floor — called on an emit with no fresh audio, so the
@@ -477,11 +475,10 @@ mod windows_impl {
             }
         }
 
-        /// Collapse the averaged power onto log bins (dB) and advance the per-bin peak-hold.
-        fn snapshot(&mut self, dt: f32) -> SpectrumUpdate {
-            let drop = SPEC_PEAK_DROP_DB_PER_SEC * dt;
+        /// Collapse the averaged power onto log bins (dB).
+        fn snapshot(&mut self, signal: bool) -> SpectrumUpdate {
             let mut db = Vec::with_capacity(N_LOG_BINS);
-            for (i, &(lo, hi)) in self.ranges.iter().enumerate() {
+            for &(lo, hi) in self.ranges.iter() {
                 // Peak linear bin in this log bin, normalized to dBFS — so a narrow resonance reads
                 // its true level regardless of the (wider, at HF) log bin, on an absolute scale.
                 let power = self.avg_power[lo..=hi].iter().copied().fold(0.0f32, f32::max);
@@ -490,11 +487,9 @@ mod windows_impl {
                 } else {
                     SPEC_FLOOR
                 };
-                self.peak_db[i] = (self.peak_db[i] - drop).max(cur);
                 db.push(round_to(cur, 1));
             }
-            let peak_db = self.peak_db.iter().map(|&v| round_to(v, 1)).collect();
-            SpectrumUpdate { db, peak_db, f_min: SPEC_F_MIN, f_max: SPEC_F_MAX }
+            SpectrumUpdate { db, signal, f_min: SPEC_F_MIN, f_max: SPEC_F_MAX }
         }
     }
 
@@ -767,14 +762,19 @@ mod windows_impl {
                 last_tick = now;
             }
 
-            // Spectrum on its own (slower) cadence — the FFTs themselves ran in `push` above.
-            // With no fresh audio (silence), fade the stored spectrum so it falls away.
+            // Spectrum on its own (slower) cadence — the FFTs themselves ran in `push` above. Only
+            // decay toward the floor on genuine silence (endpoint idle), not merely "no new hop
+            // finished in the last SPECTRUM_INTERVAL" — the hop is ~43 ms (see fft_hop) and the emit
+            // tick is 16 ms, so during perfectly normal continuous playback most ticks land between
+            // hops; treating that gap as "idle" faded the display in a spurious sawtooth even with
+            // real audio flowing. Silence detection reuses the same `last_signal`/SILENCE_GAP the
+            // meter's own `signal` field uses just below, for the same "endpoint has gone idle" test.
             if last_spectrum.elapsed() >= SPECTRUM_INTERVAL {
-                let sdt = last_spectrum.elapsed().as_secs_f32();
-                if !spectrum.take_fresh() {
+                let signal = last_signal.elapsed() < SILENCE_GAP;
+                if !signal {
                     spectrum.decay_idle();
                 }
-                on_spectrum(spectrum.snapshot(sdt));
+                on_spectrum(spectrum.snapshot(signal));
                 last_spectrum = Instant::now();
             }
 
