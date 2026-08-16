@@ -34,7 +34,7 @@ const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler
 // that's now been amplified/reshaped — the line would sit *inside* the beam it's supposed to
 // reference. Tracking the same outL/outR the trace itself draws is correct by construction.
 const PEAK_RELEASE_DB_PER_SEC = 20;
-const PEAK_HOLD_MS = 350;
+const PEAK_HOLD_MS = 1200;
 const DB_FLOOR = -120;
 // Peak *detection* takes the K-th largest rectified sample in the block, not the plain max and
 // not a windowed/smoothed value — a sustained tone has many samples near its own peak, one every
