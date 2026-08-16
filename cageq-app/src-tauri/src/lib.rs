@@ -743,6 +743,9 @@ enum SidecarSource {
 /// `None` in dev.
 fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
     let (config_dir, config_source) = resolve_config_dir();
+    // Set once, before the sidecar (or any restart of it) is ever spawned — a child process
+    // inherits the parent's environment, so this alone is enough for every launch/restart to see it.
+    set_cache_dir_env(&resolve_cache_dir());
     let (source, sidecar) = resolve_sidecar(bundled_sidecar.as_deref());
     let settings = load_settings();
     match start_core(&config_dir, source, settings.last_hash.as_deref()) {
@@ -794,6 +797,32 @@ fn resolve_config_dir() -> (PathBuf, String) {
     }
     let dev = std::env::temp_dir().join("cageq-dev-config");
     (dev, "dev temp (Equalizer APO not detected)".into())
+}
+
+/// Where the sidecar caches downloaded AutoEq data (the headphone/target catalogue plus every
+/// fetched measurement/target CSV, sidecar_dsp.py's `CAGEQ_CACHE_DIR`). Precedence: an explicit
+/// override (dev/tests) → `%LOCALAPPDATA%\CAGEq\cache` → a dev temp folder off-Windows. Must be a
+/// stable, persistent location — it used to default (inside the sidecar) to the OS temp dir
+/// whenever this env var was unset, which is exactly what always happened, since nothing here
+/// ever set it. Temp is fair game for Storage Sense/disk-cleanup tools to wipe, so a slot the user
+/// had already used — and reasonably expects cached — would silently re-hit GitHub after any such
+/// cleanup. `%LOCALAPPDATA%` is the same kind of per-user, persistent-until-uninstall location the
+/// rest of the app data lives in, so caches survive reboots and cleanup sweeps like they should.
+fn resolve_cache_dir() -> PathBuf {
+    if let Ok(dir) = env::var("CAGEQ_CACHE_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Ok(local) = env::var("LOCALAPPDATA") {
+        return PathBuf::from(local).join("CAGEq").join("cache");
+    }
+    std::env::temp_dir().join("cageq-cache") // non-Windows dev fallback
+}
+
+/// Export `CAGEQ_CACHE_DIR` for the sidecar child to inherit. `set_var` is `unsafe` (it can race
+/// another thread's `env::var` read) — sound here because this runs once, synchronously, before
+/// `run()` spawns any thread that might read the environment concurrently.
+fn set_cache_dir_env(dir: &Path) {
+    unsafe { env::set_var("CAGEQ_CACHE_DIR", dir) };
 }
 
 fn sidecar_root() -> PathBuf {
