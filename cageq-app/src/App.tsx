@@ -1887,7 +1887,7 @@ function App() {
     if (dryActive) return [];
     const out: RefCurve[] = [];
     if (result?.reference_curve?.length)
-      out.push({ id: "ideal", points: result.reference_curve, color: REF_COLOR, label: tr("chart.idealEq") });
+      out.push({ id: "ideal", points: result.reference_curve, color: REF_COLOR, label: tr("chart.idealEq"), defaultHidden: true });
     // Target + raw measurement — nerd overlays, off by default (share the dBr reference).
     if (targetCurve?.length)
       out.push({ id: "target", points: targetCurve, color: TARGET_COLOR, label: tr("chart.target"), defaultHidden: true });
