@@ -36,14 +36,21 @@ const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler
 const PEAK_RELEASE_DB_PER_SEC = 20;
 const PEAK_HOLD_MS = 350;
 const DB_FLOOR = -120;
-// Peak *detection* is smoothed through a short one-pole envelope before the block max is taken —
-// real peak meters do the same (a brief integration time) so an isolated glitch — lossy-codec
-// pre/post-echo artifacts, or ringing from the undistort inverse filter (a deep EQ cut inverts
-// into a resonant boost, see inverseBiquadCoeffs in biquad.ts) — reads as a spike smoothed down,
-// not a false peak, while a genuine transient (spread over many more samples at any real
-// bandwidth) survives close to full height. Time-based, not sample-count, so it's identical at
-// 44.1/48/96/192 kHz. Only affects this reference line — the drawn trace itself is untouched.
-const PEAK_SMOOTH_MS = 0.3;
+// Peak *detection* takes the K-th largest rectified sample in the block, not the plain max and
+// not a windowed/smoothed value — a sustained tone has many samples near its own peak, one every
+// cycle for as long as it lasts, scattered across the whole block rather than adjacent; an
+// isolated glitch — lossy-codec pre/post-echo artifacts, or ringing from the undistort inverse
+// filter (a deep EQ cut inverts into a resonant boost, see inverseBiquadCoeffs in biquad.ts, which
+// decays cycle to cycle rather than sustaining) — only ever has a handful, clustered right at its
+// start. Requiring K corroborating samples *anywhere* in the block (not contiguous) tells the two
+// apart correctly regardless of frequency: two earlier attempts at a contiguous window — a
+// one-pole envelope, then a sliding-window erosion — both discounted *every* brief event in
+// proportion to its width, so widening either to catch glitches also read genuine high-frequency
+// content low (its rectified envelope dips near zero every half-cycle, same as a glitch decaying,
+// at any window wide enough to matter). Expressed as a duration (PEAK_CONFIRM_MS → K = samples in
+// that many ms) so it's identical in effect at 44.1/48/96/192 kHz. Only affects this reference
+// line — the drawn trace itself is untouched.
+const PEAK_CONFIRM_MS = 1.0;
 
 // --- Triggering ---------------------------------------------------------------------------
 // A stable oscilloscope-style trigger needs pre/post-trigger history the raw ~16 ms `scope`
@@ -79,6 +86,20 @@ function laneLayout(mode: "lr" | "mix", H: number): Lane[] {
     { cy: laneH / 2, amp: laneH * 0.5, label: "L" },
     { cy: laneH + laneH / 2, amp: laneH * 0.5, label: "R" },
   ];
+}
+
+/** The K-th largest of `mag[0..n)` (rectified samples) — the peak-detection core described at
+ *  `PEAK_CONFIRM_MS` above. `k = 1` is the plain max; `k` clamps to `n` for a block shorter than
+ *  the confirmation window, which just falls back to the max rather than under-reading. Sorts
+ *  `mag`'s first `n` entries in place (ascending — `%TypedArray%.sort()`'s numeric default, unlike
+ *  `Array`'s lexicographic one, so no comparator needed) — the caller's scratch buffer, so it's
+ *  fine to mutate; cheap at these block sizes (a handful of thousand samples at most) and simpler
+ *  than a partial-selection algorithm for no measurable cost at this rate. */
+function kthLargest(mag: Float64Array, n: number, k: number): number {
+  if (n === 0) return 0;
+  const view = mag.subarray(0, n);
+  view.sort();
+  return view[Math.max(0, n - Math.min(k, n))];
 }
 
 /** Parse a `#rrggbb` hex (the `--accent` CSS var) to [r,g,b]; a green phosphor fallback. */
@@ -249,6 +270,7 @@ export function TimeScope() {
     // different in L/R vs mixdown. A brief reset on an intentional mode change is unsurprising.
     let peakDb: number[] = [];
     let peakHoldUntil: number[] = [];
+    let magScratch = new Float64Array(0); // reused rectified-magnitude buffer for kthLargest
 
     // Triggering: a circular buffer of the (possibly undistorted) display samples, plus a parallel
     // buffer of a lowpass-filtered mono trigger-detector value at the same indices — both written
@@ -340,17 +362,14 @@ export function TimeScope() {
 
         // Attack: this window's peak per lane, from the exact values about to be drawn — correct
         // in both modes by construction (it's the same array the trace path reads below). The
-        // rectified signal is run through the short envelope (see PEAK_SMOOTH_MS) before the max,
-        // so a single-sample outlier can't set the held peak on its own.
-        const smoothAlpha = 1 - Math.exp(-1 / (rate * (PEAK_SMOOTH_MS / 1000)));
+        // rectified signal's K-th largest sample over PEAK_CONFIRM_MS worth of samples — see there.
+        const confirmSamples = Math.max(1, Math.round(rate * (PEAK_CONFIRM_MS / 1000)));
+        if (magScratch.length < n) magScratch = new Float64Array(n);
         for (let lane = 0; lane < lanes.length; lane++) {
-          let env = 0;
-          let blockPeak = 0;
           for (let i = 0; i < n; i++) {
-            const v = Math.abs(mode === "mix" ? (outL[i] + outR[i]) / 2 : lane === 0 ? outL[i] : outR[i]);
-            env += (v - env) * smoothAlpha;
-            if (env > blockPeak) blockPeak = env;
+            magScratch[i] = Math.abs(mode === "mix" ? (outL[i] + outR[i]) / 2 : lane === 0 ? outL[i] : outR[i]);
           }
+          const blockPeak = kthLargest(magScratch, n, confirmSamples);
           const blockDb = 20 * Math.log10(Math.max(blockPeak, 1e-6));
           if (blockDb >= peakDb[lane]) {
             peakDb[lane] = blockDb;
