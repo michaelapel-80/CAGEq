@@ -298,7 +298,9 @@ fn apply_result(applied: Applied, config_dir: &Path) -> ApplyResult {
 fn list_headphones(state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, .. } => core.request("list_headphones", json!({})).map_err(|e| e.to_string()),
+        Backend::Ready { core, .. } => core
+            .request_with_deadline("list_headphones", json!({}), CATALOGUE_BUSY_RESPONSE)
+            .map_err(|e| e.to_string()),
     }
 }
 
@@ -515,7 +517,9 @@ fn measurement_curves(headphone: String, target: Option<String>, state: State<Ba
 fn list_targets(state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, .. } => core.request("list_targets", json!({})).map_err(|e| e.to_string()),
+        Backend::Ready { core, .. } => core
+            .request_with_deadline("list_targets", json!({}), CATALOGUE_BUSY_RESPONSE)
+            .map_err(|e| e.to_string()),
     }
 }
 
@@ -782,6 +786,16 @@ fn watchdog_cfg() -> WatchdogConfig {
         restart_backoffs: vec![Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(10)],
     }
 }
+
+/// Busy deadline for `list_headphones`/`list_targets` specifically, in place of
+/// `watchdog_cfg()`'s fit-tuned `busy_response` (25 s). A cold catalogue build fetches every
+/// distinct AutoEq source's name_index.tsv, now in parallel (see sidecar_dsp.py) rather than one
+/// at a time, but network conditions vary a lot more than a compute-bound fit's runtime does —
+/// 25 s was tight enough that a rebuild could blow it, which made the watchdog conclude the
+/// sidecar had hung and kill it *mid-fetch*, turning "slow" into a restart loop. This is only ever
+/// reached on a cold cache (build_index/list_targets both skip straight to the cached-on-disk
+/// result otherwise), so the cost of a generous ceiling here is rare and one-off, not per-request.
+const CATALOGUE_BUSY_RESPONSE: Duration = Duration::from_secs(120);
 
 /// Resolve where cageq.txt is written, plus a human label of how it was found (for
 /// the UI). Precedence: an explicit `CAGEQ_CONFIG_DIR` override (dev/tests) → the

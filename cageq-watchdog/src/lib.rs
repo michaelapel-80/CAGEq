@@ -190,11 +190,15 @@ impl Shared {
     }
 }
 
-/// A request handed from a caller to the driver, with a one-shot reply channel.
+/// A request handed from a caller to the driver, with a one-shot reply channel. `deadline` is
+/// this specific call's busy-response ceiling — usually `WatchdogConfig::busy_response`, but a
+/// caller can widen it via [`Supervisor::call_with_deadline`] for a request whose normal duration
+/// the config's one-size-fits-all ceiling can't cover.
 struct Command {
     method: String,
     params: Value,
     reply: Sender<Result<Value, SupervisorError>>,
+    deadline: Duration,
 }
 
 // ---------------------------------------------------------------------------
@@ -247,23 +251,33 @@ impl Supervisor {
         Ok(Supervisor { cmd_tx: Some(cmd_tx), shared, driver: Some(driver), monitor: Some(monitor), cfg })
     }
 
-    /// Submit one request and block for its reply. Fails fast if the watchdog is not
-    /// `Running` rather than touching a dead/absent sidecar.
+    /// Submit one request and block for its reply, under the configured `busy_response`
+    /// deadline. Fails fast if the watchdog is not `Running` rather than touching a
+    /// dead/absent sidecar.
     pub fn call(&self, method: &str, params: Value) -> Result<Value, SupervisorError> {
+        self.call_with_deadline(method, params, self.cfg.busy_response)
+    }
+
+    /// Like [`Supervisor::call`], but with a caller-chosen busy deadline instead of the
+    /// configured `busy_response` — for a request whose normal duration the fit-tuned default
+    /// can't cover (e.g. a cold AutoEq catalogue rebuild: dozens of sequential-looking network
+    /// round-trips vs. the ~1-2 s a parametric fit takes). Only this one in-flight request gets
+    /// the wider deadline; idle heartbeats and every other call keep the configured one.
+    pub fn call_with_deadline(&self, method: &str, params: Value, deadline: Duration) -> Result<Value, SupervisorError> {
         match self.health() {
             Health::Running => {}
             Health::Recovering { reason, .. } => return Err(SupervisorError::Recovering(reason)),
             Health::Terminal { reason } => return Err(SupervisorError::Tripped(reason)),
         }
         let (reply_tx, reply_rx) = mpsc::channel();
-        let cmd = Command { method: method.to_string(), params, reply: reply_tx };
+        let cmd = Command { method: method.to_string(), params, reply: reply_tx, deadline };
         self.cmd_tx
             .as_ref()
             .ok_or(SupervisorError::DriverGone)?
             .send(cmd)
             .map_err(|_| SupervisorError::DriverGone)?;
 
-        match reply_rx.recv_timeout(self.cfg.busy_response + self.cfg.tick * 2) {
+        match reply_rx.recv_timeout(deadline + self.cfg.tick * 2) {
             Ok(result) => result,
             // The monitor should have tripped by now; report the current state.
             Err(_) => Err(match self.health() {
@@ -383,7 +397,7 @@ where
 
         match cmd_rx.recv_timeout(cfg.idle_interval) {
             Ok(cmd) => {
-                begin(&shared, Mode::Busy, cfg.busy_response);
+                begin(&shared, Mode::Busy, cmd.deadline);
                 let r = sidecar.call(&cmd.method, cmd.params);
                 let outcome = classify(&r);
                 let _ = cmd.reply.send(r.map_err(SupervisorError::from)); // ignore if caller left

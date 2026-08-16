@@ -20,6 +20,7 @@ import types
 import json
 import hashlib
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 import urllib.request
 import urllib.parse
 
@@ -158,13 +159,15 @@ def build_index(refresh=False):
                 "rig": "",
             })
 
-    # Enrich with rigs, fetching each source's name_index.tsv once (cached).
-    rig_cache = {}
+    # Enrich with rigs, fetching each distinct source's name_index.tsv once (cached) — in
+    # parallel: this is dozens of independent network round-trips (I/O-bound, so threads give
+    # real concurrency despite the GIL), and doing them one at a time on a cold cache is what
+    # made a first-ever catalogue build slow enough to look hung to whatever's talking to us.
+    sources = sorted({e["source"] for e in index})
+    with ThreadPoolExecutor(max_workers=min(12, len(sources)) or 1) as pool:
+        rig_maps = dict(zip(sources, pool.map(_rig_map_for_source, sources)))
     for e in index:
-        src = e["source"]
-        if src not in rig_cache:
-            rig_cache[src] = _rig_map_for_source(src)
-        e["rig"] = rig_cache[src].get((e["form_factor"], e["name"]), "")
+        e["rig"] = rig_maps[e["source"]].get((e["form_factor"], e["name"]), "")
 
     index.sort(key=lambda h: (h["name"].lower(), h["source"]))
     with open(idx_path, "w", encoding="utf-8") as fh:

@@ -525,6 +525,15 @@ impl Core {
         Ok(self.supervisor.call(method, params)?)
     }
 
+    /// Like [`Core::request`], but with a caller-chosen busy deadline instead of the watchdog's
+    /// fit-tuned default — for a request whose normal duration that default can't cover (the
+    /// AutoEq catalogue build: dozens of network round-trips, vs. the ~1-2 s a fit takes). The
+    /// caller (not this generic passthrough) is the one that knows which of its own requests
+    /// that applies to.
+    pub fn request_with_deadline(&self, method: &str, params: Value, deadline: Duration) -> Result<Value, CoreError> {
+        Ok(self.supervisor.call_with_deadline(method, params, deadline)?)
+    }
+
     /// The startup-integrity verdict computed at [`Core::start`].
     pub fn startup_decision(&self) -> StartupDecision {
         self.inner.startup
