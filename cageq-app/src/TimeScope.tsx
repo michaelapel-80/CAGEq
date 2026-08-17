@@ -18,12 +18,12 @@ import type { ScopeData, ScopeEq } from "./Vectorscope";
  *  longer-timescale/envelope mode, this stays a short-timescale instrument.
  *  `trigger`/`triggerFilterHz` are surfaced separately (`trigger` as a quick toolbar toggle, not a
  *  panel slider — it's a mode switch flipped often, same reasoning as the L/R⇄Mix toggle). */
-type Params = { trailTau: number; glow: number; beam: number; undistort: boolean; msPerDivIdx: number; trigger: boolean; triggerFilterHz: number };
+type Params = { trailTau: number; tail: number; glow: number; beam: number; undistort: boolean; msPerDivIdx: number; trigger: boolean; triggerFilterHz: number };
 // Classic 1-2-5 time/div sequence, same convention a real scope's dial steps through. 10 divisions
 // (DIVISIONS) is the standard horizontal graticule count, so total span = ms/div × 10.
 const MS_PER_DIV_STEPS = [0.2, 0.5, 1, 2, 5, 10];
 const DIVISIONS = 10;
-const DEFAULTS: Params = { trailTau: 0.05, glow: 0.6, beam: 3.0, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 80 }; // 2 ms/div × 10 = 20 ms
+const DEFAULTS: Params = { trailTau: 0.05, tail: 12, glow: 0.6, beam: 3.0, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 80 }; // 2 ms/div × 10 = 20 ms
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
 const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler than the lane centrelines
@@ -52,6 +52,14 @@ const DB_FLOOR = -120;
 // that many ms) so it's identical in effect at 44.1/48/96/192 kHz. Only affects this reference
 // line — the drawn trace itself is untouched.
 const PEAK_CONFIRM_MS = 1.0;
+// Peak-line opacity. These used to be drawn *into* the accumulating trail every frame with
+// source-over at 0.35, which doesn't stay at 0.35: re-blending over the faded previous frame
+// converges on L = 0.35·C + 0.65·(L·keep), i.e. ~0.65·C at the default trail (and brighter still at
+// longer ones — the reference line's brightness silently tracked a cosmetic slider). Drawn once per
+// frame onto a cleared layer it would be exactly 0.35·C, about half as bright, which is what made
+// them look washed out after the move. This is that convergence point, now fixed and predictable
+// instead of trail-dependent.
+const PEAK_LINE_ALPHA = 0.65;
 
 // --- Triggering ---------------------------------------------------------------------------
 // A stable oscilloscope-style trigger needs pre/post-trigger history the raw ~16 ms `scope`
@@ -445,12 +453,11 @@ export function TimeScope() {
       // 2) Faint peak-hold line(s), mirrored ± around each lane's centreline (a waveform is
       // bipolar; the peak tracked above is a magnitude). On their own cleared layer rather than in
       // the trail: they're redrawn at a constant alpha every frame and the trail is additive, so
-      // accumulating them would stack them toward white. That layer sits above the trail, so —
-      // unlike the old in-trail draw order, which put them underneath so the beam could sit over
-      // them — the line now crosses *over* the beam. At 0.35 alpha against an additive trace that
-      // reads as the beam showing through, which is the same intent.
+      // accumulating them would stack them toward white. The layer sits *below* the trail (DOM
+      // order — see the canvases below), preserving the original intent that the beam reads over
+      // the reference line wherever they cross, rather than the line painting across the beam.
       peakCtx.clearRect(0, 0, W, H);
-      peakCtx.strokeStyle = "rgba(230,162,60,0.35)"; // #e6a23c — same amber as .vbar-peak
+      peakCtx.strokeStyle = `rgba(230,162,60,${PEAK_LINE_ALPHA})`; // #e6a23c — same amber as .vbar-peak
       peakCtx.lineWidth = Math.max(1, H / REF_SIZE);
       peakCtx.beginPath();
       for (let lane = 0; lane < lanes.length; lane++) {
@@ -486,7 +493,7 @@ export function TimeScope() {
       }
 
       // 4) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
-      phos.commit(dt, p.trailTau);
+      phos.commit(dt, p.trailTau, p.tail);
 
       raf = requestAnimationFrame(render);
     };
@@ -498,9 +505,10 @@ export function TimeScope() {
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "glow" | "beam" | "triggerFilterHz";
+  type NumKey = "trailTau" | "tail" | "glow" | "beam" | "triggerFilterHz";
   const CONTROLS: { key: NumKey; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
+    { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), min: 0.05, max: 1, step: 0.05 },
     { key: "beam", label: t("scope.beam"), min: 0.5, max: 8, step: 0.1 },
     { key: "triggerFilterHz", label: t("scope.trigFilter"), min: 40, max: 1000, step: 10 },
@@ -524,16 +532,16 @@ export function TimeScope() {
           aria-hidden="true"
         />
         <canvas
-          ref={trailRef}
-          className="vectorscope-canvas vs-trail"
+          ref={peakRef}
+          className="vectorscope-canvas vs-peak"
           width={resW}
           height={resH}
           style={{ width: "100%", height: "100%" }}
           aria-hidden="true"
         />
         <canvas
-          ref={peakRef}
-          className="vectorscope-canvas vs-peak"
+          ref={trailRef}
+          className="vectorscope-canvas vs-trail"
           width={resW}
           height={resH}
           style={{ width: "100%", height: "100%" }}

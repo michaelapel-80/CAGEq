@@ -31,6 +31,7 @@ export type ScopeEq = { filters: Band[]; preampDb: number };
  *  view oscilloscope-music is authored for); on = rotated so mono is vertical, anti-phase horizontal. */
 type Params = {
   trailTau: number; // phosphor decay time constant (s) — time-based, so the trail is refresh-independent
+  tail: number; // multiplies trailTau for *faint* content only — the long afterglow (see phosphor.ts)
   glow: number; // beam brightness at full (slow-beam) intensity; velocity glow dims it from here
   beam: number; // beam line width, in reference px (scaled by the tube size)
   focus: number; // velocity-glow reference: segments shorter than this (ref px) draw full-bright,
@@ -41,7 +42,7 @@ type Params = {
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
-const DEFAULTS: Params = { trailTau: 0.05, glow: 0.60, beam: 1.0, focus: 8, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
+const DEFAULTS: Params = { trailTau: 0.05, tail: 12, glow: 0.60, beam: 1.0, focus: 8, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
@@ -370,7 +371,7 @@ export function Vectorscope({
       }
 
       // 3) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
-      phos.commit(dt, p.trailTau);
+      phos.commit(dt, p.trailTau, p.tail);
 
       // 4) Draw the beam spot every frame — the beam's energy dumped on one point, like a CRT dot.
       // Its brightness eases toward the target (spotVis → spotB) so it fades in when silence lands
@@ -433,6 +434,7 @@ export function Vectorscope({
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
   const CONTROLS: { key: keyof Params; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
+    { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), min: 0.05, max: 1, step: 0.05 },
     { key: "beam", label: t("scope.beam"), min: 0.5, max: 5, step: 0.1 },
     { key: "focus", label: t("scope.focus"), min: 1, max: 24, step: 0.5 },

@@ -28,10 +28,16 @@
  *     flicker was that workaround's own quantisation dithering near zero.
  *
  * Hence: **half-float storage**, which removes the stall at its source with no drain hack — and
- * measured dramatically faster than the canvas accumulator besides. Note the accumulator is
- * deliberately *not* clamped to 1.0: half-float holds values above full brightness, so a sustained
- * dwell genuinely overexposes and takes a moment to fall back through the visible range, and only
- * the final present clamps. That's closer to a real tube than canvas's clamp-at-every-step.
+ * measured dramatically faster than the canvas accumulator besides.
+ *
+ * ## Getting the *look* back after removing the bug
+ * Removing the stall turned out to remove something wanted along with it. The residue the 8-bit
+ * accumulator parked on screen was, visually, a long faint afterglow — the objection was only ever
+ * that it never left. A clean single exponential has no such tail, so the trail read thin and had
+ * to be compensated with more glow. Two corrections restore it deliberately rather than by
+ * accident: the accumulator is clamped to 1.0 (matching the old one, so bright dwells don't hold
+ * clipped-white longer than they used to), and the decay rate is brightness-dependent — see
+ * FS_ACCUM — so faint content lingers on its own slower constant while still terminating.
  *
  * ## Fallback
  * `EXT_color_buffer_half_float` is near-universal on desktop WebView2 but not guaranteed — a
@@ -47,12 +53,27 @@
  * will pile up frame over frame instead of holding steady.
  */
 
+/** Brightness at which the decay has fully handed over to the fast (bright) rate; below it the
+ *  slow tail rate blends in, taking over completely at zero. Raised from an initial 0.12, which
+ *  confined the tail to a sliver at the very bottom of the curve and read as barely there. */
+const TAIL_KNEE = 0.3;
+/** Absolute decay floor, per second, on top of the multiply — guarantees the tail reaches true zero
+ *  however slow it's set. Kept well under the faint end it's protecting: at an earlier 0.01 it
+ *  dominated below ~2% brightness (removing twice what the multiply did at 1 LSB), so the mechanism
+ *  guaranteeing termination was itself eating the tail it was meant to let exist. */
+const TAIL_FLOOR_PER_SEC = 0.0015;
+
 /** Shared surface of both backends — see the module comment for why the fallback exists. */
 export type Phosphor = {
   /** Clear and return the 2D context for this frame's trace. Sized to the target canvas. */
   begin(): CanvasRenderingContext2D;
-  /** Decay the history (time constant `tau` seconds over `dt` seconds), add this frame, present. */
-  commit(dt: number, tau: number): void;
+  /**
+   * Decay the history (time constant `tau` seconds over `dt`), add this frame's trace, present.
+   * `tail` multiplies `tau` for *faint* content only (1 = a plain single exponential), giving the
+   * long low-level afterglow a real phosphor has — see FS_ACCUM. Ignored by the 2D fallback, which
+   * can only apply one global fade.
+   */
+  commit(dt: number, tau: number, tail?: number): void;
   /** True for the half-float GL backend; false when running the 8-bit canvas fallback. */
   readonly precise: boolean;
   dispose(): void;
@@ -67,12 +88,31 @@ void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
 // treats `UNPACK_PREMULTIPLY_ALPHA_WEBGL` as a no-op, and relying on it turned the composite
 // additive in straight RGB — every frame stacking full-strength colour regardless of alpha until it
 // clipped to white. Doing it in three characters of shader we control sidesteps that entirely.
+// Clamped to 1.0, matching the 8-bit canvas accumulator this replaced. Half-float *can* hold
+// values above full brightness, and letting it looked appealing on paper ("a real tube
+// overexposes") — but it changes the dynamics asymmetrically: a dwell summing to 3.0 stores 3.0 and
+// stays clipped-white until decay drags it back under 1.0, where the old accumulator clamped at 1.0
+// on every write and began fading immediately. That made bright content bloom harder and hold
+// longer, which raises the apparent floor and forces glow up before the faint end reads against it.
+// The point of this module is a trail that reaches zero, not a different look.
 const FS_ACCUM = `precision highp float; varying vec2 vUv;
-uniform sampler2D uPrev, uTrace; uniform float uKeep;
+uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor;
 void main(){
+  vec4 prev = texture2D(uPrev, vUv);
+  // Brightness-dependent decay rate: bright content falls at uKeep, faint content at the slower
+  // uKeepTail, blended across uKnee. A single exponential is the wrong model — real phosphors decay
+  // with a long low-level tail, and *that tail is what the old 8-bit accumulator was accidentally
+  // faking* by stalling. Removing the stall removed the tail with it, which read as a loss of
+  // richness (and had to be compensated with more glow). This puts the tail back deliberately,
+  // with a rate that still terminates instead of parking residue on screen forever.
+  float v = max(max(prev.r, prev.g), prev.b);
+  float k = mix(uKeepTail, uKeep, smoothstep(0.0, uKnee, v));
+  // Tiny absolute floor so the tail is guaranteed to reach true zero however slow uKeepTail is.
+  // This is the same idea as the "drain" that flickered in the 8-bit attempt — harmless here
+  // because half-float has no quantisation left to dither against near zero.
   vec4 cur = texture2D(uTrace, vUv);
   cur.rgb *= cur.a;
-  gl_FragColor = texture2D(uPrev, vUv) * uKeep + cur;
+  gl_FragColor = min(max(prev * k - uFloor, 0.0) + cur, 1.0);
 }`;
 
 const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
@@ -134,6 +174,9 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   if (!accum || !blit || !quad) return null;
 
   const uKeep = gl.getUniformLocation(accum, "uKeep");
+  const uKeepTail = gl.getUniformLocation(accum, "uKeepTail");
+  const uKnee = gl.getUniformLocation(accum, "uKnee");
+  const uFloor = gl.getUniformLocation(accum, "uFloor");
   const uPrev = gl.getUniformLocation(accum, "uPrev");
   const uTrace = gl.getUniformLocation(accum, "uTrace");
   const uTex = gl.getUniformLocation(blit, "uTex");
@@ -143,6 +186,10 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); // one flip on upload, none on present — orientations agree
+  // Upload the canvas's values verbatim. The default is BROWSER_DEFAULT_WEBGL, which permits the
+  // implementation to colour-convert canvas→texture — a silent brightness/saturation shift on
+  // exactly the path this module depends on being exact.
+  gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
   gl.disable(gl.BLEND); // every pass writes its whole target; compositing is the shader's job
 
   const scratch = makeScratch(target);
@@ -212,7 +259,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       scratch.ctx!.clearRect(0, 0, target.width, target.height);
       return scratch.ctx!;
     },
-    commit(dt, tau) {
+    commit(dt, tau, tail = 1) {
       const W = target.width;
       const H = target.height;
       if (dead || W === 0 || H === 0 || gl.isContextLost()) return;
@@ -229,6 +276,9 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       gl.viewport(0, 0, W, H);
       gl.useProgram(accum);
       gl.uniform1f(uKeep, Math.exp(-dt / tau));
+      gl.uniform1f(uKeepTail, Math.exp(-dt / (tau * Math.max(1, tail))));
+      gl.uniform1f(uKnee, TAIL_KNEE);
+      gl.uniform1f(uFloor, TAIL_FLOOR_PER_SEC * dt);
       gl.uniform1i(uPrev, 0);
       gl.uniform1i(uTrace, 1);
       gl.activeTexture(gl.TEXTURE0);

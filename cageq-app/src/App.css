@@ -690,11 +690,12 @@ select:disabled {
   /* the trace sits above the graticule */
   z-index: 1;
 }
-/* Overlays that sit above the phosphor trail and are cleared+redrawn every frame rather than
-   accumulating into it: the vectorscope's resting spot, and the time scope's peak-hold lines. They
-   have to live outside the trail because it composites *additively*, so a constant-brightness
-   redraw would stack toward white instead of holding steady (see phosphor.ts). */
-.vs-peak,
+/* Layers cleared and redrawn every frame instead of accumulating into the phosphor trail — they
+   have to live outside it because it composites *additively*, so a constant-brightness redraw would
+   stack toward white rather than hold steady (see phosphor.ts).
+   The vectorscope's resting spot goes above the trail; the time scope's peak-hold lines go below it
+   (no z-index — DOM order puts them over the graticule but under the trail's z-index:1), so the
+   beam still reads over the reference line where they cross, as it did when both shared a canvas. */
 .vs-spot {
   z-index: 2;
 }

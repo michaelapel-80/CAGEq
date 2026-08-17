@@ -115,6 +115,7 @@
       <label>segments <input id="segs" type="range" min="64" max="4096" step="64" value="768" /><b id="segsV"></b></label>
       <label>trail (s) <input id="tau" type="range" min="0.02" max="0.6" step="0.01" value="0.05" /><b id="tauV"></b></label>
       <label>glow <input id="glow" type="range" min="0.05" max="1" step="0.05" value="0.6" /><b id="glowV"></b></label>
+      <label>tail <input id="tail" type="range" min="1" max="64" step="1" value="12" /><b id="tailV"></b></label>
     </fieldset>
 
     <fieldset>
@@ -123,6 +124,8 @@
         <span>fps</span><span id="fps">—</span>
         <span>frame</span><span id="ms">—</span>
         <span>storage</span><span id="storage">—</span>
+        <span>peak rgb</span><span id="peak">—</span>
+        <span>whiteness</span><span id="white">—</span>
         <span>probe</span><span id="probe">idle</span>
       </div>
       <div style="display:flex; gap:8px; margin-top:8px">
@@ -151,7 +154,7 @@ const log = (msg, cls) => {
 };
 const P = {
   mode: "canvas2d", premul: "shader", blend: "additive",
-  size: 512, segs: 768, tau: 0.05, glow: 0.6,
+  size: 512, segs: 768, tau: 0.05, glow: 0.6, tail: 12,
 };
 const ACCENT = [80, 220, 140];
 
@@ -171,6 +174,36 @@ function beamPoints(n, S, tSec) {
     pts[i * 2 + 1] = c - Math.sin(b * u) * R;
   }
   return pts;
+}
+
+// The colour of the single brightest pixel, plus how white it is (min/max channel). Additive
+// accumulation whitens by dragging the accent's *weak* channels up toward its strong one, so
+// "saturates to white" is exactly "min/max approaches 1".
+//
+// Two traps this got wrong first time round, both of which made the comparison meaningless:
+//   1. `getImageData` returns UNPREMULTIPLIED rgba; `readPixels` on the GL drawing buffer returns
+//      PREMULTIPLIED. Comparing them directly compares different quantities. Everything is
+//      converted to premultiplied here — that's the light actually emitted over a black tube.
+//   2. Taking each channel's max independently across the surface picks three unrelated pixels,
+//      and un-premultiplying divides by alpha, so a faint edge holding (1,1,1)/255 at alpha 1/255
+//      amplifies to pure white. The result was a constant 255,255,255 of pure quantisation noise.
+//      Tracking one coherent pixel — the brightest — avoids both.
+function peaks(d, premultiplied) {
+  let r = 0, g = 0, b = 0, best = -1;
+  for (let i = 0; i < d.length; i += 4) {
+    const a = premultiplied ? 255 : d[i + 3];
+    const pr = premultiplied ? d[i] : (d[i] * a) / 255;
+    const pg = premultiplied ? d[i + 1] : (d[i + 1] * a) / 255;
+    const pb = premultiplied ? d[i + 2] : (d[i + 2] * a) / 255;
+    const m = Math.max(pr, pg, pb);
+    if (m > best) { best = m; r = pr; g = pg; b = pb; }
+  }
+  const mx = Math.max(r, g, b);
+  return {
+    r: Math.round(r), g: Math.round(g), b: Math.round(b),
+    max: Math.round(mx),
+    white: mx ? Math.min(r, g, b) / mx : 0,
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -195,12 +228,7 @@ const c2d = {
     for (let i = 1; i < pts.length / 2; i++) ctx.lineTo(pts[i * 2], pts[i * 2 + 1]);
     ctx.stroke();
   },
-  read(S) { // max channel value anywhere — the burn-in probe's measurement
-    const d = this.ctx.getImageData(0, 0, S, S).data;
-    let m = 0;
-    for (let i = 0; i < d.length; i++) if (d[i] > m) m = d[i];
-    return m;
-  },
+  read(S) { return peaks(this.ctx.getImageData(0, 0, S, S).data, false); },
   storage: () => "canvas 8-bit",
 };
 
@@ -217,13 +245,21 @@ void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.,1.); }`;
 //       goes white. This is the mode a port must use — the source-over variant below cannot
 //       produce that, it only ever converges on the stroke colour.
 //   0 → cur + prev*(1-cur.a), plain source-over (what the first WebGL attempt used).
+// Kept in sync with src/phosphor.ts's FS_ACCUM (brightness-dependent tail, absolute floor, clamp)
+// so the GL modes here test the *shipped* math. An earlier version of this file predated all three,
+// which made it useless for the question it's now being asked: why the ported renderer saturates
+// toward white less than the canvas accumulator it replaced.
 const FS_ACCUM = `precision highp float; varying vec2 vUv;
-uniform sampler2D uPrev, uTrace; uniform float uKeep, uDrain, uPremul, uUseTrace, uAdditive;
+uniform sampler2D uPrev, uTrace;
+uniform float uKeep, uKeepTail, uKnee, uDrain, uPremul, uUseTrace, uAdditive;
 void main(){
-  vec4 prev = max(texture2D(uPrev, vUv) * uKeep - uDrain, 0.0);
+  vec4 p = texture2D(uPrev, vUv);
+  float v = max(max(p.r, p.g), p.b);
+  float k = mix(uKeepTail, uKeep, smoothstep(0.0, uKnee, v));
+  vec4 prev = max(p * k - uDrain, 0.0);
   vec4 cur = uUseTrace > 0.5 ? texture2D(uTrace, vUv) : vec4(0.0);
   if (uPremul > 0.5) cur.rgb *= cur.a;
-  gl_FragColor = uAdditive > 0.5 ? (prev + cur) : (cur + prev * (1.0 - cur.a));
+  gl_FragColor = uAdditive > 0.5 ? min(prev + cur, 1.0) : (cur + prev * (1.0 - cur.a));
 }`;
 const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
 void main(){ gl_FragColor = texture2D(uTex, vUv); }`;
@@ -263,6 +299,8 @@ const glr = {
     this.line = program(gl, VS_LINE, FS_LINE, "aXY");
     this.u = {
       keep: gl.getUniformLocation(this.accum, "uKeep"),
+      keepTail: gl.getUniformLocation(this.accum, "uKeepTail"),
+      knee: gl.getUniformLocation(this.accum, "uKnee"),
       drain: gl.getUniformLocation(this.accum, "uDrain"),
       premul: gl.getUniformLocation(this.accum, "uPremul"),
       useTrace: gl.getUniformLocation(this.accum, "uUseTrace"),
@@ -354,6 +392,8 @@ const glr = {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.uniform1f(this.u.keep, Math.exp(-dt / P.tau));
+    gl.uniform1f(this.u.keepTail, Math.exp(-dt / (P.tau * Math.max(1, P.tail))));
+    gl.uniform1f(this.u.knee, 0.3); // TAIL_KNEE in phosphor.ts
     gl.uniform1f(this.u.drain, drain);
     gl.uniform1f(this.u.premul, P.premul === "shader" ? 1 : 0);
     // Native mode draws its beam straight into this FBO below, so the accum pass must not also
@@ -404,9 +444,7 @@ const glr = {
     const px = new Uint8Array(S * S * 4);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.readPixels(0, 0, S, S, gl.RGBA, gl.UNSIGNED_BYTE, px);
-    let m = 0;
-    for (let i = 0; i < px.length; i++) if (px[i] > m) m = px[i];
-    return m;
+    return peaks(px, true);
   },
   storage() { return this.storageLabel; },
 };
@@ -417,6 +455,7 @@ const glr = {
 let R = c2d;
 let last = performance.now();
 let fpsAcc = [], msAcc = [];
+let lastPeak = 0;
 
 // Probe: cut the beam, then watch the brightest pixel until it's genuinely 0. Reports time-to-zero,
 // or the residual it stalls at — the number whose absence let the original 30 s tail go unexplained.
@@ -435,7 +474,7 @@ function tickProbe(now, S) {
   if (!probe.active) return;
   if (now - probe.lastSample < 100) return; // sample at ~10 Hz; readPixels is not free
   probe.lastSample = now;
-  const max = R.read(S);
+  const max = R.read(S).max;
   const elapsed = (now - probe.t0) / 1000;
   if (!probe.startedMax) probe.startedMax = max;
   $("probe").textContent = `${elapsed.toFixed(1)}s · max=${max}`;
@@ -479,6 +518,14 @@ function loop() {
     fpsAcc = []; msAcc = [];
   }
   tickProbe(now, S);
+  // Sampled, not per-frame: the readback is the expensive part and would distort the fps figure
+  // this harness also exists to report.
+  if (!probe.active && now - lastPeak > 250) {
+    lastPeak = now;
+    const p = R.read(S);
+    $("peak").textContent = `${p.r} ${p.g} ${p.b}`;
+    $("white").textContent = p.white.toFixed(3);
+  }
   requestAnimationFrame(loop);
 }
 
@@ -498,7 +545,7 @@ function rebuild() {
   }
 }
 
-for (const [id, key, fmt] of [["size","size",(v)=>v+"px"], ["segs","segs",(v)=>v], ["tau","tau",(v)=>v+"s"], ["glow","glow",(v)=>v]]) {
+for (const [id, key, fmt] of [["size","size",(v)=>v+"px"], ["segs","segs",(v)=>v], ["tau","tau",(v)=>v+"s"], ["glow","glow",(v)=>v], ["tail","tail",(v)=>"x"+v]]) {
   const el = $(id), out = $(id + "V");
   const sync = () => { P[key] = Number(el.value); out.textContent = fmt(el.value);
                        if (key === "size") rebuild(); };
