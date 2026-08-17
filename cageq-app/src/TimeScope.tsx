@@ -4,6 +4,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type Band, type BiquadCoeffs, type BiquadState, inverseBiquadCoeffs, zeroState, stepBiquad } from "./biquad";
 import { scopeStream } from "./streams";
+import { createPhosphor } from "./phosphor";
 import type { ScopeData, ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters (see Vectorscope's identical rationale — a live panel beats a
@@ -140,6 +141,10 @@ export function TimeScope() {
   const wrapRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLCanvasElement>(null);
   const trailRef = useRef<HTMLCanvasElement>(null);
+  // The peak-hold lines get their own layer above the trail: they're redrawn at a constant alpha
+  // every frame, and the trail accumulates *additively*, so drawing them into it would stack them
+  // toward white instead of holding steady (see phosphor.ts's closing note).
+  const peakRef = useRef<HTMLCanvasElement>(null);
   const scopeRef = useRef<ScopeData | null>(null);
   const [params, setParams] = useState<Params>(DEFAULTS);
   const [tuning, setTuning] = useState(false);
@@ -255,11 +260,16 @@ export function TimeScope() {
     for (const lane of laneLayout(mode, H)) if (lane.label) ctx.fillText(lane.label, 6, lane.cy - lane.amp * 0.55);
   }, [resW, resH, mode]);
 
-  // The trace: fade-then-draw on rAF, same phosphor persistence as the vectorscope.
+  // The trace: this frame's beam goes onto a scratch canvas handed to the phosphor accumulator,
+  // which owns the decay and the additive composite — same machinery as the vectorscope, see
+  // phosphor.ts for why the decay isn't an in-place canvas fade any more.
   useEffect(() => {
     const cv = trailRef.current;
-    const ctx = cv?.getContext("2d");
-    if (!cv || !ctx) return;
+    const peakCv = peakRef.current;
+    const peakCtx = peakCv?.getContext("2d");
+    if (!cv || !peakCv || !peakCtx) return;
+    const phos = createPhosphor(cv);
+    if (!phos) return;
     const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
 
     let raf = 0;
@@ -428,32 +438,30 @@ export function TimeScope() {
         }
       }
 
-      // 1) Fade the trace toward transparent. This never reaches zero and stalls in 8-bit storage
-      // at a residual that scales with the decay rate — invisible at the default trail, a faint
-      // permanent ghost at long ones. Deliberate: see Vectorscope's file-level note for the math
-      // and for why the redraw-from-history fix SpectrumScope uses was ported here and reverted.
-      const fade = 1 - Math.exp(-dt / p.trailTau);
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.fillStyle = `rgba(0,0,0,${fade})`;
-      ctx.fillRect(0, 0, W, H);
+      // 1) Start this frame's trace on a cleared scratch canvas; decaying everything before it is
+      // the accumulator's job, applied in commit() below.
+      const ctx = phos.begin();
 
       // 2) Faint peak-hold line(s), mirrored ± around each lane's centreline (a waveform is
-      // bipolar; the peak tracked above is a magnitude). Drawn *before* the trace (source-over, not
-      // the additive beam blend) so the beam can sit visibly over it wherever they cross, rather
-      // than the line painting over the beam.
-      ctx.globalCompositeOperation = "source-over";
-      ctx.strokeStyle = "rgba(230,162,60,0.35)"; // #e6a23c — same amber as .vbar-peak
-      ctx.lineWidth = Math.max(1, H / REF_SIZE);
-      ctx.beginPath();
+      // bipolar; the peak tracked above is a magnitude). On their own cleared layer rather than in
+      // the trail: they're redrawn at a constant alpha every frame and the trail is additive, so
+      // accumulating them would stack them toward white. That layer sits above the trail, so —
+      // unlike the old in-trail draw order, which put them underneath so the beam could sit over
+      // them — the line now crosses *over* the beam. At 0.35 alpha against an additive trace that
+      // reads as the beam showing through, which is the same intent.
+      peakCtx.clearRect(0, 0, W, H);
+      peakCtx.strokeStyle = "rgba(230,162,60,0.35)"; // #e6a23c — same amber as .vbar-peak
+      peakCtx.lineWidth = Math.max(1, H / REF_SIZE);
+      peakCtx.beginPath();
       for (let lane = 0; lane < lanes.length; lane++) {
         const { cy, amp } = lanes[lane];
         const dy = Math.pow(10, peakDb[lane] / 20) * amp;
-        ctx.moveTo(0, cy - dy);
-        ctx.lineTo(W, cy - dy);
-        ctx.moveTo(0, cy + dy);
-        ctx.lineTo(W, cy + dy);
+        peakCtx.moveTo(0, cy - dy);
+        peakCtx.lineTo(W, cy - dy);
+        peakCtx.moveTo(0, cy + dy);
+        peakCtx.lineTo(W, cy + dy);
       }
-      ctx.stroke();
+      peakCtx.stroke();
 
       // 3) The trace itself — the extracted (free-run or triggered) display window, not the raw
       // per-event samples: the window is a fixed ms/div × DIVISIONS span, decoupled from the
@@ -476,10 +484,17 @@ export function TimeScope() {
         ctx.strokeStyle = `rgba(${ar},${ag},${ab},${p.glow})`;
         for (const path of paths) ctx.stroke(path);
       }
+
+      // 4) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
+      phos.commit(dt, p.trailTau);
+
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      phos.dispose(); // frees the GL textures/programs; a leaked context would survive the unmount
+    };
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
@@ -511,6 +526,14 @@ export function TimeScope() {
         <canvas
           ref={trailRef}
           className="vectorscope-canvas vs-trail"
+          width={resW}
+          height={resH}
+          style={{ width: "100%", height: "100%" }}
+          aria-hidden="true"
+        />
+        <canvas
+          ref={peakRef}
+          className="vectorscope-canvas vs-peak"
           width={resW}
           height={resH}
           style={{ width: "100%", height: "100%" }}

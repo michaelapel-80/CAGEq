@@ -4,6 +4,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type Band, type BiquadCoeffs, type BiquadState, inverseBiquadCoeffs, zeroState, stepBiquad } from "./biquad";
 import { scopeStream } from "./streams";
+import { createPhosphor } from "./phosphor";
 
 /** A stereo vectorscope window from the loopback (see cageq-monitor `ScopeUpdate`): interleaved
  *  `l0, r0, l1, r1, …` sample pairs (≈ -1..1) in capture order, a signal flag, and the mix rate. */
@@ -15,20 +16,15 @@ export type ScopeData = { xy: number[]; signal: boolean; rate: number };
 export type ScopeEq = { filters: Band[]; preampDb: number };
 
 // The scope's dark "instrument screen" backdrop is a CSS background on .vs-screen (theme-independent).
-// The trace lives on a **transparent** canvas over it and fades with `destination-out` (alpha decay),
-// which can't reach zero: a multiplicative fade stalls in 8-bit storage wherever alpha drops below
-// ~0.5/(1-keep) LSB, since it then rounds back to itself. That threshold scales with the decay rate
-// — ~1.8 LSB (0.7%, invisible) at the default 0.05 s trail, but ~18 LSB (7%, a permanent ghost) at
-// the slider's 0.6 s end. So the faint burn-in here is real, deliberate, and bounded by keeping the
-// trail short; it is NOT the "harmlessly stalls at 1 LSB" that this note used to claim outright.
+// The trace lives on a **transparent** canvas over it, whose persistence is owned by the shared
+// half-float accumulator in phosphor.ts — see there for why an in-place `destination-out` fade (what
+// this used for a long time) leaves a permanent ghost at long trail settings, and what else was
+// tried before landing on that. Consequence worth knowing: the Trail slider's whole range is
+// genuinely usable now, where it used to be short-end-only.
 //
-// SpectrumScope solved the same bug by hard-clearing and redrawing its whole trail from timestamped
-// history each frame. That was ported here and reverted: a stamp there is 240 points and one stroke,
-// but one here is ~768 connected sample-pairs across up to 15 velocity buckets, and re-stroking the
-// live window every frame dropped frames at default settings on a large tube — even with Path2D
-// caching (which is otherwise a natural fit, since undistort's streaming IIR bakes a window's
-// geometry in at record time and it never changes). 60 fps wins over a faint ghost here; don't
-// re-attempt without a plan for that geometry volume.
+// Two things must NOT be drawn into the trail canvas, because the accumulator composites additively:
+// the graticule (static, on its own canvas below) and the resting spot (constant brightness, redrawn
+// every frame, on its own canvas above). Either would stack toward white instead of holding steady.
 
 /** Live-tunable render parameters (adjustable in the on-screen panel so tuning isn't a recompile).
  *  `rotate` picks orientation: off = raw X-Y (L→horizontal, R→vertical, mono = 45° diagonal — the
@@ -69,9 +65,9 @@ function parseHex(hex: string): [number, number, number] {
  * persistence: fade-then-draw on rAF turns motion into a glowing, decaying figure. Continuous lines
  * (not decimated dots) are what render oscilloscope-music Lissajous shapes. Purely a monitor.
  *
- * Two stacked canvases over the dark backdrop: a **static** graticule and a **transparent** trace
- * that fades via `destination-out`. Keeping the graticule off the fading canvas avoids it building
- * up, and the alpha fade avoids the additive-on-opaque burn-in.
+ * Three stacked canvases over the dark backdrop: a **static** graticule, the **trace** (whose
+ * persistence phosphor.ts owns), and the **resting spot**. Keeping the graticule and the spot off
+ * the trace canvas is what stops them accumulating into it — see the file-level note above.
  *
  * Always sized by measuring its own container (`ResizeObserver`, both inline and in the pop-out
  * window) rather than a fixed prop — `.vectorscope-wrap:not(.fill)` is `height:100%;
@@ -92,6 +88,10 @@ export function Vectorscope({
   const wrapRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLCanvasElement>(null);
   const trailRef = useRef<HTMLCanvasElement>(null);
+  // The resting spot gets its own layer above the trail: it's redrawn at a constant brightness
+  // every frame, and the trail accumulates *additively*, so drawing it there would pile it up frame
+  // over frame instead of holding it steady (see phosphor.ts's closing note).
+  const spotRef = useRef<HTMLCanvasElement>(null);
   // Latest payload, written by the listener and read by the rAF loop — a ref, not state, so the
   // 60 fps stream drives the imperative canvas without ever re-rendering React.
   const scopeRef = useRef<ScopeData | null>(null);
@@ -207,11 +207,17 @@ export function Vectorscope({
     }
   }, [res, params.rotate, params.radiusFrac, params.gridAlpha]);
 
-  // The trace: a transparent canvas that fades via destination-out and draws the beam additively.
+  // The trace: this frame's beam is drawn into a scratch 2D canvas and handed to the phosphor
+  // accumulator, which owns the decay and the additive composite (see phosphor.ts — half-float
+  // storage, so the trail actually reaches zero instead of stalling at a permanent ghost the way
+  // an in-place 8-bit `destination-out` fade does at long trail settings).
   useEffect(() => {
     const cv = trailRef.current;
-    const ctx = cv?.getContext("2d");
-    if (!cv || !ctx) return;
+    const spotCv = spotRef.current;
+    const spotCtx = spotCv?.getContext("2d");
+    if (!cv || !spotCv || !spotCtx) return;
+    const phos = createPhosphor(cv);
+    if (!phos) return;
     const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
 
     let raf = 0;
@@ -247,12 +253,9 @@ export function Vectorscope({
       const scale = p.rotate ? R / SQRT2 : R;
       const r0 = Math.max(1.5, p.beam * (S / REF_SIZE)); // beam/spot base radius
 
-      // 1) Fade the trace toward transparent (alpha decay) — time-based, so the trail length is
-      //    identical at any refresh rate. Stalls at ~1/255 alpha, invisible over the backdrop.
-      const fade = 1 - Math.exp(-dt / p.trailTau);
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.fillStyle = `rgba(0,0,0,${fade})`;
-      ctx.fillRect(0, 0, S, S);
+      // 1) Start this frame's trace on a cleared scratch canvas. The decay of everything before it
+      //    is the accumulator's job, applied in commit() at the end of the frame.
+      const ctx = phos.begin();
 
       // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns on,
       // then run each sample back through it to recover the pre-EQ source image. State persists
@@ -366,15 +369,21 @@ export function Vectorscope({
         spotB = (p.glow * refL) / (pathLen + refL);
       }
 
-      // Draw the beam spot every frame — the beam's energy dumped on one point, like a CRT dot.
+      // 3) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
+      phos.commit(dt, p.trailTau);
+
+      // 4) Draw the beam spot every frame — the beam's energy dumped on one point, like a CRT dot.
       // Its brightness eases toward the target (spotVis → spotB) so it fades in when silence lands
       // and fades out when the trace resumes, instead of popping. Skipped once it's fully faded.
+      // On its own layer (see spotRef), cleared each frame: the trail composites additively, so a
+      // constant-brightness redraw belongs outside it or it would stack toward white.
       spotVis += (spotB - spotVis) * (1 - Math.exp(-dt / SPOT_TAU));
+      spotCtx.clearRect(0, 0, S, S);
       if (spotVis > 0.01 && !Number.isNaN(spotX)) {
-        // source-over, not additive: the radii below *are* the spot size. (Additive keeps
-        // accumulating every frame, so the visible spot grows past the drawn radius by a factor
-        // that depends on the trail — unpredictable and too big.) Sized to the tube (S) so it
-        // scales proportionally inline and in the pop-out, independent of the beam width.
+        // source-over: the radii below *are* the spot size, drawn once per frame onto a cleared
+        // layer. Sized to the tube (S) so it scales proportionally inline and in the pop-out,
+        // independent of the beam width.
+        const ctx = spotCtx;
         ctx.globalCompositeOperation = "source-over";
         // Bloom: a steep *exponential* falloff (not a flat gradient disk, which reads fake) —
         // intense at the core, dropping fast into a faint tail, the real phosphor point-spread.
@@ -415,7 +424,10 @@ export function Vectorscope({
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      phos.dispose(); // frees the GL textures/programs; a leaked context would survive the unmount
+    };
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
@@ -439,6 +451,7 @@ export function Vectorscope({
       <div className="vs-screen" style={canvasStyle}>
         <canvas ref={gridRef} className="vectorscope-canvas vs-grid" width={res} height={res} style={canvasStyle} aria-hidden="true" />
         <canvas ref={trailRef} className="vectorscope-canvas vs-trail" width={res} height={res} style={canvasStyle} aria-hidden="true" />
+        <canvas ref={spotRef} className="vectorscope-canvas vs-spot" width={res} height={res} style={canvasStyle} aria-hidden="true" />
         <div className="vs-tools">
           {onPopOut && (
             <button type="button" className="vs-tool" title={t("scope.popOut")} onClick={onPopOut}>

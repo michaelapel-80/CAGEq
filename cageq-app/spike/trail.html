@@ -1,0 +1,515 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>CAGEq spike — trail renderer</title>
+<!--
+  SPIKE — a measurement harness, not part of the app. Nothing imports it, and it sits outside
+  public/ deliberately: Vite's dev server still serves the project root, so `tauri dev` reaches it
+  at http://localhost:1420/spike/trail.html, but `vite build` only bundles the index.html entry plus
+  public/, so it never ships. (Open it from the app window's devtools:
+  `location.href = "/spike/trail.html"`, and navigate back the same way.)
+
+  Running it in the *real WebView2* rather than a normal browser is the whole point: every failure
+  it was built to investigate was stack-specific and silent — an SVG alpha-floor filter that did
+  nothing, UNPACK_PREMULTIPLY_ALPHA_WEBGL that did nothing, and a half-float path that worked here
+  while the first port of it crashed the GPU process.
+
+  QUESTION (answered — see VERDICT): can a WebGL trail match the canvas accumulator's performance
+  without its burn-in?
+
+  VERDICT, from running this: yes, with half-float storage.
+    • gl-8bit stalls at the *same* residual as canvas2d → the earlier WebGL attempt's unexplained
+      ~30 s tail was the storage type, not the math. Decaying in float in the shader achieves
+      nothing when the result is rounded back into an UNSIGNED_BYTE texture on write.
+    • gl-8bit-drain does reach zero, but lingers and visibly flickers — that flicker is the drain
+      workaround's own quantisation dithering near zero.
+    • gl-half-float reaches zero cleanly with no drain, and held 240 fps at maxed size/segments.
+      Since that mode uploads the trace from a 2D canvas, the upload is NOT the bottleneck — which
+      is why the shipped port (src/phosphor.ts) keeps all existing Canvas 2D drawing and replaces
+      only the fade-and-composite step, rather than rewriting the beam as GL line geometry.
+  Kept rather than deleted: it stays the fastest way to answer "is this the stack or is this us?"
+
+  Background. The canvas accumulator fades with `destination-out`, which is multiplicative and so
+  never reaches zero; in 8-bit storage it stalls wherever alpha drops below ~0.5/(1-keep) LSB, since
+  the value then rounds back to itself. That threshold scales with the decay rate — invisible at the
+  scopes' short trails, a permanent ~7% ghost at long ones. SpectrumScope/EqChart solved it by
+  redrawing from timestamped history; the scopes can't afford that (too much geometry per stamp).
+  A WebGL accumulator was tried once in SpectrumScope and abandoned after measuring a ~30 s tail
+  that was never explained. This harness exists to explain it, with numbers instead of eyeballing.
+
+  It deliberately MEASURES rather than shows:
+    • FPS, so "fast enough" is a number.
+    • A decay probe: cut the input, then readPixels until the framebuffer is genuinely black, and
+      report either the time-to-zero or the residual it stalls at. This is the measurement whose
+      absence let the 30 s tail go undiagnosed.
+
+  The modes isolate one variable each, so a result points at a cause:
+    canvas2d          baseline — what the scopes ship today.
+    gl-8bit           WebGL accumulator, RGBA8 storage, multiply-only decay.
+                      Should reproduce the stall: float math in the shader does NOT help when the
+                      value is rounded back into an 8-bit texture on write. (Suspect #1 for the
+                      original 30 s tail — the old code claimed "float precision kills the rounding
+                      stall" while using UNSIGNED_BYTE textures.)
+    gl-8bit-drain     ...plus a small linear drain, which should turn the asymptote into a real zero.
+    gl-half-float     half-float storage, multiply-only — no drain needed if precision is the issue.
+    gl-native-lines   RGBA8+drain, but the beam is drawn as GL_LINE_STRIP instead of being uploaded
+                      from a 2D canvas. Isolates upload cost from accumulate cost. NOTE: 1px, no
+                      joins/width — this answers "how fast could this go", not "how would it look".
+
+  The premultiply toggle is a probe too: the app found UNPACK_PREMULTIPLY_ALPHA_WEBGL to be a no-op
+  here, which turned the composite additive in RGB and clipped the trail to white. "shader" does it
+  ourselves; "unpack" asks WebGL to. If those two look identical, the flag is being ignored.
+-->
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0e0d; color: #d8e0dc;
+         font: 12px/1.5 ui-monospace, Consolas, monospace; }
+  #wrap { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
+  #screen { background: #070a09; border-radius: 8px; box-shadow: inset 0 0 30px -10px #000; }
+  #panel { min-width: 300px; display: flex; flex-direction: column; gap: 10px; }
+  fieldset { border: 1px solid #2a3330; border-radius: 6px; margin: 0; padding: 8px 10px 10px; }
+  legend { color: #7fd8a8; letter-spacing: .08em; text-transform: uppercase; font-size: 10px; }
+  label { display: grid; grid-template-columns: 7.5em 1fr 3.6em; gap: 8px; align-items: center; }
+  label b { font-weight: 600; text-align: right; color: #9fb0a9; }
+  select, button { background: #141a18; color: #d8e0dc; border: 1px solid #2f3a36;
+                   border-radius: 5px; padding: 4px 8px; font: inherit; }
+  button { cursor: pointer; }
+  button:hover { border-color: #7fd8a8; color: #7fd8a8; }
+  #stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  #stats span:nth-child(odd) { color: #7f8f89; }
+  .verdict-ok { color: #7fd8a8; } .verdict-bad { color: #e6746b; } .verdict-warn { color: #e6a23c; }
+  #log { white-space: pre-wrap; color: #9fb0a9; max-height: 190px; overflow: auto;
+         border-top: 1px solid #2a3330; padding-top: 6px; }
+</style>
+
+<div id="wrap">
+  <canvas id="screen" width="512" height="512"></canvas>
+  <div id="panel">
+    <fieldset>
+      <legend>Renderer</legend>
+      <label>mode
+        <select id="mode">
+          <option value="canvas2d">canvas2d (baseline)</option>
+          <option value="gl-8bit">gl-8bit (multiply only)</option>
+          <option value="gl-8bit-drain">gl-8bit + drain</option>
+          <option value="gl-half-float">gl-half-float</option>
+          <option value="gl-native-lines">gl-native-lines</option>
+        </select><b></b>
+      </label>
+      <label>premultiply
+        <select id="premul">
+          <option value="shader">in shader</option>
+          <option value="unpack">UNPACK flag</option>
+        </select><b></b>
+      </label>
+      <label>blend
+        <select id="blend">
+          <option value="additive">additive (scopes)</option>
+          <option value="source-over">source-over</option>
+        </select><b></b>
+      </label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Load</legend>
+      <label>size <input id="size" type="range" min="256" max="1400" step="32" value="512" /><b id="sizeV"></b></label>
+      <label>segments <input id="segs" type="range" min="64" max="4096" step="64" value="768" /><b id="segsV"></b></label>
+      <label>trail (s) <input id="tau" type="range" min="0.02" max="0.6" step="0.01" value="0.05" /><b id="tauV"></b></label>
+      <label>glow <input id="glow" type="range" min="0.05" max="1" step="0.05" value="0.6" /><b id="glowV"></b></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Measure</legend>
+      <div id="stats">
+        <span>fps</span><span id="fps">—</span>
+        <span>frame</span><span id="ms">—</span>
+        <span>storage</span><span id="storage">—</span>
+        <span>probe</span><span id="probe">idle</span>
+      </div>
+      <div style="display:flex; gap:8px; margin-top:8px">
+        <button id="run">Run decay probe</button>
+        <button id="clear">Clear log</button>
+      </div>
+    </fieldset>
+
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------------------------------------
+// Controls / plumbing
+// ---------------------------------------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+// Reassigned by rebuild(): a canvas can only ever hold one context type for its lifetime, so
+// switching between the 2D and WebGL renderers requires replacing the element itself.
+let screenCv = $("screen");
+const logEl = $("log");
+const log = (msg, cls) => {
+  const t = new Date().toLocaleTimeString();
+  logEl.insertAdjacentHTML("afterbegin", `<div${cls ? ` class="${cls}"` : ""}>${t}  ${msg}</div>`);
+};
+const P = {
+  mode: "canvas2d", premul: "shader", blend: "additive",
+  size: 512, segs: 768, tau: 0.05, glow: 0.6,
+};
+const ACCENT = [80, 220, 140];
+
+// ---------------------------------------------------------------------------------------------
+// Synthetic beam — a drifting Lissajous, so geometry density matches a real vectorscope window
+// (~768 connected sample-pairs per 16 ms) without needing audio. `feeding` is cut by the probe.
+// ---------------------------------------------------------------------------------------------
+let feeding = true;
+let phase = 0;
+function beamPoints(n, S, tSec) {
+  const pts = new Float32Array(n * 2);
+  const c = S / 2, R = S * 0.42;
+  const a = 3 + Math.sin(tSec * 0.11) * 0.6, b = 2 + Math.cos(tSec * 0.07) * 0.4;
+  for (let i = 0; i < n; i++) {
+    const u = (i / n) * Math.PI * 2;
+    pts[i * 2] = c + Math.sin(a * u + phase) * R;
+    pts[i * 2 + 1] = c - Math.sin(b * u) * R;
+  }
+  return pts;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Renderer A — canvas2d accumulator (exactly what the scopes ship: destination-out fade + lighter)
+// ---------------------------------------------------------------------------------------------
+const c2d = {
+  ctx: null,
+  init(S) { screenCv.width = screenCv.height = S; this.ctx = screenCv.getContext("2d"); },
+  frame(dt, pts, S) {
+    const ctx = this.ctx;
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.fillStyle = `rgba(0,0,0,${1 - Math.exp(-dt / P.tau)})`;
+    ctx.fillRect(0, 0, S, S);
+    if (!pts) return;
+    // Mirrors the GL side's uAdditive so the two are a fair *look* comparison, not just a
+    // decay/perf one. "lighter" is what the scopes actually ship.
+    ctx.globalCompositeOperation = P.blend === "additive" ? "lighter" : "source-over";
+    ctx.strokeStyle = `rgba(${ACCENT},${P.glow})`;
+    ctx.lineWidth = 1.2; ctx.lineJoin = "round"; ctx.lineCap = "butt";
+    ctx.beginPath();
+    ctx.moveTo(pts[0], pts[1]);
+    for (let i = 1; i < pts.length / 2; i++) ctx.lineTo(pts[i * 2], pts[i * 2 + 1]);
+    ctx.stroke();
+  },
+  read(S) { // max channel value anywhere — the burn-in probe's measurement
+    const d = this.ctx.getImageData(0, 0, S, S).data;
+    let m = 0;
+    for (let i = 0; i < d.length; i++) if (d[i] > m) m = d[i];
+    return m;
+  },
+  storage: () => "canvas 8-bit",
+};
+
+// ---------------------------------------------------------------------------------------------
+// Renderer B — WebGL ping-pong accumulator
+// ---------------------------------------------------------------------------------------------
+const VS = `attribute vec2 aPos; varying vec2 vUv;
+void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.,1.); }`;
+
+// decay + composite. uPremul=1 → premultiply the trace here (the app found the UNPACK flag inert).
+// uAdditive picks how this frame's trace lands on the decayed history:
+//   1 → prev + cur, matching the scopes' `lighter` beam. Overlapping passes stack toward
+//       saturation (the dwell/overdraw look) and there is no hue ceiling, so a sustained dwell
+//       goes white. This is the mode a port must use — the source-over variant below cannot
+//       produce that, it only ever converges on the stroke colour.
+//   0 → cur + prev*(1-cur.a), plain source-over (what the first WebGL attempt used).
+const FS_ACCUM = `precision highp float; varying vec2 vUv;
+uniform sampler2D uPrev, uTrace; uniform float uKeep, uDrain, uPremul, uUseTrace, uAdditive;
+void main(){
+  vec4 prev = max(texture2D(uPrev, vUv) * uKeep - uDrain, 0.0);
+  vec4 cur = uUseTrace > 0.5 ? texture2D(uTrace, vUv) : vec4(0.0);
+  if (uPremul > 0.5) cur.rgb *= cur.a;
+  gl_FragColor = uAdditive > 0.5 ? (prev + cur) : (cur + prev * (1.0 - cur.a));
+}`;
+const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
+void main(){ gl_FragColor = texture2D(uTex, vUv); }`;
+// Native-line path: solid colour, additive, no texture — measures the no-upload upper bound.
+const VS_LINE = `attribute vec2 aXY; uniform vec2 uRes;
+void main(){ gl_Position = vec4((aXY/uRes)*2.0-1.0, 0., 1.); gl_Position.y *= -1.0; }`;
+const FS_LINE = `precision highp float; uniform vec4 uCol;
+void main(){ gl_FragColor = uCol; }`;
+
+function compile(gl, type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(gl, vs, fs, attr0) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fs));
+  gl.bindAttribLocation(p, 0, attr0);
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+
+const glr = {
+  gl: null, storageLabel: "—",
+  init(S) {
+    screenCv.width = screenCv.height = S;
+    const gl = (this.gl = screenCv.getContext("webgl", {
+      alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false,
+    }));
+    if (!gl) throw new Error("no webgl");
+
+    this.accum = program(gl, VS, FS_ACCUM, "aPos");
+    this.blit = program(gl, VS, FS_BLIT, "aPos");
+    this.line = program(gl, VS_LINE, FS_LINE, "aXY");
+    this.u = {
+      keep: gl.getUniformLocation(this.accum, "uKeep"),
+      drain: gl.getUniformLocation(this.accum, "uDrain"),
+      premul: gl.getUniformLocation(this.accum, "uPremul"),
+      useTrace: gl.getUniformLocation(this.accum, "uUseTrace"),
+      additive: gl.getUniformLocation(this.accum, "uAdditive"),
+      prev: gl.getUniformLocation(this.accum, "uPrev"),
+      trace: gl.getUniformLocation(this.accum, "uTrace"),
+      tex: gl.getUniformLocation(this.blit, "uTex"),
+      res: gl.getUniformLocation(this.line, "uRes"),
+      col: gl.getUniformLocation(this.line, "uCol"),
+    };
+
+    this.quad = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+    this.lineBuf = gl.createBuffer();
+
+    // Half-float storage needs both the texture type and the ability to render to it.
+    this.halfExt = gl.getExtension("OES_texture_half_float");
+    this.halfRender = gl.getExtension("EXT_color_buffer_half_float");
+    this.wantHalf = P.mode === "gl-half-float";
+    const canHalf = !!(this.halfExt && this.halfRender);
+    if (this.wantHalf && !canHalf) {
+      log("half-float unavailable (OES_texture_half_float / EXT_color_buffer_half_float missing) — falling back to 8-bit", "verdict-warn");
+      this.wantHalf = false;
+    }
+    this.texType = this.wantHalf ? this.halfExt.HALF_FLOAT_OES : gl.UNSIGNED_BYTE;
+    this.storageLabel = this.wantHalf ? "GL half-float" : "GL 8-bit";
+
+    // The trace source canvas (unused by gl-native-lines).
+    this.scratch = document.createElement("canvas");
+    this.scratch.width = this.scratch.height = S;
+    this.sctx = this.scratch.getContext("2d");
+
+    const mk = (type) => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.NEAREST], [gl.TEXTURE_MAG_FILTER, gl.NEAREST],
+                            [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]])
+        gl.texParameteri(gl.TEXTURE_2D, k, v);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, S, S, 0, gl.RGBA, type, null);
+      return t;
+    };
+    this.trace = mk(gl.UNSIGNED_BYTE); // uploads come from a 2D canvas → always 8-bit
+    this.pp = [0, 1].map(() => {
+      const tex = mk(this.texType), fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      if (!ok) log("FBO incomplete for this storage type", "verdict-bad");
+      return { tex, fbo };
+    });
+    this.src = 0;
+
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, P.premul === "unpack");
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.disable(gl.BLEND);
+    gl.enableVertexAttribArray(0);
+  },
+
+  frame(dt, pts, S) {
+    const gl = this.gl;
+    const native = P.mode === "gl-native-lines";
+    const drain = (P.mode === "gl-8bit-drain" || native) ? (60 / 255) * dt : 0;
+    const dst = 1 - this.src;
+
+    // 1) The trace for this frame, into the trace texture (upload path) or straight into the
+    //    destination FBO afterwards (native path).
+    if (!native) {
+      const sctx = this.sctx;
+      sctx.clearRect(0, 0, S, S);
+      if (pts) {
+        sctx.globalCompositeOperation = "source-over";
+        sctx.strokeStyle = `rgba(${ACCENT},${P.glow})`;
+        sctx.lineWidth = 1.2; sctx.lineJoin = "round"; sctx.lineCap = "butt";
+        sctx.beginPath();
+        sctx.moveTo(pts[0], pts[1]);
+        for (let i = 1; i < pts.length / 2; i++) sctx.lineTo(pts[i * 2], pts[i * 2 + 1]);
+        sctx.stroke();
+      }
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.trace);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.scratch);
+    }
+
+    // 2) Decay the accumulator into dst (and composite the uploaded trace, upload path only).
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.pp[dst].fbo);
+    gl.viewport(0, 0, S, S);
+    gl.useProgram(this.accum);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform1f(this.u.keep, Math.exp(-dt / P.tau));
+    gl.uniform1f(this.u.drain, drain);
+    gl.uniform1f(this.u.premul, P.premul === "shader" ? 1 : 0);
+    // Native mode draws its beam straight into this FBO below, so the accum pass must not also
+    // composite the (stale, never-uploaded) trace texture.
+    gl.uniform1f(this.u.useTrace, native ? 0 : 1);
+    gl.uniform1f(this.u.additive, P.blend === "additive" ? 1 : 0);
+    gl.uniform1i(this.u.prev, 0);
+    gl.uniform1i(this.u.trace, 1);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.trace); // keep unit 1 valid even when unsampled
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.pp[this.src].tex);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // 2b) Native path: draw the beam directly into the same FBO, additively.
+    if (native && pts) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE);
+      gl.useProgram(this.line);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.lineBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, pts, gl.STREAM_DRAW);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform2f(this.u.res, S, S);
+      const g = P.glow;
+      gl.uniform4f(this.u.col, (ACCENT[0] / 255) * g, (ACCENT[1] / 255) * g, (ACCENT[2] / 255) * g, g);
+      gl.drawArrays(gl.LINE_STRIP, 0, pts.length / 2);
+      gl.disable(gl.BLEND);
+    }
+
+    // 3) Present.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, S, S);
+    gl.useProgram(this.blit);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform1i(this.u.tex, 0);
+    gl.bindTexture(gl.TEXTURE_2D, this.pp[dst].tex);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    this.src = dst;
+    this.lastS = S;
+  },
+
+  // Read the *presented* canvas, valid without preserveDrawingBuffer as long as it happens in the
+  // same rAF tick as the draw (which is how the probe calls it). Uniform across storage types,
+  // unlike reading a half-float FBO.
+  read(S) {
+    const gl = this.gl;
+    const px = new Uint8Array(S * S * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.readPixels(0, 0, S, S, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let m = 0;
+    for (let i = 0; i < px.length; i++) if (px[i] > m) m = px[i];
+    return m;
+  },
+  storage() { return this.storageLabel; },
+};
+
+// ---------------------------------------------------------------------------------------------
+// Loop + instrumentation
+// ---------------------------------------------------------------------------------------------
+let R = c2d;
+let last = performance.now();
+let fpsAcc = [], msAcc = [];
+
+// Probe: cut the beam, then watch the brightest pixel until it's genuinely 0. Reports time-to-zero,
+// or the residual it stalls at — the number whose absence let the original 30 s tail go unexplained.
+const probe = { active: false, t0: 0, lastSample: 0, startedMax: 0 };
+function startProbe() {
+  feeding = false;
+  probe.active = true;
+  probe.t0 = performance.now();
+  probe.lastSample = 0;
+  probe.startedMax = 0;
+  $("probe").textContent = "running…";
+  $("probe").className = "";
+  log(`probe start — mode=${P.mode} premul=${P.premul} tau=${P.tau}s size=${P.size} segs=${P.segs}`);
+}
+function tickProbe(now, S) {
+  if (!probe.active) return;
+  if (now - probe.lastSample < 100) return; // sample at ~10 Hz; readPixels is not free
+  probe.lastSample = now;
+  const max = R.read(S);
+  const elapsed = (now - probe.t0) / 1000;
+  if (!probe.startedMax) probe.startedMax = max;
+  $("probe").textContent = `${elapsed.toFixed(1)}s · max=${max}`;
+  const predicted = P.tau * 5; // where the trail *should* be visually gone (e^-5 ≈ 0.7%)
+  if (max === 0) {
+    probe.active = false; feeding = true;
+    const cls = elapsed < predicted * 3 ? "verdict-ok" : "verdict-warn";
+    $("probe").textContent = `zero in ${elapsed.toFixed(2)}s`;
+    $("probe").className = cls;
+    log(`REACHED ZERO in ${elapsed.toFixed(2)}s (5·tau = ${predicted.toFixed(2)}s) — ${P.mode}`, cls);
+  } else if (elapsed > 30) {
+    probe.active = false; feeding = true;
+    const pct = ((max / 255) * 100).toFixed(1);
+    $("probe").textContent = `STALLED at ${max}/255`;
+    $("probe").className = "verdict-bad";
+    log(`STALLED at ${max}/255 (${pct}% alpha) after 30s — ${P.mode}. Predicted 8-bit stall for tau=${P.tau}: ` +
+        `${(0.5 / (1 - Math.exp(-(1 / 60) / P.tau))).toFixed(1)} LSB`, "verdict-bad");
+  }
+}
+
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  const S = P.size;
+  if (feeding) phase += dt * 1.1;
+  const pts = feeding ? beamPoints(P.segs, S, now / 1000) : null;
+
+  const t0 = performance.now();
+  R.frame(dt, pts, S);
+  const t1 = performance.now();
+
+  msAcc.push(t1 - t0); fpsAcc.push(dt);
+  if (fpsAcc.length >= 30) {
+    const avgDt = fpsAcc.reduce((a, b) => a + b, 0) / fpsAcc.length;
+    const avgMs = msAcc.reduce((a, b) => a + b, 0) / msAcc.length;
+    const fps = 1 / avgDt;
+    $("fps").textContent = fps.toFixed(1);
+    $("fps").className = fps > 55 ? "verdict-ok" : fps > 40 ? "verdict-warn" : "verdict-bad";
+    $("ms").textContent = `${avgMs.toFixed(2)} ms`;
+    fpsAcc = []; msAcc = [];
+  }
+  tickProbe(now, S);
+  requestAnimationFrame(loop);
+}
+
+function rebuild() {
+  const fresh = screenCv.cloneNode(false); // see `screenCv` — a context type is bound for life
+  screenCv.replaceWith(fresh);
+  screenCv = fresh;
+  probe.active = false;
+  feeding = true;
+  try {
+    R = P.mode === "canvas2d" ? c2d : glr;
+    R.init(P.size);
+    $("storage").textContent = R.storage();
+    log(`renderer → ${P.mode} (${R.storage()})`);
+  } catch (e) {
+    log(`init failed: ${e.message}`, "verdict-bad");
+  }
+}
+
+for (const [id, key, fmt] of [["size","size",(v)=>v+"px"], ["segs","segs",(v)=>v], ["tau","tau",(v)=>v+"s"], ["glow","glow",(v)=>v]]) {
+  const el = $(id), out = $(id + "V");
+  const sync = () => { P[key] = Number(el.value); out.textContent = fmt(el.value);
+                       if (key === "size") rebuild(); };
+  el.addEventListener("input", sync); sync();
+}
+$("mode").addEventListener("change", (e) => { P.mode = e.target.value; rebuild(); });
+$("premul").addEventListener("change", (e) => { P.premul = e.target.value; rebuild(); });
+$("blend").addEventListener("change", (e) => { P.blend = e.target.value; }); // no rebuild — per-frame uniform
+$("run").addEventListener("click", startProbe);
+$("clear").addEventListener("click", () => (logEl.innerHTML = ""));
+
+rebuild();
+requestAnimationFrame(loop);
+</script>

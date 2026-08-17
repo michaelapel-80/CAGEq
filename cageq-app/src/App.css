@@ -690,9 +690,12 @@ select:disabled {
   /* the trace sits above the graticule */
   z-index: 1;
 }
-/* The spectrum analyzer's peak-hold caps live on their own layer, above the bars' phosphor trail —
-   cleared crisply every frame (no persistence of their own), see SpectrumScope.tsx. */
-.vs-peak {
+/* Overlays that sit above the phosphor trail and are cleared+redrawn every frame rather than
+   accumulating into it: the vectorscope's resting spot, and the time scope's peak-hold lines. They
+   have to live outside the trail because it composites *additively*, so a constant-brightness
+   redraw would stack toward white instead of holding steady (see phosphor.ts). */
+.vs-peak,
+.vs-spot {
   z-index: 2;
 }
 /* Corner toolbar (pop-out + tuning gear): dim until hovered/open, so the scope stays the focus. */
