@@ -3,19 +3,20 @@ import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { composedCurveDb } from "./biquad";
 import { spectrumStream } from "./streams";
+import { createPhosphor } from "./phosphor";
 import type { SpectrumData } from "./EqChart";
 import type { ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters — same rationale as Vectorscope/TimeScope's panels. `trailTau`
- *  is a genuine phosphor decay time constant (like the other scope views' Trail, though here each
- *  trail layer's brightness is recomputed from its age every frame — see the trail effect), not a
- *  value-domain ease. `undistort` shares the scope family's meaning and machinery (same
+ *  is a genuine phosphor decay time constant, and `tail` the multiplier applied to it for faint
+ *  content — both handed to the shared half-float accumulator (phosphor.ts), exactly as the scope
+ *  views do. `undistort` shares the scope family's meaning and machinery (same
  *  `scope-eq` broadcast, same "filters + preamp" correction EqChart's own spectrum backdrop now
  *  applies) — see `getCorrection` below for why it's a frequency-domain subtraction here rather
  *  than the scopes' sample-domain inverse cascade: this view never sees raw samples, only the
  *  backend's already-FFT'd, already-log-binned dB values. */
-type Params = { trailTau: number; glow: number; undistort: boolean };
-const DEFAULTS: Params = { trailTau: 0.15, glow: 0.4, undistort: true };
+type Params = { trailTau: number; tail: number; glow: number; undistort: boolean };
+const DEFAULTS: Params = { trailTau: 0.15, tail: 12, glow: 0.15, undistort: true };
 
 /** Cache for the per-bin correction curve (filter response + preamp, dB), keyed by reference/value
  *  so it's rebuilt only when the EQ or bin layout actually changes, not on every 60 fps frame. */
@@ -47,25 +48,6 @@ const SPEC_DYN = 90;
 const F_MIN = 20;
 const F_MAX = 20000;
 const FREQ_TICKS = [100, 1000, 10000]; // unlabeled-chart-clutter-avoiding minimum: one per decade
-
-// --- Windowed-history phosphor persistence (see the trail effect's doc comment) ---------------
-// A trail layer older than this many trailTau time constants is not drawn at all — e^-5 ≈ 0.7% of
-// its original brightness, safely invisible — which is what makes burn-in *structurally*
-// impossible here: expiry is a hard cutoff on what gets painted, not a decay some stored image has
-// to actually reach.
-const TRAIL_CUTOFF_EFOLDS = 5;
-// The history ring's capacity: one stamp per rendered frame, so ~4 s at 60 fps — comfortably past
-// the longest TRAIL_CUTOFF_EFOLDS × trailTau window (3 s). Slots are preallocated Float64Arrays
-// reused in place, so the steady state allocates nothing per frame. Every live stamp is stroked
-// individually, each at its true decayed alpha — an earlier draft strided the window down to a
-// fixed stroke budget with an "alpha boost" standing in for the skipped neighbours, which
-// silently destroyed the accumulation look: the boost is only valid where neighbours actually
-// overlap (a dwelling line), but on *moving* content it inflated a single sweep pass to the same
-// brightness as a dwell stack — and that single-pass-vs-many-passes contrast IS the phosphor
-// overdraw effect. The cost stays manageable because trail layers are stroked as plain polylines
-// (see the draw loop); this cap (≈ MAX_TRAIL_STAMPS strokes worst case) is the knob if it ever
-// isn't.
-const MAX_TRAIL_STAMPS = 240;
 
 /** The tangent at point `i` for a non-uniform cubic Hermite spline — Catmull-Rom's usual tangent
  *  (average of the neighbouring secant slopes) generalized to unequal x-spacing by weighting each
@@ -120,18 +102,20 @@ function parseHex(hex: string): [number, number, number] {
  * vectorscope/time-scope's visual language (dark `.vs-screen`, cached gradients, the same
  * `.vs-tools`/`.vs-tuning` chrome, and the same phosphor-persistence *look* — though after that
  * look's stored-image implementations repeatedly misbehaved on this rendering stack, the trail
- * here is recomputed from a window of recent spectrum events every frame instead; the trail
- * effect's doc comment carries the full case history). The Frequency pane (`EqChart`, curves +
- * its own spectrum backdrop) is untouched — this only replaces Monitor.
+ * here is owned by the shared accumulator in phosphor.ts, as the scopes' are). The Frequency pane
+ * (`EqChart`, curves + its own spectrum backdrop) is untouched — this only replaces Monitor.
  *
  * A connected spline through the backend's log-frequency bins (§5.4 `SpectrumUpdate`), not filled
- * bars — an earlier bar-graph version read as flat/clean rather than CRT-like; the trail of
- * discrete decaying event curves is what gives the CRT feel. The live line's frame-to-frame
+ * bars — an earlier bar-graph version read as flat/clean rather than CRT-like; the additively
+ * accumulating trail is what gives the CRT feel. The live line's frame-to-frame
  * *value* is linearly interpolated between the last two received events (see the trail effect),
  * not snapped straight to the latest one, so it flows continuously at 60 fps. No separate
- * peak-hold marker — the trail already shows "where this has recently been" on its own; a second
- * indicator doing the same job was redundant. Mono — the FFT is computed from the mono-summed
- * loopback, there's no L/R spectrum to split.
+ * peak-hold marker — the trail shows "where this has recently been" on its own, so a second
+ * indicator doing the same job was redundant. That was argued before it was true: the plain
+ * exponential trail it was removed in favour of actually faded too fast to read as a peak hold.
+ * `tail` (phosphor.ts) is what closed the gap — faint content now lingers long enough that the
+ * afterglow genuinely *is* the resonance catcher the marker used to be. Mono — the FFT is computed
+ * from the mono-summed loopback, there's no L/R spectrum to split.
  *
  * Owns its own `spectrum` subscription (no `set_scope_viewer`-style gating needed: unlike the
  * heavier `scope` stream, `spectrum` is always emitted whenever monitoring runs — Meter and
@@ -250,50 +234,33 @@ export function SpectrumScope() {
     }
   }, [resW, resH]);
 
-  // The main trace + its phosphor trail, redrawn IN FULL from a stamp ring every frame — the
-  // canvas is hard-cleared, then each retained stamp is stroked at `glow · exp(-age/trailTau)`,
-  // oldest first, newest on top, with anything older than TRAIL_CUTOFF_EFOLDS·trailTau simply not
-  // drawn. Persistence is *recomputed from timestamps*, not accumulated in an image, and that is
-  // the entire point:
+  // The main trace + its phosphor trail. This frame's line is drawn into a scratch 2D canvas and
+  // handed to the shared half-float accumulator (phosphor.ts), which owns the decay and the
+  // additive composite — the same machinery both scopes use.
   //
-  // Every stored-image decay scheme tried before this — and there were several — broke on this
-  // rendering stack in ways pure reasoning kept failing to predict, so, recorded here to stay dead:
-  // (1) canvas `destination-out` fading — multiplicative, so it can never reach zero, and in 8-bit
-  // round-to-nearest storage it stalls outright: alpha below ~0.5/(1-keep) LSB freezes forever,
-  // ~7% alpha at this instrument's slow trails (the other scope views' fast trails put the stall
-  // at an invisible ~1-2 LSB, which is why filter.md's old "stalls harmlessly" note held there);
-  // (2) an SVG alpha-floor filter via `ctx.filter = url(#id)` — silently never took hold in this
-  // WebView2 build; (3) a periodic full clear — bounded the residue but wiped legitimate layers
-  // with it, a build-up-then-pop worse than the residue; (4) a WebGL ping-pong accumulator with
-  // float-math decay + a linear drain term — mathematically bounded to a ~4 s worst-case tail, yet
-  // measured ~30 s on this stack for reasons never diagnosed (along the way its upload path also
-  // exposed UNPACK_PREMULTIPLY_ALPHA_WEBGL as another silent no-op here, turning the composite
-  // additive and clipping the trail to white). Four substrate betrayals is enough: with the trail
-  // recomputed from data each frame there is no stored image to decay, so there is nothing that
-  // CAN burn in — expiry is a hard cutoff on what gets painted, not a level some pixel has to
-  // manage to reach. (The actual burn-in that started all this had a second, independent cause
-  // fixed at the source: the backend's idle-decay sweep was being recorded into the trail after
-  // the music stopped — see `SpectrumUpdate.signal` and the stamp-recording gate on it below.)
+  // It used to redraw the whole trail from a timestamped stamp ring every frame instead, because at
+  // the time no in-place decay could be made to reach zero: an 8-bit `destination-out` fade stalls
+  // wherever alpha drops below ~0.5/(1-keep) LSB, which at this instrument's slow trails is a
+  // permanent ~7% ghost. That ring worked, but it was a workaround for a substrate limit, and a
+  // costly one — every live stamp re-splined every frame. A spike later found the limit wasn't
+  // inherent: the earlier WebGL attempt that seemed to confirm it had been writing into
+  // `UNSIGNED_BYTE` textures, so its float shader math was rounded straight back into the same
+  // 8-bit trap. Half-float storage removes the stall at its source, so the trail can simply
+  // accumulate again — no ring, no cutoff, no per-frame history redraw.
   //
-  // What gets recorded matters as much as how it decays: one stamp of the *interpolated live
-  // line per rendered frame* — not one entry per received spectrum event. The old accumulator's
-  // dwell saturation (a line sitting still overdraws itself toward solid — the CRT look) came
-  // from stacking per-frame stamps: its steady state was exactly Σ glow·e^(-age/τ) over past
-  // *frames*. An earlier draft of this design recorded per-event curves instead, which thinned the
-  // stack below the saturation threshold and visibly killed the overdraw; stamping per frame makes
-  // the windowed sum term-for-term identical to the accumulator's — same saturation, same trail —
-  // while remaining recomputed-from-data. The stamps live in a fixed ring of reused Float64Arrays
-  // (MAX_TRAIL_STAMPS — see there for why every live stamp is stroked individually rather than
-  // strided down to a budget), so the steady state allocates nothing per frame. Side benefit of
-  // recomputing: the Trail/Glow sliders act retroactively on the already-visible trail — turning
-  // Trail down instantly shortens the visible history.
+  // The one thing that must survive the change: the beam is still gated on `signal`. The backend
+  // sweeps `db` down to the floor during silence, and *drawing* that sweep repaints the whole
+  // region under the last curve into the trail — which was the original burn-in complaint, and is
+  // a separate cause from the 8-bit stall (see `SpectrumUpdate.signal`).
   useEffect(() => {
     const cv = trailRef.current;
-    const ctx = cv?.getContext("2d");
-    if (!cv || !ctx) return;
+    if (!cv) return;
+    const phos = createPhosphor(cv);
+    if (!phos) return;
     const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
 
     let raf = 0;
+    let last = performance.now();
     // The stroke gradient depends only on theme + plot geometry + glow — cached and rebuilt only
     // when the key actually changes, instead of every frame (see EqChart's identical
     // `specGradCache` fix — a fresh CanvasGradient costs the GPU compositor a shader/texture
@@ -305,116 +272,64 @@ export function SpectrumScope() {
     // bin count even though the deduplicated point count is usually smaller.
     let xScratch = new Float64Array(0);
     let yScratch = new Float64Array(0);
-    // The stamp ring: raw interpolated db values (pre-correction, so the undistort toggle also
-    // acts retroactively on the trail) + each stamp's timestamp. `head` is the next write slot;
-    // `count` the number of live entries, trimmed from the old end as stamps expire.
-    const ringBuf: (Float64Array | null)[] = new Array(MAX_TRAIL_STAMPS).fill(null);
-    const ringT = new Float64Array(MAX_TRAIL_STAMPS);
-    let ringHead = 0;
-    let ringCount = 0;
-    let ringN = 0; // bin count the ring was recorded at; a mismatch (rate switch) resets it
 
     const render = () => {
       const now = performance.now();
+      const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
+      last = now;
       const p = paramsRef.current;
       const W = cv.width;
       const H = cv.height;
       const plotTop = H * 0.03;
       const plotBot = H * 0.97;
 
-      ctx.clearRect(0, 0, W, H);
-      // Additive, not source-over: source-over is a weighted blend *toward* the stroke color, so
+      const ctx = phos.begin();
+      // Additive, not source-over: source-over is a weighted blend *toward* the stroke colour, so
       // repeated strokes converge on fully-opaque accent blue and stop — it structurally cannot
-      // exceed its own hue, no matter the alpha or how many layers stack. "lighter" sums R/G/B
-      // independently with no hue ceiling, so a genuine dwell keeps adding light until each
-      // channel clips at 255 — summed, white — which is the actual mechanism behind the
-      // vectorscope/time-scope's overexposed-dwell look (both use "lighter" for exactly this).
-      // clearRect above is exempt from compositing by spec, so this is safe to set once up front.
+      // exceed its own hue however many stack. "lighter" sums R/G/B independently with no hue
+      // ceiling, so a genuine dwell keeps adding light until each channel clips, i.e. white. Set
+      // every frame because a canvas resize resets the whole 2D context state.
       ctx.globalCompositeOperation = "lighter";
 
       const s = curRef.current;
       const n = s?.db.length ?? 0;
-      const corr = p.undistort && s ? getCorrection(corrCacheRef, eqRef.current, s) : null;
-
-      const key = `${plotTop}|${plotBot}|${ar},${ag},${ab}|${p.glow}`;
-      if (key !== gradKey) {
-        gradKey = key;
-        grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
-        grad.addColorStop(0, `rgba(${ar},${ag},${ab},${p.glow * 0.35})`);
-        grad.addColorStop(1, `rgba(${ar},${ag},${ab},${p.glow})`);
-      }
-      ctx.strokeStyle = grad!;
-      ctx.lineWidth = Math.max(1, H / REF_SIZE) * 2;
-      ctx.lineJoin = "round";
-      ctx.lineCap = "round";
-
-      // 1) Record this frame's stamp: the live line's values, interpolated between the last two
-      // spectrum events over the (measured) gap between them rather than snapped to the latest —
-      // events land at ~the frame rate but not aligned to it, and snapping made the line visibly
-      // step instead of flow. Beam off on silence (`signal`, the backend's same test the meter
-      // uses): nothing is recorded — the backend's idle-decay sweep to the floor must not enter
-      // the trail, or it'd repaint itself as exactly the burn-in haze this design exists to kill —
-      // and the existing stamps just age out.
       if (n >= 2 && s && s.signal) {
-        if (ringN !== n) {
-          ringN = n;
-          ringHead = 0;
-          ringCount = 0;
+        const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s) : null;
+        const key = `${plotTop}|${plotBot}|${ar},${ag},${ab}|${p.glow}`;
+        if (key !== gradKey) {
+          gradKey = key;
+          grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
+          grad.addColorStop(0, `rgba(${ar},${ag},${ab},${p.glow * 0.35})`);
+          grad.addColorStop(1, `rgba(${ar},${ag},${ab},${p.glow})`);
         }
-        let buf = ringBuf[ringHead];
-        if (!buf || buf.length !== n) {
-          buf = new Float64Array(n);
-          ringBuf[ringHead] = buf;
-        }
+        ctx.strokeStyle = grad!;
+        ctx.lineWidth = Math.max(1, H / REF_SIZE) * 2;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+
+        // Values are interpolated between the last two spectrum events over the (measured) gap
+        // between them rather than snapped to the latest — events land at ~the frame rate but not
+        // aligned to it, and snapping made the line visibly step instead of flow.
         const prev = prevRef.current;
         const lerp = prev && prev.db.length === n ? Math.max(0, Math.min(1, (now - curAtRef.current) / intervalRef.current)) : 1;
-        for (let i = 0; i < n; i++) {
-          buf[i] = lerp >= 1 || !prev ? s.db[i] : prev.db[i] + (s.db[i] - prev.db[i]) * lerp;
+        if (xScratch.length < n) {
+          xScratch = new Float64Array(n);
+          yScratch = new Float64Array(n);
         }
-        ringT[ringHead] = now;
-        ringHead = (ringHead + 1) % MAX_TRAIL_STAMPS;
-        if (ringCount < MAX_TRAIL_STAMPS) ringCount++;
-      }
-
-      // 2) Expire from the old end, then stroke EVERY live stamp oldest→newest (newest lands on
-      // top), each at its true decayed alpha — no striding, no compensation (see MAX_TRAIL_STAMPS
-      // for why an earlier stroke-budget scheme flattened the accumulation contrast). Where the
-      // line dwells, stamps overlap and source-over stacks them toward saturation; where it swept
-      // through once, a pixel got one faint pass — that brightness ratio is the phosphor overdraw.
-      // Every layer gets the full spline — a cheaper polyline was tried for the trail layers, but
-      // at longer trails the layers ARE most of what's on screen, and their ridge shapes are read
-      // (that's this instrument's use), so the corners showed exactly where the spline matters
-      // most: the deduped, sparse low end. If the worst case (~MAX_TRAIL_STAMPS spline strokes)
-      // ever stutters, thin the *stamp recording* rate rather than the rendering — uniformly fewer
-      // layers dims the trail uniformly, preserving the dwell-vs-sweep contrast that striding broke.
-      const cutoffMs = p.trailTau * 1000 * TRAIL_CUTOFF_EFOLDS;
-      while (ringCount > 0 && now - ringT[(ringHead - ringCount + MAX_TRAIL_STAMPS) % MAX_TRAIL_STAMPS] > cutoffMs) {
-        ringCount--;
-      }
-      for (let k = ringCount - 1; k >= 0; k--) {
-        const idx = (ringHead - 1 - k + MAX_TRAIL_STAMPS * 2) % MAX_TRAIL_STAMPS;
-        const db = ringBuf[idx]!;
-        // No k === 0 special case pinning the newest at alpha 1: a fresh stamp's decay factor is
-        // ~1 anyway, and during silence (no new stamps) the newest is *old* — pinning it kept a
-        // full-brightness line frozen on screen through the fade, then popped it at the cutoff.
-        ctx.globalAlpha = Math.exp(-(now - ringT[idx]) / 1000 / p.trailTau);
-        // The dedup inside: several adjacent log-spaced display bins can land on the same
-        // underlying linear FFT bin — always toward the low-frequency end, where the log grid is
-        // finer than the FFT's actual (fixed, linear) resolution — and read the identical raw
-        // value. Connecting each of those individually, spline or not, draws a flat plateau;
-        // skipping the repeats treats the run as the single point it actually represents. (The
-        // lerp of two equal plateau values is equally plateau'd, so stamping doesn't break the
-        // equality test.) Always keep the last bin so the trace reaches the true right edge.
-        if (xScratch.length < db.length) {
-          xScratch = new Float64Array(db.length);
-          yScratch = new Float64Array(db.length);
-        }
+        // The dedup: several adjacent log-spaced display bins can land on the same underlying
+        // linear FFT bin — always toward the low-frequency end, where the log grid is finer than
+        // the FFT's actual (fixed, linear) resolution — and read the identical raw value.
+        // Connecting each of those individually, spline or not, draws a flat plateau; skipping the
+        // repeats treats the run as the single point it actually represents. Compared on the raw
+        // reading, which is what's duplicated (the lerp of two equal values is equally flat).
+        // Always keep the last bin so the trace reaches the true right edge.
         let m = 0;
-        for (let i = 0; i < db.length; i++) {
-          if (i > 0 && i < db.length - 1 && db[i] === db[i - 1]) continue;
-          const v = corr && corr.length === db.length ? db[i] - corr[i] : db[i];
+        for (let i = 0; i < n; i++) {
+          if (i > 0 && i < n - 1 && s.db[i] === s.db[i - 1]) continue;
+          const raw = lerp >= 1 || !prev ? s.db[i] : prev.db[i] + (s.db[i] - prev.db[i]) * lerp;
+          const v = corr ? raw - corr[i] : raw;
           const frac = Math.max(0, Math.min(1, (v - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
-          xScratch[m] = (i / (db.length - 1)) * W;
+          xScratch[m] = (i / (n - 1)) * W;
           yScratch[m] = plotBot - frac * (plotBot - plotTop);
           m++;
         }
@@ -424,18 +339,22 @@ export function SpectrumScope() {
           ctx.stroke();
         }
       }
-      ctx.globalAlpha = 1;
 
+      phos.commit(dt, p.trailTau, p.tail);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      phos.dispose();
+    };
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "glow";
+  type NumKey = "trailTau" | "tail" | "glow";
   const CONTROLS: { key: NumKey; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
+    { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), min: 0.05, max: 1, step: 0.05 },
   ];
 
