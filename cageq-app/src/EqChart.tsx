@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefOb
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, logGrid, phaseDeg } from "./biquad";
+import { createPhosphor } from "./phosphor";
 
 /**
  * §5.2 interactive diagram.
@@ -122,15 +123,8 @@ const SPEC_TINT = 0.63; // blend the accent this far into the neutral glow — a
  *  time-constant (seconds), same meaning as every other trailTau in the app — see the backdrop
  *  effect's doc comment for why this used to be `fade`, a flat inverted-direction per-event alpha
  *  with no time-base, and no longer is. */
-type SpecParams = { tau: number; glowBase: number };
-const SPEC_DEFAULTS: SpecParams = { tau: 0.4, glowBase: 0.25 };
-// A stamp older than this many `tau` time constants is not drawn at all — e^-5 ≈ 0.7% of its
-// original brightness, safely invisible — the hard cutoff that makes burn-in structurally
-// impossible (see the backdrop effect). Generous cap on retained stamps so the ring can't grow
-// unboundedly if the tab was backgrounded (rAF throttled) with a very long tau selected; the age
-// cutoff above keeps it far smaller than this in normal operation.
-const SPEC_CUTOFF_EFOLDS = 5;
-const SPEC_MAX_STAMPS = 512;
+type SpecParams = { tau: number; tail: number; glowBase: number };
+const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.25 };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -381,113 +375,97 @@ export function EqChart({
   // that's refreshed every render, read fresh each frame.
   const specDrawCtx = useRef({ eqBands, preampDb, PAD, H, W, specParams });
   specDrawCtx.current = { eqBands, preampDb, PAD, H, W, specParams };
-  // Redrawn IN FULL from a timestamped stamp ring every frame — the canvas is hard-cleared, then
-  // each retained stamp (a past spectrum reading) is filled as one polygon at
-  // `glowBase · exp(-age/tau)`, oldest first, newest on top, with anything older than
-  // SPEC_CUTOFF_EFOLDS·tau simply not drawn. This replaced a `destination-out` canvas fade for the
-  // same reason SpectrumScope's own trail did (see that component's trail effect for the full
-  // case history: a multiplicative fade never reaches exact zero, and on this rendering stack it
-  // stalls in 8-bit storage at a *visible* residual rather than an invisible one, worse the slower
-  // the fade — a live-tunable `tau` made that burn-in trivial to reproduce, since dialing in a
-  // long trail here previously meant dialing in a permanent ghost). Recomputing from timestamps
-  // instead of accumulating in a stored image makes that structurally impossible: there is no
-  // stored image to fail to decay.
+  // The spectrum backdrop. Each received payload is drawn as one filled polygon into a scratch
+  // canvas and handed to the shared phosphor accumulator (phosphor.ts), which owns the decay and
+  // the composite — the same machinery the scope views use, at the `over` blend rather than their
+  // additive one.
   //
-  // Unlike SpectrumScope's stamp ring, a stamp here is recorded once per *received spectrum
-  // event*, not once per rendered frame — this backdrop doesn't stroke a single continuous line
-  // that needs frame-to-frame interpolation to flow, and events already land at close to the frame
-  // rate, so the extra complexity of per-frame stamping (needed there for dwell-saturation to
-  // stack correctly) buys nothing here. Also unlike there, each stamp draws as ONE filled polygon
-  // (the bins' staircase outline, closed down to the baseline) rather than one `fillRect` per bin —
-  // 240 separate fill calls per stamp, times up to ~SPEC_MAX_STAMPS live stamps, would be a real
-  // per-frame cost; one `fill()` per stamp regardless of bin count is the same shape, the same
-  // visual result (adjacent same-height rectangles ARE that polygon), and cheap enough to redraw
-  // continuously.
+  // This previously kept its own timestamped stamp ring and redrew the whole trail every frame,
+  // because an in-place `destination-out` fade can't reach zero: in 8-bit storage it stalls
+  // wherever alpha drops below ~0.5/(1-keep) LSB, and a live-tunable `tau` made that trivial to
+  // hit — dialing in a long trail meant dialing in a permanent ghost. That turned out to be a
+  // property of the *storage*, not of decay-in-place: the WebGL attempt that seemed to prove
+  // otherwise had been writing into UNSIGNED_BYTE textures, so its float shader math was rounded
+  // straight back into the same trap. Half-float storage removes it, so the ring, its cutoff and
+  // capacity constants, and the per-frame history redraw are all gone.
+  //
+  // One filled polygon per payload (the bins' staircase outline, closed down to the baseline)
+  // rather than a `fillRect` per bin: identical shape — adjacent same-height rectangles *are* that
+  // polygon — for ~240x fewer draw calls.
   useEffect(() => {
     const cv = specCanvasRef.current;
-    const ctx = cv?.getContext("2d");
-    if (!cv || !ctx) return;
+    if (!cv) return;
+    // `over`, not the scopes' additive blend: this is a *backdrop* under the EQ curves, so
+    // repeated content must converge on its own colour rather than bloom toward white and compete
+    // with them (see phosphor.ts).
+    const phos = createPhosphor(cv, "over");
+    if (!phos) return;
     let raf = 0;
-    let lastRecorded: SpectrumData | null | undefined;
-    // {db, t}, oldest first — db is a direct reference to the received array (each incoming
-    // payload is a fresh, never-mutated deserialization, so no copy is needed to hold onto it).
-    const stamps: { db: number[]; t: number }[] = [];
+    let last = performance.now();
+    let drawn: SpectrumData | null | undefined; // last payload already drawn; undefined = none yet
 
     const render = () => {
       const now = performance.now();
-      const spectrum = spectrumRef?.current ?? null;
-      if (spectrum && spectrum !== lastRecorded && spectrum.db.length >= 2) {
-        lastRecorded = spectrum;
-        stamps.push({ db: spectrum.db, t: now });
-        if (stamps.length > SPEC_MAX_STAMPS) stamps.shift();
-      } else if (!spectrum) {
-        lastRecorded = spectrum;
-      }
-
+      const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
+      last = now;
       const { eqBands, preampDb, PAD, H, W, specParams } = specDrawCtx.current;
-      const cutoffMs = specParams.tau * 1000 * SPEC_CUTOFF_EFOLDS;
-      while (stamps.length && now - stamps[0].t > cutoffMs) stamps.shift();
+      const spectrum = spectrumRef?.current ?? null;
+      const ctx = phos.begin();
 
-      ctx.clearRect(0, 0, W, H);
-      if (!spectrum || stamps.length === 0) {
-        raf = requestAnimationFrame(render);
-        return;
-      }
+      // Drawn only when a new payload lands, not every frame — the backdrop's brightness is set by
+      // how much arrives per second, so re-adding the same reading on every frame would make it
+      // scale with refresh rate. Frames in between just decay, which is also what makes the trail
+      // fade away gracefully when monitoring stops rather than vanishing on the next frame.
+      const fresh = !!spectrum && spectrum !== drawn && spectrum.db.length >= 2;
+      drawn = spectrum;
+      if (fresh && spectrum) {
+        const n = spectrum.db.length;
+        const lnF0 = Math.log(spectrum.f_min);
+        const lnF1 = Math.log(spectrum.f_max);
+        const binF = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
+        const fx = (i: number) => PAD.l + ((Math.log(binF(i)) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
+        const plotTop = PAD.t;
+        const plotBot = H - PAD.b;
+        const sy = (db: number) => plotBot - clamp((db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN, 0, 1) * (plotBot - plotTop);
 
-      // Geometry/correction are derived from the *latest* spectrum (bin count, f_min/f_max) and
-      // reused for every stamp — a stamp whose own bin count no longer matches (e.g. a device
-      // rate switch mid-trail) is skipped below rather than mapped through the wrong grid.
-      const n = spectrum.db.length;
-      const lnF0 = Math.log(spectrum.f_min);
-      const lnF1 = Math.log(spectrum.f_max);
-      const binF = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
-      const fx = (i: number) => PAD.l + ((Math.log(binF(i)) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
-      const plotTop = PAD.t;
-      const plotBot = H - PAD.b;
-      const sy = (db: number) => plotBot - clamp((db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN, 0, 1) * (plotBot - plotTop);
+        // The EQ response at each bin frequency plus the preamp — both subtracted from the
+        // (post-EQ) capture to undo everything applied and recover the actual source. `eqBands` is
+        // `undefined` only mid self-test (correction fully off, capture as-is since the EQ is
+        // changing under it); empty (Dry — no filters, still the loudness-match preamp) still gets
+        // the preamp term.
+        const undoing = eqBands !== undefined;
+        let corr: Float64Array | null = null;
+        if (undoing && eqBands.length) {
+          const bf = new Float64Array(n);
+          for (let i = 0; i < n; i++) bf[i] = binF(i);
+          corr = composedCurveDb(eqBands, bf);
+        }
 
-      // The EQ response at each bin frequency plus the preamp — both subtracted from the
-      // (post-EQ) capture to undo everything applied and recover the actual source. `eqBands` is
-      // `undefined` only mid self-test (correction fully off, capture as-is since the EQ is
-      // changing under it); empty (Dry — no filters, still the loudness-match preamp) still gets
-      // the preamp term. Applied uniformly to every stamp from the *current* eqBands/preampDb, not
-      // baked in per-stamp at record time — same simplification SpectrumScope's undistort makes:
-      // the whole trail reflects "this raw history under the current correction", not a mix of
-      // whatever correction happened to be active when each stamp landed.
-      const undoing = eqBands !== undefined;
-      let corr: Float64Array | null = null;
-      if (undoing && eqBands.length) {
-        const bf = new Float64Array(n);
-        for (let i = 0; i < n; i++) bf[i] = binF(i);
-        corr = composedCurveDb(eqBands, bf);
-      }
+        const [nr, ng, nb] = SPEC_NEUTRAL;
+        const acc = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
+        // A hint of the accent mixed into the (fixed, theme-independent — see SPEC_NEUTRAL) neutral
+        // base — lifts the glow off flat grey without letting it read as another curve.
+        const [r, g, b] = acc
+          ? [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round)
+          : [nr, ng, nb];
+        const gradKey = `${plotBot}|${plotTop}|${r},${g},${b}|${specParams.glowBase}`;
+        let grad = specGradCache.current?.key === gradKey ? specGradCache.current.grad : null;
+        if (!grad) {
+          grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
+          grad.addColorStop(0, `rgba(${r},${g},${b},${specParams.glowBase})`); // brightest at the floor
+          grad.addColorStop(1, `rgba(${r},${g},${b},${SPEC_GLOW_TIP})`); // fades out toward the top
+          specGradCache.current = { key: gradKey, grad };
+        }
+        ctx.fillStyle = grad;
 
-      const [nr, ng, nb] = SPEC_NEUTRAL;
-      const acc = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
-      // A hint of the accent mixed into the (fixed, theme-independent — see SPEC_NEUTRAL) neutral
-      // base — lifts the glow off flat grey without letting it read as another curve.
-      const [r, g, b] = acc
-        ? [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round)
-        : [nr, ng, nb];
-      const gradKey = `${plotBot}|${plotTop}|${r},${g},${b}|${specParams.glowBase}`;
-      let grad = specGradCache.current?.key === gradKey ? specGradCache.current.grad : null;
-      if (!grad) {
-        grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
-        grad.addColorStop(0, `rgba(${r},${g},${b},${specParams.glowBase})`); // brightest at the floor
-        grad.addColorStop(1, `rgba(${r},${g},${b},${SPEC_GLOW_TIP})`); // fades out toward the top
-        specGradCache.current = { key: gradKey, grad };
-      }
-      ctx.fillStyle = grad;
-
-      for (const stamp of stamps) {
-        if (stamp.db.length !== n) continue;
-        ctx.globalAlpha = Math.exp(-(now - stamp.t) / 1000 / specParams.tau);
+        // One filled polygon — the bins' staircase outline closed down to the baseline — rather
+        // than a fillRect per bin. Same shape, ~240x fewer draw calls.
         ctx.beginPath();
         ctx.moveTo(fx(0), plotBot); // baseline, left edge — closePath draws the return trip
         for (let i = 0; i < n; i++) {
           const x0 = fx(i);
           const x1 = i < n - 1 ? fx(i + 1) : x0 + 1;
-          const db = undoing ? stamp.db[i] - (corr ? corr[i] : 0) - preampDb : stamp.db[i];
+          const db = undoing ? spectrum.db[i] - (corr ? corr[i] : 0) - preampDb : spectrum.db[i];
           const yTop = sy(db);
           ctx.lineTo(x0, yTop); // up (or down) to this bin's top
           ctx.lineTo(x1, yTop); // across its width
@@ -496,12 +474,15 @@ export function EqChart({
         ctx.closePath(); // straight line back along the baseline to the left edge
         ctx.fill();
       }
-      ctx.globalAlpha = 1;
 
+      phos.commit(dt, specParams.tau, specParams.tail);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      phos.dispose();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -825,6 +806,21 @@ export function EqChart({
               }}
             />
             <b>{specParams.tau.toFixed(2)}</b>
+          </label>
+          <label className="vs-tune-row">
+            <span className="vs-tune-label">{t("scope.tail")}</span>
+            <input
+              type="range"
+              min={1}
+              max={64}
+              step={1}
+              value={specParams.tail}
+              onChange={(e) => {
+                const tail = Number(e.currentTarget.value);
+                setSpecParams((p) => ({ ...p, tail }));
+              }}
+            />
+            <b>{specParams.tail.toFixed(0)}</b>
           </label>
           <label className="vs-tune-row">
             <span className="vs-tune-label">{t("scope.glow")}</span>

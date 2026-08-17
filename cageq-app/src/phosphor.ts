@@ -47,10 +47,12 @@
  * Callers don't branch; `precise` reports which backend they got, for tuning copy or diagnostics.
  *
  * ## What must NOT be drawn through this
- * `commit()` is **additive** — that's what produces dwell saturation, where overlapping passes
- * stack toward white. Anything drawn at a constant alpha every frame (Vectorscope's resting spot,
- * TimeScope's peak-hold lines) must therefore live on its own non-accumulating canvas layer, or it
- * will pile up frame over frame instead of holding steady.
+ * At the default `add` blend, `commit()` is **additive** — that's what produces dwell saturation,
+ * where overlapping passes stack toward white. Anything drawn at a constant alpha every frame
+ * (Vectorscope's resting spot, TimeScope's peak-hold lines) must therefore live on its own
+ * non-accumulating canvas layer, or it will pile up frame over frame instead of holding steady.
+ * The `over` blend has no such hazard — it converges rather than stacking — which is why the
+ * spectrum *backdrop* uses it: blooming would fight the EQ curves drawn over the top.
  */
 
 /** Brightness at which the decay has fully handed over to the fast (bright) rate; below it the
@@ -62,6 +64,10 @@ const TAIL_KNEE = 0.3;
  *  dominated below ~2% brightness (removing twice what the multiply did at 1 LSB), so the mechanism
  *  guaranteeing termination was itself eating the tail it was meant to let exist. */
 const TAIL_FLOOR_PER_SEC = 0.0015;
+
+/** How this frame's trace lands on the decayed history. `add` (default) is the scopes' additive
+ *  beam; `over` is the plain over-operator for backdrop-style layers that must not bloom. */
+export type PhosphorBlend = "add" | "over";
 
 /** Shared surface of both backends — see the module comment for why the fallback exists. */
 export type Phosphor = {
@@ -96,7 +102,7 @@ void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
 // longer, which raises the apparent floor and forces glow up before the faint end reads against it.
 // The point of this module is a trail that reaches zero, not a different look.
 const FS_ACCUM = `precision highp float; varying vec2 vUv;
-uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor;
+uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uOver;
 void main(){
   vec4 prev = texture2D(uPrev, vUv);
   // Brightness-dependent decay rate: bright content falls at uKeep, faint content at the slower
@@ -112,7 +118,12 @@ void main(){
   // because half-float has no quantisation left to dither against near zero.
   vec4 cur = texture2D(uTrace, vUv);
   cur.rgb *= cur.a;
-  gl_FragColor = min(max(prev * k - uFloor, 0.0) + cur, 1.0);
+  vec4 decayed = max(prev * k - uFloor, 0.0);
+  // "add" stacks toward saturation and has no hue ceiling — the beam overdraw the scopes want.
+  // "over" is the plain over-operator, so repeated identical content converges on its own colour
+  // instead of blooming: what a dim *backdrop* (EqChart's spectrum) wants, where blowing out would
+  // fight the curves drawn on top of it.
+  gl_FragColor = min(uOver > 0.5 ? cur + decayed * (1.0 - cur.a) : decayed + cur, 1.0);
 }`;
 
 const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
@@ -153,7 +164,7 @@ function makeScratch(target: HTMLCanvasElement) {
   return { cv, ctx, sync };
 }
 
-function createGl(target: HTMLCanvasElement): Phosphor | null {
+function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | null {
   const gl = target.getContext("webgl", {
     alpha: true,
     premultipliedAlpha: true,
@@ -177,6 +188,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   const uKeepTail = gl.getUniformLocation(accum, "uKeepTail");
   const uKnee = gl.getUniformLocation(accum, "uKnee");
   const uFloor = gl.getUniformLocation(accum, "uFloor");
+  const uOver = gl.getUniformLocation(accum, "uOver");
   const uPrev = gl.getUniformLocation(accum, "uPrev");
   const uTrace = gl.getUniformLocation(accum, "uTrace");
   const uTex = gl.getUniformLocation(blit, "uTex");
@@ -279,6 +291,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       gl.uniform1f(uKeepTail, Math.exp(-dt / (tau * Math.max(1, tail))));
       gl.uniform1f(uKnee, TAIL_KNEE);
       gl.uniform1f(uFloor, TAIL_FLOOR_PER_SEC * dt);
+      gl.uniform1f(uOver, blend === "over" ? 1 : 0);
       gl.uniform1i(uPrev, 0);
       gl.uniform1i(uTrace, 1);
       gl.activeTexture(gl.TEXTURE0);
@@ -341,7 +354,7 @@ function halfFloatRenderable(): boolean {
 /** The 8-bit path — today's behaviour, including its long-trail ghost. Additive blitting is
  *  associative, so routing the trace through a scratch canvas and adding it in one go is
  *  equivalent to having stroked it straight onto the accumulator. */
-function create2d(target: HTMLCanvasElement): Phosphor | null {
+function create2d(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | null {
   const ctx = target.getContext("2d");
   const scratch = makeScratch(target);
   if (!ctx || !scratch.ctx) return null;
@@ -358,7 +371,7 @@ function create2d(target: HTMLCanvasElement): Phosphor | null {
       ctx.globalCompositeOperation = "destination-out";
       ctx.fillStyle = `rgba(0,0,0,${1 - Math.exp(-dt / tau)})`;
       ctx.fillRect(0, 0, W, H);
-      ctx.globalCompositeOperation = "lighter";
+      ctx.globalCompositeOperation = blend === "over" ? "source-over" : "lighter";
       ctx.drawImage(scratch.cv, 0, 0);
       ctx.globalCompositeOperation = "source-over";
     },
@@ -370,14 +383,14 @@ function create2d(target: HTMLCanvasElement): Phosphor | null {
  *  Capability is settled on a throwaway canvas first (see `halfFloatRenderable`) so the caller's
  *  canvas is only ever bound to the context type actually being used — it keeps that type for life.
  *  Returns null only if even a 2D context is unobtainable. */
-export function createPhosphor(target: HTMLCanvasElement): Phosphor | null {
+export function createPhosphor(target: HTMLCanvasElement, blend: PhosphorBlend = "add"): Phosphor | null {
   if (halfFloatRenderable()) {
     try {
-      const gl = createGl(target);
+      const gl = createGl(target, blend);
       if (gl) return gl;
     } catch (e) {
       console.warn("[phosphor] half-float accumulator failed, using the 8-bit fallback", e);
     }
   }
-  return create2d(target);
+  return create2d(target, blend);
 }
