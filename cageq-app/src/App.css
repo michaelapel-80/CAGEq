@@ -762,11 +762,29 @@ select:disabled {
   -webkit-backdrop-filter: blur(2px);
   backdrop-filter: blur(2px);
 }
-/* Inline (integrated) view: park the panel just left of the tube instead of over it. */
+/* Inline (integrated) view: park the panel beside the tube rather than over it — but to the
+   RIGHT, over the level meters. To the left is the time scope (`.scope-row` is [TimeScope,
+   Vectorscope]), so the panel used to cover the very instrument next to the one being tuned,
+   which made reading it while adjusting confusing. The meters are a much better thing to hide:
+   they're not what these sliders affect.
+
+   Anchored by its right edge, not its left: the panel is a good deal wider than the meter column,
+   so a plain `left: calc(100% + 10px)` would overhang the card's right edge — absolutely
+   positioned overflow that can provoke a horizontal scrollbar. The offset is the distance from
+   the tube's right edge (== `.chart-wrap`'s, since the vectorscope is `.scope-row`'s last child)
+   out to the meter column's: the row gap plus the column's own outer width. `.meter-col` is
+   content-box, so its padding counts on top of the declared width.
+
+   Accepted compromise, not a clean fit: the panel ends up ~2x the meter column's width, so it
+   still covers most of the tube — only the translucency and backdrop blur keep the trace readable
+   underneath. Note `min-width: 13em` is NOT what sets that width; the `.vs-tune-row` grid is
+   `5.4em / 1fr / 2.6em` and a range input's intrinsic width (~129px, UA default) blows the middle
+   column well past it. So the lever for actually clearing the tube is constraining that column
+   (an explicit `width` on `.vs-tune-row input[type="range"]`), not lowering `min-width`. */
 .vectorscope-wrap:not(.fill) .vs-tuning {
   top: 0;
   left: auto;
-  right: calc(100% + 10px);
+  right: calc(-1 * (0.6rem + 104px + 0.45rem));
 }
 .vs-tune-head {
   display: flex;
