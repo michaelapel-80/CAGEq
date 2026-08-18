@@ -1,0 +1,450 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>CAGEq spike — spectrum trace / dedup / peak markers</title>
+<!--
+  SPIKE — a measurement/visual-verification harness, not part of the app. Nothing imports it, and
+  it sits outside public/ deliberately (see spike/trail.html's header for the general rationale —
+  same story here: `vite build` never bundles spike/, only the dev server reaches it).
+
+  WHY THIS EXISTS: SpectrumScope's spline + dedup + peak-marker code went through three live-tested
+  rounds against real audio without landing — a monotone-spline theory that didn't fix anything and
+  cost smoothness, a peak-picking centring fix that was real but insufficient, and a dedup fix that
+  fixed the geometry the marker cared about but introduced ringing elsewhere. Each round was a guess
+  verified only by asking the user to re-test against unpredictable live material — slow, and every
+  wrong guess costs a full round trip. This harness instead generates a KNOWN synthetic spectrum
+  (peak positions and levels chosen by the harness, not discovered by eye) and renders the exact
+  candidate logic against it, with the raw bin values plotted alongside the spline and a live
+  "is the marker actually a control point on this curve" check, so a mismatch is provable rather
+  than eyeballed — checked here, against a browser, before ever asking for another live re-test.
+
+  The synthetic generator reproduces BOTH tie mechanisms that matter here, not just one, since
+  conflating them is what caused the third round's regression:
+    (a) WIDE ties from FFT-bin oversampling: cageq-monitor collapses a *range* of linear FFT bins
+        into one log-display bin (`.fold(max)` over the range, see lib.rs `snapshot`), and at the
+        low-frequency end the log grid is finer than the linear FFT resolution, so several
+        consecutive log bins can map to the exact same underlying linear bin — a genuine, wide,
+        structural plateau in the real data, not noise.
+    (b) SHORT incidental ties from 1-decimal rounding: cageq-monitor rounds every bin to 0.1 dB
+        (`round_to(cur, 1)`), which can tie two or three adjacent bins of an otherwise smoothly
+        *varying* underlying curve purely by quantization, anywhere in the spectrum, unrelated to
+        (a). Treating every tie the same as (a) is what made the third round "funky": a real, wide
+        plateau's two endpoints are a legitimate, isolated pair of control points, but scattered
+        short (b)-ties throughout an otherwise-smooth region turn into a dense run of sharply
+        alternating control points, which an unconstrained (plain Catmull-Rom) spline rings on.
+
+  VERDICT (answered — ported to src/SpectrumScope.tsx): dedup-both (keep a tied run's first bin,
+  last bin, and — new since the "*** NOT a control point ***" diagnostic below caught it — its
+  *middle* bin too, via the same `runMid` both the dedup and findPeaks now share) plus a MONOTONE
+  tangent rule (`monotone` checkbox) together, not separately. Dedup-both alone fixes marker
+  alignment but rings on dense (b)-ties; the monotone tangent alone (against the *old* dedup) has
+  nothing worth fixing and just flattens ordinary content. Paired, the honest control points remove
+  the invented-bulge misalignment and the monotone tangent removes the ringing those same denser
+  control points would otherwise cause — verified by regenerating random synthetic spectra
+  repeatedly (button below) and confirming every reported peak reads "ON CURVE" with no visible
+  dip/overshoot, rather than judging a single hand-picked case.
+
+  Three dedup strategies remain toggleable for the comparison this verdict rests on (`overlay all 3
+  strategies` shows them at once), plus the raw per-bin values as a faint scatter:
+    dedup-old    "skip if equal to the PREVIOUS bin" — what shipped before this investigation.
+                 Collapses a run down to its first bin only, discarding where it ends.
+    dedup-both   Keeps a run's first, middle, and last bin (see VERDICT) — the shipped fix.
+    dedup-len    Like dedup-both, but only for runs at least MIN_RUN_LEN bins long — an earlier,
+                 more complicated attempt at taming the ringing by leaving short ties alone. Kept
+                 for comparison; superseded by the monotone tangent, which fixes it without needing
+                 a length threshold at all.
+-->
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0e0d; color: #d8e0dc;
+         font: 12px/1.5 ui-monospace, Consolas, monospace; }
+  #wrap { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
+  #screen { background: #05070a; border-radius: 8px; box-shadow: inset 0 0 30px -10px #000; }
+  #panel { min-width: 320px; display: flex; flex-direction: column; gap: 10px; }
+  fieldset { border: 1px solid #2a3330; border-radius: 6px; margin: 0; padding: 8px 10px 10px; }
+  legend { color: #7fd8a8; letter-spacing: .08em; text-transform: uppercase; font-size: 10px; }
+  label { display: grid; grid-template-columns: 9em 1fr 3.6em; gap: 8px; align-items: center; margin-bottom: 4px; }
+  label b { font-weight: 600; text-align: right; color: #9fb0a9; }
+  select, button, input[type="checkbox"] { accent-color: #7fd8a8; }
+  select, button { background: #141a18; color: #d8e0dc; border: 1px solid #2f3a36;
+                   border-radius: 5px; padding: 4px 8px; font: inherit; }
+  button { cursor: pointer; }
+  button:hover, label:hover { border-color: #7fd8a8; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  #peaks { white-space: pre; color: #9fb0a9; font-size: 11px; }
+  #stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  #stats span:nth-child(odd) { color: #7f8f89; }
+</style>
+
+<div id="wrap">
+  <canvas id="screen" width="680" height="320"></canvas>
+  <div id="panel">
+    <fieldset>
+      <legend>Strategy</legend>
+      <div class="row">
+        <select id="strategy">
+          <option value="dedup-old">dedup-old (shipped before this round)</option>
+          <option value="dedup-both" selected>dedup-both (round 3)</option>
+          <option value="dedup-len">dedup-len (length-gated)</option>
+        </select>
+      </div>
+      <label>min run length <input id="minRunLen" type="range" min="2" max="12" step="1" value="4" /><b id="minRunLenV"></b></label>
+      <div class="row"><label style="grid-template-columns: auto auto;"><input id="showRaw" type="checkbox" checked /> show raw per-bin scatter</label></div>
+      <div class="row"><label style="grid-template-columns: auto auto;"><input id="showAll" type="checkbox" /> overlay all 3 strategies</label></div>
+      <div class="row"><label style="grid-template-columns: auto auto;"><input id="monotone" type="checkbox" checked /> monotone (no-overshoot) tangent</label></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Synthetic signal</legend>
+      <label>peaks <input id="peakCount" type="range" min="1" max="6" step="1" value="4" /><b id="peakCountV"></b></label>
+      <label>peak width (oct) <input id="peakWidth" type="range" min="0.05" max="0.6" step="0.01" value="0.35" /><b id="peakWidthV"></b></label>
+      <label>noise floor (dB) <input id="noise" type="range" min="0" max="3" step="0.1" value="0.6" /><b id="noiseV"></b></label>
+      <label>fft bin width (Hz) <input id="fftBinHz" type="range" min="5" max="100" step="1" value="47" /><b id="fftBinHzV"></b></label>
+      <div class="row">
+        <button id="clean">Clean preset (4 well-separated peaks)</button>
+      </div>
+      <div class="row">
+        <button id="regen">Regenerate (random, may overlap)</button>
+        <button id="reseed">Reseed noise</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Ground truth (synthetic peaks — what findPeaks SHOULD report)</legend>
+      <div id="truth" style="white-space: pre; color: #7fd8a8; font-size: 11px;"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>findPeaks output (this strategy)</legend>
+      <div id="peaks"></div>
+    </fieldset>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const cv = $("screen");
+const ctx = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+
+// ---------------------------------------------------------------------------------------------
+// Ported verbatim from src/SpectrumScope.tsx (kept in sync manually — small, stable functions).
+const SPEC_TOP_DB = 0, SPEC_DYN = 90;
+const N = 240, F_MIN = 20, F_MAX = 20000;
+
+function hermiteTangentPlain(xs, ys, n, i) {
+  if (i <= 0) return (ys[1] - ys[0]) / (xs[1] - xs[0]);
+  if (i >= n - 1) return (ys[n - 1] - ys[n - 2]) / (xs[n - 1] - xs[n - 2]);
+  const hL = xs[i] - xs[i - 1], hR = xs[i + 1] - xs[i];
+  const sL = (ys[i] - ys[i - 1]) / hL, sR = (ys[i + 1] - ys[i]) / hR;
+  return (hR * sL + hL * sR) / (hL + hR);
+}
+// Round-1 monotone attempt, kept here for the A/B rather than shipped — tested against dedup-old
+// (nothing to fix, cost smoothness). Retesting now against dedup-both/dedup-len: those keep both
+// ends of every tied run, which is geometrically honest but creates a much denser run of sharply
+// alternating control points at the low-frequency end than dedup-old ever produced — plain
+// Catmull-Rom rings on exactly that pattern (the "funky" dip/overshoot). This combination — honest
+// endpoints *plus* a tangent rule that can't overshoot them — is the one nobody tried yet.
+function hermiteTangentMonotone(xs, ys, n, i) {
+  if (i <= 0) return (ys[1] - ys[0]) / (xs[1] - xs[0]);
+  if (i >= n - 1) return (ys[n - 1] - ys[n - 2]) / (xs[n - 1] - xs[n - 2]);
+  const hL = xs[i] - xs[i - 1], hR = xs[i + 1] - xs[i];
+  const sL = (ys[i] - ys[i - 1]) / hL, sR = (ys[i + 1] - ys[i]) / hR;
+  if (sL === 0 || sR === 0 || sL > 0 !== sR > 0) return 0;
+  const avg = (hR * sL + hL * sR) / (hL + hR);
+  const cap = Math.min(Math.abs(sL), Math.abs(sR));
+  return Math.sign(avg) * Math.min(Math.abs(avg), cap);
+}
+let hermiteTangent = hermiteTangentPlain;
+function traceSmooth(ctx, xs, ys, n) {
+  ctx.moveTo(xs[0], ys[0]);
+  for (let i = 0; i < n - 1; i++) {
+    const h = xs[i + 1] - xs[i];
+    const m0 = hermiteTangent(xs, ys, n, i);
+    const m1 = hermiteTangent(xs, ys, n, i + 1);
+    ctx.bezierCurveTo(xs[i] + h / 3, ys[i] + (m0 * h) / 3, xs[i + 1] - h / 3, ys[i + 1] - (m1 * h) / 3, xs[i + 1], ys[i + 1]);
+  }
+}
+
+const PEAK_COUNT = 4, PEAK_MIN_PROMINENCE_DB = 6, PEAK_MIN_SEPARATION_OCTAVES = 1 / 3;
+function findPeaks(v, n, binHz) {
+  if (n < 3) return [];
+  const candidates = [];
+  for (let i = 1; i < n - 1; ) {
+    if (v[i] <= v[i - 1]) { i++; continue; }
+    let j = i;
+    while (j + 1 < n && v[j + 1] === v[i]) j++;
+    if (j + 1 < n && v[j + 1] < v[i]) candidates.push({ i: Math.round((i + j) / 2), v: v[i] });
+    i = j + 1;
+  }
+  const prominent = candidates.filter((c) => {
+    let leftMin = c.v;
+    for (let i = c.i - 1; i >= 0 && v[i] <= c.v; i--) leftMin = Math.min(leftMin, v[i]);
+    let rightMin = c.v;
+    for (let i = c.i + 1; i < n && v[i] <= c.v; i++) rightMin = Math.min(rightMin, v[i]);
+    return c.v - Math.max(leftMin, rightMin) >= PEAK_MIN_PROMINENCE_DB;
+  });
+  prominent.sort((a, b) => b.v - a.v);
+  const picked = [];
+  for (const c of prominent) {
+    if (picked.length >= PEAK_COUNT) break;
+    const f = binHz(c.i);
+    if (picked.some((p) => Math.abs(Math.log2(f / binHz(p.i))) < PEAK_MIN_SEPARATION_OCTAVES)) continue;
+    picked.push(c);
+  }
+  picked.sort((a, b) => a.i - b.i);
+  return picked;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Dedup strategies under test. All three preserve bin 0 and bin n-1 unconditionally, matching the
+// real code's edge guarantee (`i > 0 && i < n - 1` guard).
+function dedupOld(db) {
+  const n = db.length, keep = [];
+  for (let i = 0; i < n; i++) {
+    if (i > 0 && i < n - 1 && db[i] === db[i - 1]) continue;
+    keep.push(i);
+  }
+  return keep;
+}
+// Diagnostic run (see the "*** NOT a control point ***" output) found a second bug on top of the
+// endpoint one: findPeaks reports a plateau's *centre* (Math.round((i+j)/2), matching its own
+// candidate-detection loop) as the peak location, but dedup-both/dedup-len only kept the run's
+// first and last bin — the centre of a WIDE run is neither, so the marker could point at an x the
+// curve has no control point at, even though the curve is (now honestly) flat on both sides of it.
+// Keeping the exact same centre index as an explicit third control point closes that gap by
+// construction: since it shares its tied neighbours' value, its own secants on both sides are
+// exactly 0 regardless of spacing or tangent rule, so the curve is pinned flat through it either
+// way — and it's now guaranteed to be the same point findPeaks marks.
+function runMid(i, j) {
+  return Math.round((i + j) / 2);
+}
+function dedupBoth(db) {
+  const n = db.length, keep = [];
+  let i = 0;
+  while (i < n) {
+    let j = i;
+    while (j + 1 < n && db[j + 1] === db[i]) j++;
+    keep.push(i);
+    if (j > i) keep.push(runMid(i, j), j);
+    i = j + 1;
+  }
+  return [...new Set(keep)].sort((a, b) => a - b);
+}
+function dedupLen(db, minRunLen) {
+  const n = db.length, keep = [];
+  let i = 0;
+  while (i < n) {
+    let j = i;
+    while (j + 1 < n && db[j + 1] === db[i]) j++;
+    const runLen = j - i + 1;
+    if (runLen < minRunLen) {
+      keep.push(i); // short run: old behaviour, collapse to first bin
+    } else {
+      keep.push(i, runMid(i, j), j); // long run: keep both ends AND the centre findPeaks marks
+    }
+    i = j + 1;
+  }
+  return [...new Set(keep)].sort((a, b) => a - b);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Synthetic signal: log-spaced display bins, each snapped to an underlying LINEAR fft bin's value
+// (reproducing the real oversampling-tie mechanism at low frequency), then rounded to 1 decimal
+// (reproducing the real rounding-tie mechanism everywhere) — same two mechanisms cageq-monitor's
+// snapshot() actually has, see the header comment.
+let peaks = []; // {f, db, widthOct}
+let noiseSeed = Math.random() * 1000;
+
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function regeneratePeaks() {
+  const count = +$("peakCount").value;
+  const rnd = mulberry32(Date.now() & 0xffffffff);
+  peaks = [];
+  const lnMin = Math.log(40), lnMax = Math.log(8000); // keep peaks off the very edges
+  for (let k = 0; k < count; k++) {
+    const f = Math.exp(lnMin + rnd() * (lnMax - lnMin));
+    const db = -25 + rnd() * 20; // -25..-5 dB
+    peaks.push({ f, db });
+  }
+  peaks.sort((a, b) => a.f - b.f);
+}
+// Deterministic, well-separated (>=1.9 octaves apart) and comfortably wider than the simulated
+// linear FFT bin at every peak's own frequency — an unambiguous baseline to check alignment
+// against before stress-testing with random (and possibly overlapping/aliased) placements.
+function cleanPreset() {
+  peaks = [
+    { f: 400, db: -14 },
+    { f: 1500, db: -9 },
+    { f: 4200, db: -18 },
+    { f: 9500, db: -12 },
+  ];
+  $("peakWidth").value = "0.3";
+  $("peakWidth").dispatchEvent(new Event("input"));
+  $("noise").value = "0.4";
+  $("noise").dispatchEvent(new Event("input"));
+}
+
+function underlyingDb(fHz) {
+  const floor = -80;
+  let acc = 0; // linear-ish sum of Gaussian bumps in log-freq, then convert to a dB-ish peak
+  const widthOct = +$("peakWidth").value;
+  for (const pk of peaks) {
+    const d = Math.log2(fHz / pk.f) / widthOct;
+    acc += Math.pow(10, pk.db / 10) * Math.exp(-0.5 * d * d);
+  }
+  const db = acc > 0 ? 10 * Math.log10(acc) : floor;
+  return Math.max(floor, db);
+}
+
+function synthesize() {
+  const fftBinHz = +$("fftBinHz").value;
+  const noiseAmt = +$("noise").value;
+  const rnd = mulberry32(Math.floor(noiseSeed));
+  const lnF0 = Math.log(F_MIN), lnSpan = Math.log(F_MAX) - lnF0;
+  const centerHz = new Array(N);
+  const linBin = new Array(N);
+  for (let i = 0; i < N; i++) {
+    centerHz[i] = Math.exp(lnF0 + (i / (N - 1)) * lnSpan);
+    linBin[i] = Math.max(1, Math.round(centerHz[i] / fftBinHz)); // (a) oversampling mechanism
+  }
+  // Cache one underlying value per DISTINCT linear bin (matches lib.rs: log bins sharing a linear
+  // bin share its single power value) — noise is per-linear-bin too, not per-display-bin, so ties
+  // that share a linear bin are EXACT ties, same as the real signal chain.
+  const linCache = new Map();
+  const db = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const lb = linBin[i];
+    let v = linCache.get(lb);
+    if (v === undefined) {
+      v = underlyingDb(lb * fftBinHz) + (rnd() - 0.5) * 2 * noiseAmt;
+      linCache.set(lb, v);
+    }
+    db[i] = Math.round(v * 10) / 10; // (b) rounding mechanism
+  }
+  return { db, centerHz };
+}
+
+// ---------------------------------------------------------------------------------------------
+function draw() {
+  const { db, centerHz } = synthesize();
+  const n = db.length;
+  const lnF0 = Math.log(F_MIN), lnSpan = Math.log(F_MAX) - lnF0;
+  const binHz = (i) => Math.exp(lnF0 + (i / (n - 1)) * lnSpan);
+
+  ctx.clearRect(0, 0, W, H);
+  const plotTop = H * 0.05, plotBot = H * 0.85;
+  const fracOf = (v) => Math.max(0, Math.min(1, (v - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
+  const xOf = (i) => (i / (n - 1)) * W;
+  const yOf = (v) => plotBot - fracOf(v) * (plotBot - plotTop);
+
+  // Grid
+  ctx.strokeStyle = "rgba(127,216,168,0.15)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const hz of [100, 1000, 10000]) {
+    const x = ((Math.log(hz) - lnF0) / lnSpan) * W;
+    ctx.moveTo(x, plotTop); ctx.lineTo(x, plotBot);
+  }
+  ctx.stroke();
+
+  // Raw per-bin scatter (ground truth data, unsimplified)
+  if ($("showRaw").checked) {
+    ctx.fillStyle = "rgba(230,162,60,0.35)";
+    for (let i = 0; i < n; i++) {
+      ctx.beginPath();
+      ctx.arc(xOf(i), yOf(db[i]), 1.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  hermiteTangent = $("monotone").checked ? hermiteTangentMonotone : hermiteTangentPlain;
+  const strategies = $("showAll").checked ? ["dedup-old", "dedup-both", "dedup-len"] : [$("strategy").value];
+  const colors = { "dedup-old": "#e6746b", "dedup-both": "#e6a23c", "dedup-len": "#5db8ff" };
+  let lastPeaks = [];
+  let lastIdxSet = new Set();
+  for (const strat of strategies) {
+    const idx =
+      strat === "dedup-old" ? dedupOld(db) : strat === "dedup-both" ? dedupBoth(db) : dedupLen(db, +$("minRunLen").value);
+    const xs = new Float64Array(idx.length), ys = new Float64Array(idx.length);
+    for (let k = 0; k < idx.length; k++) { xs[k] = xOf(idx[k]); ys[k] = yOf(db[idx[k]]); }
+    ctx.strokeStyle = colors[strat];
+    ctx.lineWidth = strat === $("strategy").value ? 2.4 : 1.2;
+    ctx.globalAlpha = strat === $("strategy").value || !$("showAll").checked ? 1 : 0.55;
+    ctx.beginPath();
+    traceSmooth(ctx, xs, ys, idx.length);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    if (strat === $("strategy").value) { lastPeaks = findPeaks(db, n, binHz); lastIdxSet = new Set(idx); }
+  }
+
+  // Peak markers for the primary (selected) strategy
+  ctx.strokeStyle = "rgba(230,162,60,0.95)";
+  ctx.lineWidth = 1.6;
+  const r = 6;
+  ctx.beginPath();
+  for (const pk of lastPeaks) {
+    const x = xOf(pk.i), y = yOf(pk.v);
+    ctx.moveTo(x - r, y); ctx.lineTo(x + r, y);
+    ctx.moveTo(x, y - r); ctx.lineTo(x, y + r);
+  }
+  ctx.stroke();
+
+  // Ground-truth synthetic peak positions (green ticks along the bottom) so the eye has an
+  // independent reference the harness itself guarantees, not derived from any of the code above.
+  ctx.fillStyle = "#7fd8a8";
+  ctx.font = "10px ui-monospace, monospace";
+  for (const pk of peaks) {
+    const x = ((Math.log(pk.f) - lnF0) / lnSpan) * W;
+    ctx.fillRect(x - 0.5, plotBot + 4, 1, 8);
+  }
+
+  // Axis labels
+  ctx.fillStyle = "rgba(127,216,168,0.6)";
+  ctx.textAlign = "center";
+  for (const hz of [100, 1000, 10000]) {
+    const x = ((Math.log(hz) - lnF0) / lnSpan) * W;
+    ctx.fillText(hz >= 1000 ? hz / 1000 + "k" : "" + hz, x, plotBot + 24);
+  }
+
+  $("truth").textContent = peaks.map((p) => `${p.f.toFixed(0)} Hz  ${p.db.toFixed(1)} dB`).join("\n");
+  $("peaks").textContent =
+    lastPeaks.length === 0
+      ? "(none found)"
+      : lastPeaks
+          .map((p) => {
+            const onCurve = lastIdxSet.has(p.i);
+            return `${binHz(p.i).toFixed(0)} Hz  ${p.v.toFixed(1)} dB  (bin ${p.i})  ${onCurve ? "ON CURVE" : "*** NOT a control point ***"}`;
+          })
+          .join("\n");
+}
+
+for (const [id, fmt] of [
+  ["minRunLen", (v) => v],
+  ["peakCount", (v) => v],
+  ["peakWidth", (v) => v + " oct"],
+  ["noise", (v) => v + " dB"],
+  ["fftBinHz", (v) => v + " Hz"],
+]) {
+  $(id).addEventListener("input", () => { $(id + "V").textContent = fmt($(id).value); draw(); });
+  $(id + "V").textContent = fmt($(id).value);
+}
+$("strategy").addEventListener("change", draw);
+$("showRaw").addEventListener("change", draw);
+$("showAll").addEventListener("change", draw);
+$("monotone").addEventListener("change", draw);
+$("clean").addEventListener("click", () => { cleanPreset(); draw(); });
+$("regen").addEventListener("click", () => { regeneratePeaks(); draw(); });
+$("reseed").addEventListener("click", () => { noiseSeed = Math.random() * 1000; draw(); });
+
+cleanPreset();
+draw();
+</script>

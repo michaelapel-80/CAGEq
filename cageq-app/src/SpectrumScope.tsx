@@ -49,14 +49,56 @@ const F_MIN = 20;
 const F_MAX = 20000;
 const FREQ_TICKS = [100, 1000, 10000]; // unlabeled-chart-clutter-avoiding minimum: one per decade
 
-/** The tangent at point `i` for a non-uniform cubic Hermite spline — Catmull-Rom's usual tangent
- *  (average of the neighbouring secant slopes) generalized to unequal x-spacing by weighting each
- *  secant by the *opposite* segment's width, so a short adjacent segment pulls the tangent toward
- *  its own slope instead of the far one's. Reduces to the textbook `(y[i+1]-y[i-1])/2` exactly when
- *  spacing is uniform — the plain Catmull-Rom formula assumes that uniformity and distorts the
- *  curve without it, which is exactly the case here once `traceSmooth`'s caller has dropped the
- *  duplicate-value bins (see there): the surviving points are deliberately *not* evenly spaced.
- *  Endpoints just use the one available secant. */
+/** The tangent at point `i` for a *monotone* non-uniform cubic Hermite spline (Fritsch-Carlson in
+ *  spirit — see the derivation below; a plain, unconstrained Catmull-Rom average was tried first
+ *  and is why this isn't that). Generalizes to unequal x-spacing the same way the plain average
+ *  would: each secant weighted by the *opposite* segment's width, so a short adjacent segment
+ *  pulls the tangent toward its own slope instead of the far one's — needed since `traceSmooth`'s
+ *  caller has dropped duplicate-value bins (see there), so the surviving points are deliberately
+ *  not evenly spaced. Endpoints just use the one available secant.
+ *
+ *  This took three attempts to land, verified in the end with a synthetic-signal spike
+ *  (`spike/spectrum-trace.html`, kept) rather than more rounds against unpredictable live audio:
+ *
+ *  1. Plain Catmull-Rom overshoots at a sharp, narrow feature, so the curve's own visual apex can
+ *     land beside the data point it's meant to represent — this monotone version was tried in
+ *     response, and *by itself* fixed nothing, which was the tell that overshoot wasn't the real
+ *     cause here.
+ *  2. The actual cause: `findPeaks` centres a flat-topped run of tied bins (routine — the backend
+ *     rounds dB to 1 decimal, `SpectrumUpdate::db`, and log bins can oversample a single linear
+ *     FFT bin at the low-frequency end) on the run's *middle* index. But dedup (below) used to
+ *     collapse a whole run down to its *first* bin only, discarding where the run actually ends —
+ *     so the spline had no control point at the marked centre, or anywhere near it, and instead
+ *     free-interpolated across to whichever distant, differing bin came next, inventing a rounded
+ *     bulge that had nothing to do with the real (flat, then a real step at the true edge) data.
+ *     Fixed by keeping a run's first AND last bin (below), which stopped the invented bulge — but:
+ *  3. A wide run's *middle* still wasn't itself a surviving control point (only its ends were), so
+ *     the marker could still sit at an x with no matching anchor. Fixed by keeping the run's exact
+ *     midpoint too — `runMid` in the dedup loop below, computed identically to `findPeaks`' own
+ *     centring, so the two can never disagree about where a plateau's peak sits. And since a kept
+ *     midpoint shares its immediate (kept) neighbours' value by construction, its own secants are
+ *     always exactly 0 — pinning the curve flat through it regardless of tangent rule.
+ *
+ *  That third fix alone restored correct marker placement, but not smoothness: with plain
+ *  Catmull-Rom, the *denser* run of sharply-alternating control points a faithfully-kept run's
+ *  boundaries create (versus the single collapsed point dedup used to produce) rings — dips below
+ *  and overshoots above the true local values before settling — which is the "steppy"/"funky" look
+ *  the second and third live-tested rounds each produced in a different place. That's what this
+ *  monotone tangent is actually for: `sL === 0 || sR === 0 || sign(sL) !== sign(sR)` detects a true
+ *  local extremum (arrival/departure forced flat, so the curve can't bulge past it), and otherwise
+ *  the tangent is capped to `min(|sL|, |sR|)` — provably enough on its own, for a Bezier segment
+ *  built the way `traceSmooth` builds it (control points at ±h/3 along each tangent): a tangent
+ *  magnitude ≤ the segment's own secant keeps that control point's y between the segment's two
+ *  endpoint values, and a Bezier curve is a convex combination of its control points, so if all
+ *  four sit inside `[y_i, y_{i+1}]` the whole curve does too. A conservative special case of the
+ *  textbook algorithm's looser (and coupled, multi-point) bound, chosen because it stays a pure
+ *  per-point computation — only `i`'s immediate neighbours, same signature as always.
+ *
+ *  Landed alongside a backend fix (`cageq-monitor`'s `ZERO_PAD_FACTOR`) that shrinks how often any
+ *  of this even triggers — zero-padding the FFT quadruples the linear bin density, pushing the
+ *  frequency below which log display bins outrun it from ~200 Hz down to ~50 Hz — but the fix here
+ *  stays regardless, since some oversampling always remains at the very bottom of the range, and
+ *  the correctness argument above doesn't depend on how often the case actually occurs. */
 function hermiteTangent(xs: Float64Array, ys: Float64Array, n: number, i: number): number {
   if (i <= 0) return (ys[1] - ys[0]) / (xs[1] - xs[0]);
   if (i >= n - 1) return (ys[n - 1] - ys[n - 2]) / (xs[n - 1] - xs[n - 2]);
@@ -64,7 +106,10 @@ function hermiteTangent(xs: Float64Array, ys: Float64Array, n: number, i: number
   const hR = xs[i + 1] - xs[i];
   const sL = (ys[i] - ys[i - 1]) / hL;
   const sR = (ys[i + 1] - ys[i]) / hR;
-  return (hR * sL + hL * sR) / (hL + hR);
+  if (sL === 0 || sR === 0 || sL > 0 !== sR > 0) return 0; // local extremum — flatten, don't overshoot it
+  const avg = (hR * sL + hL * sR) / (hL + hR);
+  const cap = Math.min(Math.abs(sL), Math.abs(sR));
+  return Math.sign(avg) * Math.min(Math.abs(avg), cap);
 }
 
 /** Stroke a smooth cubic Hermite spline through `n` points `(xs[i], ys[i])`, tangents from
@@ -95,6 +140,91 @@ function parseHex(hex: string): [number, number, number] {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
+/** The representative index for a tied run spanning `[i, j]` — its middle, rounded. Shared between
+ *  `findPeaks` (which marks a plateau here) and the trace loop's dedup (which must keep this exact
+ *  index as a surviving control point, or the marker points at an x the curve has no anchor at —
+ *  see `hermiteTangent`'s doc for the full history). A run of length 1 has i === j, so this is a
+ *  no-op then, same as ever. */
+function runMid(i: number, j: number): number {
+  return Math.round((i + j) / 2);
+}
+
+/** Format a peak frequency for the numeric readout below the tube — unlike EqChart's `fmtHz`
+ *  (built for a handful of fixed, always-round grid-tick values), this has to handle an arbitrary
+ *  continuous bin frequency without printing a long float tail. */
+function fmtPeakHz(hz: number): string {
+  return hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 1 : 2)} kHz` : `${Math.round(hz)} Hz`;
+}
+
+// Up to this many peaks are ever shown/marked — "3 or 4", a couple more than one but still
+// scannable at a glance without crowding the readout row or the tube itself.
+const PEAK_COUNT = 4;
+// #e6a23c — the same amber TimeScope's peak-hold lines use (see PEAK_LINE_ALPHA there), so a
+// "peak" reads as the same colour wherever this app marks one.
+const PEAK_MARK_COLOR = "rgba(230,162,60,0.9)";
+// How far (dB) a local maximum must stand above the lower of the two valleys separating it from
+// taller ground before it counts as a real peak — see `findPeaks`. Plain "> both neighbours" flags
+// nearly every wiggle in FFT-noisy content; this rejects a shallow shoulder bump on a bigger peak's
+// flank, which never finds a low-enough valley before running into that bigger peak.
+const PEAK_MIN_PROMINENCE_DB = 6;
+// Minimum spacing between picked peaks, in octaves (so it means the same thing at the low and high
+// end of a log axis, unlike a fixed Hz or bin-count gap). ~a third-octave — roughly a critical
+// band in the midrange — stops one broad resonance's own ripples from filling every slot.
+const PEAK_MIN_SEPARATION_OCTAVES = 1 / 3;
+
+/** Up to `PEAK_COUNT` distinct spectral peaks in `v[0..n)` (bin i's frequency given by `binHz`):
+ *  local maxima prominent enough to be a real peak rather than FFT noise, spaced far enough apart
+ *  that they aren't all just one resonance's shoulder. Returns the *largest* qualifying peaks,
+ *  then reorders them to ascending frequency — picking by magnitude and presenting by frequency
+ *  are different steps on purpose, so a strong low-frequency hum and a quieter but still-qualifying
+ *  high note both land in the order a reader scans the axis, not loudest-first. */
+function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { i: number; v: number }[] {
+  if (n < 3) return [];
+  // 1) Local maxima, plateau-aware. A run of bins tied at *exactly* the same value is common here
+  // — the backend rounds dB to 1 decimal (see `SpectrumUpdate::db`), so the true rounded-off top of
+  // an ordinary rounded peak often lands several adjacent bins wide, not one. An earlier version of
+  // this scan flagged only the first (lowest-frequency) bin of such a run — the simple `v[i] >
+  // v[i-1] && v[i] >= v[i+1]` test a plain per-bin scan uses necessarily does, since it has no
+  // notion of "this whole flat stretch is one peak" — which put every marker at the run's leading
+  // edge instead of its middle, visibly off the curve's drawn (and genuinely rounded) apex. Walking
+  // each run's full extent and reporting its *centre* fixes that; for a true single-bin peak (no
+  // tie) the run has length 1 and this reduces to exactly the old per-bin test.
+  const candidates: { i: number; v: number }[] = [];
+  for (let i = 1; i < n - 1; ) {
+    if (v[i] <= v[i - 1]) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j + 1 < n && v[j + 1] === v[i]) j++; // extend across the tied plateau
+    if (j + 1 < n && v[j + 1] < v[i]) candidates.push({ i: runMid(i, j), v: v[i] });
+    i = j + 1; // either past a confirmed peak, or past a run that turned out to keep rising/hit the edge
+  }
+  // 2) Prominence: walk outward from each candidate until the ground rises back above it (or the
+  // array ends), tracking the lowest point crossed each way. A shoulder bump never finds a valley
+  // deep enough before running into the bigger peak it's riding on; a standalone peak does.
+  const prominent = candidates.filter((c) => {
+    let leftMin = c.v;
+    for (let i = c.i - 1; i >= 0 && v[i] <= c.v; i--) leftMin = Math.min(leftMin, v[i]);
+    let rightMin = c.v;
+    for (let i = c.i + 1; i < n && v[i] <= c.v; i++) rightMin = Math.min(rightMin, v[i]);
+    return c.v - Math.max(leftMin, rightMin) >= PEAK_MIN_PROMINENCE_DB;
+  });
+  // 3) Greedy pick by magnitude, skipping anything too close (in octaves) to an already-picked
+  // peak — otherwise the loudest region's own harmonics could fill every remaining slot.
+  prominent.sort((a, b) => b.v - a.v);
+  const picked: { i: number; v: number }[] = [];
+  for (const c of prominent) {
+    if (picked.length >= PEAK_COUNT) break;
+    const f = binHz(c.i);
+    if (picked.some((p) => Math.abs(Math.log2(f / binHz(p.i))) < PEAK_MIN_SEPARATION_OCTAVES)) continue;
+    picked.push(c);
+  }
+  // 4) Presented by frequency, not the magnitude order they were picked in.
+  picked.sort((a, b) => a.i - b.i);
+  return picked;
+}
+
 /**
  * §5.4 CRT-styled spectrum analyzer — the "Monitor" chart view's own instrument, replacing the
  * earlier approach of reusing `EqChart` with every curve/marker/node stripped. That worked but
@@ -123,9 +253,20 @@ function parseHex(hex: string): [number, number, number] {
  */
 export function SpectrumScope() {
   const { t } = useTranslation();
-  const wrapRef = useRef<HTMLDivElement>(null);
+  // Ref'd on `.vs-screen` (the CRT box itself), not the outer wrap — the wrap also hosts the
+  // peak readout row below the tube (see the return JSX), and the canvases' backing-store
+  // resolution must match the tube's own box exactly, not the taller box that includes the
+  // readout, or the two drift and the render blurs.
+  const screenRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLCanvasElement>(null);
   const trailRef = useRef<HTMLCanvasElement>(null);
+  // Peak crosses live on their own cleared-every-frame layer, same reason as Vectorscope's resting
+  // spot: the trail composites additively, so a constant-brightness redraw drawn straight into it
+  // would stack toward white instead of holding steady (see phosphor.ts).
+  const markRef = useRef<HTMLCanvasElement>(null);
+  // Text for up to PEAK_COUNT readout chips, written imperatively (see the trail effect) — driving
+  // this off React state from a 60 fps stream once re-rendered the entire App tree per arrival.
+  const peakSlotRefs = useRef<(HTMLSpanElement | null)[]>([]);
   // The last two received spectrum events, plus when the current one landed and how long the gap
   // before it was — the trail effect below linearly interpolates between them over that gap
   // instead of snapping straight to `cur` the instant it arrives, so the line flows at 60 fps
@@ -141,14 +282,15 @@ export function SpectrumScope() {
   const paramsRef = useRef(params);
   paramsRef.current = params;
 
-  // Fills the whole chart-wrap (not square, unlike the vectorscope; not sharing a row, unlike the
-  // time scope) — both dimensions tracked from `.chart-wrap`'s own `aspect-ratio:720/215`
-  // (App.css), so this instrument's height agrees with the Frequency/Time views' viewBox-scaled
-  // SVGs instead of drifting from a hardcoded value and shifting the layout on every view switch.
+  // Fills the chart-wrap (not square, unlike the vectorscope; not sharing a row, unlike the time
+  // scope), minus a small strip at the bottom for the peak readout — both dimensions tracked from
+  // `.vs-screen`'s own box (App.css gives it `flex: 1 1 auto` inside the wrap, so it's exactly
+  // "chart-wrap's height, less the readout row"), so the canvases' resolution always matches what
+  // CSS actually renders instead of drifting from a hardcoded or stale value.
   const [width, setWidth] = useState(320);
   const [height, setHeight] = useState(215);
   useEffect(() => {
-    const el = wrapRef.current;
+    const el = screenRef.current;
     if (!el) return;
     const measure = () => {
       const r = el.getBoundingClientRect();
@@ -254,7 +396,9 @@ export function SpectrumScope() {
   // a separate cause from the 8-bit stall (see `SpectrumUpdate.signal`).
   useEffect(() => {
     const cv = trailRef.current;
-    if (!cv) return;
+    const markCv = markRef.current;
+    const markCtx = markCv?.getContext("2d");
+    if (!cv || !markCv || !markCtx) return;
     const phos = createPhosphor(cv);
     if (!phos) return;
     const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
@@ -267,11 +411,23 @@ export function SpectrumScope() {
     // upload each time, a real contributor to the GPU-memory growth diagnosed earlier this session).
     let gradKey = "";
     let grad: CanvasGradient | null = null;
+    // The peak readout's DOM writes, throttled independently of the (unthrottled) crosses below —
+    // the underlying data is already smoothed at the source (cageq-monitor's SPEC_TAU_SECS), but
+    // text updating 60x/s reads as vibrating rather than as a number, in a way a moving cross
+    // doesn't. `hadPeak` blanks the row exactly once on losing signal / peaks, rather than writing
+    // to it every idle frame for nothing.
+    let lastReadout = 0;
+    let hadPeak = false;
+    const READOUT_INTERVAL_MS = 120;
     // Reused per-point scratch buffers for the spline (see `traceSmooth`) — resized, never
     // reallocated fresh each frame, matching TimeScope's `magScratch` pattern. Sized for the full
     // bin count even though the deduplicated point count is usually smaller.
     let xScratch = new Float64Array(0);
     let yScratch = new Float64Array(0);
+    // Every bin's (possibly corrected) value, undeduped — the trace loop below skips duplicate
+    // bins as a drawing optimization, but `findPeaks` needs true bin-to-bin adjacency to detect
+    // local maxima correctly, so it reads from this instead of the trace's own dedup pass.
+    let vScratch = new Float64Array(0);
 
     const render = () => {
       const now = performance.now();
@@ -315,29 +471,92 @@ export function SpectrumScope() {
         if (xScratch.length < n) {
           xScratch = new Float64Array(n);
           yScratch = new Float64Array(n);
+          vScratch = new Float64Array(n);
+        }
+        // Every bin's value, in order, no skipping — see `vScratch`'s own comment above.
+        for (let i = 0; i < n; i++) {
+          const raw = lerp >= 1 || !prev ? s.db[i] : prev.db[i] + (s.db[i] - prev.db[i]) * lerp;
+          vScratch[i] = corr ? raw - corr[i] : raw;
         }
         // The dedup: several adjacent log-spaced display bins can land on the same underlying
         // linear FFT bin — always toward the low-frequency end, where the log grid is finer than
-        // the FFT's actual (fixed, linear) resolution — and read the identical raw value.
-        // Connecting each of those individually, spline or not, draws a flat plateau; skipping the
-        // repeats treats the run as the single point it actually represents. Compared on the raw
-        // reading, which is what's duplicated (the lerp of two equal values is equally flat).
-        // Always keep the last bin so the trace reaches the true right edge.
+        // the FFT's actual (fixed, linear) resolution — and read the identical raw value. Walked as
+        // runs of equal `s.db` (raw, not `vScratch` — the raw reading is what's actually duplicated)
+        // rather than a flat per-bin skip: each run keeps its first bin, its last bin, and — for a
+        // run wider than 2 — its exact midpoint, `runMid`-computed identically to `findPeaks`' own
+        // centring so a marked plateau's peak is *always* one of the surviving control points, never
+        // an x the spline has no anchor at. See `hermiteTangent`'s doc for the two-bug history this
+        // is the second half of: collapsing a whole run down to just its first bin (what this used
+        // to do) discarded where the run actually ends, so the spline free-interpolated across the
+        // gap to whatever distant, differing bin came next — inventing a rounded bulge with nothing
+        // to do with the real (flat, then a genuine step at the true edge) data; keeping just the
+        // two ends fixed that but still left a *wide* run's own middle — where the marker actually
+        // points — without a matching anchor.
         let m = 0;
-        for (let i = 0; i < n; i++) {
-          if (i > 0 && i < n - 1 && s.db[i] === s.db[i - 1]) continue;
-          const raw = lerp >= 1 || !prev ? s.db[i] : prev.db[i] + (s.db[i] - prev.db[i]) * lerp;
-          const v = corr ? raw - corr[i] : raw;
-          const frac = Math.max(0, Math.min(1, (v - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
+        const pushPoint = (i: number) => {
+          const frac = Math.max(0, Math.min(1, (vScratch[i] - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
           xScratch[m] = (i / (n - 1)) * W;
           yScratch[m] = plotBot - frac * (plotBot - plotTop);
           m++;
+        };
+        for (let i = 0; i < n; ) {
+          let j = i;
+          while (j + 1 < n && s.db[j + 1] === s.db[i]) j++;
+          pushPoint(i);
+          if (j > i) {
+            const mid = runMid(i, j);
+            if (mid !== i && mid !== j) pushPoint(mid);
+            pushPoint(j);
+          }
+          i = j + 1;
         }
         if (m >= 2) {
           ctx.beginPath();
           traceSmooth(ctx, xScratch, yScratch, m);
           ctx.stroke();
         }
+
+        // Peak crosses: recomputed and redrawn every frame (not throttled — see below), so they
+        // track the live trace exactly as fluidly as the trace itself does.
+        markCtx.clearRect(0, 0, W, H);
+        const lnF0 = Math.log(s.f_min);
+        const lnSpan = Math.log(s.f_max) - lnF0;
+        const binHz = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * lnSpan);
+        const peaks = findPeaks(vScratch, n, binHz);
+        if (peaks.length) {
+          markCtx.strokeStyle = PEAK_MARK_COLOR;
+          markCtx.lineWidth = Math.max(1, H / REF_SIZE) * 1.5;
+          const r = Math.max(3, H * 0.018); // cross arm length
+          markCtx.beginPath();
+          for (const pk of peaks) {
+            const frac = Math.max(0, Math.min(1, (pk.v - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
+            const x = (pk.i / (n - 1)) * W;
+            const y = plotBot - frac * (plotBot - plotTop);
+            markCtx.moveTo(x - r, y);
+            markCtx.lineTo(x + r, y);
+            markCtx.moveTo(x, y - r);
+            markCtx.lineTo(x, y + r);
+          }
+          markCtx.stroke();
+        }
+
+        // The readout row's text, throttled independently of the (unthrottled) crosses above — see
+        // `lastReadout`'s own comment.
+        if (now - lastReadout > READOUT_INTERVAL_MS) {
+          lastReadout = now;
+          hadPeak = peaks.length > 0;
+          for (let j = 0; j < PEAK_COUNT; j++) {
+            const slot = peakSlotRefs.current[j];
+            if (!slot) continue;
+            slot.textContent = j < peaks.length ? `${fmtPeakHz(binHz(peaks[j].i))}  ${peaks[j].v.toFixed(1)} dB` : "";
+          }
+        }
+      } else if (hadPeak) {
+        // Signal just dropped — blank once rather than leaving the last reading stale on screen
+        // (matching the beam itself, which the `signal` gate above also stops updating on silence).
+        hadPeak = false;
+        markCtx.clearRect(0, 0, W, H);
+        for (const slot of peakSlotRefs.current) if (slot) slot.textContent = "";
       }
 
       phos.commit(dt, p.trailTau, p.tail);
@@ -359,13 +578,14 @@ export function SpectrumScope() {
   ];
 
   return (
-    <div className="spectrumscope-wrap" ref={wrapRef}>
-      {/* width/height here are CSS "100%" (matching the wrap exactly, sub-pixel precise) — the
+    <div className="spectrumscope-wrap">
+      {/* width/height here are CSS "100%" (matching this box exactly, sub-pixel precise, since its
+          own size comes from the flex rule in App.css rather than an inline style) — the
           JS-measured `resW`/`resH` state feeds only the canvas backing-store *resolution*
           attributes below, never the display size. A JS-measured, floored pixel value here would
-          drift by up to 1px from the wrap's true (CSS-computed) height and show up as exactly the
+          drift by up to 1px from the box's true (CSS-computed) height and show up as exactly the
           kind of small persistent misalignment against EqChart's own height:auto SVG sizing. */}
-      <div className="vs-screen" style={{ width: "100%", height: "100%" }}>
+      <div className="vs-screen" ref={screenRef}>
         <canvas
           ref={gridRef}
           className="vectorscope-canvas vs-grid"
@@ -377,6 +597,14 @@ export function SpectrumScope() {
         <canvas
           ref={trailRef}
           className="vectorscope-canvas vs-trail"
+          width={resW}
+          height={resH}
+          style={{ width: "100%", height: "100%" }}
+          aria-hidden="true"
+        />
+        <canvas
+          ref={markRef}
+          className="vectorscope-canvas vs-peakmarks"
           width={resW}
           height={resH}
           style={{ width: "100%", height: "100%" }}
@@ -425,6 +653,29 @@ export function SpectrumScope() {
             </label>
           </div>
         )}
+      </div>
+      {/* Numeric peak readout, below the tube — up to PEAK_COUNT chips, one per cross marked on the
+          tube above, presented left-to-right by frequency (see `findPeaks`). The trail's own long
+          afterglow (`tail`, phosphor.ts) already shows *where* the spectrum has recently been, but
+          reading an exact level or frequency off a glowing curve isn't realistic — this is the same
+          information as a number. A fixed PEAK_COUNT of slots is rendered upfront and each is
+          shown/blanked by writing its text (see the trail effect) rather than mapping over a
+          variable-length array, since the array itself lives outside React state — see below.
+          Updated imperatively, NOT via React state: `spectrum` arrives well above React's
+          comfortable render rate, and driving a state update from it once re-rendered the entire
+          App tree per arrival (see cageq-monitor's `SpectrumUpdate` doc / this component's own
+          history) — the fix there was moving the data off state entirely, so adding a state-driven
+          readout here would reintroduce exactly that. */}
+      <div className="ss-readout" title={t("scope.peak")}>
+        {Array.from({ length: PEAK_COUNT }, (_, j) => (
+          <span
+            key={j}
+            ref={(el) => {
+              peakSlotRefs.current[j] = el;
+            }}
+            className="ss-peak"
+          />
+        ))}
       </div>
     </div>
   );

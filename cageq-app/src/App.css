@@ -645,6 +645,46 @@ select:disabled {
   width: 100%;
   height: calc(100% - 0.5rem);
   margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+/* The tube shrinks to make room for the peak readout row below it — same "reduce the instrument's
+   own share, leave the panel's total height alone" idea as the wrap's own inset above, one level
+   deeper. `min-height: 0` is load-bearing on a flex child holding an absolutely-positioned canvas
+   (see `.vs-screen`'s children) — without it a flex item won't shrink past its content's intrinsic
+   size, and canvases report their own attribute width/height as that size. */
+.spectrumscope-wrap .vs-screen {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* Numeric peak readout: level + frequency of each cross marked on the tube above (up to
+   PEAK_COUNT). The trail's own long afterglow already shows *where* the spectrum has recently been
+   at a glance; this is the exact numbers for it, which glow and persistence can't render precisely.
+   `flex-wrap` rather than a fixed 4-column grid: at PEAK_COUNT=4 chips can just barely need two
+   rows on a narrow panel, and wrapping degrades gracefully where an overflowing single row
+   wouldn't. Empty chips (fewer than PEAK_COUNT peaks found) collapse to nothing rather than
+   leaving a gap, since they're plain empty text nodes with no fixed width. */
+.ss-readout {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-content: center;
+  column-gap: 1.1rem;
+  row-gap: 0.15rem;
+  font-size: 0.72rem;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+/* One chip per peak — styled like `.chart-preamp` (the other small always-on instrument readout in
+   this panel) for a consistent look. Plain text (no separate <b> for the two values, unlike the
+   preamp readout): four chips × two spans each was more DOM than the payoff was worth here. */
+.ss-peak {
+  font-weight: 600;
+}
+.ss-peak:empty {
+  display: none; /* an empty chip would otherwise still claim a gap's worth of column-gap */
 }
 
 /* Vectorscope view: an always-dark "instrument screen" (it's square, the chart is wide), framed
@@ -693,10 +733,14 @@ select:disabled {
 /* Layers cleared and redrawn every frame instead of accumulating into the phosphor trail — they
    have to live outside it because it composites *additively*, so a constant-brightness redraw would
    stack toward white rather than hold steady (see phosphor.ts).
-   The vectorscope's resting spot goes above the trail; the time scope's peak-hold lines go below it
-   (no z-index — DOM order puts them over the graticule but under the trail's z-index:1), so the
-   beam still reads over the reference line where they cross, as it did when both shared a canvas. */
-.vs-spot {
+   The vectorscope's resting spot and the Monitor pane's peak-cross markers both go above the trail;
+   the time scope's peak-hold lines go below it instead (no z-index — DOM order puts them over the
+   graticule but under the trail's z-index:1), so the beam still reads over the reference line where
+   they cross, as it did when both shared a canvas. The peak crosses go above for the opposite
+   reason: they're meant to stay findable precisely when a resonance is loud enough to bloom the
+   trail brightly, not get washed out by it. */
+.vs-spot,
+.vs-peakmarks {
   z-index: 2;
 }
 /* Corner toolbar (pop-out + tuning gear): dim until hovered/open, so the scope stays the focus. */
