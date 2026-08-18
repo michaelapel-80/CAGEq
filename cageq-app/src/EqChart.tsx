@@ -28,6 +28,13 @@ export type Series = {
   muted?: boolean;
   /** Start hidden (user can reveal via the legend) — for opt-in "nerd" layers. */
   defaultHidden?: boolean;
+  /** Still drawn (and still clipped to whatever range results), but its values don't count toward
+   *  the Y auto-range — for a curve whose *shape* is meaningful but whose *magnitude* isn't
+   *  representative of "the applied filter": §5.2 isolate substitutes a bandpass with deep
+   *  attenuation outside the audition band for exactly this series' bands, and letting that drive
+   *  the scale blows the axis out to reflect the audition, not the actual correction, at exactly
+   *  the moment a user is most likely to glance at the chart without re-reading the axis. */
+  excludeFromScale?: boolean;
 };
 
 /** A fixed (non-draggable) set of band handles drawn as diamonds — e.g. the AutoEq fit. */
@@ -229,9 +236,11 @@ export function EqChart({
     // lets the rest breathe). The user's own EQ (series) and the fit (markers) use the full
     // range — a deliberate HF boost should be visible. Reference curves (measured raw /
     // target), though, diverge noisily in the top octaves, so those only count up to
-    // RANGE_F_MAX; the rest of each ref is still drawn, just clipped to the frame.
+    // RANGE_F_MAX; the rest of each ref is still drawn, just clipped to the frame. A series
+    // marked `excludeFromScale` is skipped here entirely, same idea for a different reason (see
+    // that field's doc) — still drawn, just not allowed to set the axis.
     series.forEach((s, i) => {
-      if (isHidden(s.id)) return;
+      if (isHidden(s.id) || s.excludeFromScale) return;
       for (const v of curves[i]) {
         if (v < lo) lo = v;
         if (v > hi) hi = v;

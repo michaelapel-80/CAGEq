@@ -1855,6 +1855,21 @@ function App() {
         bands: result.filters,
         color: SLOT_COLOR[activeSlot],
         label: slotLabel(activeSlot),
+        // Whenever `result.filters` IS the §5.2 isolate bandpass audition (deep attenuation
+        // outside the audited band), it shouldn't drive the Y auto-range — that would blow the
+        // axis out to the audition's scale rather than the applied filter's, misrepresenting it
+        // at a glance. The stage line for the band's own stage (drawn below, unaffected by
+        // isolate) still sets a true range from the real bands.
+        //
+        // Deliberately keyed off `result.filters` itself (Bandpass only ever appears there — see
+        // FilterKind's doc), not off the `isolate` toggle state: turning isolate off flips that
+        // state synchronously, but the throttled re-apply that overwrites `result` with the real
+        // cascade lands later, async. Keying off the toggle left a real gap — a frame or more
+        // where `result` was still the bandpass but the flag had already gone false — during
+        // which the exact blowout this exists to prevent flashed on screen. Keying off the data
+        // instead means the flag can never be stale: it's derived from the very bands the curve
+        // is about to be drawn from.
+        excludeFromScale: result.filters.some((b) => b.kind === "Bandpass"),
       },
     ];
     if (!dryActive) {
