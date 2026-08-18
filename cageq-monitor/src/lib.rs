@@ -141,12 +141,34 @@ mod windows_impl {
     const GLOW_SPAN_DB: f32 = 3.0;
 
     // --- spectrum analyzer (post-EQ loopback FFT) ---
-    /// Base FFT size at ≤48 kHz (≈5.9 Hz bins / 171 ms window — decent low-end for resonance
-    /// hunting). Scaled up with the sample rate in [`Spectrum::new`] so the analysis *window
-    /// duration* — and thus the low-frequency resolution — stays constant at 96/192 kHz instead of
-    /// halving/quartering. We only ever display up to 20 kHz, so analysing the whole (wider) band
-    /// and ignoring the bins above 20 kHz is simpler and alias-free vs. decimating the input.
+    /// Base *analysis window* size at ≤48 kHz (≈171 ms — decent low-end for resonance hunting).
+    /// Scaled up with the sample rate in [`Spectrum::new`] so the window *duration* — and thus the
+    /// true frequency resolution, Δf = rate/analysis_size, i.e. how well two close tones can be
+    /// told apart — stays constant at 96/192 kHz instead of halving/quartering. We only ever
+    /// display up to 20 kHz, so analysing the whole (wider) band and ignoring the bins above 20 kHz
+    /// is simpler and alias-free vs. decimating the input.
+    ///
+    /// This is the *real* window length, not the FFT transform length — see `ZERO_PAD_FACTOR`
+    /// below for why those are no longer the same number.
     const BASE_FFT_SIZE: usize = 8192;
+    /// The real, windowed analysis block (`BASE_FFT_SIZE`-derived) is transformed at this many
+    /// times its own length — the rest of the FFT's input is zeros. This is NOT the same thing as
+    /// more resolution: resolution (how well two close tones can be told apart) is fixed by the
+    /// analysis window's time *duration*, unaffected by this. Zero-padding instead *interpolates*
+    /// the transform of that same finite window more finely — a finite-duration signal has a
+    /// well-defined continuous Fourier transform, and the unpadded FFT only ever samples it
+    /// coarsely; padding computes more exact samples of that identical continuous function, not
+    /// new/approximated information. This is the standard technique real-time spectrum analyzers
+    /// use to look smooth without a longer (higher-latency) window.
+    ///
+    /// Concretely: 5.9 Hz bins (BASE_FFT_SIZE alone) let the 240 *log*-spaced display bins outrun
+    /// the linear FFT's own resolution below ~200 Hz — several adjacent display bins there end up
+    /// reading the exact same linear bin, a genuine plateau the display has to render honestly
+    /// (see EqChart/SpectrumScope's dedup) rather than smooth over. At ×4 (≈1.5 Hz bins) that
+    /// crossover drops to ~50 Hz, shrinking the affected range by roughly the same factor, for a
+    /// modest one-time FFT cost (O(N log N), so ×4 the points costs well under ×4) and zero added
+    /// latency — same real samples, same hop cadence, just more (interpolated) output bins.
+    const ZERO_PAD_FACTOR: usize = 4;
     /// The rate the base size is tuned for; higher rates scale the FFT proportionally.
     const BASE_RATE: f32 = 48_000.0;
     /// Hop is a quarter of the (per-rate) FFT size → 75% overlap, Welch-style averaging.
@@ -376,14 +398,19 @@ mod windows_impl {
     /// bins. No peak-hold here — the front-end's own persistence covers that job now.
     struct Spectrum {
         fft: Arc<dyn RealToComplex<f32>>,
-        fft_size: usize,           // per-rate FFT length (BASE_FFT_SIZE scaled to the sample rate)
-        fft_hop: usize,            // hop between windows = fft_size / FFT_OVERLAP_DIV
-        in_buf: Vec<f32>,          // realfft input scratch (len fft_size)
-        out_buf: Vec<Complex<f32>>, // realfft output scratch (len fft_size/2 + 1)
+        analysis_size: usize,      // real, windowed sample count (BASE_FFT_SIZE scaled to rate) —
+                                    // governs window duration/hop timing, i.e. true resolution
+        fft_hop: usize,            // hop between windows = analysis_size / FFT_OVERLAP_DIV
+        in_buf: Vec<f32>,          // realfft input scratch, len analysis_size*ZERO_PAD_FACTOR —
+                                    // only the first analysis_size entries ever hold real samples,
+                                    // the rest must stay exactly 0.0 (see push(): realfft documents
+                                    // input as "garbage after calling", so it's re-zeroed every hop
+                                    // rather than trusted to stay zero from init)
+        out_buf: Vec<Complex<f32>>, // realfft output scratch (len in_buf.len()/2 + 1)
         scratch: Vec<Complex<f32>>,
-        window: Vec<f32>,          // Hann window
+        window: Vec<f32>,          // Hann window, len analysis_size — the real samples only
         accum: VecDeque<f32>,      // mono sample accumulator
-        avg_power: Vec<f32>,       // smoothed linear power per FFT bin
+        avg_power: Vec<f32>,       // smoothed linear power per (padded, interpolated) FFT bin
         ranges: Vec<(usize, usize)>, // per log bin: inclusive linear-bin span
         smoothing: f32,            // power-average coefficient per hop
         power_scale: f32,          // |X|² -> normalized power so a full-scale sine reads ~0 dBFS
@@ -391,26 +418,33 @@ mod windows_impl {
 
     impl Spectrum {
         fn new(rate: u32) -> Self {
-            // Scale the FFT length up with the rate so the window *duration* (≈171 ms) stays
-            // constant: FFT_SIZE = BASE × next_pow2(round(rate / 48 kHz)). 48 k→8192, 96 k→16384,
-            // 192 k→32768 (44.1/88.2/176.4 round to the same multiples). Keeps `bin_hz` — and the
-            // low-frequency resolution — identical across devices instead of coarsening at high rates.
+            // Scale the real analysis window up with the rate so its *duration* (≈171 ms) stays
+            // constant: analysis_size = BASE × next_pow2(round(rate / 48 kHz)). 48 k→8192,
+            // 96 k→16384, 192 k→32768 (44.1/88.2/176.4 round to the same multiples). Keeps the true
+            // (unpadded) resolution identical across devices instead of coarsening at high rates.
             let mult = ((rate as f32 / BASE_RATE).round().max(1.0) as usize).next_power_of_two();
-            let fft_size = BASE_FFT_SIZE * mult;
-            let fft_hop = fft_size / FFT_OVERLAP_DIV;
+            let analysis_size = BASE_FFT_SIZE * mult;
+            let fft_hop = analysis_size / FFT_OVERLAP_DIV;
+            // The FFT is planned and run at ZERO_PAD_FACTOR times the real window — see that
+            // constant's doc for why this is an interpolation of the same window's transform, not
+            // additional resolution. Stays a power of two (both factors are), so the transform
+            // itself is exactly as cheap per-point as an unpadded one of the same total length.
+            let padded_size = analysis_size * ZERO_PAD_FACTOR;
 
-            let fft = RealFftPlanner::<f32>::new().plan_fft_forward(fft_size);
+            let fft = RealFftPlanner::<f32>::new().plan_fft_forward(padded_size);
             let in_buf = fft.make_input_vec();
             let out_buf = fft.make_output_vec();
             let scratch = fft.make_scratch_vec();
-            let window: Vec<f32> = (0..fft_size)
+            // Windows only the real (analysis_size) portion — the padding is zeros regardless of
+            // any window coefficient, so extending the window formula over it would be dead work.
+            let window: Vec<f32> = (0..analysis_size)
                 .map(|n| {
-                    0.5 - 0.5 * (2.0 * std::f32::consts::PI * n as f32 / fft_size as f32).cos()
+                    0.5 - 0.5 * (2.0 * std::f32::consts::PI * n as f32 / analysis_size as f32).cos()
                 })
                 .collect();
 
-            let n_lin = fft_size / 2 + 1;
-            let bin_hz = rate as f32 / fft_size as f32;
+            let n_lin = padded_size / 2 + 1;
+            let bin_hz = rate as f32 / padded_size as f32;
             let ratio = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_BINS as f32 - 1.0));
             let half = ratio.sqrt();
             let mut ranges = Vec::with_capacity(N_LOG_BINS);
@@ -424,13 +458,14 @@ mod windows_impl {
             let smoothing = 1.0 - (-(fft_hop as f32 / rate as f32) / SPEC_TAU_SECS).exp();
             // Amplitude normalization: a full-scale sine at a bin centre gives |X| = S1/2 (window
             // coherent gain), so multiply the one-sided amplitude by 2/S1 to read 1.0 → 0 dBFS.
-            // In the power domain that's (2/S1)². S1 = sum(window). This makes the level absolute
-            // and FFT-size independent, so the display can use a fixed scale.
+            // In the power domain that's (2/S1)². S1 = sum(window) — unaffected by the zero
+            // padding (zeros contribute nothing to the sum either way), so this is still exactly
+            // the real (analysis_size) window's own coherent gain, FFT-size independent as before.
             let s1: f32 = window.iter().sum();
             let power_scale = (2.0 / s1).powi(2);
             Spectrum {
                 fft,
-                fft_size,
+                analysis_size,
                 fft_hop,
                 in_buf,
                 out_buf,
@@ -447,10 +482,16 @@ mod windows_impl {
         /// Feed mono samples; runs an FFT for every full hop and folds it into the running average.
         fn push(&mut self, mono: &[f32]) {
             self.accum.extend(mono.iter().copied());
-            while self.accum.len() >= self.fft_size {
+            while self.accum.len() >= self.analysis_size {
                 for (i, w) in self.window.iter().enumerate() {
                     self.in_buf[i] = self.accum[i] * w;
                 }
+                // The zero-padded tail. realfft documents `process`/`process_with_scratch`'s input
+                // as "garbage after calling" (it's reused as working space), so this can't be
+                // zeroed once at init and trusted to stay that way — re-zeroed every hop instead.
+                // Cheap: FFT_OVERLAP_DIV=4 means this runs at most 4x/hop-worth of audio, and it's
+                // a plain fill, not per-sample work.
+                self.in_buf[self.analysis_size..].fill(0.0);
                 if self
                     .fft
                     .process_with_scratch(&mut self.in_buf, &mut self.out_buf, &mut self.scratch)
