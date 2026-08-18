@@ -1713,13 +1713,28 @@ function App() {
 
   const selectedDevice = devices.find((d) => d.id === deviceId);
   const dryActive = activeSlot === "Dry";
+  // Whether `result.filters` currently IS the §5.2 isolate bandpass audition, rather than the
+  // real applied correction — see `excludeFromScale` below and `FilterKind`'s doc (Bandpass only
+  // ever appears here). Shared by every place that would otherwise try to *invert* the cascade.
+  const isolateAudition = !dryActive && (result?.filters.some((b) => b.kind === "Bandpass") ?? false);
 
   // Broadcast the active EQ cascade to any scope view (inline or the detached window) so its
   // inverse-filter ("undistort") mode can recover the pre-EQ image. Dry → no filters (already
   // pristine). Emitted on change, and replayed on request when a scope window mounts and asks.
   // Dry has no EQ to invert, but it DOES carry a preamp (the §4.1 loudness match in Comparison
   // mode), so undistort must undo it too — else Dry's scope excursion wouldn't match A/B's.
-  const scopeEq = { filters: dryActive ? [] : result?.filters ?? [], preampDb: result?.preamp_db ?? 0 };
+  //
+  // Isolate is treated the same as Dry here — filters withheld, preamp still passed — and for a
+  // different reason than the chart's Y-scale fix above: this isn't about misleading magnitudes,
+  // it's that *inverting* the audition bandpass is dangerous. The bandpass exists to attenuate
+  // everything outside one narrow band hard, on purpose; its inverse is a matching hard *boost*
+  // out there. Undistort would run every scope's raw samples (or the FFT/backdrop's dB curve)
+  // through that boost, and there's no music left out there to recover — only whatever noise floor
+  // survived the attenuation, now amplified back up to fill the display. The other three views
+  // (Vectorscope, TimeScope, SpectrumScope) all read this same broadcast, so gating it once here
+  // covers all of them; EqChart's backdrop takes eqBands as a direct prop and is gated the same
+  // way where it's passed, below.
+  const scopeEq = { filters: dryActive || isolateAudition ? [] : result?.filters ?? [], preampDb: result?.preamp_db ?? 0 };
   const scopeEqRef = useRef(scopeEq);
   scopeEqRef.current = scopeEq;
   useEffect(() => {
@@ -1869,7 +1884,7 @@ function App() {
         // which the exact blowout this exists to prevent flashed on screen. Keying off the data
         // instead means the flag can never be stale: it's derived from the very bands the curve
         // is about to be drawn from.
-        excludeFromScale: result.filters.some((b) => b.kind === "Bandpass"),
+        excludeFromScale: isolateAudition,
       },
     ];
     if (!dryActive) {
@@ -2415,7 +2430,7 @@ function App() {
                         refs={chartRefs}
                         phase={chartPhase}
                         spectrumRef={spectrumRef}
-                        eqBands={selfTest?.phase === "running" ? undefined : dryActive ? [] : result.filters}
+                        eqBands={selfTest?.phase === "running" ? undefined : dryActive || isolateAudition ? [] : result.filters}
                         preampDb={result?.preamp_db ?? 0}
                         legendHost={legendHost}
                         minSpan={comparisonSpan}
