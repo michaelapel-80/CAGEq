@@ -1841,6 +1841,17 @@ function App() {
   // Tab count comes straight from the same slot-synced source, so it renders in the same paint.
   const autoEqCount = autoEqBands.length;
 
+  // Presets list alphabetically rather than in `library.presets`' own order (append-on-create,
+  // stable-in-place on update via `upsert` — see there), which put a freshly-saved preset at the
+  // bottom instead of somewhere findable. A sorted *view*, not a resort of the stored order: `id`
+  // stays the identity `upsert` keys on, so save/rename/update logic is untouched, only the list's
+  // presentation changes. `localeCompare` with the active UI language, not `<`, so accented names
+  // (ä/ö/ü and friends) sort where a human expects rather than by raw code point.
+  const sortedPresets = useMemo(
+    () => [...library.presets].sort((a, b) => a.name.localeCompare(b.name, i18n.language)),
+    [library.presets, i18n.language],
+  );
+
   // In Comparison mode, hold the chart's Y-scale steady across A/B switches by flooring it at the
   // larger of both editable slots' curve ranges — otherwise switching to the flatter slot rescales
   // the graph, which is jarring when A/B-ing. Only in Comparison (where A/B are meant to be read
@@ -2896,9 +2907,9 @@ function App() {
                 {tr("presets.presetsGroup")} <span>{tr("presets.presetsScope")}</span>
               </h3>
               <div className="pl-scroll">
-                {library.presets.length > 0 ? (
+                {sortedPresets.length > 0 ? (
                   <ul className="pl-list">
-                    {library.presets.map((p) => (
+                    {sortedPresets.map((p) => (
                       <li key={p.id} className="pl-preset">
                         <div className="pl-item">
                           {renaming?.kind === "preset" && renaming.id === p.id ? (
