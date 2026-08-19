@@ -50,55 +50,25 @@ const F_MAX = 20000;
 const FREQ_TICKS = [100, 1000, 10000]; // unlabeled-chart-clutter-avoiding minimum: one per decade
 
 /** The tangent at point `i` for a *monotone* non-uniform cubic Hermite spline (Fritsch-Carlson in
- *  spirit — see the derivation below; a plain, unconstrained Catmull-Rom average was tried first
- *  and is why this isn't that). Generalizes to unequal x-spacing the same way the plain average
- *  would: each secant weighted by the *opposite* segment's width, so a short adjacent segment
- *  pulls the tangent toward its own slope instead of the far one's — needed since `traceSmooth`'s
- *  caller has dropped duplicate-value bins (see there), so the surviving points are deliberately
- *  not evenly spaced. Endpoints just use the one available secant.
+ *  spirit: constrain the tangent so the curve can't leave the range its neighbours bound it to).
+ *  Each secant weighted by the *opposite* segment's width, so a short adjacent segment pulls the
+ *  tangent toward its own slope instead of the far one's — matters here because the backend's
+ *  per-bin Gaussian reduction (`cageq-monitor`'s `gaussian_power`) doesn't put bin centres at even
+ *  Hz spacing on this log axis in general. Endpoints just use the one available secant.
  *
- *  This took three attempts to land, verified in the end with a synthetic-signal spike
- *  (`spike/spectrum-trace.html`, kept) rather than more rounds against unpredictable live audio:
- *
- *  1. Plain Catmull-Rom overshoots at a sharp, narrow feature, so the curve's own visual apex can
- *     land beside the data point it's meant to represent — this monotone version was tried in
- *     response, and *by itself* fixed nothing, which was the tell that overshoot wasn't the real
- *     cause here.
- *  2. The actual cause: `findPeaks` centres a flat-topped run of tied bins (routine — the backend
- *     rounds dB to 1 decimal, `SpectrumUpdate::db`, and log bins can oversample a single linear
- *     FFT bin at the low-frequency end) on the run's *middle* index. But dedup (below) used to
- *     collapse a whole run down to its *first* bin only, discarding where the run actually ends —
- *     so the spline had no control point at the marked centre, or anywhere near it, and instead
- *     free-interpolated across to whichever distant, differing bin came next, inventing a rounded
- *     bulge that had nothing to do with the real (flat, then a real step at the true edge) data.
- *     Fixed by keeping a run's first AND last bin (below), which stopped the invented bulge — but:
- *  3. A wide run's *middle* still wasn't itself a surviving control point (only its ends were), so
- *     the marker could still sit at an x with no matching anchor. Fixed by keeping the run's exact
- *     midpoint too — `runMid` in the dedup loop below, computed identically to `findPeaks`' own
- *     centring, so the two can never disagree about where a plateau's peak sits. And since a kept
- *     midpoint shares its immediate (kept) neighbours' value by construction, its own secants are
- *     always exactly 0 — pinning the curve flat through it regardless of tangent rule.
- *
- *  That third fix alone restored correct marker placement, but not smoothness: with plain
- *  Catmull-Rom, the *denser* run of sharply-alternating control points a faithfully-kept run's
- *  boundaries create (versus the single collapsed point dedup used to produce) rings — dips below
- *  and overshoots above the true local values before settling — which is the "steppy"/"funky" look
- *  the second and third live-tested rounds each produced in a different place. That's what this
- *  monotone tangent is actually for: `sL === 0 || sR === 0 || sign(sL) !== sign(sR)` detects a true
- *  local extremum (arrival/departure forced flat, so the curve can't bulge past it), and otherwise
- *  the tangent is capped to `min(|sL|, |sR|)` — provably enough on its own, for a Bezier segment
- *  built the way `traceSmooth` builds it (control points at ±h/3 along each tangent): a tangent
- *  magnitude ≤ the segment's own secant keeps that control point's y between the segment's two
- *  endpoint values, and a Bezier curve is a convex combination of its control points, so if all
- *  four sit inside `[y_i, y_{i+1}]` the whole curve does too. A conservative special case of the
- *  textbook algorithm's looser (and coupled, multi-point) bound, chosen because it stays a pure
- *  per-point computation — only `i`'s immediate neighbours, same signature as always.
- *
- *  Landed alongside a backend fix (`cageq-monitor`'s `ZERO_PAD_FACTOR`) that shrinks how often any
- *  of this even triggers — zero-padding the FFT quadruples the linear bin density, pushing the
- *  frequency below which log display bins outrun it from ~200 Hz down to ~50 Hz — but the fix here
- *  stays regardless, since some oversampling always remains at the very bottom of the range, and
- *  the correctness argument above doesn't depend on how often the case actually occurs. */
+ *  A spline was tried here before, over three live-tested rounds, and thrown out (`tracePolyline`,
+ *  a plain polyline, replaced it — see git history) once it became clear the actual bug wasn't the
+ *  curve shape at all: the backend's OLD `max`-based reduction let many adjacent display bins share
+ *  the *exact* same value (oversampling a coarse linear FFT grid), and the dedup built to collapse
+ *  those literal ties kept discarding or reinventing shape across gaps in a way a spline's tangent
+ *  math couldn't cleanly recover from. `gaussian_power` replaced that reduction entirely — a smooth
+ *  function of each bin's own (never-repeating) fractional range, so adjacent bins essentially never
+ *  produce bit-for-bit identical values any more. With no ties, there's nothing to dedup: every bin
+ *  gets its own spline control point, `findPeaks`' reported bin is *always* one of them by
+ *  construction (a Hermite spline passes exactly through every point it's given, regardless of
+ *  tangent rule), and the monotone tangent here exists only for what's left — a plain sharp
+ *  residual bump (the backend fix's own case history notes one, ~2.7 dB, 41 dB down — see
+ *  `gaussian_power`'s doc) can't make the curve swing past its own true height on the way through. */
 function hermiteTangent(xs: Float64Array, ys: Float64Array, n: number, i: number): number {
   if (i <= 0) return (ys[1] - ys[0]) / (xs[1] - xs[0]);
   if (i >= n - 1) return (ys[n - 1] - ys[n - 2]) / (xs[n - 1] - xs[n - 2]);
@@ -140,11 +110,14 @@ function parseHex(hex: string): [number, number, number] {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-/** The representative index for a tied run spanning `[i, j]` — its middle, rounded. Shared between
- *  `findPeaks` (which marks a plateau here) and the trace loop's dedup (which must keep this exact
- *  index as a surviving control point, or the marker points at an x the curve has no anchor at —
- *  see `hermiteTangent`'s doc for the full history). A run of length 1 has i === j, so this is a
- *  no-op then, same as ever. */
+/** The representative index for a tied run spanning `[i, j]` — its middle, rounded. Used by
+ *  `findPeaks` to mark a plateau at its centre rather than its (arbitrary) leading edge. In
+ *  practice `i === j` essentially always now — the backend's Gaussian reduction (see
+ *  `hermiteTangent`'s doc) is a smooth function of each bin's own never-repeating fractional
+ *  range, so exact ties between adjacent bins are no longer expected the way they were under the
+ *  old `max`-based reduction. Kept rather than special-cased away: still correct, still cheap, and
+ *  still needed if a tie ever *does* land exactly (two adjacent bins integrating to the identical
+ *  float by coincidence isn't provably impossible, just no longer routine). */
 function runMid(i: number, j: number): number {
   return Math.round((i + j) / 2);
 }
@@ -237,9 +210,14 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { 
  *
  * A connected spline through the backend's log-frequency bins (§5.4 `SpectrumUpdate`), not filled
  * bars — an earlier bar-graph version read as flat/clean rather than CRT-like; the additively
- * accumulating trail is what gives the CRT feel. The live line's frame-to-frame
- * *value* is linearly interpolated between the last two received events (see the trail effect),
- * not snapped straight to the latest one, so it flows continuously at 60 fps. No separate
+ * accumulating trail is what gives the CRT feel. Briefly a plain polyline instead (see
+ * `hermiteTangent`'s doc) while the backend's reduction had a real bug a spline's tangent math
+ * couldn't cleanly represent — restored now that bug is fixed at its source, since interpolating
+ * every bin exactly is strictly better once there's nothing left for a curve to get wrong. Each
+ * rendered frame draws the
+ * latest received event's values as-is, with no temporal blending toward the previous one (also
+ * tried; also worth losing — see the trail effect's doc) — EqChart's spectrum backdrop, fed the
+ * identical data, has always drawn it this same unblended way. No separate
  * peak-hold marker — the trail shows "where this has recently been" on its own, so a second
  * indicator doing the same job was redundant. That was argued before it was true: the plain
  * exponential trail it was removed in favour of actually faded too fast to read as a peak hold.
@@ -267,14 +245,16 @@ export function SpectrumScope() {
   // Text for up to PEAK_COUNT readout chips, written imperatively (see the trail effect) — driving
   // this off React state from a 60 fps stream once re-rendered the entire App tree per arrival.
   const peakSlotRefs = useRef<(HTMLSpanElement | null)[]>([]);
-  // The last two received spectrum events, plus when the current one landed and how long the gap
-  // before it was — the trail effect below linearly interpolates between them over that gap
-  // instead of snapping straight to `cur` the instant it arrives, so the line flows at 60 fps
-  // despite spectrum events landing well under that rate (see the component doc comment).
-  const prevRef = useRef<SpectrumData | null>(null);
+  // The latest received spectrum event — the trail effect below draws it straight, no temporal
+  // interpolation toward a previous one (see the component doc comment for why: this used to blend
+  // per-bin between the last two events over the gap between them, so the line would flow at 60 fps
+  // despite events landing slower than that — but blending two snapshots of the same *frequency*
+  // bin can shift what's really a small, honest step in *when* the spectrum changed into a false
+  // wobble in *what* it reads, worst exactly on a steep transition, where two adjacent events'
+  // values differ the most. EqChart's identical-data spectrum backdrop never showed this because it
+  // draws one event at a time with no blending — the tell that pointed at the interpolation itself
+  // rather than the data feeding it.
   const curRef = useRef<SpectrumData | null>(null);
-  const curAtRef = useRef(0);
-  const intervalRef = useRef(1000 / 30); // running estimate (ms); a reasonable seed before the 2nd event
   const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0 });
   const corrCacheRef = useRef<CorrCache | null>(null);
   const [params, setParams] = useState<Params>(DEFAULTS);
@@ -312,13 +292,7 @@ export function SpectrumScope() {
   // requested on mount since events aren't retained.
   useEffect(() => {
     const unsubSpectrum = spectrumStream.subscribe((s) => {
-      const now = performance.now();
-      if (curRef.current) {
-        intervalRef.current = now - curAtRef.current;
-        prevRef.current = curRef.current;
-      }
       curRef.current = s;
-      curAtRef.current = now;
     });
     let active = true;
     let unlistenEq: (() => void) | undefined;
@@ -419,14 +393,12 @@ export function SpectrumScope() {
     let lastReadout = 0;
     let hadPeak = false;
     const READOUT_INTERVAL_MS = 120;
-    // Reused per-point scratch buffers for the spline (see `traceSmooth`) — resized, never
-    // reallocated fresh each frame, matching TimeScope's `magScratch` pattern. Sized for the full
-    // bin count even though the deduplicated point count is usually smaller.
+    // Reused per-point scratch buffers for the trace (see `traceSmooth`) — resized, never
+    // reallocated fresh each frame, matching TimeScope's `magScratch` pattern.
     let xScratch = new Float64Array(0);
     let yScratch = new Float64Array(0);
-    // Every bin's (possibly corrected) value, undeduped — the trace loop below skips duplicate
-    // bins as a drawing optimization, but `findPeaks` needs true bin-to-bin adjacency to detect
-    // local maxima correctly, so it reads from this instead of the trace's own dedup pass.
+    // Every bin's (possibly corrected) value, one-to-one with xScratch/yScratch — `findPeaks` reads
+    // this directly for true bin-to-bin adjacency (needed to detect local maxima correctly).
     let vScratch = new Float64Array(0);
 
     const render = () => {
@@ -463,58 +435,25 @@ export function SpectrumScope() {
         ctx.lineJoin = "round";
         ctx.lineCap = "round";
 
-        // Values are interpolated between the last two spectrum events over the (measured) gap
-        // between them rather than snapped to the latest — events land at ~the frame rate but not
-        // aligned to it, and snapping made the line visibly step instead of flow.
-        const prev = prevRef.current;
-        const lerp = prev && prev.db.length === n ? Math.max(0, Math.min(1, (now - curAtRef.current) / intervalRef.current)) : 1;
         if (xScratch.length < n) {
           xScratch = new Float64Array(n);
           yScratch = new Float64Array(n);
           vScratch = new Float64Array(n);
         }
-        // Every bin's value, in order, no skipping — see `vScratch`'s own comment above.
+        // One point per bin, no deduplication — see `hermiteTangent`'s doc for why that's safe now:
+        // the backend's Gaussian reduction essentially never produces two adjacent bins with the
+        // exact same value the way the old `max`-based one routinely did, so there's no "tied run"
+        // left to collapse or preserve the shape of.
         for (let i = 0; i < n; i++) {
-          const raw = lerp >= 1 || !prev ? s.db[i] : prev.db[i] + (s.db[i] - prev.db[i]) * lerp;
-          vScratch[i] = corr ? raw - corr[i] : raw;
-        }
-        // The dedup: several adjacent log-spaced display bins can land on the same underlying
-        // linear FFT bin — always toward the low-frequency end, where the log grid is finer than
-        // the FFT's actual (fixed, linear) resolution — and read the identical raw value. Walked as
-        // runs of equal `s.db` (raw, not `vScratch` — the raw reading is what's actually duplicated)
-        // rather than a flat per-bin skip: each run keeps its first bin, its last bin, and — for a
-        // run wider than 2 — its exact midpoint, `runMid`-computed identically to `findPeaks`' own
-        // centring so a marked plateau's peak is *always* one of the surviving control points, never
-        // an x the spline has no anchor at. See `hermiteTangent`'s doc for the two-bug history this
-        // is the second half of: collapsing a whole run down to just its first bin (what this used
-        // to do) discarded where the run actually ends, so the spline free-interpolated across the
-        // gap to whatever distant, differing bin came next — inventing a rounded bulge with nothing
-        // to do with the real (flat, then a genuine step at the true edge) data; keeping just the
-        // two ends fixed that but still left a *wide* run's own middle — where the marker actually
-        // points — without a matching anchor.
-        let m = 0;
-        const pushPoint = (i: number) => {
+          vScratch[i] = corr ? s.db[i] - corr[i] : s.db[i];
           const frac = Math.max(0, Math.min(1, (vScratch[i] - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
-          xScratch[m] = (i / (n - 1)) * W;
-          yScratch[m] = plotBot - frac * (plotBot - plotTop);
-          m++;
-        };
-        for (let i = 0; i < n; ) {
-          let j = i;
-          while (j + 1 < n && s.db[j + 1] === s.db[i]) j++;
-          pushPoint(i);
-          if (j > i) {
-            const mid = runMid(i, j);
-            if (mid !== i && mid !== j) pushPoint(mid);
-            pushPoint(j);
-          }
-          i = j + 1;
+          xScratch[i] = (i / (n - 1)) * W;
+          yScratch[i] = plotBot - frac * (plotBot - plotTop);
         }
-        if (m >= 2) {
-          ctx.beginPath();
-          traceSmooth(ctx, xScratch, yScratch, m);
-          ctx.stroke();
-        }
+        // n >= 2 already guaranteed by the outer `if`.
+        ctx.beginPath();
+        traceSmooth(ctx, xScratch, yScratch, n);
+        ctx.stroke();
 
         // Peak crosses: recomputed and redrawn every frame (not throttled — see below), so they
         // track the live trace exactly as fluidly as the trace itself does.

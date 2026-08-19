@@ -169,6 +169,40 @@ mod windows_impl {
     /// modest one-time FFT cost (O(N log N), so ×4 the points costs well under ×4) and zero added
     /// latency — same real samples, same hop cadence, just more (interpolated) output bins.
     const ZERO_PAD_FACTOR: usize = 4;
+    /// Floor on `gaussian_power`'s sigma, in the same padded-linear-bin units `ranges` already
+    /// uses — see that function's doc for the full case history this closes out. Width-matching
+    /// sigma to each log bin's own local span (the un-floored formula) correctly tames hard
+    /// bin-membership roughness on dense content, but near the low-frequency crossover that local
+    /// span is only a bin or so wide — too narrow to also smooth over the analysis window's own
+    /// sidelobe structure, a *fixed-Hz* artifact unrelated to the local decimation ratio.
+    ///
+    /// A first attempt set this to `4.0 * ZERO_PAD_FACTOR` (16), reasoning "the Hann mainlobe
+    /// width, in padded-bin units" — wrong, because a Gaussian's effective reach is `±4σ`
+    /// (`gaussian_power` builds `radius` from `sigma * 4.0`), so that set the *sigma* to the
+    /// mainlobe width and the actual kernel reach to ~4x the mainlobe width. In practice that
+    /// smeared away all frequency resolution below ~100 Hz — confirmed directly in
+    /// `cageq-monitor/tests/decimation_spike.rs`'s `floor_sweep_preserves_low_frequency_resolution`
+    /// test: at floor=16, even two tones a full octave apart (60/120 Hz) no longer show a
+    /// distinguishable dip between their peaks.
+    ///
+    /// `2.0` is the corrected, spike-verified value: comfortably covers the known sidelobe-null
+    /// spacing (~2 unpadded bins) while leaving real closely-spaced content resolved with wide
+    /// margin — the tightest pair tested (40/60 Hz, 0.58 octave apart) still shows a 7.67 dB dip
+    /// at floor=2.0 (vs. 0.15 dB — effectively merged — at floor=6.0, and total collapse by 16).
+    /// Costs some smoothness versus the more aggressive floors (60 Hz near-peak roughness only
+    /// drops from 13.65 dB to 7.09 dB, not down to ~1 dB) — a deliberate trade favoring resolution,
+    /// per direct user feedback that the heavier floor was "too heavy handed... 0 frequency
+    /// resolution below 100Hz."
+    const GAUSSIAN_FLOOR_SIGMA_BINS: f32 = 2.0;
+    /// Uniform multiplier on `gaussian_power`'s natural (pre-floor) half-width — a small, constant
+    /// extra smoothing margin, independent of the floor above (which is a `max()` and so can only
+    /// ever help the low end; it never engages at high frequency, where the natural width-matched
+    /// sigma already dwarfs any reasonable floor). Verified in the same spike to have no
+    /// measurable downside up to at least 1.5x (an isolated 8 kHz tone's -6dB width stays flat at
+    /// 232.6 Hz through 1.5x, only widening at 2.0x) — `1.2` is a deliberately small "smidge",
+    /// per direct user feedback asking for "additional smoothing (again, just a smidge)" at the
+    /// high end specifically.
+    const GAUSSIAN_WIDTH_MULT: f32 = 1.2;
     /// The rate the base size is tuned for; higher rates scale the FFT proportionally.
     const BASE_RATE: f32 = 48_000.0;
     /// Hop is a quarter of the (per-rate) FFT size → 75% overlap, Welch-style averaging.
@@ -377,6 +411,75 @@ mod windows_impl {
         (v * scale).round() / scale
     }
 
+    /// Collapse `power` (one value per linear FFT bin) onto a single log-display-bin reading, over
+    /// the bin's own exact (fractional) span `[lo, hi]` — a Gaussian-weighted integral, not a
+    /// rectangular (boxcar) one and not the single loudest sample in the range.
+    ///
+    /// This is the third reduction this bin has used, and the case for each replacement is worth
+    /// keeping (verified against synthetic ground truth in `cageq-monitor/tests/decimation_spike.rs`
+    /// each time, not live-guessed):
+    ///  1. `.fold(max)` (original): at the high end a single display bin spans dozens to hundreds
+    ///     of linear bins (more so since `ZERO_PAD_FACTOR` densified them), and independently
+    ///     peak-picking each one from a mostly-unrelated neighbouring window produces adjacent
+    ///     display bins whose reported level barely correlates — a jagged, uncorrelated zigzag on
+    ///     dense/busy content.
+    ///  2. A rectangular (boxcar) integral over `[lo, hi]` fixed that, and is also the *more*
+    ///     correct read for an isolated tone by Parseval's theorem (recovers the tone's whole main
+    ///     lobe rather than one sample of it, immune to "scalloping loss"). But a box's inclusion
+    ///     rule is all-or-nothing: a discrete spectral feature (a harmonic partial, FFT sidelobe
+    ///     structure) sitting near a boundary counts *entirely* toward whichever side it falls on,
+    ///     so as that hard boundary sweeps past dense discrete content from bin to bin, each
+    ///     feature flips in or out abruptly — the spike's own measurement shows this literally
+    ///     quantizes the output to `log10(integer count of partials included)`, jumping between
+    ///     discrete levels even though the underlying content barely changes.
+    ///  3. Gaussian removes the hard edge: a feature near a boundary contributes partially to BOTH
+    ///     neighbouring bins, blended smoothly, so the same sweep produces a smoothly-varying total
+    ///     instead of a jagged one — measured 3.7x smoother on a synthetic harmonic series, with
+    ///     the max/box/gaussian ordering coming out monotonic exactly as predicted.
+    ///
+    /// One theory the spike *ruled out*, worth not re-trying: this is NOT classical decimation
+    /// aliasing in the continuous-signal sense, and a box's sidelobes are not "leaking" outside
+    /// bin content in — a rectangular weight over already-computed frequency-domain power values
+    /// has *zero* response outside its own exact range, by construction (unlike a window applied
+    /// to time-domain data before an FFT, which does have real sidelobes — the Hann-window case
+    /// this same investigation found in `SpectrumUpdate`'s own history). The problem was always
+    /// hard bin-membership on discrete content, not out-of-band leakage.
+    ///
+    /// Sigma is set to the bin's own nominal half-width (`(hi-lo)/2`), i.e. matched to the *local*
+    /// decimation ratio exactly the way `[lo, hi]` already is — wide in linear-bin terms low in
+    /// the spectrum, narrow high up — scaled by `GAUSSIAN_WIDTH_MULT` (a small constant "smidge" of
+    /// extra smoothing everywhere) and then floored at `GAUSSIAN_FLOOR_SIGMA_BINS` (see that
+    /// constant's own doc for why the width-matched value alone isn't enough at the low end: near
+    /// the low-frequency crossover the local span is too narrow to smooth over the analysis
+    /// window's own, fixed-Hz sidelobe structure, a second, different-scale problem from the one
+    /// width-matching alone solves). The result is scaled by `(hi-lo)` to stay in the same "total
+    /// power over this span" units the boxcar integral produced, so `power_scale`'s calibration
+    /// (tuned for a full-scale sine reading ~0 dBFS) is unaffected by which reduction is in use.
+    fn gaussian_power(power: &[f32], lo: f32, hi: f32) -> f32 {
+        let lo = lo.max(0.0);
+        let hi = hi.min(power.len().saturating_sub(1) as f32);
+        let center = (lo + hi) / 2.0;
+        let half_width = ((hi - lo) / 2.0) * GAUSSIAN_WIDTH_MULT;
+        let sigma = half_width.max(GAUSSIAN_FLOOR_SIGMA_BINS);
+        let radius = (sigma * 4.0).ceil() as i32;
+        let c = center.round() as i32;
+        let lo_i = (c - radius).max(0) as usize;
+        let hi_i = ((c + radius) as usize).min(power.len().saturating_sub(1));
+        let mut acc = 0.0f32;
+        let mut wsum = 0.0f32;
+        for (i, &p) in power.iter().enumerate().take(hi_i + 1).skip(lo_i) {
+            let d = i as f32 - center;
+            let w = (-0.5 * (d / sigma).powi(2)).exp();
+            acc += p * w;
+            wsum += w;
+        }
+        if wsum > 0.0 {
+            (acc / wsum) * (hi - lo).max(1.0)
+        } else {
+            0.0
+        }
+    }
+
     fn to_db(linear: f32) -> f32 {
         if linear <= 0.0 {
             DB_FLOOR
@@ -411,7 +514,7 @@ mod windows_impl {
         window: Vec<f32>,          // Hann window, len analysis_size — the real samples only
         accum: VecDeque<f32>,      // mono sample accumulator
         avg_power: Vec<f32>,       // smoothed linear power per (padded, interpolated) FFT bin
-        ranges: Vec<(usize, usize)>, // per log bin: inclusive linear-bin span
+        ranges: Vec<(f32, f32)>, // per log bin: exact (fractional) linear-bin span — see `gaussian_power`
         smoothing: f32,            // power-average coefficient per hop
         power_scale: f32,          // |X|² -> normalized power so a full-scale sine reads ~0 dBFS
     }
@@ -447,12 +550,17 @@ mod windows_impl {
             let bin_hz = rate as f32 / padded_size as f32;
             let ratio = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_BINS as f32 - 1.0));
             let half = ratio.sqrt();
+            // Exact (fractional) linear-bin boundaries, deliberately NOT rounded to integers —
+            // `gaussian_power` (below) derives each bin's Gaussian centre and width directly from
+            // these, so an integer-rounded boundary would just reintroduce the same "bin count
+            // jumps as the true fractional width crosses an integer" artifact the Gaussian exists
+            // to avoid (see that function's doc).
             let mut ranges = Vec::with_capacity(N_LOG_BINS);
             for i in 0..N_LOG_BINS {
                 let fc = SPEC_F_MIN * ratio.powi(i as i32);
-                let lo = ((fc / half) / bin_hz).floor().max(0.0) as usize;
-                let hi = (((fc * half) / bin_hz).ceil() as usize).min(n_lin - 1);
-                ranges.push((lo.min(hi), hi));
+                let lo = ((fc / half) / bin_hz).max(0.0);
+                let hi = ((fc * half) / bin_hz).min((n_lin - 1) as f32);
+                ranges.push((lo, hi));
             }
 
             let smoothing = 1.0 - (-(fft_hop as f32 / rate as f32) / SPEC_TAU_SECS).exp();
@@ -520,9 +628,13 @@ mod windows_impl {
         fn snapshot(&mut self, signal: bool) -> SpectrumUpdate {
             let mut db = Vec::with_capacity(N_LOG_BINS);
             for &(lo, hi) in self.ranges.iter() {
-                // Peak linear bin in this log bin, normalized to dBFS — so a narrow resonance reads
-                // its true level regardless of the (wider, at HF) log bin, on an absolute scale.
-                let power = self.avg_power[lo..=hi].iter().copied().fold(0.0f32, f32::max);
+                // Gaussian-weighted integral of linear power across the log bin's own span, not
+                // the single loudest sample in it — see `gaussian_power`'s doc for the full case
+                // history (this replaced `.fold(max)`, then a rectangular/boxcar sum, in that
+                // order; both are in git history if the reasoning against either is ever needed
+                // again). Verified against synthetic ground truth before landing here — see
+                // `cageq-monitor/tests/decimation_spike.rs`, kept.
+                let power = gaussian_power(&self.avg_power, lo, hi);
                 let cur = if power > 0.0 {
                     (10.0 * (power * self.power_scale).log10()).max(SPEC_FLOOR)
                 } else {
@@ -840,6 +952,73 @@ mod windows_impl {
 
         let _ = audio_client.stop_stream();
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod spectrum_reduction {
+        // A regression guard on the actual production `Spectrum` pipeline (not the isolated
+        // `tests/decimation_spike.rs`, which validated the reduction *method* against synthetic
+        // ground truth before it was ported here) — a pure tone's spectrum should be one smooth,
+        // monotonic lobe on each side of its peak, with no bumps or reversals. This is exactly the
+        // property `.fold(max)` and a plain boxcar sum each failed at some point this investigation
+        // (see `gaussian_power`'s doc for the full case history) — asserted here, not just printed,
+        // so a future change to the reduction that reintroduces either failure mode fails a test
+        // instead of needing a live screenshot to notice again.
+        use super::*;
+
+        #[test]
+        fn pure_tone_lobe_is_monotonic_each_side_of_peak() {
+            let rate = 48_000u32;
+            let mut spec = Spectrum::new(rate);
+            let freq = 60.0f32;
+            let amp = 0.5f32;
+            let total_samples = rate as usize * 2; // 2s — well past SPEC_TAU_SECS settling
+            let mut phase = 0.0f64;
+            let step = 2.0 * std::f64::consts::PI * freq as f64 / rate as f64;
+            let mut buf = vec![0.0f32; 4096];
+            let mut fed = 0;
+            while fed < total_samples {
+                let n = buf.len().min(total_samples - fed);
+                for s in buf.iter_mut().take(n) {
+                    *s = amp * phase.sin() as f32;
+                    phase += step;
+                }
+                spec.push(&buf[..n]);
+                fed += n;
+            }
+
+            let update = spec.snapshot(true);
+            let peak_i = update
+                .db
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+                .unwrap();
+
+            // Monotonically non-increasing moving outward from the peak, checked over a window
+            // wide enough to cover the sidelobe-null region a boxcar/max reduction showed
+            // artifacts in (±20 bins was comfortably past it in the original diagnosis).
+            let window = 20usize;
+            let mut prev = update.db[peak_i];
+            for i in (peak_i.saturating_sub(window)..peak_i).rev() {
+                assert!(
+                    update.db[i] <= prev + 0.05, // small tolerance for floating-point/rounding noise
+                    "non-monotonic on the falling-frequency side at bin {i}: {} > {prev} (peak at bin {peak_i})",
+                    update.db[i]
+                );
+                prev = update.db[i];
+            }
+            prev = update.db[peak_i];
+            for i in (peak_i + 1)..(peak_i + window).min(update.db.len()) {
+                assert!(
+                    update.db[i] <= prev + 0.05,
+                    "non-monotonic on the rising-frequency side at bin {i}: {} > {prev} (peak at bin {peak_i})",
+                    update.db[i]
+                );
+                prev = update.db[i];
+            }
+        }
     }
 }
 
