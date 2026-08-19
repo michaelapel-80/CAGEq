@@ -48,7 +48,9 @@ const SPEC_TOP_DB = 0;
 const SPEC_DYN = 90;
 const F_MIN = 20;
 const F_MAX = 20000;
-const FREQ_TICKS = [100, 1000, 10000]; // unlabeled-chart-clutter-avoiding minimum: one per decade
+// The classic 1-2-5 sequence — same set EqChart's own `GRID_HZ` uses, so the two charts' grids
+// read as the same axis rather than two different conventions.
+const FREQ_TICKS = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 
 /** The tangent at point `i` for a *monotone* non-uniform cubic Hermite spline (Fritsch-Carlson in
  *  spirit: constrain the tangent so the curve can't leave the range its neighbours bound it to).
@@ -358,9 +360,8 @@ export function SpectrumScope() {
     };
   }, []);
 
-  // Static graticule: a few dBFS reference lines + one vertical guide per frequency decade
-  // (100/1k/10k — deliberately minimal, this view's whole point is staying uncluttered). Redrawn
-  // only on resize.
+  // Static graticule: a few dBFS reference lines + one vertical guide per FREQ_TICKS entry (the
+  // classic 1-2-5 sequence — matches EqChart's own grid). Redrawn only on resize.
   useEffect(() => {
     const cv = gridRef.current;
     const ctx = cv?.getContext("2d");
@@ -391,10 +392,13 @@ export function SpectrumScope() {
 
     ctx.fillStyle = `rgba(${ar},${ag},${ab},0.5)`;
     ctx.font = `${Math.round(H * 0.045)}px system-ui, sans-serif`;
-    ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
     for (const hz of FREQ_TICKS) {
       const x = ((Math.log(hz) - lnMin) / lnSpan) * W;
+      // FREQ_TICKS' own extremes (F_MIN/F_MAX) land exactly on the plot's edges — centring their
+      // label there would run it half off-canvas, so those two anchor to the inside edge instead;
+      // everything in between still centres on its gridline as before.
+      ctx.textAlign = hz === F_MIN ? "left" : hz === F_MAX ? "right" : "center";
       ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : `${hz}`, x, H - 2);
     }
   }, [resW, resH]);
