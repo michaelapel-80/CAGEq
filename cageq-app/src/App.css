@@ -661,20 +661,20 @@ select:disabled {
 /* Numeric peak readout: level + frequency of each cross marked on the tube above (up to
    PEAK_COUNT). The trail's own long afterglow already shows *where* the spectrum has recently been
    at a glance; this is the exact numbers for it, which glow and persistence can't render precisely.
-   `flex-wrap` rather than a fixed grid: at PEAK_COUNT=5 chips can just barely need two rows on a
-   narrow panel, and wrapping degrades gracefully where an overflowing single row wouldn't. Unlike
-   an earlier version, ALL PEAK_COUNT chips are always present (SpectrumScope.tsx never conditionally
-   renders fewer) and each chip's two fields have a fixed min-width — so the row's total width, and
-   every chip's position within it, stay constant regardless of how many peaks are currently found
-   or how many digits their numbers happen to have; nothing here reflows peak-to-peak. */
+   A fixed grid, ONE EXPLICIT COLUMN PER PEAK INDEX (`repeat(5, 6.7rem)` — 5 == PEAK_COUNT,
+   6.7rem == .ss-peak-hz + the internal gap + .ss-peak-db below; keep both in sync if either
+   changes) — not `justify-content: center` on a flex row, which was tried first and made things
+   worse, not better: even with every chip's own width pinned down (`.ss-peak-hz`/`.ss-peak-db`
+   below), CENTERING THE GROUP means the group's total on-screen position still depends on how much
+   of it is visually "there", so a change in how many peaks are populated shifted the whole row
+   sideways under the centering, on top of anything else. A grid's columns are simply fixed slots —
+   peak index 2 lives in column 3, full stop, whether 1 peak is showing or all 5 are. */
 .ss-readout {
   flex: 0 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  align-content: center;
+  display: grid;
+  grid-template-columns: repeat(5, 6.7rem);
   column-gap: 1.1rem;
-  row-gap: 0.15rem;
+  overflow-x: auto;
   font-size: 0.72rem;
   opacity: 0.85;
   font-variant-numeric: tabular-nums;
@@ -682,24 +682,31 @@ select:disabled {
 /* One chip per peak — styled like `.chart-preamp` (the other small always-on instrument readout in
    this panel) for a consistent look. */
 .ss-peak {
-  display: inline-flex;
+  display: flex;
   column-gap: 0.4rem;
   font-weight: 600;
 }
-/* Fixed-width fields within a chip — sized (in `ch`, i.e. relative to THIS element's own small
-   font, not the page root — `rem` here was a bug: it's always root-relative regardless of the
-   0.72rem context, so it reserved ~6-8x more space than intended and pushed the row into wrapping)
-   for the longest value each realistically shows ("19.8 kHz", "-90.0 dB", the SPEC_DYN=90 floor)
-   with a little slack, right-aligned so the digits (tabular-nums, `.ss-readout` above) line up
-   chip-to-chip too, not just hold still frame-to-frame. */
+/* Fixed-width fields within a chip. `min-width` (an earlier version of this rule) still let a
+   longer string — most visibly a unit change, "999 Hz" -> "1.00 kHz" as a peak crosses 1kHz —
+   widen the box past it and shove every later chip sideways; the whole point here is a width the
+   content can NEVER exceed, so it has to be a true `width`, with `overflow: hidden` as a backstop.
+   Sized from measured (not guessed) pixel widths at this rule's actual font: every kHz-form hz
+   string is a constant 46.11px (`fmtPeakHz`'s `.toFixed(2)`/`.toFixed(1)` branches always produce
+   exactly 8 characters), and "-119.9 dB" (near the backend's noise floor) measured 51.23px — both
+   with a little rounding slack on top. Right-aligned so the digits (tabular-nums, `.ss-readout`
+   above) line up chip-to-chip too, not just hold still frame-to-frame. */
 .ss-peak-hz {
   display: inline-block;
-  min-width: 4.4ch;
+  width: 3rem;
+  overflow: hidden;
+  white-space: nowrap;
   text-align: right;
 }
 .ss-peak-db {
   display: inline-block;
-  min-width: 4.6ch;
+  width: 3.3rem;
+  overflow: hidden;
+  white-space: nowrap;
   text-align: right;
 }
 
