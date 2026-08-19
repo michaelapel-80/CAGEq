@@ -145,13 +145,23 @@ const PEAK_MIN_PROMINENCE_DB = 6;
 // end of a log axis, unlike a fixed Hz or bin-count gap). ~a third-octave — roughly a critical
 // band in the midrange — stops one broad resonance's own ripples from filling every slot.
 const PEAK_MIN_SEPARATION_OCTAVES = 1 / 3;
+// How far (dB) below the loudest content in the current frame a candidate may sit and still count
+// as a real peak, not noise-floor texture. PEAK_MIN_PROMINENCE_DB alone isn't enough down at the
+// noise floor: it only asks "is this bump taller than its immediate valleys", and a floor's natural
+// statistical ripple routinely clears 6dB purely by chance somewhere across 240 bins — e.g. a clean
+// 1kHz sine visibly showing a second "peak" at 5.77kHz, -103dB, ~80dB below the real tone. 60dB is
+// a standard analyzer noise-floor gate: generous enough to keep real, quiet harmonics (a sawtooth's
+// ladder is nowhere near 60dB down within the range anyone's looking at), tight enough to reject
+// content that's actually down at the floor.
+const PEAK_MAX_RANGE_DB = 60;
 
 /** Up to `PEAK_COUNT` distinct spectral peaks in `v[0..n)` (bin i's frequency given by `binHz`):
- *  local maxima prominent enough to be a real peak rather than FFT noise, spaced far enough apart
- *  that they aren't all just one resonance's shoulder. Returns the *largest* qualifying peaks,
- *  then reorders them to ascending frequency — picking by magnitude and presenting by frequency
- *  are different steps on purpose, so a strong low-frequency hum and a quieter but still-qualifying
- *  high note both land in the order a reader scans the axis, not loudest-first. */
+ *  local maxima prominent enough to be a real peak rather than FFT noise, loud enough to be real
+ *  content rather than noise-floor ripple (`PEAK_MAX_RANGE_DB`), spaced far enough apart that they
+ *  aren't all just one resonance's shoulder. Returns the *largest* qualifying peaks, then reorders
+ *  them to ascending frequency — picking by magnitude and presenting by frequency are different
+ *  steps on purpose, so a strong low-frequency hum and a quieter but still-qualifying high note
+ *  both land in the order a reader scans the axis, not loudest-first. */
 function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { i: number; v: number }[] {
   if (n < 3) return [];
   // 1) Local maxima, plateau-aware. A run of bins tied at *exactly* the same value is common here
@@ -184,11 +194,17 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { 
     for (let i = c.i + 1; i < n && v[i] <= c.v; i++) rightMin = Math.min(rightMin, v[i]);
     return c.v - Math.max(leftMin, rightMin) >= PEAK_MIN_PROMINENCE_DB;
   });
+  // 2.5) Noise-floor gate: prominence alone can't tell a real quiet feature from the floor's own
+  // statistical ripple (see PEAK_MAX_RANGE_DB's doc) — this can, since it's relative to the loudest
+  // thing actually in the frame rather than each candidate's own immediate neighbours.
+  let loudest = -Infinity;
+  for (let i = 0; i < n; i++) if (v[i] > loudest) loudest = v[i];
+  const audible = prominent.filter((c) => loudest - c.v <= PEAK_MAX_RANGE_DB);
   // 3) Greedy pick by magnitude, skipping anything too close (in octaves) to an already-picked
   // peak — otherwise the loudest region's own harmonics could fill every remaining slot.
-  prominent.sort((a, b) => b.v - a.v);
+  audible.sort((a, b) => b.v - a.v);
   const picked: { i: number; v: number }[] = [];
-  for (const c of prominent) {
+  for (const c of audible) {
     if (picked.length >= PEAK_COUNT) break;
     const f = binHz(c.i);
     if (picked.some((p) => Math.abs(Math.log2(f / binHz(p.i))) < PEAK_MIN_SEPARATION_OCTAVES)) continue;
