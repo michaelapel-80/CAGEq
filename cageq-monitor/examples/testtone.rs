@@ -8,6 +8,8 @@
 //!
 //! Run it alongside CAGEq (it plays, the app captures):
 //!   cargo run -p cageq-monitor --example testtone                     # pink noise, -20 dBFS
+//!   cargo run -p cageq-monitor --example testtone -- --pink           # same, explicit
+//!   cargo run -p cageq-monitor --example testtone -- --white          # white noise
 //!   cargo run -p cageq-monitor --example testtone -- --sine 1000      # 1 kHz sine
 //!   cargo run -p cageq-monitor --example testtone -- --square 220     # 220 Hz square
 //!   cargo run -p cageq-monitor --example testtone -- --triangle 220   # 220 Hz triangle
@@ -17,8 +19,17 @@
 //!   cargo run -p cageq-monitor --example testtone -- --device "Phonitor"  # match by name
 //!   cargo run -p cageq-monitor --example testtone -- --sine 12000 --rate 44100  # test Windows' resampler
 //!
-//! `--sine`/`--square`/`--triangle`/`--sawtooth` are mutually exclusive (one tone at a time);
-//! omitting all of them plays pink noise. The three non-sine shapes are synthesised as an exact
+//! `--sine`/`--square`/`--triangle`/`--sawtooth`/`--pink`/`--white` are all mutually exclusive
+//! (one signal at a time); omitting every one of them plays pink noise, same as passing `--pink`
+//! explicitly. Pink and white noise are also the calibrated pair for the Monitor pane's spectrum
+//! *display* (not just the source-referred EQ check above): pink noise's power spectral density is
+//! -3dB/octave by definition (equal energy per octave — the textbook reason it's used as a
+//! reference signal at all), so it should read as a straight, flat-DIAGONAL line log-log; white
+//! noise's PSD is flat by definition, so it should read as a flat-HORIZONTAL line. Together they're
+//! a direct, no-guessing check that the spectrum's own per-bin reduction is doing power-per-Hz
+//! (density) rather than power-summed-over-a-widening-band, the exact bug `cageq-monitor`'s
+//! `gaussian_power` had until it was caught live against a real analyzer showing the correct pink
+//! slope and CAGEq showing flat instead. The three non-sine tone shapes are synthesised as an exact
 //! band-limited Fourier sum (harmonics only up to just below Nyquist, at each shape's textbook
 //! amplitude — 1/k for square/sawtooth, 1/k² for triangle), not generated naively (e.g. a hard
 //! comparison for square, a wrapped ramp for sawtooth) — a naive version has harmonic content out
@@ -105,6 +116,28 @@ impl Waveform {
     }
 }
 
+/// The one signal actually being played — a tuned waveform (needs a frequency) or untuned noise
+/// (doesn't). Unified into one type, rather than a separate `Option` per category, so the CLI's
+/// mutual-exclusivity check (`set_signal` below) covers all of them with one rule: exactly one
+/// signal, whatever kind, per run.
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum Signal {
+    Tone(Waveform, f32),
+    Pink,
+    White,
+}
+
+/// Next white-noise sample in `[-1, 1]`, xorshift-driven (no `rand` dependency needed) — shared by
+/// `Signal::White` directly and `Signal::Pink` (which filters this same source).
+#[cfg(windows)]
+fn white_sample(rng: &mut u32) -> f32 {
+    *rng ^= *rng << 13;
+    *rng ^= *rng >> 17;
+    *rng ^= *rng << 5;
+    (*rng as f32 / u32::MAX as f32) * 2.0 - 1.0
+}
+
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Duration;
@@ -113,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // --- args (dependency-free parsing) ------------------------------------------------------
-    let mut tone: Option<(Waveform, f32)> = None;
+    let mut signal: Option<Signal> = None;
     let mut level_dbfs: f32 = -20.0;
     let mut seconds: Option<f32> = None;
     let mut device_match: Option<String> = None;
@@ -121,20 +154,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut unsafe_mode = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
-        // Shared by all four tone flags: only one shape at a time, so a leftover --square from a
-        // copy-pasted command line can't silently combine with a new --sine instead of erroring.
-        let mut set_tone = |wf: Waveform, hz: f32| -> Result<(), Box<dyn std::error::Error>> {
-            if tone.is_some() {
-                return Err("only one of --sine/--square/--triangle/--sawtooth may be given".into());
+        // Shared by every signal flag: only one at a time, so a leftover --square from a
+        // copy-pasted command line can't silently combine with a new --sine (or --pink) instead of
+        // erroring.
+        let mut set_signal = |sig: Signal| -> Result<(), Box<dyn std::error::Error>> {
+            if signal.is_some() {
+                return Err("only one of --sine/--square/--triangle/--sawtooth/--pink/--white may be given".into());
             }
-            tone = Some((wf, hz));
+            signal = Some(sig);
             Ok(())
         };
         match a.as_str() {
-            "--sine" => set_tone(Waveform::Sine, args.next().ok_or("--sine needs a frequency")?.parse()?)?,
-            "--square" => set_tone(Waveform::Square, args.next().ok_or("--square needs a frequency")?.parse()?)?,
-            "--triangle" => set_tone(Waveform::Triangle, args.next().ok_or("--triangle needs a frequency")?.parse()?)?,
-            "--sawtooth" => set_tone(Waveform::Sawtooth, args.next().ok_or("--sawtooth needs a frequency")?.parse()?)?,
+            "--sine" => set_signal(Signal::Tone(Waveform::Sine, args.next().ok_or("--sine needs a frequency")?.parse()?))?,
+            "--square" => set_signal(Signal::Tone(Waveform::Square, args.next().ok_or("--square needs a frequency")?.parse()?))?,
+            "--triangle" => set_signal(Signal::Tone(Waveform::Triangle, args.next().ok_or("--triangle needs a frequency")?.parse()?))?,
+            "--sawtooth" => set_signal(Signal::Tone(Waveform::Sawtooth, args.next().ok_or("--sawtooth needs a frequency")?.parse()?))?,
+            "--pink" => set_signal(Signal::Pink)?,
+            "--white" => set_signal(Signal::White)?,
             "--level" => level_dbfs = args.next().ok_or("--level needs a value")?.parse()?,
             "--seconds" => seconds = Some(args.next().ok_or("--seconds needs a value")?.parse()?),
             "--device" => device_match = Some(args.next().ok_or("--device needs a name")?),
@@ -146,12 +182,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (0 dBFS) torture test. Opt-in and deliberate — mind your ears and gear.
             "--unsafe" => unsafe_mode = true,
             "-h" | "--help" => {
-                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth <hz>] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
+                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth <hz>] [--pink|--white] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
                 return Ok(());
             }
             other => return Err(format!("unknown arg: {other}").into()),
         }
     }
+    // No signal flag at all still means pink noise — same as it always has, just now also
+    // reachable explicitly via --pink.
+    let signal = signal.unwrap_or(Signal::Pink);
     if let Some(r) = rate_override {
         if !(8_000..=768_000).contains(&r) {
             return Err(format!("--rate {r} is out of the 8000..=768000 range").into());
@@ -213,9 +252,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_frames: Option<u64> = seconds.map(|s| (s * rate as f32) as u64);
     let fade_frames = (0.12 * rate as f32) as u64; // 120 ms fade in/out — kills startup/stop pops
     let resample = if rate != mix_rate { format!(" → resampled to {mix_rate} Hz by Windows") } else { String::new() };
-    match tone {
-        Some((wf, hz)) => eprintln!("[testtone] {hz} Hz {} @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}", wf.name()),
-        None => eprintln!("[testtone] pink noise @ ~{level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
+    match signal {
+        Signal::Tone(wf, hz) => eprintln!("[testtone] {hz} Hz {} @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}", wf.name()),
+        Signal::Pink => eprintln!("[testtone] pink noise @ ~{level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
+        Signal::White => eprintln!("[testtone] white noise @ ~{level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
     }
     eprintln!("[testtone] Ctrl+C to stop.");
 
@@ -231,16 +271,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // argument in [0, 2π) so it stays precise indefinitely — and since every harmonic's contribution
     // below is computed as `sin(k * phase)` fresh from that same bounded, precise value each sample
     // (not its own accumulated phase), they inherit the same precision guarantee for free.
-    let phase_inc = std::f32::consts::TAU * tone.map(|(_, hz)| hz).unwrap_or(0.0) / rate as f32;
+    let tone_hz = if let Signal::Tone(_, hz) = signal { hz } else { 0.0 };
+    let phase_inc = std::f32::consts::TAU * tone_hz / rate as f32;
     let mut phase = 0f32;
     // Highest harmonic to sum, kept a few percent below true Nyquist rather than right up against
     // it — see the file header doc for why band-limiting matters here at all (a naive square/
     // triangle/sawtooth has harmonics to infinity, which would alias back down and contaminate the
     // very spectrum this tool exists to let you check against a known-correct shape).
-    let k_max: u32 = match tone {
-        Some((_, hz)) if hz > 0.0 => (((rate as f32 * 0.48) / hz).floor().max(1.0)) as u32,
-        _ => 1,
-    };
+    let k_max: u32 = if tone_hz > 0.0 { (((rate as f32 * 0.48) / tone_hz).floor().max(1.0)) as u32 } else { 1 };
     let mut buf: Vec<u8> = Vec::new();
 
     'play: loop {
@@ -270,8 +308,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            let mono = match tone {
-                Some((wf, _)) => {
+            let mono = match signal {
+                Signal::Tone(wf, _) => {
                     let s = wf.sample(phase, k_max) * gain;
                     phase += phase_inc;
                     if phase >= std::f32::consts::TAU {
@@ -279,12 +317,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     s
                 }
-                None => {
-                    // White (uniform [-1,1]) → Paul Kellet's economy pink filter.
-                    rng ^= rng << 13;
-                    rng ^= rng >> 17;
-                    rng ^= rng << 5;
-                    let white = (rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+                Signal::White => white_sample(&mut rng) * gain,
+                Signal::Pink => {
+                    // Paul Kellet's economy pink filter over the same white source.
+                    let white = white_sample(&mut rng);
                     b0 = 0.99765 * b0 + white * 0.0990460;
                     b1 = 0.96300 * b1 + white * 0.2965164;
                     b2 = 0.57000 * b2 + white * 1.0526913;
