@@ -155,6 +155,29 @@ const PEAK_MIN_SEPARATION_OCTAVES = 1 / 3;
 // content that's actually down at the floor.
 const PEAK_MAX_RANGE_DB = 60;
 
+/** Parabolic (quadratic) interpolation across the three log bins straddling a peak at integer index
+ *  `i`, refining both its reported frequency and level to sub-bin precision. Without this, a peak
+ *  can only ever be reported at one of the 240 fixed log-bin centres — increasingly coarse in
+ *  absolute Hz as frequency rises, since log bins are constant-*percentage* wide, not constant-Hz
+ *  (~1.5% here: ~15Hz at 1kHz, ~150Hz at 10kHz). That's why a dead-on 1kHz sine could only ever
+ *  read as its nearest bin centre, ~990Hz, however precisely the backend located it. Standard
+ *  technique (the same used for sub-bin FFT peak/pitch estimation), adapted to operate on the
+ *  already log-binned, Gaussian-smoothed display curve rather than raw FFT bins — reasonable since
+ *  that curve is itself smooth and unimodal near a real, isolated tone, not the discontinuous
+ *  step function the old `max`-based reduction produced (interpolating across that would have
+ *  been meaningless). Returns `i` untouched at an array edge or a plateau (flat top — the parabola
+ *  is undefined there, denominator ~0), both rare with the current reduction. */
+function interpolatePeak(v: Float64Array, i: number, n: number): { i: number; v: number } {
+  if (i <= 0 || i >= n - 1) return { i, v: v[i] };
+  const ym1 = v[i - 1];
+  const y0 = v[i];
+  const yp1 = v[i + 1];
+  const denom = ym1 - 2 * y0 + yp1;
+  if (Math.abs(denom) < 1e-9) return { i, v: y0 };
+  const d = Math.max(-0.5, Math.min(0.5, (0.5 * (ym1 - yp1)) / denom));
+  return { i: i + d, v: y0 - 0.25 * (ym1 - yp1) * d };
+}
+
 /** Up to `PEAK_COUNT` distinct spectral peaks in `v[0..n)` (bin i's frequency given by `binHz`):
  *  local maxima prominent enough to be a real peak rather than FFT noise, loud enough to be real
  *  content rather than noise-floor ripple (`PEAK_MAX_RANGE_DB`), spaced far enough apart that they
@@ -210,9 +233,12 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { 
     if (picked.some((p) => Math.abs(Math.log2(f / binHz(p.i))) < PEAK_MIN_SEPARATION_OCTAVES)) continue;
     picked.push(c);
   }
-  // 4) Presented by frequency, not the magnitude order they were picked in.
+  // 4) Presented by frequency, not the magnitude order they were picked in. Interpolated last,
+  // after every index-based comparison above (prominence's neighbour walk, the octave-separation
+  // check) is done with the coarse integer bin — those decisions don't need sub-bin precision, only
+  // the final reported frequency/level do.
   picked.sort((a, b) => a.i - b.i);
-  return picked;
+  return picked.map((p) => interpolatePeak(v, p.i, n));
 }
 
 /**
