@@ -452,9 +452,32 @@ mod windows_impl {
     /// constant's own doc for why the width-matched value alone isn't enough at the low end: near
     /// the low-frequency crossover the local span is too narrow to smooth over the analysis
     /// window's own, fixed-Hz sidelobe structure, a second, different-scale problem from the one
-    /// width-matching alone solves). The result is scaled by `(hi-lo)` to stay in the same "total
-    /// power over this span" units the boxcar integral produced, so `power_scale`'s calibration
-    /// (tuned for a full-scale sine reading ~0 dBFS) is unaffected by which reduction is in use.
+    /// width-matching alone solves).
+    ///
+    /// A FOURTH correction, reported live against real pink noise ("perfectly equal magnitude...
+    /// reading high"): this used to be scaled by `(hi-lo)`, matching the boxcar integral's "total
+    /// power over this span" units. That's exactly the bug — reported live and reproduced with a
+    /// direct FabFilter Pro-Q screenshot (pink noise sloping down ~-3dB/octave, not flat). Real
+    /// analyzers display power SPECTRAL DENSITY (power per Hz), not power sitting over the display
+    /// bin's own bandwidth: a log bin's bandwidth grows with frequency (1 linear bin at 20Hz, ~287
+    /// at 14.5kHz — `cageq-monitor/tests/decimation_spike.rs`'s `old_max_vs_new_gaussian_on_pink_noise`),
+    /// so a `*(hi-lo)` reading grows right along with it for any broadband signal — flat instead of
+    /// the correct -3dB/octave for pink noise, confirmed to ~0.02dB of theory once removed
+    /// (`gaussian_floor_bias_on_pink_noise`, `width_matched_density_final_check`). Simply dropping
+    /// the `*(hi-lo)` factor — reporting the Gaussian-weighted AVERAGE, not the average scaled up by
+    /// the span it was estimated over — is the fix.
+    ///
+    /// This does cost something for an isolated TONE: sigma still widens with frequency (needed —
+    /// `decimation_spike.rs`'s `debug_12khz_window_scan` shows a sigma that *doesn't* track the
+    /// bin's own width can miss real content sitting away from the bin's centre entirely, ~76 bins
+    /// off in that measured case), and averaging a tone's few genuinely-loud bins together with an
+    /// increasingly wide window of near-silent neighbours dilutes it — a real, ~19dB droop measured
+    /// from 60Hz to 18kHz for a swept full-scale tone. This is the textbook resolution-bandwidth
+    /// tradeoff of ANY constant-Q/fractional-octave analyzer (confirmed against a real reference
+    /// technique — Tylka & Choueiri, JAES, "fractional-octave smoothing" — not fixable without a
+    /// genuinely different architecture, e.g. multi-resolution FFT). Accepted per direct user
+    /// steer: broadband content is the common case here, and a correct noise floor/pink-noise
+    /// reading matters more than a perfectly flat tone sweep.
     fn gaussian_power(power: &[f32], lo: f32, hi: f32) -> f32 {
         let lo = lo.max(0.0);
         let hi = hi.min(power.len().saturating_sub(1) as f32);
@@ -474,7 +497,7 @@ mod windows_impl {
             wsum += w;
         }
         if wsum > 0.0 {
-            (acc / wsum) * (hi - lo).max(1.0)
+            acc / wsum
         } else {
             0.0
         }

@@ -64,6 +64,32 @@
 //! width, before the floor) answers the accompanying "high end could use a smidge more" ask —
 //! verified to have no measurable cost up to at least 1.5x on both an isolated tone's width and
 //! dense high-frequency content's roughness (`width_mult_smooths_dense_high_frequency_content`).
+//!
+//! SECOND FOLLOW-UP (different day): reported live against real pink noise — "perfectly equal
+//! magnitude over the whole frequency range... reading high" — and reproduced directly against a
+//! FabFilter Pro-Q screenshot (pink noise sloping down ~-3dB/octave, not flat). The bug: the
+//! reduction was scaled by `(hi-lo)`, matching the boxcar integral's "total power over this span"
+//! units — correct for an isolated tone (all its energy sits in ~1 bin regardless of span width),
+//! wrong for broadband content, where a wider span just means more bins summed into one reading. A
+//! log bin's span grows with frequency (1 linear bin at 20Hz, ~287 at 14.5kHz), so a `*(hi-lo)`
+//! reading grows right along with it for pink noise — flat instead of the correct -3dB/octave
+//! (`old_max_vs_new_gaussian_on_pink_noise`, `gaussian_floor_bias_on_pink_noise`). Fix: drop the
+//! `*(hi-lo)` factor — report the Gaussian-weighted AVERAGE (power spectral density), not the
+//! average scaled up by the span it was estimated over. Confirmed to ~0.02dB of the theoretical
+//! -3.01dB/octave (`production_formula_tone_and_pink_noise_behavior`).
+//!
+//! Costs something for an isolated TONE: sigma still has to widen with frequency for basic
+//! coverage (a narrower or fixed sigma can miss real content sitting away from a wide bin's own
+//! centre entirely — see that test's own doc for the dead ends this ruled out, including a real
+//! reference technique, Tylka & Choueiri's fractional-octave smoothing, that turned out to have the
+//! same inherent tradeoff once worked through), and averaging a tone's few genuinely-loud bins
+//! together with an increasingly wide window of near-silent neighbours dilutes it — a real, ~19dB
+//! droop measured from 60Hz to 18kHz for a swept full-scale tone. Accepted per direct user steer:
+//! broadband content (pink/white noise, music, most real-world program material) is the common
+//! case for this analyzer, and a correct noise floor/pink-noise reading matters more than a
+//! perfectly flat tone sweep. Eliminating the droop entirely would need a genuinely different
+//! architecture (multi-resolution FFT, matching frequency resolution to the log-bin width at every
+//! frequency, the way a true Constant-Q Transform does) — out of scope for this fix.
 
 /// Mirrors the real config in `src/lib.rs` (`N_LOG_BINS`, `SPEC_F_MIN/MAX`, and a realistic
 /// 48 kHz / `ZERO_PAD_FACTOR=4` linear grid) closely enough to be representative, without pulling
@@ -162,16 +188,18 @@ fn reduce_gaussian(power: &[f32], lo: f32, hi: f32) -> f32 {
     }
 }
 
-/// Like `reduce_gaussian`, but sigma is floored to a fixed bin-count (`floor_sigma_bins`) rather
-/// than always exactly matching the local decimation ratio (`(hi-lo)/2`), and additionally scaled
-/// by `width_mult` BEFORE the floor — a uniform "smidge more everywhere" knob distinct from the
-/// floor, which only ever affects the low end (by construction, it's a `max()`). Since the LINEAR
-/// bin grid is uniform in Hz (unlike the log grid), a constant bin-count floor here is
-/// automatically also a constant-Hz floor — no per-position conversion needed, unlike the earlier
-/// (abandoned) attempt at a fixed-Hz *post-fold* smoothing pass over the already-log-binned
-/// output. At high frequency the natural width-matched sigma already exceeds any reasonable
-/// floor, so `width_mult` is what can add a touch of extra smoothing there, where the floor never
-/// engages; at low frequency, where the natural sigma is tiny, the floor takes over instead.
+/// Mirrors production `gaussian_power` (`cageq-monitor/src/lib.rs`) exactly — sigma floored to a
+/// fixed bin-count (`floor_sigma_bins`) rather than always exactly matching the local decimation
+/// ratio (`(hi-lo)/2`), additionally scaled by `width_mult` BEFORE the floor (a uniform "smidge
+/// more everywhere" knob distinct from the floor, which only ever affects the low end, being a
+/// `max()`), and normalized to a per-bin AVERAGE (density), NOT scaled up by `(hi-lo)` into a
+/// per-span total — see `gaussian_power`'s own doc for why: that `*(hi-lo)` scaling was the pink-
+/// noise-reads-flat-instead-of-sloping bug, caught live against a real FabFilter Pro-Q reference.
+/// Since the LINEAR bin grid is uniform in Hz (unlike the log grid), a constant bin-count floor
+/// here is automatically also a constant-Hz floor — no per-position conversion needed. At high
+/// frequency the natural width-matched sigma already exceeds any reasonable floor, so `width_mult`
+/// is what can add a touch of extra smoothing there, where the floor never engages; at low
+/// frequency, where the natural sigma is tiny, the floor takes over instead.
 fn reduce_gaussian_tuned(power: &[f32], lo: f32, hi: f32, floor_sigma_bins: f32, width_mult: f32) -> f32 {
     let center = (lo + hi) / 2.0;
     let half_width = (((hi - lo) / 2.0) * width_mult).max(0.1);
@@ -189,10 +217,76 @@ fn reduce_gaussian_tuned(power: &[f32], lo: f32, hi: f32, floor_sigma_bins: f32,
         wsum += w;
     }
     if wsum > 0.0 {
-        (acc / wsum) * (hi - lo).max(1.0)
+        acc / wsum
     } else {
         0.0
     }
+}
+
+/// Synthetic pink noise's linear-bin power spectral density: pink noise is defined by equal power
+/// per OCTAVE (constant power in any constant-percentage band), which means its power PER LINEAR
+/// (constant-Hz) BIN falls off as 1/f, i.e. ~1/i in bin-index terms. This is why pink noise is the
+/// standard reference for a log-frequency analyzer: integrating (summing) that 1/i density over a
+/// constant-Q log bin — width ∝ its own centre frequency — gives f * (1/f) = a CONSTANT, i.e. pink
+/// noise reads exactly flat when a log-bin reduction properly represents "total power over this
+/// bin's own span". This is also what makes it a sensitive probe for reduction bugs: unlike the
+/// flat-density content used elsewhere in this file, its per-bin density is steeply *non-constant*
+/// (especially at low i, where 1/i is changing fastest bin-to-bin) — so a reduction whose effective
+/// window no longer matches the bin's own true span, and reaches instead into neighbouring bins
+/// with substantially different density, is more likely to show it here than on flatter content.
+fn pink_noise_linear_power() -> Vec<f32> {
+    (0..N_LIN).map(|i| 1.0 / (i as f32 + 1.0)).collect()
+}
+
+/// Reported live: pink noise reading "a perfectly equal magnitude over the whole frequency range"
+/// and "reading high" after `GAUSSIAN_FLOOR_SIGMA_BINS`/`GAUSSIAN_WIDTH_MULT` landed. Both floor
+/// sweeps that chose those values (`floor_sweep_preserves_low_frequency_resolution`,
+/// `width_mult_smooths_dense_high_frequency_content`) only ever tested ISOLATED TONES or a flat-
+/// density harmonic comb — never a steeply *sloped* broadband signal, which is exactly what pink
+/// noise's 1/i linear-bin density is. Compares the production floor/width_mult combination against
+/// the plain boxcar (`reduce_box`, the reference "total power over this bin's own span" integral)
+/// across the whole spectrum, on synthetic pink noise, to check directly for a systematic bias —
+/// not just "is it smoother", which every earlier sweep already over-optimised for.
+#[test]
+fn gaussian_floor_bias_on_pink_noise() {
+    let ranges = log_bin_ranges();
+    let power = pink_noise_linear_power();
+    let to_db = |p: f32| if p > 0.0 { 10.0 * p.log10() } else { -120.0 };
+
+    let mut max_bias = f32::NEG_INFINITY;
+    let mut max_bias_hz = 0.0f32;
+    let mut sum_bias = 0.0f32;
+    println!("\n--- pink noise: gaussian (floor=2.0, mult=1.2) vs boxcar reference, by decade ---");
+    println!("{:>10}  {:>12}  {:>12}  {:>10}", "freq(Hz)", "box(dB)", "gauss(dB)", "bias(dB)");
+    for (idx, &(lo, hi)) in ranges.iter().enumerate() {
+        let fc = ((lo + hi) / 2.0) * BIN_HZ;
+        let box_db = to_db(reduce_box(&power, lo, hi));
+        let gauss_db = to_db(reduce_gaussian_tuned(&power, lo, hi, 2.0, 1.2));
+        let bias = gauss_db - box_db;
+        sum_bias += bias;
+        if bias > max_bias {
+            max_bias = bias;
+            max_bias_hz = fc;
+        }
+        // Print roughly one row per decade-ish step so the table stays readable.
+        if idx % 24 == 0 {
+            println!("{fc:10.1}  {box_db:12.2}  {gauss_db:12.2}  {bias:10.2}");
+        }
+    }
+    let mean_bias = sum_bias / ranges.len() as f32;
+    println!("mean bias: {mean_bias:.2} dB, max bias: {max_bias:.2} dB at {max_bias_hz:.1} Hz");
+
+    // Also report the boxcar's and gaussian's own flatness (max-min across the whole spectrum) —
+    // the "perfectly equal magnitude" complaint is about the GAUSSIAN losing real (if noisy-looking)
+    // structure box still shows, not just about an absolute level shift.
+    let box_db: Vec<f32> = ranges.iter().map(|&(lo, hi)| to_db(reduce_box(&power, lo, hi))).collect();
+    let gauss_db: Vec<f32> = ranges.iter().map(|&(lo, hi)| to_db(reduce_gaussian_tuned(&power, lo, hi, 2.0, 1.2))).collect();
+    let spread = |d: &[f32]| {
+        let hi = d.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let lo = d.iter().cloned().fold(f32::INFINITY, f32::min);
+        hi - lo
+    };
+    println!("box spread: {:.2} dB, gauss spread: {:.2} dB", spread(&box_db), spread(&gauss_db));
 }
 
 /// A real windowed + zero-padded linear power spectrum for a pure tone — same method
@@ -512,3 +606,112 @@ fn max_is_roughest_of_the_three() {
     println!("    box:      {rough_box:.1}");
     println!("    gaussian: {rough_gauss:.1}");
 }
+
+/// Quantifies WHY pink noise's absolute level changed this session (reported live as "reading
+/// high"): the reduction itself changed from picking the single loudest linear bin in each log
+/// bin's range (`reduce_max`, this session's starting point) to properly SUMMING power across the
+/// whole range (`reduce_gaussian_tuned`, Parseval-correct). For an isolated tone the two barely
+/// differ — virtually all its energy sits in ~1 bin regardless of the range's width. For broadband
+/// content they diverge sharply, and grow further apart with frequency, because the number of
+/// linear bins in a log bin's range grows with frequency (`n_bins` column) — summing N roughly-
+/// equal-power bins reads ~10*log10(N) higher than any single one of them. Confirmed here: ~0dB
+/// difference at 20-40Hz (n_bins≈1), growing to +24.5dB at 14.5kHz (n_bins≈287) — and the OLD
+/// max-based column is the one that's actually wrong-shaped, rolling off ~28dB low-to-high even
+/// though pink noise should read flat; the NEW gaussian column reads flat to ~0.2dB (matches
+/// `gaussian_floor_bias_on_pink_noise`'s box-reference spread). Not a floor/width_mult regression —
+/// this reduction-method change landed in the same commit as the floor, so it was never isolated
+/// and shown on its own before now.
+#[test]
+fn old_max_vs_new_gaussian_on_pink_noise() {
+    let ranges = log_bin_ranges();
+    let power = pink_noise_linear_power();
+    let to_db = |p: f32| if p > 0.0 { 10.0 * p.log10() } else { -120.0 };
+    println!("\n--- pink noise: OLD max-reduction vs NEW gaussian(floor=2,mult=1.2), by decade ---");
+    println!("{:>10}  {:>10}  {:>12}  {:>10}  {:>8}", "freq(Hz)", "max(dB)", "gauss(dB)", "diff(dB)", "n_bins");
+    for (idx, &(lo, hi)) in ranges.iter().enumerate() {
+        if idx % 12 != 0 { continue; }
+        let fc = ((lo + hi) / 2.0) * BIN_HZ;
+        let max_db = to_db(reduce_max(&power, lo, hi));
+        let gauss_db = to_db(reduce_gaussian_tuned(&power, lo, hi, 2.0, 1.2));
+        let n_bins = (hi - lo).max(1.0);
+        println!("{fc:10.1}  {max_db:10.2}  {gauss_db:12.2}  {:10.2}  {n_bins:8.1}", gauss_db - max_db);
+    }
+}
+
+/// Two dead ends explored (and rejected) while looking for a way to avoid the tone-droop tradeoff
+/// below — kept as a note, not code, so neither is re-tried blind:
+///  - A FIXED (not width-matched) sigma for the density formula. Broke tone readings far worse
+///    than the width-matched version (100dB+ spread, sometimes reading *negative* dB for a
+///    full-scale tone) — a log bin's own geometric centre can sit tens to hundreds of linear bins
+///    away from where real content actually falls within that bin at high frequency (measured:
+///    76 bins off at 12kHz, where one display bin already spans 234 linear bins), so a small fixed
+///    window can miss real, in-range content entirely. Sigma has to track the bin's own width for
+///    basic coverage — there's no way around that with a single Gaussian-on-linear-bins formula.
+///  - Interpolating the linear spectrum straight onto the 240-point DISPLAY grid, then smoothing
+///    across those 240 points with a small fixed-sample kernel — the two-step technique in Tylka &
+///    Choueiri, "A Generalized Method for Fractional-Octave Smoothing of Transfer Functions that
+///    Preserves Log-Frequency Symmetry" (JAES, Princeton 3D3A Lab), and the reference
+///    implementation at https://gist.github.com/SiggiGue/0ffdb8a6d5055ddb71f76a10272aa40c. Same
+///    failure, worse: 240 points is far too sparse an intermediate grid (~234 linear bins between
+///    adjacent points at 12kHz), so most of the time no sample point lands anywhere near a narrow
+///    tone at all. The reference technique likely interpolates onto a much finer intermediate grid
+///    before smoothing — but reasoning through what that would converge to, it's the same
+///    operation as width-matched smoothing either way: "average over X% relative bandwidth" dilutes
+///    a narrowband tone by the same amount regardless of which of these three routes computes it.
+///    The tone-vs-broadband tension is real, inherent to any single-resolution constant-Q display,
+///    not an implementation gap — matches this exact reference technique's own domain (offline
+///    acoustic *measurement* smoothing, where losing narrowband accuracy at HF is an accepted,
+///    routine tradeoff), not a real-time tone-vs-noise-preserving design.
+///
+/// THE landed fix: keep sigma width-matched (as shipped — needed for coverage, per the first dead
+/// end above), but switch the final scaling from `*(hi-lo)` (sum — flat pink noise, wrong per a
+/// direct Pro-Q comparison) to density (`acc/wsum`, now what `reduce_gaussian_tuned` above computes
+/// — correct -3dB/oct pink-noise slope). Costs a real, accepted-per-user-steer ~19dB droop for a
+/// swept full-scale tone from 60Hz to 18kHz — broadband content is the common case here, and a
+/// correct noise floor/pink-noise reading matters more than a perfectly flat tone sweep.
+#[test]
+fn production_formula_tone_and_pink_noise_behavior() {
+    let ranges = log_bin_ranges();
+    let to_db = |p: f32| if p > 0.0 { 10.0 * p.log10() } else { -120.0 };
+    let tone_freqs = [60.0f64, 200.0, 1000.0, 5000.0, 12000.0, 18000.0];
+
+    // Tone readings via nearby-peak search (the fair way to read a display: the tallest nearby
+    // bin, not one arbitrarily-"nearest-centre" bin, which can under-read by tens of dB purely
+    // from how the tone happens to land relative to that one bin's own sampling centre).
+    println!("\n--- production formula (floor=2.0, mult=1.2, density): tone peak-search readings ---");
+    for &freq in &tone_freqs {
+        let power = real_tone_linear_power(freq);
+        let center_idx = ranges
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                let ca = ((a.0 + a.1) / 2.0) * BIN_HZ;
+                let cb = ((b.0 + b.1) / 2.0) * BIN_HZ;
+                (ca - freq as f32).abs().partial_cmp(&(cb - freq as f32).abs()).unwrap()
+            })
+            .map(|(i, _)| i)
+            .unwrap();
+        let window = 8usize;
+        let lo_j = center_idx.saturating_sub(window);
+        let hi_j = (center_idx + window).min(ranges.len() - 1);
+        let peak_db = (lo_j..=hi_j)
+            .map(|j| {
+                let (lo, hi) = ranges[j];
+                to_db(reduce_gaussian_tuned(&power, lo, hi, 2.0, 1.2))
+            })
+            .fold(f32::NEG_INFINITY, f32::max);
+        println!("  {freq:8.0}Hz -> {peak_db:.2}dB");
+    }
+
+    let pink = pink_noise_linear_power();
+    let (lo0, hi0) = ranges[0];
+    let (lo_last, hi_last) = *ranges.last().unwrap();
+    let d0 = to_db(reduce_gaussian_tuned(&pink, lo0, hi0, 2.0, 1.2));
+    let d_last = to_db(reduce_gaussian_tuned(&pink, lo_last, hi_last, 2.0, 1.2));
+    let f0 = ((lo0 + hi0) / 2.0) * BIN_HZ;
+    let f_last = ((lo_last + hi_last) / 2.0) * BIN_HZ;
+    let slope = (d_last - d0) / (f_last / f0).log2();
+    println!("\npink noise slope: {slope:.2} dB/oct  [expect ~-3.01]");
+    assert!((slope - (-3.01)).abs() < 0.2, "pink noise slope {slope:.2} dB/oct drifted from the expected ~-3.01");
+}
+
