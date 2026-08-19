@@ -686,17 +686,20 @@ select:disabled {
   column-gap: 0.4rem;
   font-weight: 600;
 }
-/* Fixed-width fields within a chip — sized for the longest value each can ever show ("19.8 kHz",
-   "-119.9 dB") with a little slack, right-aligned so the digits (tabular-nums, `.ss-readout` above)
-   line up chip-to-chip too, not just hold still frame-to-frame. */
+/* Fixed-width fields within a chip — sized (in `ch`, i.e. relative to THIS element's own small
+   font, not the page root — `rem` here was a bug: it's always root-relative regardless of the
+   0.72rem context, so it reserved ~6-8x more space than intended and pushed the row into wrapping)
+   for the longest value each realistically shows ("19.8 kHz", "-90.0 dB", the SPEC_DYN=90 floor)
+   with a little slack, right-aligned so the digits (tabular-nums, `.ss-readout` above) line up
+   chip-to-chip too, not just hold still frame-to-frame. */
 .ss-peak-hz {
   display: inline-block;
-  min-width: 4.6rem;
+  min-width: 4.4ch;
   text-align: right;
 }
 .ss-peak-db {
   display: inline-block;
-  min-width: 3.6rem;
+  min-width: 4.6ch;
   text-align: right;
 }
 
