@@ -565,10 +565,12 @@ export function SpectrumScope() {
               // Same Fc→hue mapping ToneGrid's Fc readout uses, at the same full strength — a
               // peak's frequency reads as the same colour here as a band tuned to it would there.
               slot.style.color = fcHue(hz);
+              slot.classList.remove("ss-peak-empty");
             } else {
               hzSpan.textContent = PEAK_PLACEHOLDER_HZ;
               dbSpan.textContent = PEAK_PLACEHOLDER_DB;
               slot.style.color = "";
+              slot.classList.add("ss-peak-empty");
             }
           }
         }
@@ -584,7 +586,10 @@ export function SpectrumScope() {
           const dbSpan = peakDbRefs.current[j];
           if (hzSpan) hzSpan.textContent = PEAK_PLACEHOLDER_HZ;
           if (dbSpan) dbSpan.textContent = PEAK_PLACEHOLDER_DB;
-          if (slot) slot.style.color = "";
+          if (slot) {
+            slot.style.color = "";
+            slot.classList.add("ss-peak-empty");
+          }
         }
       }
 

@@ -686,6 +686,13 @@ select:disabled {
   column-gap: 0.4rem;
   font-weight: 600;
 }
+/* An empty slot (SpectrumScope.tsx's PEAK_PLACEHOLDER_HZ/DB) dims toward the theme background
+   instead of reading at full text colour — a plain colour reset left it white/light-on-dark, easy
+   to mistake for a real (if colourless) reading rather than "nothing here". Opacity on `--fg`
+   rather than a hard-coded grey so it still dims correctly in the light theme. */
+.ss-peak-empty {
+  opacity: 0.4;
+}
 /* Fixed-width fields within a chip. `min-width` (an earlier version of this rule) still let a
    longer string — most visibly a unit change, "999 Hz" -> "1.00 kHz" as a peak crosses 1kHz —
    widen the box past it and shove every later chip sideways; the whole point here is a width the
