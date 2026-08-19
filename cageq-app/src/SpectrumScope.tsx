@@ -130,9 +130,9 @@ function fmtPeakHz(hz: number): string {
   return hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 1 : 2)} kHz` : `${Math.round(hz)} Hz`;
 }
 
-// Up to this many peaks are ever shown/marked — "3 or 4", a couple more than one but still
-// scannable at a glance without crowding the readout row or the tube itself.
-const PEAK_COUNT = 4;
+// Up to this many peaks are ever shown/marked — a handful more than one but still scannable at a
+// glance without crowding the readout row or the tube itself.
+const PEAK_COUNT = 5;
 // #e6a23c — the same amber TimeScope's peak-hold lines use (see PEAK_LINE_ALPHA there), so a
 // "peak" reads as the same colour wherever this app marks one.
 const PEAK_MARK_COLOR = "rgba(230,162,60,0.9)";
@@ -245,7 +245,13 @@ export function SpectrumScope() {
   const markRef = useRef<HTMLCanvasElement>(null);
   // Text for up to PEAK_COUNT readout chips, written imperatively (see the trail effect) — driving
   // this off React state from a 60 fps stream once re-rendered the entire App tree per arrival.
+  // Split into two fixed-width fields (frequency, level) per chip, each written independently —
+  // see `.ss-peak-hz`/`.ss-peak-db` in App.css for why: a single free-width text node reflows (and
+  // visibly shifts every OTHER chip alongside it) whenever a peak's digit count changes, e.g.
+  // "60 Hz" growing to "8.2 kHz" as a note bends upward.
   const peakSlotRefs = useRef<(HTMLSpanElement | null)[]>([]);
+  const peakHzRefs = useRef<(HTMLSpanElement | null)[]>([]);
+  const peakDbRefs = useRef<(HTMLSpanElement | null)[]>([]);
   // The latest received spectrum event — the trail effect below draws it straight, no temporal
   // interpolation toward a previous one (see the component doc comment for why: this used to blend
   // per-bin between the last two events over the gap between them, so the line would flow at 60 fps
@@ -487,15 +493,19 @@ export function SpectrumScope() {
           hadPeak = peaks.length > 0;
           for (let j = 0; j < PEAK_COUNT; j++) {
             const slot = peakSlotRefs.current[j];
-            if (!slot) continue;
+            const hzSpan = peakHzRefs.current[j];
+            const dbSpan = peakDbRefs.current[j];
+            if (!slot || !hzSpan || !dbSpan) continue;
             if (j < peaks.length) {
               const hz = binHz(peaks[j].i);
-              slot.textContent = `${fmtPeakHz(hz)}  ${peaks[j].v.toFixed(1)} dB`;
+              hzSpan.textContent = fmtPeakHz(hz);
+              dbSpan.textContent = `${peaks[j].v.toFixed(1)} dB`;
               // Same Fc→hue mapping ToneGrid's Fc readout uses, at the same full strength — a
               // peak's frequency reads as the same colour here as a band tuned to it would there.
               slot.style.color = fcHue(hz);
             } else {
-              slot.textContent = "";
+              hzSpan.textContent = "";
+              dbSpan.textContent = "";
             }
           }
         }
@@ -504,7 +514,8 @@ export function SpectrumScope() {
         // (matching the beam itself, which the `signal` gate above also stops updating on silence).
         hadPeak = false;
         markCtx.clearRect(0, 0, W, H);
-        for (const slot of peakSlotRefs.current) if (slot) slot.textContent = "";
+        for (const hzSpan of peakHzRefs.current) if (hzSpan) hzSpan.textContent = "";
+        for (const dbSpan of peakDbRefs.current) if (dbSpan) dbSpan.textContent = "";
       }
 
       phos.commit(dt, p.trailTau, p.tail);
@@ -606,8 +617,13 @@ export function SpectrumScope() {
           tube above, presented left-to-right by frequency (see `findPeaks`). The trail's own long
           afterglow (`tail`, phosphor.ts) already shows *where* the spectrum has recently been, but
           reading an exact level or frequency off a glowing curve isn't realistic — this is the same
-          information as a number. A fixed PEAK_COUNT of slots is rendered upfront and each is
-          shown/blanked by writing its text (see the trail effect) rather than mapping over a
+          information as a number. A fixed PEAK_COUNT of slots is rendered upfront, ALWAYS all
+          PEAK_COUNT of them (see App.css — no more collapsing an empty slot to `display:none`), so
+          the row's own width and each chip's own position never depend on how many peaks are
+          currently found; and each chip is two independently-sized fixed-width fields (frequency,
+          level — App.css again) rather than one free-width text node, so a peak sliding from
+          "60 Hz" to "8.2 kHz" can't shift every chip after it sideways either. Slots are
+          shown/blanked by writing their text (see the trail effect) rather than mapping over a
           variable-length array, since the array itself lives outside React state — see below.
           Updated imperatively, NOT via React state: `spectrum` arrives well above React's
           comfortable render rate, and driving a state update from it once re-rendered the entire
@@ -622,7 +638,20 @@ export function SpectrumScope() {
               peakSlotRefs.current[j] = el;
             }}
             className="ss-peak"
-          />
+          >
+            <span
+              ref={(el) => {
+                peakHzRefs.current[j] = el;
+              }}
+              className="ss-peak-hz"
+            />
+            <span
+              ref={(el) => {
+                peakDbRefs.current[j] = el;
+              }}
+              className="ss-peak-db"
+            />
+          </span>
         ))}
       </div>
     </div>

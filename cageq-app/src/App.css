@@ -661,10 +661,12 @@ select:disabled {
 /* Numeric peak readout: level + frequency of each cross marked on the tube above (up to
    PEAK_COUNT). The trail's own long afterglow already shows *where* the spectrum has recently been
    at a glance; this is the exact numbers for it, which glow and persistence can't render precisely.
-   `flex-wrap` rather than a fixed 4-column grid: at PEAK_COUNT=4 chips can just barely need two
-   rows on a narrow panel, and wrapping degrades gracefully where an overflowing single row
-   wouldn't. Empty chips (fewer than PEAK_COUNT peaks found) collapse to nothing rather than
-   leaving a gap, since they're plain empty text nodes with no fixed width. */
+   `flex-wrap` rather than a fixed grid: at PEAK_COUNT=5 chips can just barely need two rows on a
+   narrow panel, and wrapping degrades gracefully where an overflowing single row wouldn't. Unlike
+   an earlier version, ALL PEAK_COUNT chips are always present (SpectrumScope.tsx never conditionally
+   renders fewer) and each chip's two fields have a fixed min-width — so the row's total width, and
+   every chip's position within it, stay constant regardless of how many peaks are currently found
+   or how many digits their numbers happen to have; nothing here reflows peak-to-peak. */
 .ss-readout {
   flex: 0 0 auto;
   display: flex;
@@ -678,13 +680,24 @@ select:disabled {
   font-variant-numeric: tabular-nums;
 }
 /* One chip per peak — styled like `.chart-preamp` (the other small always-on instrument readout in
-   this panel) for a consistent look. Plain text (no separate <b> for the two values, unlike the
-   preamp readout): four chips × two spans each was more DOM than the payoff was worth here. */
+   this panel) for a consistent look. */
 .ss-peak {
+  display: inline-flex;
+  column-gap: 0.4rem;
   font-weight: 600;
 }
-.ss-peak:empty {
-  display: none; /* an empty chip would otherwise still claim a gap's worth of column-gap */
+/* Fixed-width fields within a chip — sized for the longest value each can ever show ("19.8 kHz",
+   "-119.9 dB") with a little slack, right-aligned so the digits (tabular-nums, `.ss-readout` above)
+   line up chip-to-chip too, not just hold still frame-to-frame. */
+.ss-peak-hz {
+  display: inline-block;
+  min-width: 4.6rem;
+  text-align: right;
+}
+.ss-peak-db {
+  display: inline-block;
+  min-width: 3.6rem;
+  text-align: right;
 }
 
 /* Vectorscope view: an always-dark "instrument screen" (it's square, the chart is wide), framed
