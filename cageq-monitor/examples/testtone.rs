@@ -9,19 +9,101 @@
 //! Run it alongside CAGEq (it plays, the app captures):
 //!   cargo run -p cageq-monitor --example testtone                     # pink noise, -20 dBFS
 //!   cargo run -p cageq-monitor --example testtone -- --sine 1000      # 1 kHz sine
+//!   cargo run -p cageq-monitor --example testtone -- --square 220     # 220 Hz square
+//!   cargo run -p cageq-monitor --example testtone -- --triangle 220   # 220 Hz triangle
+//!   cargo run -p cageq-monitor --example testtone -- --sawtooth 220   # 220 Hz sawtooth
 //!   cargo run -p cageq-monitor --example testtone -- --level -24
 //!   cargo run -p cageq-monitor --example testtone -- --seconds 10     # auto-stop w/ fade-out
 //!   cargo run -p cageq-monitor --example testtone -- --device "Phonitor"  # match by name
 //!   cargo run -p cageq-monitor --example testtone -- --sine 12000 --rate 44100  # test Windows' resampler
 //!
+//! `--sine`/`--square`/`--triangle`/`--sawtooth` are mutually exclusive (one tone at a time);
+//! omitting all of them plays pink noise. The three non-sine shapes are synthesised as an exact
+//! band-limited Fourier sum (harmonics only up to just below Nyquist, at each shape's textbook
+//! amplitude — 1/k for square/sawtooth, 1/k² for triangle), not generated naively (e.g. a hard
+//! comparison for square, a wrapped ramp for sawtooth) — a naive version has harmonic content out
+//! to infinity, so anything above Nyquist folds back down and contaminates the very spectrum
+//! shape this tool exists to let you verify against a known-correct reference. So the loopback
+//! spectrum for, say, `--square 220` should show *only* clean odd harmonics falling off at
+//! -6 dB/octave up to the Nyquist-adjacent cutoff, and nothing else.
+//!
 //! `--rate <hz>` forces a *source* rate different from the device's — Windows' shared-mode
 //! resampler (AUTOCONVERT) then converts it up/down to the device rate, so any resampling images/
-//! aliasing show up in the loopback spectrum. Pair with `--sine` and a Dry slot to isolate it.
+//! aliasing show up in the loopback spectrum. Pair with a tone flag and a Dry slot to isolate it.
 //!
 //! Safety: the level is clamped to ≤ -3 dBFS, every sample is hard-limited just below full scale,
 //! and it fades in (and out, with --seconds) — so even with EQ boosts stacked on top it can't
 //! blast. `--unsafe` lifts both clamps for a deliberate full-scale (0 dBFS) torture test. Ctrl+C
 //! stops it (abrupt; use --seconds for a clean fade-out).
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum Waveform {
+    Sine,
+    Square,
+    Triangle,
+    Sawtooth,
+}
+
+#[cfg(windows)]
+impl Waveform {
+    fn name(self) -> &'static str {
+        match self {
+            Waveform::Sine => "sine",
+            Waveform::Square => "square",
+            Waveform::Triangle => "triangle",
+            Waveform::Sawtooth => "sawtooth",
+        }
+    }
+
+    /// One sample of this shape at phase `theta` (radians, any real value — `sin` wraps it),
+    /// summing harmonics 1..=`k_max` at each shape's textbook Fourier amplitude. Peak amplitude is
+    /// ~1 (plus a few percent of Gibbs overshoot right at an edge for square/sawtooth, same as any
+    /// finite-harmonic approximation of a discontinuous waveform — left to the caller's existing
+    /// `gain`/`sample_ceil` handling, exactly like a sine's own ~1 peak already is).
+    fn sample(self, theta: f32, k_max: u32) -> f32 {
+        const FRAC_4_PI: f32 = 4.0 / std::f32::consts::PI;
+        const FRAC_2_PI: f32 = 2.0 / std::f32::consts::PI;
+        const FRAC_8_PI2: f32 = 8.0 / (std::f32::consts::PI * std::f32::consts::PI);
+        match self {
+            Waveform::Sine => theta.sin(),
+            // Odd harmonics only, amplitude 1/k — the textbook square-wave series.
+            Waveform::Square => {
+                let mut acc = 0.0f32;
+                let mut k = 1u32;
+                while k <= k_max {
+                    acc += (k as f32 * theta).sin() / k as f32;
+                    k += 2;
+                }
+                acc * FRAC_4_PI
+            }
+            // All harmonics, amplitude 1/k, alternating sign — the textbook (rising) sawtooth series.
+            Waveform::Sawtooth => {
+                let mut acc = 0.0f32;
+                let mut sign = 1.0f32;
+                for k in 1..=k_max {
+                    acc += sign * (k as f32 * theta).sin() / k as f32;
+                    sign = -sign;
+                }
+                acc * FRAC_2_PI
+            }
+            // Odd harmonics only, amplitude 1/k² (converges much faster than square/sawtooth — no
+            // audible discontinuity in the waveform itself, just a slope change, so far less Gibbs
+            // ringing and a visibly steeper roll-off on screen: -12 dB/octave vs -6).
+            Waveform::Triangle => {
+                let mut acc = 0.0f32;
+                let mut k = 1u32;
+                let mut sign = 1.0f32;
+                while k <= k_max {
+                    acc += sign * (k as f32 * theta).sin() / (k as f32 * k as f32);
+                    sign = -sign;
+                    k += 2;
+                }
+                acc * FRAC_8_PI2
+            }
+        }
+    }
+}
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // --- args (dependency-free parsing) ------------------------------------------------------
-    let mut sine_hz: Option<f32> = None;
+    let mut tone: Option<(Waveform, f32)> = None;
     let mut level_dbfs: f32 = -20.0;
     let mut seconds: Option<f32> = None;
     let mut device_match: Option<String> = None;
@@ -39,20 +121,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut unsafe_mode = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
+        // Shared by all four tone flags: only one shape at a time, so a leftover --square from a
+        // copy-pasted command line can't silently combine with a new --sine instead of erroring.
+        let mut set_tone = |wf: Waveform, hz: f32| -> Result<(), Box<dyn std::error::Error>> {
+            if tone.is_some() {
+                return Err("only one of --sine/--square/--triangle/--sawtooth may be given".into());
+            }
+            tone = Some((wf, hz));
+            Ok(())
+        };
         match a.as_str() {
-            "--sine" => sine_hz = Some(args.next().ok_or("--sine needs a frequency")?.parse()?),
+            "--sine" => set_tone(Waveform::Sine, args.next().ok_or("--sine needs a frequency")?.parse()?)?,
+            "--square" => set_tone(Waveform::Square, args.next().ok_or("--square needs a frequency")?.parse()?)?,
+            "--triangle" => set_tone(Waveform::Triangle, args.next().ok_or("--triangle needs a frequency")?.parse()?)?,
+            "--sawtooth" => set_tone(Waveform::Sawtooth, args.next().ok_or("--sawtooth needs a frequency")?.parse()?)?,
             "--level" => level_dbfs = args.next().ok_or("--level needs a value")?.parse()?,
             "--seconds" => seconds = Some(args.next().ok_or("--seconds needs a value")?.parse()?),
             "--device" => device_match = Some(args.next().ok_or("--device needs a name")?),
             // Force a source sample rate ≠ the device rate → Windows' shared-mode resampler
             // converts it (AUTOCONVERT), so the loopback shows the resampling artifacts. Pair with
-            // --sine and a Dry slot to isolate the resampler.
+            // a tone flag and a Dry slot to isolate the resampler.
             "--rate" => rate_override = Some(args.next().ok_or("--rate needs a value")?.parse()?),
             // Lift the -3 dBFS safety ceiling and the per-sample limiter to allow a full-scale
             // (0 dBFS) torture test. Opt-in and deliberate — mind your ears and gear.
             "--unsafe" => unsafe_mode = true,
             "-h" | "--help" => {
-                eprintln!("usage: testtone [--sine <hz>] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
+                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth <hz>] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
                 return Ok(());
             }
             other => return Err(format!("unknown arg: {other}").into()),
@@ -119,8 +213,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_frames: Option<u64> = seconds.map(|s| (s * rate as f32) as u64);
     let fade_frames = (0.12 * rate as f32) as u64; // 120 ms fade in/out — kills startup/stop pops
     let resample = if rate != mix_rate { format!(" → resampled to {mix_rate} Hz by Windows") } else { String::new() };
-    match sine_hz {
-        Some(hz) => eprintln!("[testtone] {hz} Hz sine @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
+    match tone {
+        Some((wf, hz)) => eprintln!("[testtone] {hz} Hz {} @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}", wf.name()),
         None => eprintln!("[testtone] pink noise @ ~{level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
     }
     eprintln!("[testtone] Ctrl+C to stop.");
@@ -131,12 +225,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame: u64 = 0;
     let mut rng: u32 = 0x2545_f491; // xorshift white-noise source (no rand dependency needed)
     let (mut b0, mut b1, mut b2) = (0f32, 0f32, 0f32); // Paul Kellet economy pink-noise filter
-    // Sine phase as a *wrapped incremental accumulator*, not `sin(2π·f·frame/rate)`: computing the
+    // Tone phase as a *wrapped incremental accumulator*, not `sin(2π·f·frame/rate)`: computing the
     // latter from an ever-growing `frame` in f32 loses precision in binades, dirtying the tone
     // step-wise over time (a confound that looks like the resampler degrading). Wrapping keeps the
-    // argument in [0, 2π) so it stays precise indefinitely.
-    let phase_inc = std::f32::consts::TAU * sine_hz.unwrap_or(0.0) / rate as f32;
+    // argument in [0, 2π) so it stays precise indefinitely — and since every harmonic's contribution
+    // below is computed as `sin(k * phase)` fresh from that same bounded, precise value each sample
+    // (not its own accumulated phase), they inherit the same precision guarantee for free.
+    let phase_inc = std::f32::consts::TAU * tone.map(|(_, hz)| hz).unwrap_or(0.0) / rate as f32;
     let mut phase = 0f32;
+    // Highest harmonic to sum, kept a few percent below true Nyquist rather than right up against
+    // it — see the file header doc for why band-limiting matters here at all (a naive square/
+    // triangle/sawtooth has harmonics to infinity, which would alias back down and contaminate the
+    // very spectrum this tool exists to let you check against a known-correct shape).
+    let k_max: u32 = match tone {
+        Some((_, hz)) if hz > 0.0 => (((rate as f32 * 0.48) / hz).floor().max(1.0)) as u32,
+        _ => 1,
+    };
     let mut buf: Vec<u8> = Vec::new();
 
     'play: loop {
@@ -166,9 +270,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            let mono = match sine_hz {
-                Some(_) => {
-                    let s = phase.sin() * gain;
+            let mono = match tone {
+                Some((wf, _)) => {
+                    let s = wf.sample(phase, k_max) * gain;
                     phase += phase_inc;
                     if phase >= std::f32::consts::TAU {
                         phase -= std::f32::consts::TAU;
