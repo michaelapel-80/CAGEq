@@ -181,14 +181,26 @@ function interpolatePeak(v: Float64Array, i: number, n: number): { i: number; v:
 }
 
 /** Up to `PEAK_COUNT` distinct spectral peaks in `v[0..n)` (bin i's frequency given by `binHz`):
- *  local maxima prominent enough to be a real peak rather than FFT noise, loud enough to be real
- *  content rather than noise-floor ripple (`PEAK_MAX_RANGE_DB`), spaced far enough apart that they
- *  aren't all just one resonance's shoulder. Returns the *largest* qualifying peaks, then reorders
- *  them to ascending frequency — picking by magnitude and presenting by frequency are different
- *  steps on purpose, so a strong low-frequency hum and a quieter but still-qualifying high note
- *  both land in the order a reader scans the axis, not loudest-first. */
+ *  none at all when the whole frame is at or below the noise floor, local maxima prominent enough
+ *  to be a real peak rather than FFT noise, loud enough to be real content rather than noise-floor
+ *  ripple (`PEAK_MAX_RANGE_DB`), spaced far enough apart that they aren't all just one resonance's
+ *  shoulder. Returns the *largest* qualifying peaks, then reorders them to ascending frequency —
+ *  picking by magnitude and presenting by frequency are different steps on purpose, so a strong
+ *  low-frequency hum and a quieter but still-qualifying high note both land in the order a reader
+ *  scans the axis, not loudest-first. */
 function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { i: number; v: number }[] {
   if (n < 3) return [];
+  let loudest = -Infinity;
+  for (let i = 0; i < n; i++) if (v[i] > loudest) loudest = v[i];
+  // 0) Absolute silence gate: nothing in this frame reaches even the visible plot's own floor, so
+  // it's pure noise-floor content, not real signal — no matter how it's shaped, none of it should
+  // be marked. PEAK_MAX_RANGE_DB below can't catch this on its own: it's relative to `loudest`, and
+  // a frame that's ALL noise floor still has *a* loudest bin, with the rest of the floor's own
+  // ripple routinely within 60dB of it. Matters because `signal` (the caller's own gate) doesn't
+  // catch this either — WASAPI keeps delivering (all near-zero) frames as long as a stream is open,
+  // so it stays true right through digital silence — reported live as peak markers/readout not
+  // clearing when audio actually stopped.
+  if (loudest < SPEC_TOP_DB - SPEC_DYN) return [];
   // 1) Local maxima, plateau-aware. A run of bins tied at *exactly* the same value is common here
   // — the backend rounds dB to 1 decimal (see `SpectrumUpdate::db`), so the true rounded-off top of
   // an ordinary rounded peak often lands several adjacent bins wide, not one. An earlier version of
@@ -221,9 +233,8 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { 
   });
   // 2.5) Noise-floor gate: prominence alone can't tell a real quiet feature from the floor's own
   // statistical ripple (see PEAK_MAX_RANGE_DB's doc) — this can, since it's relative to the loudest
-  // thing actually in the frame rather than each candidate's own immediate neighbours.
-  let loudest = -Infinity;
-  for (let i = 0; i < n; i++) if (v[i] > loudest) loudest = v[i];
+  // thing actually in the frame (computed at the top, step 0) rather than each candidate's own
+  // immediate neighbours.
   const audible = prominent.filter((c) => loudest - c.v <= PEAK_MAX_RANGE_DB);
   // 3) Greedy pick by magnitude, skipping anything too close (in octaves) to an already-picked
   // peak — otherwise the loudest region's own harmonics could fill every remaining slot.
