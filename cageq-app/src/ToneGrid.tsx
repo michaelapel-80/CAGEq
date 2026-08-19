@@ -1,6 +1,7 @@
 import { useEffect, useRef, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import { Band, FilterKind } from "./biquad";
+import { fcHue, logNorm } from "./fcColor";
 import { ScrubNumber } from "./ScrubNumber";
 
 /**
@@ -103,19 +104,6 @@ const COOL = "#3f9bef"; // gain cut
 const Q_NARROW = "#b95cf0"; // high Q — surgical / focused (violet)
 const Q_WIDE = "#14b8a6"; // low Q — broad / gentle (teal)
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
-/** Position of `v` on a log scale from `lo`→`hi`, clamped 0..1. */
-const logNorm = (v: number, lo: number, hi: number) => clamp01((Math.log(v) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)));
-
-// Fc hue sweep: interpolate in HUE space (not RGB), warm low → cool high, so the mids stay
-// vivid (an orange↔blue RGB blend greys out through the middle, where most bands live). The
-// window is narrowed to the musical range so typical bands span the whole sweep — sub-bass
-// pins warm, the top octave pins cool — instead of bunching up in the blue.
-const FC_HUE_LO = 30; // warm orange at the low end (bass)
-const FC_HUE_HI = 250; // blue-violet at the top (air)
-const FC_HUE_F_LO = 100; // Hz that maps to the warm end
-const FC_HUE_F_HI = 15000; // Hz that maps to the cool end
-const fcHue = (hz: number) =>
-  `hsl(${Math.round(FC_HUE_LO + (FC_HUE_HI - FC_HUE_LO) * logNorm(hz, FC_HUE_F_LO, FC_HUE_F_HI))}, 58%, 56%)`;
 /** A readout tint: `amt`% of the target hue mixed into the theme text colour, set inline so it
  *  beats the base `input` rule's `color` (which outranks a plain `.tg-num` class). */
 const tint = (c: string, amt: number): CSSProperties => ({ color: `color-mix(in srgb, var(--fg), ${c} ${Math.round(amt)}%)` });

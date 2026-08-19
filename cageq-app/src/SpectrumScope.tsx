@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { composedCurveDb } from "./biquad";
+import { fcHue } from "./fcColor";
 import { spectrumStream } from "./streams";
 import { createPhosphor } from "./phosphor";
 import type { SpectrumData } from "./EqChart";
@@ -487,7 +488,15 @@ export function SpectrumScope() {
           for (let j = 0; j < PEAK_COUNT; j++) {
             const slot = peakSlotRefs.current[j];
             if (!slot) continue;
-            slot.textContent = j < peaks.length ? `${fmtPeakHz(binHz(peaks[j].i))}  ${peaks[j].v.toFixed(1)} dB` : "";
+            if (j < peaks.length) {
+              const hz = binHz(peaks[j].i);
+              slot.textContent = `${fmtPeakHz(hz)}  ${peaks[j].v.toFixed(1)} dB`;
+              // Same Fc→hue mapping ToneGrid's Fc readout uses, at the same full strength — a
+              // peak's frequency reads as the same colour here as a band tuned to it would there.
+              slot.style.color = fcHue(hz);
+            } else {
+              slot.textContent = "";
+            }
           }
         }
       } else if (hadPeak) {
