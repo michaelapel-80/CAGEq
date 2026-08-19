@@ -156,6 +156,11 @@ const PEAK_MIN_SEPARATION_OCTAVES = 1 / 3;
 // ladder is nowhere near 60dB down within the range anyone's looking at), tight enough to reject
 // content that's actually down at the floor.
 const PEAK_MAX_RANGE_DB = 60;
+// Shown in an empty readout slot instead of leaving it blank — an empty chip popping in and out of
+// existence every time the peak count changes (even just from frame-to-frame noise near a gate's
+// threshold) reads as more of a glitch than a fixed-width dash sitting there quietly does.
+const PEAK_PLACEHOLDER_HZ = "--- Hz";
+const PEAK_PLACEHOLDER_DB = "--- dB";
 
 /** Parabolic (quadratic) interpolation across the three log bins straddling a peak at integer index
  *  `i`, refining both its reported frequency and level to sub-bin precision. Without this, a peak
@@ -561,18 +566,26 @@ export function SpectrumScope() {
               // peak's frequency reads as the same colour here as a band tuned to it would there.
               slot.style.color = fcHue(hz);
             } else {
-              hzSpan.textContent = "";
-              dbSpan.textContent = "";
+              hzSpan.textContent = PEAK_PLACEHOLDER_HZ;
+              dbSpan.textContent = PEAK_PLACEHOLDER_DB;
+              slot.style.color = "";
             }
           }
         }
       } else if (hadPeak) {
-        // Signal just dropped — blank once rather than leaving the last reading stale on screen
-        // (matching the beam itself, which the `signal` gate above also stops updating on silence).
+        // Signal just dropped — reset to the placeholder once rather than leaving the last reading
+        // stale on screen (matching the beam itself, which the `signal` gate above also stops
+        // updating on silence).
         hadPeak = false;
         markCtx.clearRect(0, 0, W, H);
-        for (const hzSpan of peakHzRefs.current) if (hzSpan) hzSpan.textContent = "";
-        for (const dbSpan of peakDbRefs.current) if (dbSpan) dbSpan.textContent = "";
+        for (let j = 0; j < PEAK_COUNT; j++) {
+          const slot = peakSlotRefs.current[j];
+          const hzSpan = peakHzRefs.current[j];
+          const dbSpan = peakDbRefs.current[j];
+          if (hzSpan) hzSpan.textContent = PEAK_PLACEHOLDER_HZ;
+          if (dbSpan) dbSpan.textContent = PEAK_PLACEHOLDER_DB;
+          if (slot) slot.style.color = "";
+        }
       }
 
       phos.commit(dt, p.trailTau, p.tail);
@@ -679,9 +692,12 @@ export function SpectrumScope() {
           the row's own width and each chip's own position never depend on how many peaks are
           currently found; and each chip is two independently-sized fixed-width fields (frequency,
           level — App.css again) rather than one free-width text node, so a peak sliding from
-          "60 Hz" to "8.2 kHz" can't shift every chip after it sideways either. Slots are
-          shown/blanked by writing their text (see the trail effect) rather than mapping over a
-          variable-length array, since the array itself lives outside React state — see below.
+          "60 Hz" to "8.2 kHz" can't shift every chip after it sideways either. An empty slot shows
+          PEAK_PLACEHOLDER_HZ/DB ("--- Hz"/"--- dB") rather than going fully blank, for the same
+          reason: a chip popping between text and nothing every time the peak count changes reads
+          as a glitch, where a quiet dash sitting in a fixed-width field doesn't. Slots are filled
+          or reset to the placeholder by writing their text (see the trail effect) rather than
+          mapping over a variable-length array, since the array itself lives outside React state.
           Updated imperatively, NOT via React state: `spectrum` arrives well above React's
           comfortable render rate, and driving a state update from it once re-rendered the entire
           App tree per arrival (see cageq-monitor's `SpectrumUpdate` doc / this component's own
