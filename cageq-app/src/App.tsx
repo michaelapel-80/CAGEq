@@ -2364,16 +2364,15 @@ function App() {
             <div className="panel">
               <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.35rem" }}>
                 <h2 style={{ margin: 0 }}>{tr("correction.title")}</h2>
-                {/* Kept mounted (space reserved) but hidden on Dry — the impulse view is meaningless
-                    for Dry, but removing the toggle collapsed the header row and jumped the layout. */}
+                {/* Selectable on Dry too — every view has something honest to show with no filters
+                    applied: Frequency's curve is already just flat/absent there, Time now draws the
+                    literal unmodified unit impulse (see the ImpulseChart call below), and Monitor/
+                    Scope show live captured audio regardless of Dry (their own `scopeEq`/`eqBands`
+                    plumbing already only clears the *correction curve* fed to them, never the
+                    capture itself). Kept mounted with space reserved even when there's no `result`
+                    yet, purely so the header row's height doesn't jump once one arrives. */}
                 {result && (
-                  <div
-                    className="chart-view"
-                    style={{ margin: 0, visibility: dryActive ? "hidden" : "visible" }}
-                    role="group"
-                    aria-label={tr("correction.domainAria")}
-                    aria-hidden={dryActive || undefined}
-                  >
+                  <div className="chart-view" style={{ margin: 0 }} role="group" aria-label={tr("correction.domainAria")}>
                     {(
                       [
                         ["freq", tr("correction.frequency"), tr("correction.frequencyTitle")],
@@ -2430,8 +2429,12 @@ function App() {
                         <TimeScope />
                         <Vectorscope onPopOut={openScopeWindow} />
                       </div>
-                    ) : impulseView && !dryActive ? (
-                      <ImpulseChart bands={result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
+                    ) : impulseView ? (
+                      // Dry means no filters applied — its truthful impulse response is the literal
+                      // unmodified unit impulse, not "unavailable": ImpulseChart/impulseResponse
+                      // already draw exactly that from an empty band list (impulseResponse seeds
+                      // sig[0]=1 and only the loop over `bands`, skipped here, would shape it further).
+                      <ImpulseChart bands={dryActive ? [] : result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
                     ) : monitorView ? (
                       <SpectrumScope />
                     ) : (
