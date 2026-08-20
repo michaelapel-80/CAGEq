@@ -43,7 +43,7 @@ function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: Spe
 const REF_SIZE = 512;
 const GRID_ALPHA = 0.22;
 // Same fixed dBFS scale as EqChart's spectrum backdrop (§5.4) — consistent reading between the
-// Frequency pane's backdrop and this standalone analyzer.
+// Eq pane's backdrop and this standalone analyzer.
 const SPEC_TOP_DB = 0;
 const SPEC_DYN = 90;
 const F_MIN = 20;
@@ -260,14 +260,16 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { 
 }
 
 /**
- * §5.4 CRT-styled spectrum analyzer — the "Monitor" chart view's own instrument, replacing the
- * earlier approach of reusing `EqChart` with every curve/marker/node stripped. That worked but
- * looked like an EQ chart with nothing on it; this is a dedicated analyzer sharing the
- * vectorscope/time-scope's visual language (dark `.vs-screen`, cached gradients, the same
+ * §5.4 CRT-styled spectrum analyzer — the "Spectrum" chart view's own instrument (named "Monitor"
+ * until it earned a dedicated identity of its own — see the naming note on `chartView`'s
+ * declaration in App.tsx), replacing the earlier approach of reusing `EqChart` with every curve/
+ * marker/node stripped. That worked but looked like an EQ chart with nothing on it; this is a
+ * dedicated analyzer sharing the vectorscope/time-scope's visual language (dark `.vs-screen`,
+ * cached gradients, the same
  * `.vs-tools`/`.vs-tuning` chrome, and the same phosphor-persistence *look* — though after that
  * look's stored-image implementations repeatedly misbehaved on this rendering stack, the trail
- * here is owned by the shared accumulator in phosphor.ts, as the scopes' are). The Frequency pane
- * (`EqChart`, curves + its own spectrum backdrop) is untouched — this only replaces Monitor.
+ * here is owned by the shared accumulator in phosphor.ts, as the scopes' are). The Eq pane
+ * (`EqChart`, curves + its own spectrum backdrop) is untouched — this only replaces Spectrum.
  *
  * A connected spline through the backend's log-frequency bins (§5.4 `SpectrumUpdate`), not filled
  * bars — an earlier bar-graph version read as flat/clean rather than CRT-like; the additively

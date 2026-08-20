@@ -73,7 +73,7 @@ function parseHex(hex: string): [number, number, number] {
  * Always sized by measuring its own container (`ResizeObserver`, both inline and in the pop-out
  * window) rather than a fixed prop — `.vectorscope-wrap:not(.fill)` is `height:100%;
  * aspect-ratio:1` in CSS (App.css), matching `.chart-wrap`'s own `aspect-ratio:720/215` so the
- * tube's row-height agrees with whatever the Frequency/Time views' viewBox-scaled SVGs render at,
+ * tube's row-height agrees with whatever the Eq/Impulse views' viewBox-scaled SVGs render at,
  * instead of a hardcoded height drifting from their width-driven one and shifting the layout on
  * every chart-view switch. `onPopOut`, when given, shows a button to detach the scope into its
  * own larger window.

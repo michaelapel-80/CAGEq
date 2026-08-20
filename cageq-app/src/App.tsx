@@ -534,12 +534,12 @@ function App() {
   // letting them stretch past it (the chart-wrap also holds the legend). Measured near the return.
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const [plotBox, setPlotBox] = useState<{ top: number; height: number } | null>(null);
-  // The combined chart-row + legend area's total rendered height, captured whenever Frequency/Time
-  // (SVG-based) is showing and reused to size Monitor/Scope's canvas-based views to the exact same
+  // The combined chart-row + legend area's total rendered height, captured whenever Eq/Impulse
+  // (SVG-based) is showing and reused to size Spectrum/Scope's canvas-based views to the exact same
   // pixel height — see the measuring effect near plotBox's. Chart-wrap's own aspect-ratio (App.css)
   // already keeps the *chart* portion consistent across views; this covers the legend strip below
   // it too, whose real height (a variable number of toggle chips, wrapping or not) isn't worth
-  // separately reverse-engineering when the real Frequency/Time value is right there to measure.
+  // separately reverse-engineering when the real Eq/Impulse value is right there to measure.
   const chartAreaRef = useRef<HTMLDivElement>(null);
   const [chartAreaHeight, setChartAreaHeight] = useState<number | null>(null);
   // The chart legend renders (via portal) into this full-width host *below* the chart-row, so its
@@ -558,14 +558,18 @@ function App() {
   const [commitToken, setCommitToken] = useState(0);
   const historyBaseline = useRef<Stages | null>(null);
   const [showAllStages, setShowAllStages] = useState(false); // library filter: templates of all stages vs the active one
-  // The chart area shows one of four mutually-exclusive views (a single segmented control):
-  //   freq    — magnitude curves + spectrum backdrop (the default, editable)
-  //   time    — impulse-response decay (§5.2)
-  //   monitor — clean spectrum: curves stripped, spectrum + preamp only
-  //   scope   — stereo vectorscope (X-Y goniometer) of the live loopback
-  const [chartView, setChartView] = useState<"freq" | "time" | "monitor" | "scope">("freq");
-  const impulseView = chartView === "time";
-  const monitorView = chartView === "monitor";
+  // The chart area shows one of four mutually-exclusive views (a single segmented control), named
+  // for what each one actually shows rather than a Frequency/Time domain axis that stopped fitting
+  // once there were two live-monitoring views alongside the two filter-design ones (spectrum's own
+  // name used to be "monitor", left over from when it was literally EqChart with every curve
+  // stripped — it's a dedicated CRT-style analyzer now, not a stripped-down chart):
+  //   eq       — magnitude curves + spectrum backdrop (the default, editable)
+  //   impulse  — impulse-response decay (§5.2)
+  //   spectrum — clean live FFT spectrum analyzer, no filter curves
+  //   scope    — stereo vectorscope (X-Y goniometer) + time-domain trace of the live loopback
+  const [chartView, setChartView] = useState<"eq" | "impulse" | "spectrum" | "scope">("eq");
+  const impulseView = chartView === "impulse";
+  const spectrumView = chartView === "spectrum";
   const scopeView = chartView === "scope";
   const [rawCurve, setRawCurve] = useState<{ f: number; db: number }[] | null>(null); // raw measured FR (nerd overlay)
   const [targetCurve, setTargetCurve] = useState<{ f: number; db: number }[] | null>(null); // the target curve (nerd overlay)
@@ -1790,7 +1794,7 @@ function App() {
   }, [chartView, dryActive, loading, !!result]);
 
   // Same "measure the real thing, remember it" idea as plotBox above, one level up: capture the
-  // combined chart-row + legend area's total height whenever it's SVG-driven, so Monitor/Scope can
+  // combined chart-row + legend area's total height whenever it's SVG-driven, so Spectrum/Scope can
   // be forced to that exact pixel value (below) instead of the panel's total height drifting by
   // however many px the legend's real (possibly multi-line) content differs from a fixed guess.
   useEffect(() => {
@@ -2365,8 +2369,8 @@ function App() {
               <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", marginBottom: "0.35rem" }}>
                 <h2 style={{ margin: 0 }}>{tr("correction.title")}</h2>
                 {/* Selectable on Dry too — every view has something honest to show with no filters
-                    applied: Frequency's curve is already just flat/absent there, Time now draws the
-                    literal unmodified unit impulse (see the ImpulseChart call below), and Monitor/
+                    applied: Eq's curve is already just flat/absent there, Impulse now draws the
+                    literal unmodified unit impulse (see the ImpulseChart call below), and Spectrum/
                     Scope show live captured audio regardless of Dry (their own `scopeEq`/`eqBands`
                     plumbing already only clears the *correction curve* fed to them, never the
                     capture itself). Kept mounted with space reserved even when there's no `result`
@@ -2375,9 +2379,9 @@ function App() {
                   <div className="chart-view" style={{ margin: 0 }} role="group" aria-label={tr("correction.domainAria")}>
                     {(
                       [
-                        ["freq", tr("correction.frequency"), tr("correction.frequencyTitle")],
-                        ["time", tr("correction.time"), tr("correction.timeTitle")],
-                        ["monitor", tr("correction.monitor"), tr("correction.monitorTitle")],
+                        ["eq", tr("correction.eq"), tr("correction.eqTitle")],
+                        ["impulse", tr("correction.impulse"), tr("correction.impulseTitle")],
+                        ["spectrum", tr("correction.spectrum"), tr("correction.spectrumTitle")],
                         ["scope", tr("correction.scope"), tr("correction.scopeTitle")],
                       ] as const
                     ).map(([id, label, title]) => (
@@ -2416,12 +2420,12 @@ function App() {
 
               {result && (
                 <>
-                  {/* The Frequency/Time (domain) view swap lives in the panel header row (above).
-                      Phase rides the frequency chart's secondary axis (legend). Forced to
-                      `chartAreaHeight` (measured below) on Monitor/Scope — its own natural height
+                  {/* The Eq/Impulse/Spectrum/Scope view swap lives in the panel header row (above).
+                      Phase rides the Eq chart's secondary axis (legend). Forced to
+                      `chartAreaHeight` (measured below) on Spectrum/Scope — its own natural height
                       there (chart-wrap's aspect-ratio + the legend host's own, now-empty, height)
-                      won't exactly match Frequency/Time's real legend height on its own. */}
-                  <div ref={chartAreaRef} style={monitorView || scopeView ? { height: chartAreaHeight ?? undefined } : undefined}>
+                      won't exactly match Eq/Impulse's real legend height on its own. */}
+                  <div ref={chartAreaRef} style={spectrumView || scopeView ? { height: chartAreaHeight ?? undefined } : undefined}>
                   <div className="chart-row">
                   <div className="chart-wrap" ref={chartWrapRef}>
                     {scopeView ? (
@@ -2435,7 +2439,7 @@ function App() {
                       // already draw exactly that from an empty band list (impulseResponse seeds
                       // sig[0]=1 and only the loop over `bands`, skipped here, would shape it further).
                       <ImpulseChart bands={dryActive ? [] : result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
-                    ) : monitorView ? (
+                    ) : spectrumView ? (
                       <SpectrumScope />
                     ) : (
                       <EqChart
@@ -2471,7 +2475,7 @@ function App() {
                     {/* Preamp is a property of the correction, not the live signal — hide it on the
                         scope (which shows the stereo image, not a level) and on the CRT spectrum
                         analyzer (its own clean instrument screen, no chart-style overlay). */}
-                    {!scopeView && !monitorView && (
+                    {!scopeView && !spectrumView && (
                       <div
                         className="chart-preamp"
                         title={loudness?.mode === "FinalVolume" ? tr("correction.preampTitleMax") : tr("correction.preampTitleMatched")}

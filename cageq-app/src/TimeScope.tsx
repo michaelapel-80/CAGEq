@@ -168,7 +168,7 @@ export function TimeScope() {
 
   // Width tracks the flex row's leftover space (not square, unlike the vectorscope); height tracks
   // `.chart-wrap`'s own `aspect-ratio:720/215` (App.css) via the same wrapper's rendered box, so
-  // this instrument's height agrees with the Frequency/Time views' viewBox-scaled SVGs instead of
+  // this instrument's height agrees with the Eq/Impulse views' viewBox-scaled SVGs instead of
   // drifting from a hardcoded value and shifting the layout on every chart-view switch.
   const [width, setWidth] = useState(320);
   const [height, setHeight] = useState(215);

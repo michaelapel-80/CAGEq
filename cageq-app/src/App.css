@@ -421,8 +421,8 @@ select:disabled {
   gap: 0.3rem;
 }
 /* Reserves the same height as `.eq-legend`'s own `min-height` (below) even when nothing is
-   portaled into it — Monitor/Scope don't populate a legend at all, and without this the host
-   collapses to 0 height there while Frequency/Time (which always portal an `.eq-legend`) keep
+   portaled into it — Spectrum/Scope don't populate a legend at all, and without this the host
+   collapses to 0 height there while Eq/Impulse (which always portal an `.eq-legend`) keep
    theirs, so the panel's total height still differed between views even after the chart itself
    was made consistent (§ chart-wrap aspect-ratio, above). */
 .chart-legend-host {
@@ -618,8 +618,8 @@ select:disabled {
    side by side, sharing the row the vectorscope alone used to fill. Inset from the top a little —
    `.chart-wrap`'s own height (from its `aspect-ratio:720/215`, above) is untouched, only this
    row's own share of it shrinks by the same amount as the margin, so the panel's total height
-   stays identical to Frequency/Time; only the content within visibly sits a bit lower. This
-   selector only ever matches the scope view's own row, so Frequency/Time are never affected. */
+   stays identical to Eq/Impulse; only the content within visibly sits a bit lower. This
+   selector only ever matches the scope view's own row, so Eq/Impulse are never affected. */
 .scope-row {
   display: flex;
   align-items: center;
@@ -640,7 +640,7 @@ select:disabled {
    does for the Frequency view (no row-sharing, unlike the time scope/vectorscope pair). Inset from
    the top a little, same reasoning as `.scope-row` above — the height reduction matches the
    margin, so `.chart-wrap`'s (and the panel's) total height is unaffected, and this selector only
-   ever matches the Monitor view's own element, so Frequency/Time are never touched. */
+   ever matches the Spectrum view's own element, so Eq/Impulse are never touched. */
 .spectrumscope-wrap {
   width: 100%;
   height: calc(100% - 0.5rem);
@@ -732,7 +732,7 @@ select:disabled {
 /* Inline: square, at `.scope-row`'s full height — `aspect-ratio:1` derives the width from that
    (rather than a fixed pixel size), so the tube's height always agrees with whatever
    `.chart-wrap`'s own `aspect-ratio:720/215` computes, instead of a hardcoded height drifting from
-   the Frequency/Time views' width-driven one and shifting the layout on every chart-view switch. */
+   the Eq/Impulse views' width-driven one and shifting the layout on every chart-view switch. */
 .vectorscope-wrap:not(.fill) {
   height: 100%;
   aspect-ratio: 1;
@@ -763,7 +763,7 @@ select:disabled {
 /* Layers cleared and redrawn every frame instead of accumulating into the phosphor trail — they
    have to live outside it because it composites *additively*, so a constant-brightness redraw would
    stack toward white rather than hold steady (see phosphor.ts).
-   The vectorscope's resting spot and the Monitor pane's peak-cross markers both go above the trail;
+   The vectorscope's resting spot and the Spectrum pane's peak-cross markers both go above the trail;
    the time scope's peak-hold lines go below it instead (no z-index — DOM order puts them over the
    graticule but under the trail's z-index:1), so the beam still reads over the reference line where
    they cross, as it did when both shared a canvas. The peak crosses go above for the opposite
