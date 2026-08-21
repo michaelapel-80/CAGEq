@@ -17,14 +17,26 @@ import type { ScopeData, ScopeEq } from "./Vectorscope";
  *  decoupled from the backend's ~16 ms emission size once a ring buffer is needed for triggering
  *  anyway, so it's exposed in both modes, not just when triggered; there's deliberately no
  *  longer-timescale/envelope mode, this stays a short-timescale instrument.
- *  `trigger`/`triggerFilterHz` are surfaced separately (`trigger` as a quick toolbar toggle, not a
- *  panel slider — it's a mode switch flipped often, same reasoning as the L/R⇄Mix toggle). */
-type Params = { trailTau: number; tail: number; glow: number; beam: number; undistort: boolean; msPerDivIdx: number; trigger: boolean; triggerFilterHz: number };
+ *  `trigger`/`triggerFilterHz` and `mode` (L/R⇄Mix) are surfaced separately, as quick toolbar
+ *  toggles rather than panel sliders — they're mode switches flipped often, not fine-tuning knobs —
+ *  but they're still ordinary `Params` fields underneath, so "Save as default"/"Reset" (the tuning
+ *  panel's own buttons) cover them exactly like everything else. */
+type Params = {
+  trailTau: number;
+  tail: number;
+  glow: number;
+  beam: number;
+  undistort: boolean;
+  msPerDivIdx: number;
+  trigger: boolean;
+  triggerFilterHz: number;
+  mode: "lr" | "mix";
+};
 // Classic 1-2-5 time/div sequence, same convention a real scope's dial steps through. 10 divisions
 // (DIVISIONS) is the standard horizontal graticule count, so total span = ms/div × 10.
 const MS_PER_DIV_STEPS = [0.2, 0.5, 1, 2, 5, 10];
 const DIVISIONS = 10;
-const DEFAULTS: Params = { trailTau: 0.06, tail: 12, glow: 0.8, beam: 3.0, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 80 }; // 2 ms/div × 10 = 20 ms
+const DEFAULTS: Params = { trailTau: 0.06, tail: 12, glow: 0.8, beam: 3.0, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 80, mode: "mix" }; // 2 ms/div × 10 = 20 ms
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
 const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler than the lane centrelines
@@ -162,10 +174,8 @@ export function TimeScope() {
   // L/R (two half-height lanes) vs mixdown (one full-height lane, mono sum) — mixdown trades
   // channel separation for 2x the vertical scale, handy when you just want to see how hot/quiet
   // the signal is rather than compare channels. A quick toggle, not a tuning-panel knob — flipped
-  // often enough to want single-click access.
-  const [mode, setMode] = useState<"lr" | "mix">("mix");
-  const modeRef = useRef(mode);
-  modeRef.current = mode;
+  // often enough to want single-click access; still an ordinary `params.mode` field underneath
+  // (see Params' own doc), so it's saved/reset alongside everything else.
 
   // Width tracks the flex row's leftover space (not square, unlike the vectorscope); height tracks
   // `.chart-wrap`'s own `aspect-ratio:720/215` (App.css) via the same wrapper's rendered box, so
@@ -243,11 +253,11 @@ export function TimeScope() {
     ctx.strokeStyle = `rgba(${ar},${ag},${ab},${GRID_ALPHA})`;
     ctx.lineWidth = Math.max(1, H / REF_SIZE);
     ctx.beginPath();
-    if (mode === "lr") {
+    if (params.mode === "lr") {
       ctx.moveTo(0, H / 2); // lane divider
       ctx.lineTo(W, H / 2);
     }
-    for (const lane of laneLayout(mode, H)) {
+    for (const lane of laneLayout(params.mode, H)) {
       ctx.moveTo(0, lane.cy);
       ctx.lineTo(W, lane.cy);
     }
@@ -266,8 +276,8 @@ export function TimeScope() {
     ctx.fillStyle = `rgba(${ar},${ag},${ab},0.5)`;
     ctx.font = `${Math.round(H * 0.05)}px system-ui, sans-serif`;
     ctx.textBaseline = "middle";
-    for (const lane of laneLayout(mode, H)) if (lane.label) ctx.fillText(lane.label, 6, lane.cy - lane.amp * 0.55);
-  }, [resW, resH, mode]);
+    for (const lane of laneLayout(params.mode, H)) if (lane.label) ctx.fillText(lane.label, 6, lane.cy - lane.amp * 0.55);
+  }, [resW, resH, params.mode]);
 
   // The trace: this frame's beam goes onto a scratch canvas handed to the phosphor accumulator,
   // which owns the decay and the additive composite — same machinery as the vectorscope, see
@@ -313,7 +323,7 @@ export function TimeScope() {
       const dt = Math.min(0.1, (now - last) / 1000);
       last = now;
       const p = paramsRef.current;
-      const mode = modeRef.current;
+      const mode = p.mode;
       const W = cv.width;
       const H = cv.height;
       const lanes = laneLayout(mode, H);
@@ -556,10 +566,10 @@ export function TimeScope() {
           <button
             type="button"
             className="vs-tool vs-tool-text"
-            title={mode === "lr" ? t("scope.toMixTitle") : t("scope.toLrTitle")}
-            onClick={() => setMode((m) => (m === "lr" ? "mix" : "lr"))}
+            title={params.mode === "lr" ? t("scope.toMixTitle") : t("scope.toLrTitle")}
+            onClick={() => set("mode", params.mode === "lr" ? "mix" : "lr")}
           >
-            {mode === "lr" ? t("scope.modeLr") : t("scope.modeMix")}
+            {params.mode === "lr" ? t("scope.modeLr") : t("scope.modeMix")}
           </button>
           <button
             type="button"
