@@ -65,6 +65,35 @@ const TAIL_KNEE = 0.3;
  *  guaranteeing termination was itself eating the tail it was meant to let exist. */
 const TAIL_FLOOR_PER_SEC = 0.0015;
 
+/** Reference frame rate the "dose" (this frame's contribution to the accumulator) is normalized
+ *  against — see `commit()`'s `dt`-scaling of it below for why this exists at all. 240, not a
+ *  rounder 60, because it's the refresh rate of the machine every glow/tau default in these views
+ *  was actually tuned on this session — anchoring here means that machine's look is EXACTLY
+ *  unchanged by this fix (dt/DOSE_REF_DT == 1 there), and it's every *other* refresh rate that gets
+ *  compensated to match it, rather than the reverse.
+ *
+ *  THE BUG this fixes: decay is correctly time-integrated (`keep = exp(-dt/tau)`, below, scales
+ *  properly with `dt`), but the dose ADDED each commit was a flat per-frame amount independent of
+ *  `dt` — so its contribution *per second* scaled with how often `commit()` gets called, i.e. with
+ *  the display's refresh rate. Reported live: the Spectrum view read much darker on a 60Hz machine
+ *  than on a 240Hz one at the identical `glow` setting, and turning `glow` up to its 1.0 maximum on
+ *  the slower machine still couldn't match it. The other three views (TimeScope/Vectorscope/
+ *  EqChart's backdrop) share this same accumulator and are equally affected in principle, but their
+ *  much higher default `glow` already pushes their steady-state brightness past the accumulator's
+ *  1.0 clamp on both machines, so the same underlying refresh-rate sensitivity has no visible effect
+ *  there — Spectrum's much lower default (tuned to sit well below the clamp, for headroom on real
+ *  peaks) is the one view where it shows.
+ *
+ *  The fix: scale the dose by `dt / DOSE_REF_DT` before adding it. At steady state (dose added every
+ *  `dt` seconds, decaying at `exp(-dt/tau)` between additions), the accumulated brightness is then
+ *  `(glow * dt/DOSE_REF_DT) / (1 - exp(-dt/tau))` — for `dt` small relative to `tau` (true here at
+ *  any plausible refresh rate), that's within a couple percent of `glow * tau / DOSE_REF_DT`,
+ *  independent of `dt` — i.e. independent of refresh rate. Verified numerically before landing:
+ *  at tau=0.15s, steady-state brightness units at glow=0.15 go from 5.48 (240Hz) vs. 1.43 (60Hz) —
+ *  a 3.8x gap — under the OLD fixed-dose behaviour, to 5.48 vs. 5.71 under this fix. */
+const DOSE_REF_FPS = 240;
+const DOSE_REF_DT = 1 / DOSE_REF_FPS;
+
 /** How this frame's trace lands on the decayed history. `add` (default) is the scopes' additive
  *  beam; `over` is the plain over-operator for backdrop-style layers that must not bloom. */
 export type PhosphorBlend = "add" | "over";
@@ -102,7 +131,7 @@ void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
 // longer, which raises the apparent floor and forces glow up before the faint end reads against it.
 // The point of this module is a trail that reaches zero, not a different look.
 const FS_ACCUM = `precision highp float; varying vec2 vUv;
-uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uOver;
+uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uOver, uDose;
 void main(){
   vec4 prev = texture2D(uPrev, vUv);
   // Brightness-dependent decay rate: bright content falls at uKeep, faint content at the slower
@@ -117,6 +146,11 @@ void main(){
   // This is the same idea as the "drain" that flickered in the 8-bit attempt — harmless here
   // because half-float has no quantisation left to dither against near zero.
   vec4 cur = texture2D(uTrace, vUv);
+  // uDose (dt/DOSE_REF_DT, set in commit()) makes this frame's contribution frame-rate-independent
+  // — see DOSE_REF_DT's own doc above for why: without it, a dose added once every dt seconds
+  // contributes proportionally MORE per second on a higher-refresh display, purely because commit()
+  // gets called more often, not because anything drawn is actually brighter.
+  cur.a *= uDose;
   cur.rgb *= cur.a;
   vec4 decayed = max(prev * k - uFloor, 0.0);
   // "add" stacks toward saturation and has no hue ceiling — the beam overdraw the scopes want.
@@ -189,6 +223,7 @@ function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
   const uKnee = gl.getUniformLocation(accum, "uKnee");
   const uFloor = gl.getUniformLocation(accum, "uFloor");
   const uOver = gl.getUniformLocation(accum, "uOver");
+  const uDose = gl.getUniformLocation(accum, "uDose");
   const uPrev = gl.getUniformLocation(accum, "uPrev");
   const uTrace = gl.getUniformLocation(accum, "uTrace");
   const uTex = gl.getUniformLocation(blit, "uTex");
@@ -292,6 +327,7 @@ function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
       gl.uniform1f(uKnee, TAIL_KNEE);
       gl.uniform1f(uFloor, TAIL_FLOOR_PER_SEC * dt);
       gl.uniform1f(uOver, blend === "over" ? 1 : 0);
+      gl.uniform1f(uDose, dt / DOSE_REF_DT);
       gl.uniform1i(uPrev, 0);
       gl.uniform1i(uTrace, 1);
       gl.activeTexture(gl.TEXTURE0);
@@ -372,7 +408,15 @@ function create2d(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
       ctx.fillStyle = `rgba(0,0,0,${1 - Math.exp(-dt / tau)})`;
       ctx.fillRect(0, 0, W, H);
       ctx.globalCompositeOperation = blend === "over" ? "source-over" : "lighter";
-      ctx.drawImage(scratch.cv, 0, 0);
+      // Same dt-normalized dose as the GL path (see DOSE_REF_DT's doc) — `globalAlpha` can't exceed
+      // 1 (the spec ignores an out-of-range assignment rather than clamping it), so a dose scale
+      // above 1 — any refresh rate below DOSE_REF_FPS — is spread across that many additive draws of
+      // the same frame instead of one draw at an alpha it can't express.
+      const doseScale = dt / DOSE_REF_DT;
+      const passes = Math.max(1, Math.ceil(doseScale));
+      ctx.globalAlpha = doseScale / passes;
+      for (let i = 0; i < passes; i++) ctx.drawImage(scratch.cv, 0, 0);
+      ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = "source-over";
     },
     dispose() {},

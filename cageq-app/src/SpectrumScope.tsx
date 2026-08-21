@@ -446,6 +446,13 @@ export function SpectrumScope() {
     if (!cv || !markCv || !markCtx) return;
     const phos = createPhosphor(cv);
     if (!phos) return;
+    // Reported live: this view specifically (not TimeScope/Vectorscope) reads much darker on some
+    // machines. `precise` (see phosphor.ts) was built for exactly this — silently falling back from
+    // the half-float GPU accumulator to the old 8-bit one on a GPU that can't render half-float, or
+    // if the WebGL context request itself fails outright (e.g. a machine-dependent context-count
+    // ceiling, with four views each opening their own). Logged once per mount so it's checkable via
+    // DevTools on an affected machine without needing to reproduce it here first.
+    if (!phos.precise) console.warn("[SpectrumScope] phosphor fell back to the 8-bit canvas accumulator (no half-float GPU support)");
     const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
 
     let raf = 0;

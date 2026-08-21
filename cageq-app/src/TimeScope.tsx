@@ -278,6 +278,10 @@ export function TimeScope() {
     if (!cv || !peakCv || !peakCtx) return;
     const phos = createPhosphor(cv);
     if (!phos) return;
+    // See SpectrumScope.tsx's identical log — diagnosing a machine-specific "one view reads darker
+    // than the others" report by checking whether any view silently fell back off the GPU
+    // half-float accumulator (phosphor.ts's `precise`).
+    if (!phos.precise) console.warn("[TimeScope] phosphor fell back to the 8-bit canvas accumulator (no half-float GPU support)");
     const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
 
     let raf = 0;
