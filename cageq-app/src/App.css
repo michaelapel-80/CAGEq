@@ -452,11 +452,23 @@ select:disabled {
   box-shadow: 0 0 0 3px color-mix(in srgb, #16a34a 25%, transparent);
 }
 .meter {
+  position: relative; /* anchors the tuning gear (.vs-tools) + panel (.meter-tuning) */
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
   font-variant-numeric: tabular-nums;
+}
+/* The beam's tuning panel (shared .vs-tuning chrome — see Vectorscope's own doc on that class).
+   Unlike the scopes, there's no empty gutter beside this narrow column to park it in, and covering
+   the bars themselves while tuning them would defeat the point — so it parks entirely to the LEFT
+   of the meter column instead (over the chart, not what these sliders affect), anchored by its own
+   right edge so it never overhangs the window's right edge regardless of its width. */
+.meter-tuning {
+  top: 8px;
+  left: auto;
+  right: 100%;
+  margin-right: 10px;
 }
 .meter-idle {
   opacity: 0.65;

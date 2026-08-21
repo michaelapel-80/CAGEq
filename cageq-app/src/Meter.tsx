@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { meterStream, scopeStream, type MeterData } from "./streams";
 import type { ScopeData } from "./Vectorscope";
 import { createPhosphor } from "./phosphor";
+import { useTunableParams } from "./useTunableParams";
 
 /**
  * §5.3c post-EQ output meter, laid out vertically to sit beside the chart (no vertical growth, so
@@ -39,15 +40,20 @@ const BAR_TOP_GAP = 14;
 // header for the full history (three revisions: wrong comparison, no connected beam, velocity
 // measured in the wrong domain, a tau/glow mismatch) and for the direct verification that the
 // initially-stripy look was a synthetic-test-tone artifact (a single perfectly periodic wave
-// revisiting the same discrete heights every cycle), not a flaw in this mechanism. Deliberately NOT
-// shared with Vectorscope's own tuned Params: this panel runs at audio-sample rate against a much
-// denser trace than Vectorscope's 2D per-hop batches, so a tau/glow calibrated for one badly
-// miscalibrates the other. First-pass values — expect retuning against real content.
-const BEAM_TAU = 0.06;
-const BEAM_TAIL = 12;
-const BEAM_GLOW = 0.06;
-const BEAM_FOCUS = 8;
-const BEAM_WIDTH_FRAC = 0.85; // fraction of the bar's own (backing-store) width the stroke fills
+// revisiting the same discrete heights every cycle), not a flaw in this mechanism.
+//
+// Live-tunable (on-screen panel, same `useTunableParams` persistence the scopes use) rather than
+// hardcoded: deliberately NOT shared with Vectorscope's own tuned Params/defaults even though it's
+// the identical mechanism — this panel runs at audio-sample rate against a much denser trace than
+// Vectorscope's 2D per-hop batches, so a tau/glow calibrated for one badly miscalibrates the other.
+type Params = {
+  trailTau: number; // phosphor decay time constant (s)
+  tail: number; // multiplies trailTau for *faint* content only — the long afterglow (see phosphor.ts)
+  glow: number; // beam brightness at full (slow-beam) intensity; velocity glow dims it from here
+  focus: number; // velocity-glow reference — see Vectorscope's own `focus` doc
+  beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
+};
+const DEFAULTS: Params = { trailTau: 0.06, tail: 12, glow: 0.06, focus: 8, beamWidth: 0.85 };
 const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05;
 const VEL_REF_RATE = 48000;
@@ -90,6 +96,10 @@ export function Meter({
   const [err, setErr] = useState<string | null>(null);
   const lastNums = useRef(0);
   const lastRate = useRef<number | null>(null);
+  const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-meter-params", DEFAULTS);
+  const [tuning, setTuning] = useState(false);
+  const paramsRef = useRef(params);
+  paramsRef.current = params;
 
   useEffect(() => {
     lastRate.current = null; // a new session may report a different (or the same) rate — re-emit it
@@ -184,6 +194,7 @@ export function Meter({
       const now = performance.now();
       const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
       last = now;
+      const p = paramsRef.current;
 
       const ctx = phos.begin();
       const s = scopeRef.current;
@@ -192,7 +203,7 @@ export function Meter({
         const W = cv.width;
         const cx = W / 2;
         const rate = s.rate > 0 ? s.rate : 48000;
-        const kRef = Math.max(0.001, BEAM_FOCUS * (VEL_REF_RATE / rate));
+        const kRef = Math.max(0.001, p.focus * (VEL_REF_RATE / rate));
         const buckets: Path2D[] = [];
         for (let b = 0; b < VEL_BUCKETS; b++) buckets.push(new Path2D());
         const xy = s.xy;
@@ -215,7 +226,7 @@ export function Meter({
           prevLin = lin;
         }
         ctx.globalCompositeOperation = "lighter";
-        ctx.lineWidth = Math.max(1, W * BEAM_WIDTH_FRAC);
+        ctx.lineWidth = Math.max(1, W * p.beamWidth);
         // Flat (not round) caps: consecutive samples landing in different velocity buckets are
         // stroked separately, and round caps at their shared point would overlap and add into a
         // bright dot at every such sample — see Vectorscope's identical note.
@@ -223,7 +234,7 @@ export function Meter({
         // Beam blanking: brightness ∝ velocity factor, reaching zero at the fastest bucket (a beam
         // moving too fast to expose the phosphor draws nothing) — skip bucket 0.
         for (let b = 1; b < VEL_BUCKETS; b++) {
-          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(BEAM_GLOW * b) / (VEL_BUCKETS - 1)})`;
+          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * b) / (VEL_BUCKETS - 1)})`;
           ctx.stroke(buckets[b]);
         }
         ctx.globalCompositeOperation = "source-over";
@@ -231,7 +242,7 @@ export function Meter({
         drawn = s; // idle: draw nothing this frame — the accumulator's own decay fades the trail out
       }
 
-      phos.commit(dt, BEAM_TAU, BEAM_TAIL);
+      phos.commit(dt, p.trailTau, p.tail);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -248,8 +259,61 @@ export function Meter({
 
   const num = (v: number | undefined) => (showNums && v != null ? fmt(v) : "—");
 
+  const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
+  const CONTROLS: { key: keyof Params; label: string; min: number; max: number; step: number }[] = [
+    { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
+    { key: "tail", label: t("scope.tail"), min: 1, max: 24, step: 1 },
+    { key: "glow", label: t("scope.glow"), min: 0.02, max: 1, step: 0.02 },
+    { key: "focus", label: t("scope.focus"), min: 1, max: 24, step: 0.5 },
+    { key: "beamWidth", label: t("scope.beam"), min: 0.1, max: 1, step: 0.05 },
+  ];
+
   return (
     <div className={`meter${live ? "" : " meter-idle"}`}>
+      <div className="vs-tools">
+        <button
+          type="button"
+          className={`vs-tool${tuning ? " on" : ""}`}
+          title={t("scope.tune")}
+          aria-pressed={tuning}
+          onClick={() => setTuning((v) => !v)}
+        >
+          ⚙
+        </button>
+      </div>
+      {tuning && (
+        <div className="vs-tuning meter-tuning">
+          <div className="vs-tune-head">
+            <span className="vs-tune-title">{t("scope.tune")}</span>
+            <button type="button" className="vs-tune-reset" onClick={saveAsDefault}>
+              {t("scope.saveDefault")}
+            </button>
+            <button type="button" className="vs-tune-reset" onClick={resetToFactory}>
+              {t("scope.reset")}
+            </button>
+            <button type="button" className="vs-tune-close" title={t("scope.close")} aria-label={t("scope.close")} onClick={() => setTuning(false)}>
+              ×
+            </button>
+          </div>
+          {CONTROLS.map((cc) => {
+            const dp = cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : 2;
+            return (
+              <label key={cc.key} className="vs-tune-row">
+                <span className="vs-tune-label">{cc.label}</span>
+                <input
+                  type="range"
+                  min={cc.min}
+                  max={cc.max}
+                  step={cc.step}
+                  value={params[cc.key]}
+                  onChange={(e) => set(cc.key, Number(e.currentTarget.value))}
+                />
+                <b>{params[cc.key].toFixed(dp)}</b>
+              </label>
+            );
+          })}
+        </div>
+      )}
       <div
         className="meter-bars"
         style={
