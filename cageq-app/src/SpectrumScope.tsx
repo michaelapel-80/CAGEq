@@ -5,6 +5,7 @@ import { composedCurveDb } from "./biquad";
 import { fcHue } from "./fcColor";
 import { spectrumStream } from "./streams";
 import { createPhosphor } from "./phosphor";
+import { useTunableParams } from "./useTunableParams";
 import type { SpectrumData } from "./EqChart";
 import type { ScopeEq } from "./Vectorscope";
 
@@ -326,7 +327,7 @@ export function SpectrumScope() {
   const curRef = useRef<SpectrumData | null>(null);
   const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0 });
   const corrCacheRef = useRef<CorrCache | null>(null);
-  const [params, setParams] = useState<Params>(DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-spectrum-params", DEFAULTS);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -668,7 +669,10 @@ export function SpectrumScope() {
           <div className="vs-tuning">
             <div className="vs-tune-head">
               <span className="vs-tune-title">{t("scope.tune")}</span>
-              <button type="button" className="vs-tune-reset" onClick={() => setParams(DEFAULTS)}>
+              <button type="button" className="vs-tune-reset" onClick={saveAsDefault}>
+                {t("scope.saveDefault")}
+              </button>
+              <button type="button" className="vs-tune-reset" onClick={resetToFactory}>
                 {t("scope.reset")}
               </button>
               <button type="button" className="vs-tune-close" title={t("scope.close")} aria-label={t("scope.close")} onClick={() => setTuning(false)}>

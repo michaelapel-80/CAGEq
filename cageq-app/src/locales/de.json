@@ -147,6 +147,7 @@
     "msPerDiv": "ms/Div",
     "msPerDivHint": "{{total}} ms über die volle Breite (10 Teile)",
     "trigFilter": "Trigger-Filter",
+    "saveDefault": "Als Standard speichern",
     "reset": "Reset"
   },
 

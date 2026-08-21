@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { type Band, type BiquadCoeffs, type BiquadState, inverseBiquadCoeffs, zeroState, stepBiquad } from "./biquad";
 import { scopeStream } from "./streams";
 import { createPhosphor } from "./phosphor";
+import { useTunableParams } from "./useTunableParams";
 import type { ScopeData, ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters (see Vectorscope's identical rationale — a live panel beats a
@@ -154,7 +155,7 @@ export function TimeScope() {
   // toward white instead of holding steady (see phosphor.ts's closing note).
   const peakRef = useRef<HTMLCanvasElement>(null);
   const scopeRef = useRef<ScopeData | null>(null);
-  const [params, setParams] = useState<Params>(DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-timescope-params", DEFAULTS);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -583,7 +584,10 @@ export function TimeScope() {
           <div className="vs-tuning">
             <div className="vs-tune-head">
               <span className="vs-tune-title">{t("scope.tune")}</span>
-              <button type="button" className="vs-tune-reset" onClick={() => setParams(DEFAULTS)}>
+              <button type="button" className="vs-tune-reset" onClick={saveAsDefault}>
+                {t("scope.saveDefault")}
+              </button>
+              <button type="button" className="vs-tune-reset" onClick={resetToFactory}>
                 {t("scope.reset")}
               </button>
               <button type="button" className="vs-tune-close" title={t("scope.close")} aria-label={t("scope.close")} onClick={() => setTuning(false)}>

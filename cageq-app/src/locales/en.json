@@ -147,6 +147,7 @@
     "msPerDiv": "ms/div",
     "msPerDivHint": "{{total}} ms across the full width (10 divisions)",
     "trigFilter": "Trig filter",
+    "saveDefault": "Save as default",
     "reset": "Reset"
   },
 

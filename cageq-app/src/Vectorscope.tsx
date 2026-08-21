@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { type Band, type BiquadCoeffs, type BiquadState, inverseBiquadCoeffs, zeroState, stepBiquad } from "./biquad";
 import { scopeStream } from "./streams";
 import { createPhosphor } from "./phosphor";
+import { useTunableParams } from "./useTunableParams";
 
 /** A stereo vectorscope window from the loopback (see cageq-monitor `ScopeUpdate`): interleaved
  *  `l0, r0, l1, r1, …` sample pairs (≈ -1..1) in capture order, a signal flag, and the mix rate. */
@@ -96,7 +97,7 @@ export function Vectorscope({
   // Latest payload, written by the listener and read by the rAF loop — a ref, not state, so the
   // 60 fps stream drives the imperative canvas without ever re-rendering React.
   const scopeRef = useRef<ScopeData | null>(null);
-  const [params, setParams] = useState<Params>(DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-vectorscope-params", DEFAULTS);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -478,7 +479,10 @@ export function Vectorscope({
           <div className="vs-tuning">
             <div className="vs-tune-head">
               <span className="vs-tune-title">{t("scope.tune")}</span>
-              <button type="button" className="vs-tune-reset" onClick={() => setParams(DEFAULTS)}>
+              <button type="button" className="vs-tune-reset" onClick={saveAsDefault}>
+                {t("scope.saveDefault")}
+              </button>
+              <button type="button" className="vs-tune-reset" onClick={resetToFactory}>
                 {t("scope.reset")}
               </button>
               <button type="button" className="vs-tune-close" title={t("scope.close")} aria-label={t("scope.close")} onClick={() => setTuning(false)}>
