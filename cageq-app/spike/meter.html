@@ -1,0 +1,599 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>CAGEq spike — meter renderer v3</title>
+<!--
+  SPIKE — a measurement harness, not part of the app. Nothing imports it, and it sits outside
+  public/ deliberately (see trail.html's identical note): Vite's dev server still serves the
+  project root, so `tauri dev` reaches it at http://localhost:1420/spike/meter.html, but
+  `vite build` only bundles the index.html entry plus public/, so it never ships. Open it from the
+  app window's devtools: `location.href = "/spike/meter.html"`, navigate back the same way.
+
+  v3 — v2 fed the raw signal to the accumulator (right call), but as INDEPENDENT per-sample dots,
+  each an equal fixed dose regardless of context: reported live as "stripey" (discrete dots leave
+  gaps a human eye reads as banding, where a real beam would sweep continuously between them) and
+  "saturates too fast" (a sample just passing THROUGH a height on its way elsewhere got the exact
+  same dose as one genuinely dwelling there, so anywhere the signal transits at all — which is most
+  heights, for anything with real dynamics — piles up doses fast regardless of true dwell time).
+
+  Corrected: "we basically have the exact implementation already in the vectorscope, just instead
+  of 2D we'd be 1D with a very thick line" — right. Vectorscope's beam is a CONNECTED path between
+  consecutive samples (no gaps to read as stripes), with per-segment brightness set by VELOCITY —
+  `f = kRef/dist`, floored and bucketed — so a slow-moving/dwelling segment reads bright and a fast
+  sweep-through reads dim-to-blank (bucket 0 is skipped entirely: "a beam moving too fast to expose
+  the phosphor draws nothing" — see Vectorscope.tsx's own comment). That velocity term is exactly
+  the missing "how long did it actually linger here" signal v2 didn't have. This version ports that
+  mechanism verbatim (same VEL_BUCKETS/VEL_FLOOR/VEL_REF_RATE constants and bucketing formula),
+  collapsed to 1D: X is held constant (a thick stroke, `beam width` below, fills the tube's width on
+  its own — there's no 2nd axis to spend it on), only Y (the sample's instantaneous dB height)
+  varies for DRAWING.
+
+  Two more calibration bugs found and fixed while actually driving this with synthetic frames
+  (manually, not via the real WebView2 — see the VERDICT note below on why that's not the same
+  thing as looking at it):
+   1. Velocity was first measured in dB-mapped pixel space, matching where the dose gets DRAWN —
+      wrong, because dB compresses/distorts velocity (a fast LINEAR zero-crossing becomes an even
+      FASTER dB swing, log diverging near zero), so nearly everything measured as "slow" and the
+      bucketing barely differentiated anything. Fixed: velocity is measured in the signal's own
+      natural LINEAR amplitude space (matching Vectorscope's real samples, which are never dB-
+      mapped), only converted to dB afterward to decide WHERE the dose lands.
+   2. Even with that fixed, everything still read fully saturated. Cause: this panel is fed at
+      AUDIO SAMPLE rate (hundreds of Hz of repetition for a steady tone), while the shared `tau`
+      slider defaulted to the METER's own 1.2s (tuned for its much slower ~20Hz per-hop cadence) —
+      at that tau, even a correctly-dim bucket gets re-hit often enough to blow past the 1.0 clamp
+      regardless of bucketing. Fixed: this panel gets its OWN tau, defaulting to Vectorscope's real
+      value (~0.06s) — its decay was already tuned for exactly this repetition rate. Its default
+      `glow` also needed lowering well below Vectorscope's own 2D default (0.6 saturated
+      everywhere here; ~0.06 is where the intended shape — bright at a hot signal's ceiling, dim
+      toward -40dB — actually shows) — a real port would need its own calibration pass against
+      real content, not Vectorscope's numbers carried over unexamined.
+
+  Still doesn't import the shipped phosphor.ts or Vectorscope.tsx (see trail.html's identical
+  reasoning) — both the GL accumulator (FS_ACCUM, verbatim, including the tail-knee blend and the
+  dt-normalized dose fix) and the beam-bucketing logic are faithfully ported rather than imported,
+  for an isolated one-off comparison rather than pulling in either module's full API.
+
+  LEFT panel: today's shipped mechanism, ported faithfully — cageq-monitor's exact per-hop formula
+  (block RMS/peak → `cover_db`, PEAK_BLEND=1.0 so it's actually just the block's own peak in
+  practice, not much of a "blend") driving the 64-segment max-hold-with-decay histogram, rendered
+  as the identical CSS `linear-gradient` Meter.tsx itself builds.
+  RIGHT panel: the raw mono signal as a connected, velocity-bucketed thick beam (Vectorscope's own
+  mechanism, 1D) into the real GL phosphor accumulator — no per-hop aggregation, no independent
+  dots, reaches it at all.
+
+  VERDICT: verified programmatically (driving the render loop manually and reading back the
+  displayed canvas — see git history for the exact method) that all five patterns now behave
+  sensibly: "hot" reads bright near 0dBFS and dim toward -40dB; "dynamic" visibly tracks its slow
+  tremolo, shifting which end is bright as the envelope moves and decaying the stale end away;
+  "silence" reads flat-dark. Not yet actually looked at in the real WebView2 — do that before
+  trusting this further, per trail.html's own history of this exact category of effect behaving
+  differently there than anywhere else.
+
+  Follow-up: "hot" still read visibly stripy even after both calibration fixes above — reported
+  live as "seems right but is stripy — drawing from your synthetic test data and not inherent to
+  the rendering (the vectorscope shows no such artifacts)". Checked by adding "hot_real" (same
+  brickwalled character, but a second non-harmonic partial + a touch of dither noise so the
+  waveform never exactly repeats sample-for-sample) and comparing settled column profiles (several
+  decay cycles in, not a 1-2 frame snapshot — that's just raw per-block noise and isn't the
+  symptom being investigated). "hot" produces real non-monotonic reversals (a row reading BRIGHTER
+  than a neighbour that's physically closer to the true peak — e.g. one profile ran
+  ...,94,95,114,74,... climbing back up before falling again) and hard multi-row plateaus, at every
+  sample size tried (6/20/40/90 frames). "hot_real" produced zero such reversals at every one of
+  those sample sizes — a smooth, monotonic decay once past its saturated top region. Confirms the
+  hypothesis: the banding comes from testing against a single perfectly-periodic tone, which
+  revisits the exact same discrete sample/height values every cycle at a fixed sample rate, so a
+  few quantized bins get systematically over/under-hit relative to their physical neighbours.
+  Breaking exact periodicity removes it, matching Vectorscope's own real-audio experience — not a
+  flaw in the rendering/bucketing mechanism itself.
+-->
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0e0d; color: #d8e0dc;
+         font: 12px/1.5 ui-monospace, Consolas, monospace; }
+  #wrap { display: flex; gap: 24px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
+  #bars { display: flex; gap: 24px; }
+  .col { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .col h3 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+            text-transform: uppercase; color: #7fd8a8; text-align: center; max-width: 13em; }
+  .tube { position: relative; width: 34px; height: 420px; border-radius: 4px;
+          background: #070a09; box-shadow: inset 0 0 16px -6px #000; overflow: hidden; }
+  .tube canvas, .tube .fill { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .fill { transform: scaleY(-1); } /* bottom-up fill, matching Meter.tsx's own bottom-anchored bar */
+  .ticks { position: absolute; inset: 0; pointer-events: none; }
+  .ticks span { position: absolute; left: 0; right: 0; border-top: 1px solid rgba(255,255,255,0.14); }
+  .ticks b { position: absolute; left: 100%; margin-left: 4px; font-weight: 400; opacity: 0.55;
+             transform: translateY(-50%); white-space: nowrap; }
+  .mark { position: absolute; left: -2px; right: -2px; height: 2px; border-radius: 1px; }
+  .mark-peak { background: #e6a23c; }
+  .mark-rms { background: rgba(216, 224, 220, 0.75); }
+  #panel { min-width: 320px; display: flex; flex-direction: column; gap: 10px; }
+  fieldset { border: 1px solid #2a3330; border-radius: 6px; margin: 0; padding: 8px 10px 10px; }
+  legend { color: #7fd8a8; letter-spacing: .08em; text-transform: uppercase; font-size: 10px; }
+  label { display: grid; grid-template-columns: 9em 1fr 4em; gap: 8px; align-items: center; }
+  label b { font-weight: 600; text-align: right; color: #9fb0a9; }
+  select, button, input[type="range"] { background: #141a18; color: #d8e0dc; border: 1px solid #2f3a36;
+                   border-radius: 5px; padding: 4px 8px; font: inherit; }
+  button { cursor: pointer; }
+  button:hover { border-color: #7fd8a8; color: #7fd8a8; }
+  #stats { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  #stats span:nth-child(odd) { color: #7f8f89; }
+  #note { color: #9fb0a9; max-width: 34em; }
+</style>
+
+<div id="wrap">
+  <div id="bars">
+    <div class="col">
+      <h3>Current — per-hop coverage → CSS gradient</h3>
+      <div class="tube">
+        <div id="fillCurrent" class="fill"></div>
+        <div class="ticks" id="ticksA"></div>
+        <i id="peakA" class="mark mark-peak"></i>
+        <i id="rmsA" class="mark mark-rms"></i>
+      </div>
+    </div>
+    <div class="col">
+      <h3>Spike — Vectorscope's beam, collapsed to 1D</h3>
+      <div class="tube">
+        <canvas id="glCanvas" width="34" height="420"></canvas>
+        <div class="ticks" id="ticksB"></div>
+        <i id="peakB" class="mark mark-peak"></i>
+        <i id="rmsB" class="mark mark-rms"></i>
+      </div>
+    </div>
+  </div>
+
+  <div id="panel">
+    <fieldset>
+      <legend>Signal (raw mono, generated per frame)</legend>
+      <label>pattern
+        <select id="pattern">
+          <option value="hot">hot / limited master (pure tone)</option>
+          <option value="hot_real">hot / limited master (+ 2nd partial, dither)</option>
+          <option value="dynamic">dynamic (tremolo)</option>
+          <option value="steady">steady sine, -12 dB</option>
+          <option value="silence">silence</option>
+        </select><b></b>
+      </label>
+      <label>block peak <span></span><b id="peakV">—</b></label>
+      <label>block RMS <span></span><b id="rmsV">—</b></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Left panel (today's shipped mechanism)</legend>
+      <label>decay tau (s) <input id="tau" type="range" min="0.1" max="3" step="0.05" value="1.2" /><b id="tauV"></b></label>
+      <label>glow span (dB) <input id="glowSpan" type="range" min="0.5" max="8" step="0.5" value="3" /><b id="glowSpanV"></b></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Right panel (Vectorscope's own beam model, collapsed to 1D)</legend>
+      <!-- Deliberately its OWN tau, not the left panel's: this panel is fed at AUDIO SAMPLE rate
+           (thousands of Hz), not the left's per-hop rate (tens of Hz) - at the meter's own 1.2s
+           decay, even a dim velocity bucket gets re-hit ~270 times per decay window at a 220Hz
+           test tone, which saturates regardless of how well the bucketing differentiates. A
+           shared "fair" tau turned out not to be fair at all - the two mechanisms have genuinely
+           different natural timescales, and Vectorscope's own default (~0.05-0.08s) exists exactly
+           because ITS input is audio-sample-rate too. Defaulting to that, not the left's 1.2s. -->
+      <label>decay tau (s) <input id="beamTau" type="range" min="0.02" max="0.6" step="0.01" value="0.06" /><b id="beamTauV"></b></label>
+      <label>tail <input id="tail" type="range" min="1" max="24" step="1" value="12" /><b id="tailV"></b></label>
+      <!-- Vectorscope's own default (0.6) saturated everywhere here regardless of bucketing —
+           400 segments/frame at audio-sample rate is a much denser dose stream than Vectorscope's
+           2D per-hop path, so even a correctly-dim bucket still oversaturates at that glow. 0.05
+           (the slider's own floor) is where the intended shape — bright near a hot signal's
+           ceiling, dim toward -40dB — actually shows. A real port would need this recalibrated for
+           its own real content, not carried over from Vectorscope's number unexamined. -->
+      <label>glow <input id="beamGlow" type="range" min="0.02" max="1" step="0.02" value="0.06" /><b id="beamGlowV"></b></label>
+      <label>focus <input id="focus" type="range" min="1" max="24" step="0.5" value="8" /><b id="focusV"></b></label>
+      <label>beam width (frac) <input id="beamWidth" type="range" min="0.1" max="1" step="0.05" value="0.85" /><b id="beamWidthV"></b></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>Measure</legend>
+      <div id="stats">
+        <span>fps</span><span id="fps">—</span>
+        <span>GL accumulator</span><span id="glStatus">—</span>
+      </div>
+    </fieldset>
+
+    <p id="note">
+      Right panel connects each frame's raw samples into one continuous beam (Vectorscope's own
+      mechanism, collapsed to 1D — see the file header), bucketed by velocity: dwelling near a
+      height reads bright, sweeping past it reads dim-to-blank. A hot/limited master should glow
+      near the top without the gappy/stripey look v2 had; a dynamic signal should spread more
+      evenly, still without banding. Peak/RMS ticks are identical on both panels — same
+      PEAK_HOLD/RELEASE/RMS_TAU as cageq-monitor.
+    </p>
+  </div>
+</div>
+
+<script type="module">
+// ---- shared scale ----------------------------------------------------------------------------
+const BAR_MIN_DB = -40;
+const DB_FLOOR = -120;
+const N_TICKS = [0, -10, -20, -30, -40];
+for (const el of [document.getElementById("ticksA"), document.getElementById("ticksB")]) {
+  for (const db of N_TICKS) {
+    const pct = ((db - BAR_MIN_DB) / -BAR_MIN_DB) * 100;
+    const s = document.createElement("span");
+    s.style.bottom = `${pct}%`;
+    if (el.id === "ticksB") { const b = document.createElement("b"); b.textContent = String(db); s.appendChild(b); }
+    el.appendChild(s);
+  }
+}
+const pctOf = (db) => Math.max(0, Math.min(100, ((db - BAR_MIN_DB) / -BAR_MIN_DB) * 100));
+const markStyle = (db) => `bottom: clamp(0px, ${pctOf(db)}%, calc(100% - 2px))`;
+const toDb = (lin) => (lin > 0 ? Math.max(DB_FLOOR, 20 * Math.log10(lin)) : DB_FLOOR);
+
+// ---- raw synthetic mono signal, continuous across frames (real phase state, not per-frame noise) --
+const SAMPLE_RATE = 48000;
+const BLOCK_SAMPLES = 400; // a slice of "this frame's" audio — not sample-rate-accurate, just enough for a real distribution
+let phase = 0;
+let tremPhase = 0;
+let rngState = 0x2545_f491; // xorshift dither source for "hot_real" — no rand dependency needed
+function genBlock(pattern) {
+  const out = new Float32Array(BLOCK_SAMPLES);
+  const f0 = 220; // arbitrary tone frequency, not the point of this spike
+  const step = (2 * Math.PI * f0) / SAMPLE_RATE;
+  for (let i = 0; i < BLOCK_SAMPLES; i++) {
+    let s;
+    switch (pattern) {
+      case "silence":
+        s = 0;
+        break;
+      case "steady":
+        s = 0.25 * Math.sin(phase); // ~-12 dBFS undistorted sine
+        break;
+      case "dynamic": {
+        // Slow tremolo (~0.3Hz) sweeping amplitude from near-silent to close to full scale, so
+        // energy visits a WIDE range of heights over time rather than concentrating at one.
+        const trem = 0.5 + 0.49 * Math.sin(tremPhase);
+        s = trem * Math.sin(phase);
+        tremPhase += (2 * Math.PI * 0.3) / SAMPLE_RATE;
+        break;
+      }
+      case "hot":
+      default: {
+        // Heavily soft-clipped (tanh) and driven hard, so most samples pin near +/-1 — the
+        // "brickwalled master" case: a real hot mix spends most of its time at/near the ceiling.
+        s = Math.tanh(2.6 * Math.sin(phase));
+        break;
+      }
+      case "hot_real": {
+        // Same idea as "hot", but with the single-pure-tone artificiality broken up: a second,
+        // non-harmonically-related partial (irrational-ish frequency ratio, so the combined
+        // waveform never exactly repeats sample-for-sample the way one pure tone does) plus a
+        // touch of noise (every real mastered signal has SOME dither/floor noise; this has none
+        // at all otherwise). Reported live: does the "stripy" look come from the RENDERING, or
+        // from testing it against a signal far too clean/perfectly-periodic for anything real to
+        // look like? This is the direct check — if the banding is gone here, it was the test
+        // signal, not the mechanism.
+        rngState ^= rngState << 13;
+        rngState ^= rngState >>> 17;
+        rngState ^= rngState << 5;
+        const noise = ((rngState >>> 0) / 4294967295 - 0.5) * 0.03;
+        const combined = Math.sin(phase) * 0.8 + Math.sin(phase * 1.41421356) * 0.35 + noise;
+        s = Math.tanh(2.2 * combined);
+        break;
+      }
+    }
+    out[i] = s;
+    phase += step;
+    if (phase > 2 * Math.PI) phase -= 2 * Math.PI;
+  }
+  return out;
+}
+
+// ---- shared peak/RMS ballistics, identical formula to cageq-monitor --------------------------
+const PEAK_RELEASE_DB_PER_SEC = 20;
+const PEAK_HOLD_S = 0.35;
+const RMS_TAU_SECS = 0.3;
+let peakDb = DB_FLOOR, peakHoldUntil = 0;
+let rmsMeanSq = 0;
+let clockS = 0;
+
+function updateBallistics(dt, block) {
+  clockS += dt;
+  let sumSq = 0, peakLin = 0;
+  for (let i = 0; i < block.length; i++) {
+    const a = Math.abs(block[i]);
+    if (a > peakLin) peakLin = a;
+    sumSq += block[i] * block[i];
+  }
+  const blockMs = sumSq / block.length;
+  const blockPeakDb = toDb(peakLin);
+  if (blockPeakDb >= peakDb) {
+    peakDb = blockPeakDb;
+    peakHoldUntil = clockS + PEAK_HOLD_S;
+  } else if (clockS >= peakHoldUntil) {
+    peakDb = Math.max(DB_FLOOR, peakDb - PEAK_RELEASE_DB_PER_SEC * dt);
+  }
+  const alpha = 1 - Math.exp(-dt / RMS_TAU_SECS);
+  rmsMeanSq += alpha * (blockMs - rmsMeanSq);
+  return { blockMs, blockPeakDb, rmsDb: toDb(Math.sqrt(rmsMeanSq)) };
+}
+
+const patternSel = document.getElementById("pattern");
+const tauInput = document.getElementById("tau");
+const beamTauInput = document.getElementById("beamTau");
+const tailInput = document.getElementById("tail");
+const glowSpanInput = document.getElementById("glowSpan");
+const beamGlowInput = document.getElementById("beamGlow");
+const focusInput = document.getElementById("focus");
+const beamWidthInput = document.getElementById("beamWidth");
+const tauV = document.getElementById("tauV");
+const beamTauV = document.getElementById("beamTauV");
+const tailV = document.getElementById("tailV");
+const glowSpanV = document.getElementById("glowSpanV");
+const beamGlowV = document.getElementById("beamGlowV");
+const focusV = document.getElementById("focusV");
+const beamWidthV = document.getElementById("beamWidthV");
+const peakV = document.getElementById("peakV");
+const rmsV = document.getElementById("rmsV");
+const fpsEl = document.getElementById("fps");
+const glStatusEl = document.getElementById("glStatus");
+const sync = () => {
+  tauV.textContent = (+tauInput.value).toFixed(2);
+  beamTauV.textContent = (+beamTauInput.value).toFixed(2);
+  tailV.textContent = tailInput.value;
+  glowSpanV.textContent = glowSpanInput.value;
+  beamGlowV.textContent = (+beamGlowInput.value).toFixed(2);
+  focusV.textContent = focusInput.value;
+  beamWidthV.textContent = (+beamWidthInput.value).toFixed(2);
+};
+[tauInput, beamTauInput, tailInput, glowSpanInput, beamGlowInput, focusInput, beamWidthInput].forEach((el) => el.addEventListener("input", sync));
+sync();
+
+// ---- LEFT: exact port of cageq-monitor's histogram math (N_BINS/BAR_MIN_DB/decay/target) -----
+const N_BINS = 64;
+const PEAK_BLEND = 1.0; // matches cageq-monitor's own constant — in practice this makes cover_db == blockPeakDb
+const intensity = new Float32Array(N_BINS);
+const fillEl = document.getElementById("fillCurrent");
+
+function stepHistogram(dt, rmsNowDb, blockPeakDb) {
+  const tau = +tauInput.value;
+  const glowSpan = +glowSpanInput.value;
+  const coverDb = rmsNowDb + PEAK_BLEND * (blockPeakDb - rmsNowDb);
+  const decay = Math.exp(-dt / tau);
+  for (let i = 0; i < N_BINS; i++) {
+    const segDb = BAR_MIN_DB * (1 - (i + 0.5) / N_BINS);
+    const target = Math.max(0, Math.min(1, (coverDb - segDb) / glowSpan));
+    intensity[i] = Math.max(intensity[i] * decay, target);
+  }
+}
+function renderHistogramGradient() {
+  const stops = [];
+  for (let i = 0; i < N_BINS; i++) {
+    const alpha = Math.round(Math.max(0, Math.min(1, intensity[i])) * 100);
+    const pos = ((i / (N_BINS - 1)) * 100).toFixed(1);
+    stops.push(`rgba(127,216,168,${alpha / 100}) ${pos}%`);
+  }
+  fillEl.style.background = `linear-gradient(to top, ${stops.join(", ")})`;
+}
+
+// ---- RIGHT: faithful port of phosphor.ts's actual half-float GL accumulator -------------------
+// Shaders copied verbatim from src/phosphor.ts (FS_ACCUM/FS_BLIT/VS_QUAD) - see that file for the
+// full history/reasoning behind every constant and line here.
+const TAIL_KNEE = 0.3;
+const TAIL_FLOOR_PER_SEC = 0.0015;
+const DOSE_REF_FPS = 240;
+const DOSE_REF_DT = 1 / DOSE_REF_FPS;
+
+const VS_QUAD = `attribute vec2 aPos; varying vec2 vUv;
+void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
+const FS_ACCUM = `precision highp float; varying vec2 vUv;
+uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uOver, uDose;
+void main(){
+  vec4 prev = texture2D(uPrev, vUv);
+  float v = max(max(prev.r, prev.g), prev.b);
+  float k = mix(uKeepTail, uKeep, smoothstep(0.0, uKnee, v));
+  vec4 cur = texture2D(uTrace, vUv);
+  cur.a *= uDose;
+  cur.rgb *= cur.a;
+  vec4 decayed = max(prev * k - uFloor, 0.0);
+  gl_FragColor = min(uOver > 0.5 ? cur + decayed * (1.0 - cur.a) : decayed + cur, 1.0);
+}`;
+const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
+void main(){ gl_FragColor = texture2D(uTex, vUv); }`;
+
+function compile(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+function link(gl, fsSrc) {
+  const vs = compile(gl, gl.VERTEX_SHADER, VS_QUAD);
+  const fs = compile(gl, gl.FRAGMENT_SHADER, fsSrc);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.bindAttribLocation(prog, 0, "aPos");
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(prog));
+  return prog;
+}
+
+const glCanvas = document.getElementById("glCanvas");
+const gl = glCanvas.getContext("webgl", { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false });
+let glReady = false;
+let accum, blit, quad, uKeep, uKeepTail, uKnee, uFloor, uOver, uDose, uPrev, uTrace, uTex;
+let ping, texTrace, srcIdx = 0;
+const W = glCanvas.width, H = glCanvas.height;
+const scratch = document.createElement("canvas");
+scratch.width = W;
+scratch.height = H;
+const sctx = scratch.getContext("2d");
+
+if (gl) {
+  const half = gl.getExtension("OES_texture_half_float");
+  const halfRender = gl.getExtension("EXT_color_buffer_half_float");
+  if (half && halfRender) {
+    accum = link(gl, FS_ACCUM);
+    blit = link(gl, FS_BLIT);
+    quad = gl.createBuffer();
+    uKeep = gl.getUniformLocation(accum, "uKeep");
+    uKeepTail = gl.getUniformLocation(accum, "uKeepTail");
+    uKnee = gl.getUniformLocation(accum, "uKnee");
+    uFloor = gl.getUniformLocation(accum, "uFloor");
+    uOver = gl.getUniformLocation(accum, "uOver");
+    uDose = gl.getUniformLocation(accum, "uDose");
+    uPrev = gl.getUniformLocation(accum, "uPrev");
+    uTrace = gl.getUniformLocation(accum, "uTrace");
+    uTex = gl.getUniformLocation(blit, "uTex");
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    gl.disable(gl.BLEND);
+    const mkTex = (type) => {
+      const tx = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tx);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, type, null);
+      return tx;
+    };
+    texTrace = mkTex(gl.UNSIGNED_BYTE);
+    ping = [0, 1].map(() => ({ tex: mkTex(half.HALF_FLOAT_OES), fbo: gl.createFramebuffer() }));
+    let ok = true;
+    for (const pp of ping) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, pp.fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pp.tex, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) ok = false;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    glReady = ok;
+  }
+}
+glStatusEl.textContent = glReady ? "half-float, ready" : "unavailable (falling back would be needed — see phosphor.ts)";
+
+// Vectorscope's own beam mechanism (Vectorscope.tsx, VEL_BUCKETS/VEL_FLOOR/VEL_REF_RATE + the
+// kRef/bucketing formula, copied verbatim), collapsed to 1D: X is pinned at the tube's centre (a
+// thick stroke fills the width on its own, there's no 2nd axis to spend it on), only Y — the
+// sample's instantaneous dB height — varies for DRAWING. Velocity, though, is measured in the
+// signal's own natural LINEAR amplitude space, NOT dB-height space, same as Vectorscope's real
+// audio samples always were (they're never dB-mapped) — dB compresses/distorts velocity in a way
+// that breaks the whole premise: a fast LINEAR zero-crossing becomes an even FASTER dB swing (log
+// diverges near zero), so measuring velocity post-dB-mapping made nearly everything look like a
+// "slow dwell" and defeated the bucketing entirely (first cut of this fix: nearly the whole tube
+// read fully saturated). Measuring in linear space first, then only mapping to dB for WHERE to
+// draw, is what actually reproduces "dwelling near a height reads bright, sweeping past it reads
+// dim-to-blank" — this is what v2's independent equal-dose-per-sample dots didn't have at all.
+const VEL_BUCKETS = 16;
+const VEL_FLOOR = 0.05;
+const VEL_REF_RATE = 48000;
+// Linear amplitude has no natural "pixels" — this is the arbitrary (but fixed, so `focus` stays a
+// meaningful, comparable knob across signal levels) convention: a full -1..1 swing is treated as
+// spanning one tube-height's worth of "distance" for velocity purposes, independent of the dB
+// mapping used for the Y position itself.
+const LIN_DIST_SCALE = 420;
+
+function drawRawSampleTrace(block) {
+  sctx.clearRect(0, 0, W, H);
+  const cx = W / 2;
+  const focus = +focusInput.value;
+  const kRef = Math.max(0.001, focus * (VEL_REF_RATE / SAMPLE_RATE));
+  const buckets = [];
+  for (let b = 0; b < VEL_BUCKETS; b++) buckets.push(new Path2D());
+
+  let prevY = null;
+  let prevLin = null;
+  for (let i = 0; i < block.length; i++) {
+    const lin = block[i]; // signed, -1..1 — the velocity measurement's own domain
+    const db = toDb(Math.abs(lin));
+    const frac = Math.max(0, Math.min(1, (db - BAR_MIN_DB) / -BAR_MIN_DB));
+    const y = (1 - frac) * H; // canvas Y=0 at top; frac=1 (0dBFS) should land at y=0
+    if (prevLin !== null) {
+      const dist = Math.abs(lin - prevLin) * LIN_DIST_SCALE;
+      const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
+      let b = (f * VEL_BUCKETS) | 0;
+      if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
+      buckets[b].moveTo(cx, prevY);
+      buckets[b].lineTo(cx, y);
+    }
+    prevY = y;
+    prevLin = lin;
+  }
+
+  sctx.globalCompositeOperation = "lighter";
+  sctx.lineWidth = Math.max(1, +beamWidthInput.value * W);
+  sctx.lineJoin = "round";
+  sctx.lineCap = "butt"; // flat, not round — see Vectorscope's identical note on why (no bright-dot pileup at bucket boundaries)
+  const glow = +beamGlowInput.value;
+  for (let b = 1; b < VEL_BUCKETS; b++) {
+    sctx.strokeStyle = `rgba(127,216,168,${(glow * b) / (VEL_BUCKETS - 1)})`;
+    sctx.stroke(buckets[b]);
+  }
+  sctx.globalCompositeOperation = "source-over";
+}
+
+function commitGl(dt) {
+  if (!glReady) return;
+  const tau = +beamTauInput.value; // this panel's OWN tau — see the fieldset's doc for why
+  const tail = Math.max(1, +tailInput.value);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, texTrace);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, scratch);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  const dst = 1 - srcIdx;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, ping[dst].fbo);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(accum);
+  gl.uniform1f(uKeep, Math.exp(-dt / tau));
+  gl.uniform1f(uKeepTail, Math.exp(-dt / (tau * tail)));
+  gl.uniform1f(uKnee, TAIL_KNEE);
+  gl.uniform1f(uFloor, TAIL_FLOOR_PER_SEC * dt);
+  gl.uniform1f(uOver, 0);
+  gl.uniform1f(uDose, dt / DOSE_REF_DT);
+  gl.uniform1i(uPrev, 0);
+  gl.uniform1i(uTrace, 1);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, ping[srcIdx].tex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(blit);
+  gl.uniform1i(uTex, 0);
+  gl.bindTexture(gl.TEXTURE_2D, ping[dst].tex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  srcIdx = dst;
+}
+
+// ---- shared rAF loop ---------------------------------------------------------------------
+const peakA = document.getElementById("peakA"), rmsA = document.getElementById("rmsA");
+const peakB = document.getElementById("peakB"), rmsB = document.getElementById("rmsB");
+let last = performance.now();
+let frames = 0, fpsLast = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+
+  const block = genBlock(patternSel.value);
+  const { rmsDb, blockPeakDb } = updateBallistics(dt, block);
+  peakV.textContent = blockPeakDb <= -119 ? "-inf" : blockPeakDb.toFixed(1) + " dB";
+  rmsV.textContent = rmsDb <= -119 ? "-inf" : rmsDb.toFixed(1) + " dB";
+  peakA.style.cssText = markStyle(peakDb);
+  rmsA.style.cssText = markStyle(rmsDb);
+  peakB.style.cssText = markStyle(peakDb);
+  rmsB.style.cssText = markStyle(rmsDb);
+
+  stepHistogram(dt, rmsDb, blockPeakDb);
+  renderHistogramGradient();
+
+  drawRawSampleTrace(block);
+  commitGl(dt);
+
+  frames++;
+  if (now - fpsLast > 500) {
+    fpsEl.textContent = (frames / ((now - fpsLast) / 1000)).toFixed(0);
+    frames = 0;
+    fpsLast = now;
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
