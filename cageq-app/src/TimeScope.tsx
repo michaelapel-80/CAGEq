@@ -23,7 +23,7 @@ type Params = { trailTau: number; tail: number; glow: number; beam: number; undi
 // (DIVISIONS) is the standard horizontal graticule count, so total span = ms/div × 10.
 const MS_PER_DIV_STEPS = [0.2, 0.5, 1, 2, 5, 10];
 const DIVISIONS = 10;
-const DEFAULTS: Params = { trailTau: 0.05, tail: 12, glow: 0.6, beam: 3.0, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 80 }; // 2 ms/div × 10 = 20 ms
+const DEFAULTS: Params = { trailTau: 0.06, tail: 12, glow: 0.8, beam: 3.0, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 80 }; // 2 ms/div × 10 = 20 ms
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
 const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler than the lane centrelines
@@ -514,7 +514,7 @@ export function TimeScope() {
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), min: 0.05, max: 1, step: 0.05 },
-    { key: "beam", label: t("scope.beam"), min: 0.5, max: 8, step: 0.1 },
+    { key: "beam", label: t("scope.beam"), min: 0.1, max: 8, step: 0.05 },
     { key: "triggerFilterHz", label: t("scope.trigFilter"), min: 40, max: 1000, step: 10 },
   ];
   const msPerDiv = MS_PER_DIV_STEPS[params.msPerDivIdx] ?? MS_PER_DIV_STEPS[0];

@@ -42,7 +42,7 @@ type Params = {
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
-const DEFAULTS: Params = { trailTau: 0.05, tail: 12, glow: 0.60, beam: 1.0, focus: 8, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
+const DEFAULTS: Params = { trailTau: 0.08, tail: 12, glow: 0.50, beam: 1.0, focus: 8, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
@@ -440,7 +440,7 @@ export function Vectorscope({
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), min: 0.05, max: 1, step: 0.05 },
-    { key: "beam", label: t("scope.beam"), min: 0.5, max: 5, step: 0.1 },
+    { key: "beam", label: t("scope.beam"), min: 0.1, max: 5, step: 0.05 },
     { key: "focus", label: t("scope.focus"), min: 1, max: 24, step: 0.5 },
     { key: "radiusFrac", label: t("scope.scale"), min: 0.3, max: 0.5, step: 0.01 },
     { key: "gridAlpha", label: t("scope.grid"), min: 0, max: 0.5, step: 0.02 },
