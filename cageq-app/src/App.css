@@ -805,6 +805,40 @@ select:disabled {
 .vs-peakmarks {
   z-index: 2;
 }
+/* Spectrum's hover-cursor label (SpectrumScope.tsx's `ss-cursor` refs) — floats above the tube,
+   horizontally tracking the mouse (`left`, written as a % so it stays correct across resizes without
+   the effect needing to re-run — see the render loop's own comment). Shown/hidden via `opacity`
+   rather than mounting/unmounting, so there's no layout thrash on every hover start/end. Sits above
+   the peak marks (z-index 2) — it's meant to read clearly over a bright trail exactly when you're
+   pointing at one. `pointer-events: none`: it must never itself become what the mouse is over, or
+   hovering it would report its own position as leave-and-immediately-re-enter jitter. Styled like
+   `.vs-tool` (dark pill, translucent) rather than `.ss-peak` (plain text): those chips sit below the
+   tube on the page's own background; this sits inside the always-dark tube itself and needs its own
+   contrast the same way the toolbar does. `top` near `plotTop`'s own ~3% inset (SpectrumScope.tsx),
+   not flush with the tube's edge, so the vertical cursor line remains visible above the label. */
+.ss-cursor {
+  position: absolute;
+  top: 4px;
+  left: 0;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 0.5em;
+  padding: 0.1em 0.45em;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 2;
+}
+.ss-cursor-db {
+  color: rgba(255, 255, 255, 0.55);
+}
 /* Corner toolbar (pop-out + tuning gear): dim until hovered/open, so the scope stays the focus. */
 .vs-tools {
   position: absolute;

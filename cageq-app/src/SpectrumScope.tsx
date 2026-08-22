@@ -158,6 +158,9 @@ const PEAK_COUNT = 5;
 // #e6a23c — the same amber TimeScope's peak-hold lines use (see PEAK_LINE_ALPHA there), so a
 // "peak" reads as the same colour wherever this app marks one.
 const PEAK_MARK_COLOR = "rgba(230,162,60,0.9)";
+// Plain cool white, not the peak amber — the hover cursor is a *reading tool*, not a detected
+// feature, so it deliberately doesn't compete visually with a genuine peak cross.
+const CURSOR_LINE_COLOR = "rgba(230,240,255,0.55)";
 // How far (dB) a local maximum must stand above the lower of the two valleys separating it from
 // taller ground before it counts as a real peak — see `findPeaks`. Plain "> both neighbours" flags
 // nearly every wiggle in FFT-noisy content; this rejects a shallow shoulder bump on a bigger peak's
@@ -393,6 +396,13 @@ export function SpectrumScope() {
   const curRef = useRef<SpectrumData | null>(null);
   const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0 });
   const corrCacheRef = useRef<CorrCache | null>(null);
+  // Hover cursor: the fraction (0..1) of the tube's own width the mouse is over, or `null` when not
+  // hovering. Set directly by the pointer handlers below (no DOM write there — see the render
+  // effect's cursor step for why those live in the rAF loop instead), read once per frame.
+  const hoverRef = useRef<number | null>(null);
+  const cursorElRef = useRef<HTMLDivElement | null>(null);
+  const cursorHzRef = useRef<HTMLSpanElement | null>(null);
+  const cursorDbRef = useRef<HTMLSpanElement | null>(null);
   const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-spectrum-params", DEFAULTS);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
@@ -538,6 +548,9 @@ export function SpectrumScope() {
     let lastReadout = 0;
     let hadPeak = false;
     const READOUT_INTERVAL_MS = 120;
+    // Whether the cursor label was showing last frame — same one-shot-hide idea as `hadPeak`, so
+    // leaving the tube doesn't need a per-frame DOM write to keep confirming it's still hidden.
+    let cursorShown = false;
     // Reused per-point scratch buffers for the trace (see `traceSmooth`) — resized, never
     // reallocated fresh each frame, matching TimeScope's `magScratch` pattern.
     let xScratch = new Float64Array(0);
@@ -566,6 +579,15 @@ export function SpectrumScope() {
 
       const s = curRef.current;
       const n = s?.db.length ?? 0;
+      // Marks layer (peak crosses + the hover cursor below) is a plain, non-accumulating 2D canvas
+      // — cleared and fully redrawn every frame regardless of signal state, unlike the phosphor
+      // trail above. That's new as of the cursor: crosses alone only ever needed this while a
+      // signal was live (see the removed `hadPeak`-triggered one-shot clear this replaced), but the
+      // cursor has to keep redrawing on an otherwise-idle frame too — the frequency axis stays
+      // meaningful with nothing playing, and without a clear every frame, a cursor line that moves
+      // while idle would leave every previous position stroked on top of the last, since a plain
+      // 2D context has no decay of its own the way the trail canvas does.
+      markCtx.clearRect(0, 0, W, H);
       if (n >= 2 && s && s.signal) {
         const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s) : null;
         const key = `${plotTop}|${plotBot}|${ar},${ag},${ab}|${p.glow}`;
@@ -601,8 +623,8 @@ export function SpectrumScope() {
         ctx.stroke();
 
         // Peak crosses: recomputed and redrawn every frame (not throttled — see below), so they
-        // track the live trace exactly as fluidly as the trace itself does.
-        markCtx.clearRect(0, 0, W, H);
+        // track the live trace exactly as fluidly as the trace itself does. (Layer already cleared
+        // above, unconditionally.)
         const lnF0 = Math.log(s.f_min);
         const lnSpan = Math.log(s.f_max) - lnF0;
         const binHz = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * lnSpan);
@@ -653,9 +675,9 @@ export function SpectrumScope() {
       } else if (hadPeak) {
         // Signal just dropped — reset to the placeholder once rather than leaving the last reading
         // stale on screen (matching the beam itself, which the `signal` gate above also stops
-        // updating on silence).
+        // updating on silence). Layer clear itself is unconditional now (above); this only resets
+        // the DOM readout text.
         hadPeak = false;
-        markCtx.clearRect(0, 0, W, H);
         for (let j = 0; j < PEAK_COUNT; j++) {
           const slot = peakSlotRefs.current[j];
           const hzSpan = peakHzRefs.current[j];
@@ -669,6 +691,55 @@ export function SpectrumScope() {
         }
       }
 
+      // Hover cursor: independent of signal state (drawn on top of whatever the block above left on
+      // the marks layer, which is why it lives after it) — the frequency axis is fixed and still
+      // worth reading with nothing playing, e.g. lining a cursor up against a grid tick. Frequency
+      // comes from the same fixed F_MIN/F_MAX log mapping the grid ticks use, not `s.f_min`/`f_max`
+      // (equal in practice, see `SpectrumUpdate::f_min`'s doc, but `s` itself can be null here) — so
+      // the cursor keeps reading correctly even before the first spectrum event ever arrives. The dB
+      // reading is stricter: only shown when `vScratch` was actually rebuilt this same frame (i.e.
+      // `n >= 2 && s.signal`, mirrored from the branch above), never a stale array from a prior frame.
+      const hoverFrac = hoverRef.current;
+      if (hoverFrac !== null) {
+        cursorShown = true;
+        const x = hoverFrac * W;
+        markCtx.strokeStyle = CURSOR_LINE_COLOR;
+        markCtx.lineWidth = Math.max(1, H / REF_SIZE);
+        markCtx.beginPath();
+        markCtx.moveTo(x, plotTop);
+        markCtx.lineTo(x, plotBot);
+        markCtx.stroke();
+
+        const lnMin = Math.log(F_MIN);
+        const lnSpan = Math.log(F_MAX) - lnMin;
+        const hz = Math.exp(lnMin + hoverFrac * lnSpan);
+        let dbText = PEAK_PLACEHOLDER_DB;
+        if (n >= 2 && s && s.signal) {
+          // Linear interpolation between the two bins straddling the cursor — reads the underlying
+          // data directly rather than the cosmetically-smoothed spline drawn through it (`traceSmooth`),
+          // which is the right choice for a readout: the spline's only job is to look good between
+          // points, not to claim sub-bin structure the data itself doesn't have.
+          const fi = hoverFrac * (n - 1);
+          const i0 = Math.floor(fi);
+          const i1 = Math.min(n - 1, i0 + 1);
+          const t = fi - i0;
+          dbText = `${(vScratch[i0] * (1 - t) + vScratch[i1] * t).toFixed(1)} dB`;
+        }
+        if (cursorHzRef.current) cursorHzRef.current.textContent = fmtPeakHz(hz);
+        if (cursorDbRef.current) cursorDbRef.current.textContent = dbText;
+        if (cursorElRef.current) {
+          // A CSS percentage, not a pixel offset computed from the `width`/`height` React state:
+          // this effect mounts once (`[]` deps below) and never re-runs on resize, so a state value
+          // closed over here would go stale the first time the box's actual size changed. Percent
+          // of the (always current) CSS box needs no such measurement at all.
+          cursorElRef.current.style.left = `${hoverFrac * 100}%`;
+          cursorElRef.current.style.opacity = "1";
+        }
+      } else if (cursorShown) {
+        cursorShown = false;
+        if (cursorElRef.current) cursorElRef.current.style.opacity = "0";
+      }
+
       // TAU_REF/p.trailTau is the Trail/Glow orthogonality fix — see TAU_REF's own doc.
       phos.commit(dt, p.trailTau, p.tail, 0, TAU_REF / p.trailTau);
       raf = requestAnimationFrame(render);
@@ -679,6 +750,18 @@ export function SpectrumScope() {
       phos.dispose();
     };
   }, []);
+
+  // Hover cursor pointer handlers — write only the ref, never the DOM directly: the render effect's
+  // rAF loop (above) is what actually draws the line and updates the label text/position, once per
+  // frame, matching the throttled-DOM-write discipline the peak readout already uses (`lastReadout`)
+  // rather than a raw mousemove rate, which can fire well above 60 Hz on a high-poll-rate mouse.
+  const onScopeHover = (e: React.MouseEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    hoverRef.current = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  };
+  const onScopeHoverEnd = () => {
+    hoverRef.current = null;
+  };
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
   type NumKey = "trailTau" | "tail" | "glow";
@@ -696,7 +779,7 @@ export function SpectrumScope() {
           attributes below, never the display size. A JS-measured, floored pixel value here would
           drift by up to 1px from the box's true (CSS-computed) height and show up as exactly the
           kind of small persistent misalignment against EqChart's own height:auto SVG sizing. */}
-      <div className="vs-screen" ref={screenRef}>
+      <div className="vs-screen" ref={screenRef} onMouseMove={onScopeHover} onMouseLeave={onScopeHoverEnd}>
         <canvas
           ref={gridRef}
           className="vectorscope-canvas vs-grid"
@@ -721,6 +804,19 @@ export function SpectrumScope() {
           style={{ width: "100%", height: "100%" }}
           aria-hidden="true"
         />
+        {/* Hover-cursor readout: frequency (+ level, while a signal is live) under the mouse, for
+            reading a peak's exact numbers off the tube directly rather than waiting for it to win a
+            readout slot below — the peak picker only ever shows up to PEAK_COUNT peaks and, on busy
+            program material, which ones qualify can change faster than the row is readable (that's
+            the whole reason this exists: the fixed readout row is for "what's here right now",
+            this is for "what's *that*, right there"). Positioned via `left` in % (never px) and
+            `opacity`, both written imperatively from the render loop's own rAF cadence, matching
+            every other DOM write in this component — see the effect's cursor step. `pointer-events:
+            none` (App.css) so the label itself can never steal the hover it's reporting. */}
+        <div className="ss-cursor" ref={cursorElRef} aria-hidden="true">
+          <span ref={cursorHzRef} className="ss-cursor-hz" />
+          <span ref={cursorDbRef} className="ss-cursor-db" />
+        </div>
         <div className="vs-tools">
           <button
             type="button"
