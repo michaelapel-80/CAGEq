@@ -4,7 +4,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type Band, type BiquadCoeffs, type BiquadState, inverseBiquadCoeffs, zeroState, stepBiquad } from "./biquad";
 import { scopeStream } from "./streams";
-import { createPhosphor } from "./phosphor";
+import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { useTunableParams } from "./useTunableParams";
 import type { ScopeData, ScopeEq } from "./Vectorscope";
 
@@ -84,6 +84,18 @@ const RING_CAP = 1 << 17; // ~2.7 s at 48 kHz / ~680 ms at 192 kHz — generous,
 const TRIGGER_PRE_FRAC = 0.25; // where the trigger point sits across the display window
 const TRIGGER_SEARCH_MS = 250; // how far back to look for a qualifying edge before giving up
 const TRIGGER_FILTER_Q = 0.707; // Butterworth — a clean rolloff, no resonant peaking
+// The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
+// `doseMult` comment (same reasoning as Vectorscope.tsx's identical constant) for why this matters:
+// `glow`'s tuned defaults were dialed in under the OLD, refresh-rate-dependent dose behaviour, which
+// happened to equal SCOPE_UPDATE_HZ/DOSE_REF_FPS of its "true" (rate-independent) value specifically
+// because that behaviour was calibrated on a DOSE_REF_FPS-Hz reference machine. Fixing the
+// rate-dependence without also re-applying this ratio would have changed the absolute brightness
+// `glow` now produces, not just removed its Hz-sensitivity. (Deliberately not folded into
+// `glow`/DEFAULTS instead, even though the numeric effect is identical: this panel's tuning
+// persists to localStorage via `saveAsDefault`, so redefining what the stored number *means* would
+// silently change an already-saved value — exactly the retweak this is trying to avoid.)
+const SCOPE_UPDATE_HZ = 60;
+const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, not per frame
 
 /** RBJ low-pass biquad (cookbook form), in this file's `BiquadCoeffs` convention. Used only to
  *  condition the *trigger-detector* signal (HF-reject trigger coupling, same idea a real scope's
@@ -298,6 +310,7 @@ export function TimeScope() {
     let raf = 0;
     let last = performance.now();
     let drawn: ScopeData | null = null;
+    let lastTrace = performance.now(); // when `drawn` last actually changed — see doseMult below
     // Per-lane peak-hold (dBFS) and the timestamp its release may resume after — indexed to match
     // `lanes` each frame; resized (and reset) on a mode switch, since "lane 0" means something
     // different in L/R vs mixdown. A brief reset on an intentional mode change is unsurprising.
@@ -338,6 +351,7 @@ export function TimeScope() {
         if (now >= peakHoldUntil[lane]) peakDb[lane] = Math.max(peakDb[lane] - PEAK_RELEASE_DB_PER_SEC * dt, DB_FLOOR);
       }
 
+      let doseMult = 1; // see `if (isNew)` below for why this isn't always 1
       const s = scopeRef.current;
       const n = s ? Math.floor(s.xy.length / 2) : 0;
       const isNew = !!s && s.signal && n >= 2 && s !== drawn;
@@ -353,6 +367,19 @@ export function TimeScope() {
       let dispN = 0;
       if (isNew) {
         drawn = s;
+        // This view only draws a fresh trace once per real scope window (~60/s from the backend —
+        // see ScopeUpdate), not every animation frame — see Vectorscope.tsx's identical doseMult
+        // comment for the full reasoning: commit()'s own dt/DOSE_REF_DT dose normalization assumes
+        // it's called once per unit of real content, which doesn't hold here at a display faster
+        // than the ~60 Hz data rate (reported live as dimmer at high refresh rates, brighter at low
+        // ones — the mirror of the bug DOSE_REF_DT itself fixed). `dtSinceTrace/dt` substitutes the
+        // true "time since the last real trace" for this call's own (too-short) dt — confirmed live
+        // to remove the rate-dependence. The extra `SCOPE_UPDATE_HZ/DOSE_REF_FPS` factor then
+        // restores the same absolute calibration `glow` was originally tuned against (see
+        // SCOPE_UPDATE_HZ's own doc), so this is rate-independence only, not a re-tune too.
+        const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
+        lastTrace = now;
+        doseMult = dt > 0 ? (dtSinceTrace / dt) * SCOPE_DOSE_RATIO : 1;
         const xy = s!.xy;
 
         // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns
@@ -508,7 +535,7 @@ export function TimeScope() {
       }
 
       // 4) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
-      phos.commit(dt, p.trailTau, p.tail);
+      phos.commit(dt, p.trailTau, p.tail, 0, doseMult);
 
       raf = requestAnimationFrame(render);
     };

@@ -4,7 +4,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type Band, type BiquadCoeffs, type BiquadState, inverseBiquadCoeffs, zeroState, stepBiquad } from "./biquad";
 import { scopeStream } from "./streams";
-import { createPhosphor } from "./phosphor";
+import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { useTunableParams } from "./useTunableParams";
 
 /** A stereo vectorscope window from the loopback (see cageq-monitor `ScopeUpdate`): interleaved
@@ -52,6 +52,18 @@ const VEL_FLOOR = 0.05; // dimmest a fast segment goes (keeps sharp transitions 
 const VEL_REF_RATE = 48000; // the velocity glow judges beam speed in *time*; the per-sample segment
 //   length is scaled to this rate so a given speed reads the same at 44.1/48/96/192 kHz.
 const SPOT_TAU = 0.12; // resting-spot fade-in/out time constant (s) — eases it on/off, no popping
+// The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
+// `doseMult` comment for why this matters: `glow`'s tuned defaults were dialed in under the OLD,
+// refresh-rate-dependent dose behaviour, which happened to equal SCOPE_UPDATE_HZ/DOSE_REF_FPS of
+// its "true" (rate-independent) value specifically because that behaviour was calibrated on a
+// DOSE_REF_FPS-Hz reference machine. Fixing the rate-dependence without also re-applying this ratio
+// would have changed the absolute brightness `glow` now produces, not just removed its Hz-sensitivity.
+// (Deliberately not folded into `glow`/DEFAULTS instead, even though the numeric effect is identical:
+// this panel's tuning persists to localStorage via `saveAsDefault`, so redefining what the stored
+// number *means* would silently change anyone's already-saved value — exactly the retweak this is
+// trying to avoid.)
+const SCOPE_UPDATE_HZ = 60;
+const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, not per frame
 
 /** Parse a `#rrggbb` hex (the `--accent` CSS var) to [r,g,b]; a green phosphor fallback. */
 function parseHex(hex: string): [number, number, number] {
@@ -229,6 +241,7 @@ export function Vectorscope({
     let raf = 0;
     let last = performance.now();
     let drawn: ScopeData | null = null; // last payload already traced (draw each once)
+    let lastTrace = performance.now(); // when `drawn` last actually changed — see doseMult below
     let spotX = NaN; // the beam's dwell spot — position + brightness, redrawn every frame so it
     let spotY = NaN; //   holds during silence; updated per window from the beam's mean + path length
     let spotB = 0; // target brightness
@@ -295,6 +308,7 @@ export function Vectorscope({
       //    ~zero-length and invisible — renders as an immediate saturated spot; an empty/absent
       //    window parks it at centre. No silence detection, no dark gap. (Bucketed strokes keep the
       //    velocity glow to VEL_BUCKETS stroke calls, not one per segment.)
+      let doseMult = 1; // see the fresh-trace branch below for why this isn't always 1
       const s = scopeRef.current;
       const idle = !s || !s.signal || s.xy.length < 4;
       if (idle) {
@@ -304,6 +318,24 @@ export function Vectorscope({
         spotB = p.glow;
       } else if (s !== drawn) {
         drawn = s;
+        // This view only draws a fresh trace once per real scope window (~60/s from the backend —
+        // see ScopeUpdate), not every animation frame: re-stroking ~768 connected points across up
+        // to 15 velocity buckets on every rAF frame dropped frames on a large tube (see phosphor.ts's
+        // module doc, "rejected fixes"). commit()'s own dt/DOSE_REF_DT normalization assumes it's
+        // called once per unit of real content — true for SpectrumScope/EqChart's own every-frame
+        // redraws, not here: at a display faster than the ~60 Hz data rate, this call's own dt (the
+        // rAF interval) is shorter than the true gap since the last real trace, so commit() would
+        // under-dose it — reported live as dimmer at high refresh rates than low ones (the mirror
+        // image of the original bug DOSE_REF_DT itself fixed). The `dtSinceTrace/dt` ratio restores
+        // the true interval, cancelling commit()'s built-in (wrong-for-this-case) scaling and
+        // substituting the correct one — confirmed live to remove the rate-dependence. That alone,
+        // though, also changes the *absolute* brightness `glow` was tuned against (the old, buggy
+        // behaviour happened to equal the true one only on a DOSE_REF_FPS-Hz reference machine) — the
+        // extra `SCOPE_UPDATE_HZ/DOSE_REF_FPS` factor restores that same historical calibration (see
+        // SCOPE_UPDATE_HZ's own doc) so this fix is rate-independence *only*, not a re-tune too.
+        const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
+        lastTrace = now;
+        doseMult = dt > 0 ? (dtSinceTrace / dt) * SCOPE_DOSE_RATIO : 1;
         const buckets: Path2D[] = [];
         for (let b = 0; b < VEL_BUCKETS; b++) buckets.push(new Path2D());
         // Full-bright segment length (px), scaled to a reference rate: at a higher rate the beam
@@ -376,7 +408,7 @@ export function Vectorscope({
       }
 
       // 3) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
-      phos.commit(dt, p.trailTau, p.tail);
+      phos.commit(dt, p.trailTau, p.tail, 0, doseMult);
 
       // 4) Draw the beam spot every frame — the beam's energy dumped on one point, like a CRT dot.
       // Its brightness eases toward the target (spotVis → spotB) so it fades in when silence lands

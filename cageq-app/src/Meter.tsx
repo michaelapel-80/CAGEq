@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { meterStream, scopeStream, type MeterData } from "./streams";
 import type { ScopeData } from "./Vectorscope";
-import { createPhosphor } from "./phosphor";
+import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { useTunableParams } from "./useTunableParams";
 
 /**
@@ -54,6 +54,18 @@ type Params = {
   beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
 };
 const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.07, focus: 90, beamWidth: 1.0 };
+// The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
+// `doseMult` comment (same reasoning as Vectorscope.tsx's identical constant) for why this matters:
+// `glow`'s tuned defaults were dialed in under the OLD, refresh-rate-dependent dose behaviour, which
+// happened to equal SCOPE_UPDATE_HZ/DOSE_REF_FPS of its "true" (rate-independent) value specifically
+// because that behaviour was calibrated on a DOSE_REF_FPS-Hz reference machine. Fixing the
+// rate-dependence without also re-applying this ratio would have changed the absolute brightness
+// `glow` now produces, not just removed its Hz-sensitivity. (Deliberately not folded into
+// `glow`/DEFAULTS instead, even though the numeric effect is identical: this panel's tuning
+// persists to localStorage via `saveAsDefault`, so redefining what the stored number *means* would
+// silently change an already-saved value — exactly the retweak this is trying to avoid.)
+const SCOPE_UPDATE_HZ = 60;
+const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, not per frame
 const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05;
 const VEL_REF_RATE = 48000;
@@ -189,6 +201,7 @@ export function Meter({
     let raf = 0;
     let last = performance.now();
     let drawn: ScopeData | null = null; // last payload already traced (draw each once)
+    let lastTrace = performance.now(); // when `drawn` last actually changed — see doseMult below
 
     const render = () => {
       const now = performance.now();
@@ -196,10 +209,24 @@ export function Meter({
       last = now;
       const p = paramsRef.current;
 
+      let doseMult = 1; // see the fresh-trace branch below for why this isn't always 1
       const ctx = phos.begin();
       const s = scopeRef.current;
       if (s && s.signal && s.xy.length >= 4 && s !== drawn) {
         drawn = s;
+        // This view only draws a fresh trace once per real scope window (~60/s from the backend —
+        // see ScopeUpdate), not every animation frame — see Vectorscope.tsx's identical doseMult
+        // comment for the full reasoning: commit()'s own dt/DOSE_REF_DT dose normalization assumes
+        // it's called once per unit of real content, which doesn't hold here at a display faster
+        // than the ~60 Hz data rate (reported live as dimmer at high refresh rates, brighter at low
+        // ones — the mirror of the bug DOSE_REF_DT itself fixed). `dtSinceTrace/dt` substitutes the
+        // true "time since the last real trace" for this call's own (too-short) dt — confirmed live
+        // to remove the rate-dependence. The extra `SCOPE_UPDATE_HZ/DOSE_REF_FPS` factor then
+        // restores the same absolute calibration `glow` was originally tuned against (see
+        // SCOPE_UPDATE_HZ's own doc), so this is rate-independence only, not a re-tune too.
+        const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
+        lastTrace = now;
+        doseMult = dt > 0 ? (dtSinceTrace / dt) * SCOPE_DOSE_RATIO : 1;
         const W = cv.width;
         const cx = W / 2;
         const rate = s.rate > 0 ? s.rate : 48000;
@@ -242,7 +269,7 @@ export function Meter({
         drawn = s; // idle: draw nothing this frame — the accumulator's own decay fades the trail out
       }
 
-      phos.commit(dt, p.trailTau, p.tail);
+      phos.commit(dt, p.trailTau, p.tail, 0, doseMult);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);

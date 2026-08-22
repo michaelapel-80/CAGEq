@@ -91,7 +91,10 @@ const TAIL_FLOOR_PER_SEC = 0.0015;
  *  independent of `dt` — i.e. independent of refresh rate. Verified numerically before landing:
  *  at tau=0.15s, steady-state brightness units at glow=0.15 go from 5.48 (240Hz) vs. 1.43 (60Hz) —
  *  a 3.8x gap — under the OLD fixed-dose behaviour, to 5.48 vs. 5.71 under this fix. */
-const DOSE_REF_FPS = 240;
+// Exported so a caller computing its own `doseMult` (see commit()'s doc) can derive a ratio against
+// the same reference rather than hardcoding a second copy of 240 that could silently drift from
+// this one.
+export const DOSE_REF_FPS = 240;
 const DOSE_REF_DT = 1 / DOSE_REF_FPS;
 
 /** How this frame's trace lands on the decayed history. `add` (default) is the scopes' additive
