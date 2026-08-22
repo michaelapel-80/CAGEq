@@ -30,6 +30,31 @@ export type MeterData = {
   sample_rate: number;
 };
 
+/**
+ * Liveness beat, one per webview (not per stream — the backend keys it by webview label). The
+ * backend stops sending to a webview that goes quiet for a few seconds: window *destruction* it
+ * detects on its own, but a crashed WebView2 renderer or a wedged main thread leaves the window
+ * alive while nothing drains the channel, and payloads over 8 KiB park in a Tauri-internal queue
+ * until the webview fetches them. See `StreamSubs` in src-tauri/src/lib.rs.
+ *
+ * Chromium throttles timers in hidden windows, so a minimised/occluded view stops beating and the
+ * backend stops feeding it. That's the wanted behaviour, not a bug — those views aren't painting
+ * either (their render loops are rAF-driven) — and the `visibilitychange` beat makes coming back
+ * immediate rather than waiting out the next interval.
+ */
+const HEARTBEAT_MS = 1000;
+let beating = false;
+function startHeartbeat() {
+  if (beating) return;
+  beating = true;
+  const beat = () => void invoke("stream_heartbeat");
+  beat();
+  setInterval(beat, HEARTBEAT_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) beat();
+  });
+}
+
 function makeStream<T>(cmd: string) {
   const subs = new Set<(v: T) => void>();
   let registered = false;
@@ -42,6 +67,7 @@ function makeStream<T>(cmd: string) {
         const channel = new Channel<T>();
         channel.onmessage = (v) => subs.forEach((f) => f(v));
         void invoke(cmd, { channel });
+        startHeartbeat();
       }
       return () => subs.delete(fn);
     },

@@ -55,24 +55,61 @@ struct ScopeViewers(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 /// up forever (`Meter` pins `set_scope_viewer` at ≥1, so the stream never stops on its own).
 /// [`drop_subs`] on `WindowEvent::Destroyed` is the cleanup; `register` also replaces a same-label
 /// entry so a webview reload (same label, fresh channel) can't strand the old one either.
+///
+/// Window destruction is not the only way a consumer can stop draining, though — a crashed WebView2
+/// renderer, a wedged main thread or a JS exception all leave the *window* alive, so no `Destroyed`
+/// event fires and the same pile-up resumes at full rate. `alive` is the backstop: each webview
+/// beats once a second (`stream_heartbeat`), and [`fan_out`] simply doesn't send to a label that has
+/// gone quiet. Bounding the queue directly isn't an option — `ChannelDataIpcQueue` is not exported
+/// from `tauri::ipc`, and its only accessor is Tauri's internal fetch command — so the guard has to
+/// sit upstream of `send`. Nor can the payload just be kept under the 8 KiB direct-eval threshold
+/// (which uses no queue at all): `SCOPE_MAX_POINTS` is 2048 pairs ≈ 45 KB of JSON, and fitting
+/// would mean ≲350 pairs, less than half the trace density the scope draws.
 type Subs<T> = std::sync::Arc<std::sync::Mutex<Vec<(String, tauri::ipc::Channel<T>)>>>;
+
+/// Last heartbeat per webview label — see [`StreamSubs`] and `stream_heartbeat`.
+type Alive = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>;
+
+/// How long a webview may stay silent before [`fan_out`] stops sending to it. Deliberately
+/// generous relative to the 1 Hz beat: a false positive is nearly free (frames are skipped for a
+/// beat, and the phosphor views already tolerate that — they resume the moment it checks back in),
+/// while a false *negative* leaks at the full payload rate.
+const SUB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Default)]
 struct StreamSubs {
     meter: Subs<cageq_monitor::MeterUpdate>,
     spectrum: Subs<cageq_monitor::SpectrumUpdate>,
     scope: Subs<cageq_monitor::ScopeUpdate>,
+    alive: Alive,
 }
 
-/// Send one stream payload to every subscriber. The `is_ok` prune is a belt-and-braces guard only
-/// (it fires on mobile, where the channel is a real callback that can fail) — desktop liveness is
-/// [`drop_subs`]'s job, see [`StreamSubs`].
+/// Send one stream payload to every subscriber that is still draining its channel. The `is_ok`
+/// prune is a belt-and-braces guard only (it fires on mobile, where the channel is a real callback
+/// that can fail) — desktop liveness is the heartbeat's job, see [`StreamSubs`].
 fn fan_out<T: Clone + serde::Serialize>(
     subs: &std::sync::Mutex<Vec<(String, tauri::ipc::Channel<T>)>>,
+    alive: &Alive,
     value: T,
 ) {
+    let now = std::time::Instant::now();
+    let Ok(beats) = alive.lock() else { return };
     if let Ok(mut list) = subs.lock() {
-        list.retain(|(_, ch)| ch.send(value.clone()).is_ok());
+        list.retain(|(label, ch)| {
+            let draining = beats.get(label).is_some_and(|t| now - *t <= SUB_TIMEOUT);
+            // Gone quiet: crashed, wedged, or just hidden (Chromium throttles timers in hidden
+            // windows, which is fine — those views aren't painting either, and they pick straight
+            // back up on the next beat). Skip the send rather than park a payload nobody will
+            // fetch, but keep the entry, so this is fully reversible.
+            !draining || ch.send(value.clone()).is_ok()
+        });
+    }
+}
+
+/// Record a liveness beat for `label`.
+fn beat(alive: &Alive, label: &str) {
+    if let Ok(mut beats) = alive.lock() {
+        beats.insert(label.to_string(), std::time::Instant::now());
     }
 }
 
@@ -96,6 +133,9 @@ fn drop_subs(subs: &StreamSubs, label: &str) {
     prune(&subs.meter, label);
     prune(&subs.spectrum, label);
     prune(&subs.scope, label);
+    if let Ok(mut beats) = subs.alive.lock() {
+        beats.remove(label);
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -403,12 +443,14 @@ fn start_monitor(
     let meter_subs = subs.meter.clone();
     let spectrum_subs = subs.spectrum.clone();
     let scope_subs = subs.scope.clone();
+    let (meter_alive, spectrum_alive, scope_alive) =
+        (subs.alive.clone(), subs.alive.clone(), subs.alive.clone());
     let monitor = cageq_monitor::Monitor::start(
         device,
         scope_viewers.0.clone(),
-        move |update| fan_out(&meter_subs, update),
-        move |spectrum| fan_out(&spectrum_subs, spectrum),
-        move |scope| fan_out(&scope_subs, scope),
+        move |update| fan_out(&meter_subs, &meter_alive, update),
+        move |spectrum| fan_out(&spectrum_subs, &spectrum_alive, spectrum),
+        move |scope| fan_out(&scope_subs, &scope_alive, scope),
     )?;
     *guard = Some(monitor);
     Ok(())
@@ -423,6 +465,7 @@ fn subscribe_meter(
     channel: tauri::ipc::Channel<cageq_monitor::MeterUpdate>,
     subs: State<StreamSubs>,
 ) {
+    beat(&subs.alive, webview.label());
     register(&subs.meter, webview.label(), channel);
 }
 
@@ -433,6 +476,7 @@ fn subscribe_spectrum(
     channel: tauri::ipc::Channel<cageq_monitor::SpectrumUpdate>,
     subs: State<StreamSubs>,
 ) {
+    beat(&subs.alive, webview.label());
     register(&subs.spectrum, webview.label(), channel);
 }
 
@@ -444,7 +488,16 @@ fn subscribe_scope(
     channel: tauri::ipc::Channel<cageq_monitor::ScopeUpdate>,
     subs: State<StreamSubs>,
 ) {
+    beat(&subs.alive, webview.label());
     register(&subs.scope, webview.label(), channel);
+}
+
+/// Liveness beat from a webview's stream bus (frontend `streams.ts`, ~1 Hz). A webview that stops
+/// beating stops being sent to — see [`StreamSubs`] for why this backstop exists on top of the
+/// `WindowEvent::Destroyed` cleanup.
+#[tauri::command]
+fn stream_heartbeat(webview: tauri::Webview, subs: State<StreamSubs>) {
+    beat(&subs.alive, webview.label());
 }
 
 /// A vectorscope view opened (`active = true`) or closed (`false`). Refcounted so the loopback
@@ -1015,6 +1068,7 @@ pub fn run() {
             subscribe_meter,
             subscribe_spectrum,
             subscribe_scope,
+            stream_heartbeat,
             start_test_signal,
             stop_test_signal,
             open_output_settings,
