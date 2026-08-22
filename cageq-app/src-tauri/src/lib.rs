@@ -40,24 +40,62 @@ struct ScopeViewers(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 /// WebView2 at ~100 MiB/min, faster than its GC kept up (the "out of memory" crash class).
 /// `tauri::ipc::Channel` rides the raw IPC pipe instead — the documented transport for exactly
 /// this kind of streaming. Each webview registers one channel per stream for its whole lifetime
-/// (see frontend `streams.ts`); a dead channel (closed pop-out, reloaded webview) is dropped the
-/// first time a send to it fails. Arcs so the monitor's capture-thread closures can hold them
+/// (see frontend `streams.ts`). Arcs so the monitor's capture-thread closures can hold them
 /// across monitor restarts (device changes), same pattern as `ScopeViewers`.
+///
+/// Each entry is keyed by the **label of the webview that registered it**, because that label is
+/// the only usable liveness signal on desktop. This used to lean on `Channel::send` failing once
+/// the webview was gone — it never does: `send` bottoms out in `Webview::eval` →
+/// `send_user_message`, which returns `Ok(())` as long as the *event loop* proxy is alive, whether
+/// or not the target webview still exists. The result was a real, unbounded leak in the host
+/// process (not in WebView2) after the pop-out scope window closed: a `ScopeUpdate` is ~20 KB of
+/// JSON, over Tauri's 8 KiB direct-eval threshold, so every frame took the fetch path — parked in
+/// Tauri's global `ChannelDataIpcQueue` map and evicted only when the webview actually fetches it.
+/// A dead webview never fetches, and nothing else ever evicts, so ~60 fps × 20 KB ≈ 1 MB/s piled
+/// up forever (`Meter` pins `set_scope_viewer` at ≥1, so the stream never stops on its own).
+/// [`drop_subs`] on `WindowEvent::Destroyed` is the cleanup; `register` also replaces a same-label
+/// entry so a webview reload (same label, fresh channel) can't strand the old one either.
+type Subs<T> = std::sync::Arc<std::sync::Mutex<Vec<(String, tauri::ipc::Channel<T>)>>>;
+
 #[derive(Default)]
 struct StreamSubs {
-    meter: std::sync::Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<cageq_monitor::MeterUpdate>>>>,
-    spectrum: std::sync::Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<cageq_monitor::SpectrumUpdate>>>>,
-    scope: std::sync::Arc<std::sync::Mutex<Vec<tauri::ipc::Channel<cageq_monitor::ScopeUpdate>>>>,
+    meter: Subs<cageq_monitor::MeterUpdate>,
+    spectrum: Subs<cageq_monitor::SpectrumUpdate>,
+    scope: Subs<cageq_monitor::ScopeUpdate>,
 }
 
-/// Send one stream payload to every live subscriber, dropping any whose webview is gone.
+/// Send one stream payload to every subscriber. The `is_ok` prune is a belt-and-braces guard only
+/// (it fires on mobile, where the channel is a real callback that can fail) — desktop liveness is
+/// [`drop_subs`]'s job, see [`StreamSubs`].
 fn fan_out<T: Clone + serde::Serialize>(
-    subs: &std::sync::Mutex<Vec<tauri::ipc::Channel<T>>>,
+    subs: &std::sync::Mutex<Vec<(String, tauri::ipc::Channel<T>)>>,
     value: T,
 ) {
     if let Ok(mut list) = subs.lock() {
-        list.retain(|ch| ch.send(value.clone()).is_ok());
+        list.retain(|(_, ch)| ch.send(value.clone()).is_ok());
     }
+}
+
+/// Register `label`'s channel for one stream, replacing any it had already (webview reload).
+fn register<T>(subs: &Subs<T>, label: &str, channel: tauri::ipc::Channel<T>) {
+    if let Ok(mut list) = subs.lock() {
+        list.retain(|(l, _)| l != label);
+        list.push((label.to_string(), channel));
+    }
+}
+
+/// Drop every stream channel belonging to a webview that no longer exists. Called from the
+/// app-wide `WindowEvent::Destroyed` handler — see [`StreamSubs`] for why this can't be inferred
+/// from send failures.
+fn drop_subs(subs: &StreamSubs, label: &str) {
+    fn prune<T>(list: &Subs<T>, label: &str) {
+        if let Ok(mut l) = list.lock() {
+            l.retain(|(k, _)| k != label);
+        }
+    }
+    prune(&subs.meter, label);
+    prune(&subs.spectrum, label);
+    prune(&subs.scope, label);
 }
 
 #[derive(serde::Serialize)]
@@ -377,29 +415,36 @@ fn start_monitor(
 }
 
 /// Register this webview's meter-stream channel — once per webview lifetime (frontend
-/// `streams.ts` guards against re-registering); cleaned up by `fan_out` when the webview dies.
+/// `streams.ts` guards against re-registering); dropped when that webview is destroyed
+/// (`drop_subs`), keyed by its label.
 #[tauri::command]
-fn subscribe_meter(channel: tauri::ipc::Channel<cageq_monitor::MeterUpdate>, subs: State<StreamSubs>) {
-    if let Ok(mut list) = subs.meter.lock() {
-        list.push(channel);
-    }
+fn subscribe_meter(
+    webview: tauri::Webview,
+    channel: tauri::ipc::Channel<cageq_monitor::MeterUpdate>,
+    subs: State<StreamSubs>,
+) {
+    register(&subs.meter, webview.label(), channel);
 }
 
 /// Register this webview's spectrum-stream channel (see `subscribe_meter`).
 #[tauri::command]
-fn subscribe_spectrum(channel: tauri::ipc::Channel<cageq_monitor::SpectrumUpdate>, subs: State<StreamSubs>) {
-    if let Ok(mut list) = subs.spectrum.lock() {
-        list.push(channel);
-    }
+fn subscribe_spectrum(
+    webview: tauri::Webview,
+    channel: tauri::ipc::Channel<cageq_monitor::SpectrumUpdate>,
+    subs: State<StreamSubs>,
+) {
+    register(&subs.spectrum, webview.label(), channel);
 }
 
 /// Register this webview's scope-stream channel (see `subscribe_meter`). Whether the scope
 /// stream carries data at all stays gated by `set_scope_viewer`, orthogonal to the transport.
 #[tauri::command]
-fn subscribe_scope(channel: tauri::ipc::Channel<cageq_monitor::ScopeUpdate>, subs: State<StreamSubs>) {
-    if let Ok(mut list) = subs.scope.lock() {
-        list.push(channel);
-    }
+fn subscribe_scope(
+    webview: tauri::Webview,
+    channel: tauri::ipc::Channel<cageq_monitor::ScopeUpdate>,
+    subs: State<StreamSubs>,
+) {
+    register(&subs.scope, webview.label(), channel);
 }
 
 /// A vectorscope view opened (`active = true`) or closed (`false`). Refcounted so the loopback
@@ -923,6 +968,15 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_opener::init())
+        // Release a destroyed webview's stream channels. Without this the closed pop-out scope
+        // window's channel stays subscribed forever and its ~20 KB/frame payloads pile up in
+        // Tauri's `ChannelDataIpcQueue` — a ~1 MB/s leak in *this* process, see `StreamSubs`.
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                use tauri::Manager;
+                drop_subs(&window.state::<StreamSubs>(), window.label());
+            }
+        })
         .setup(|app| {
             // The frozen DSP sidecar ships as a bundled resource (see tauri.conf.json);
             // its path needs the app handle, so build the backend here rather than in

@@ -10,8 +10,10 @@ import type { ScopeData } from "./Vectorscope";
  * class). `Channel` rides the raw IPC pipe instead, the documented transport for streams.
  *
  * Each stream registers **one** channel per webview, lazily on first subscribe, and keeps it
- * for the webview's whole lifetime — the backend's subscriber list drops it when the webview
- * dies (send failure). Components subscribe/unsubscribe *locally* (a Set of callbacks, no IPC),
+ * for the webview's whole lifetime — the backend keys its subscriber list by webview label and
+ * drops the entry when that window is destroyed (`drop_subs` in src-tauri/src/lib.rs; a dead
+ * channel can't be detected from the send side, which is documented there). Components
+ * subscribe/unsubscribe *locally* (a Set of callbacks, no IPC),
  * so React unmounts/remounts — including StrictMode's dev double-mount — never re-register.
  * The pop-out scope window only ever subscribes to `scopeStream`, so it registers only that
  * channel; whether the scope stream carries data at all stays gated by `set_scope_viewer`.
