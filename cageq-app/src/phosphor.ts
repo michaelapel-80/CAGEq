@@ -107,8 +107,16 @@ export type Phosphor = {
    * `tail` multiplies `tau` for *faint* content only (1 = a plain single exponential), giving the
    * long low-level afterglow a real phosphor has — see FS_ACCUM. Ignored by the 2D fallback, which
    * can only apply one global fade.
+   *
+   * `punch` (0..1, default 0) only matters for the `over` blend: 0 is the plain over-operator
+   * (converges on its own colour, never blooms — see the module doc's "What must NOT be drawn
+   * through this"); 1 makes `over` behave exactly like `add` (stacks toward white, uncapped). Values
+   * in between let content that keeps landing in the same place build up real brightness without
+   * going all the way to `add`'s full saturation — for a backdrop that wants a *little* pop without
+   * competing with what's drawn over it. No effect on `add` blend (already maximally additive) or
+   * the 2D fallback (ignored, like `tail`).
    */
-  commit(dt: number, tau: number, tail?: number): void;
+  commit(dt: number, tau: number, tail?: number, punch?: number): void;
   /** True for the half-float GL backend; false when running the 8-bit canvas fallback. */
   readonly precise: boolean;
   dispose(): void;
@@ -131,7 +139,7 @@ void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
 // longer, which raises the apparent floor and forces glow up before the faint end reads against it.
 // The point of this module is a trail that reaches zero, not a different look.
 const FS_ACCUM = `precision highp float; varying vec2 vUv;
-uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uOver, uDose;
+uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uOver, uDose, uPunch;
 void main(){
   vec4 prev = texture2D(uPrev, vUv);
   // Brightness-dependent decay rate: bright content falls at uKeep, faint content at the slower
@@ -156,8 +164,13 @@ void main(){
   // "add" stacks toward saturation and has no hue ceiling — the beam overdraw the scopes want.
   // "over" is the plain over-operator, so repeated identical content converges on its own colour
   // instead of blooming: what a dim *backdrop* (EqChart's spectrum) wants, where blowing out would
-  // fight the curves drawn on top of it.
-  gl_FragColor = min(uOver > 0.5 ? cur + decayed * (1.0 - cur.a) : decayed + cur, 1.0);
+  // fight the curves drawn on top of it. uPunch (0..1, 0 for every existing caller) partially
+  // undoes "over"'s own self-limiting discount of the existing trail — at 0 it's the plain
+  // (1.0 - cur.a) factor (today's behaviour, unchanged); at 1 the discount vanishes entirely and
+  // the over-branch reduces to exactly the add-branch's formula. A dial between "converges, never
+  // blooms" and "stacks toward white", rather than only the two ends of it.
+  float overKeep = 1.0 - cur.a * (1.0 - uPunch);
+  gl_FragColor = min(uOver > 0.5 ? cur + decayed * overKeep : decayed + cur, 1.0);
 }`;
 
 const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
@@ -224,6 +237,7 @@ function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
   const uFloor = gl.getUniformLocation(accum, "uFloor");
   const uOver = gl.getUniformLocation(accum, "uOver");
   const uDose = gl.getUniformLocation(accum, "uDose");
+  const uPunch = gl.getUniformLocation(accum, "uPunch");
   const uPrev = gl.getUniformLocation(accum, "uPrev");
   const uTrace = gl.getUniformLocation(accum, "uTrace");
   const uTex = gl.getUniformLocation(blit, "uTex");
@@ -306,7 +320,7 @@ function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
       scratch.ctx!.clearRect(0, 0, target.width, target.height);
       return scratch.ctx!;
     },
-    commit(dt, tau, tail = 1) {
+    commit(dt, tau, tail = 1, punch = 0) {
       const W = target.width;
       const H = target.height;
       if (dead || W === 0 || H === 0 || gl.isContextLost()) return;
@@ -328,6 +342,7 @@ function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
       gl.uniform1f(uFloor, TAIL_FLOOR_PER_SEC * dt);
       gl.uniform1f(uOver, blend === "over" ? 1 : 0);
       gl.uniform1f(uDose, dt / DOSE_REF_DT);
+      gl.uniform1f(uPunch, punch);
       gl.uniform1i(uPrev, 0);
       gl.uniform1i(uTrace, 1);
       gl.activeTexture(gl.TEXTURE0);

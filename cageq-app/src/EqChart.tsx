@@ -120,6 +120,18 @@ const SPEC_GLOW_TIP = 0.025; // brightness near the current level (vertical fall
 // instead of correcting for it — same tone, same visual weight in both themes.
 const SPEC_NEUTRAL: [number, number, number] = [15, 15, 15]; // light mode's --fg (#0f0f0f)
 const SPEC_TINT = 0.63; // blend the accent this far into the neutral glow — a hint of colour, not a rival to the curves
+// Reference cadence the fill's own alpha (glowBase/SPEC_GLOW_TIP) is calibrated against — matches
+// cageq-monitor's SPECTRUM_INTERVAL (~60 Hz). The backdrop effect below now redraws every animation
+// frame rather than only when a new payload lands (fixed a `punch`-exposed flicker — see its own
+// comment), and phosphor.ts's own dose normalization (DOSE_REF_DT) is *not* a substitute for this:
+// that one corrects for the caller's rAF/display rate, which was already the same before and after
+// this change (commit() always ran every rAF frame; only whether a fill was drawn each time did
+// not) — it has no notion of "how many of those commits actually carried new content", so drawing 4x
+// more often on a 240 Hz display without this genuinely injects ~4x the paint. Scaling the fill's
+// own alpha by `dt * SPEC_UPDATE_HZ` (via `ctx.globalAlpha`, since it varies every frame and can't be
+// baked into the cached gradient) keeps the *total* ink laid down per second pinned to what
+// `glowBase`/`SPEC_GLOW_TIP` were originally tuned against, regardless of the display's own rate.
+const SPEC_UPDATE_HZ = 60;
 
 /** Live-tunable trail/glow — a gear-icon panel (like the scope views' `.vs-tuning`) rather than
  *  fixed constants, specifically so `tau` can be re-tuned without a recompile: it's re-tuned often
@@ -129,9 +141,18 @@ const SPEC_TINT = 0.63; // blend the accent this far into the neutral glow — a
  *  trail-length re-tune usually wants a brightness re-tune alongside it. `tau` is a genuine
  *  time-constant (seconds), same meaning as every other trailTau in the app — see the backdrop
  *  effect's doc comment for why this used to be `fade`, a flat inverted-direction per-event alpha
- *  with no time-base, and no longer is. */
-type SpecParams = { tau: number; tail: number; glowBase: number };
-const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.25 };
+ *  with no time-base, and no longer is.
+ *
+ * `punch`: this backdrop deliberately runs phosphor.ts's `over` blend, not the scopes' `add` — see
+ * the backdrop effect's own comment — so repeated content converges on its own colour instead of
+ * blooming toward white and fighting the curves drawn over it. Reported live: even at `tau`/
+ * `glowBase`'s own max, real (constantly-moving) program material never actually reaches that
+ * ceiling, because `over`'s convergence discounts the existing trail by how much freshly landed —
+ * real content rarely lands on the exact same pixel enough in a row to build up. `punch` (see
+ * phosphor.ts's `commit` doc) dials that discount down without going all the way to `add`'s
+ * uncapped stacking — "a little pop", not full saturation. */
+type SpecParams = { tau: number; tail: number; glowBase: number; punch: number };
+const SPEC_DEFAULTS: SpecParams = { tau: 0.3, tail: 12, glowBase: 0.15, punch: 0.85 };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -411,7 +432,6 @@ export function EqChart({
     if (!phos) return;
     let raf = 0;
     let last = performance.now();
-    let drawn: SpectrumData | null | undefined; // last payload already drawn; undefined = none yet
 
     const render = () => {
       const now = performance.now();
@@ -421,13 +441,17 @@ export function EqChart({
       const spectrum = spectrumRef?.current ?? null;
       const ctx = phos.begin();
 
-      // Drawn only when a new payload lands, not every frame — the backdrop's brightness is set by
-      // how much arrives per second, so re-adding the same reading on every frame would make it
-      // scale with refresh rate. Frames in between just decay, which is also what makes the trail
-      // fade away gracefully when monitoring stops rather than vanishing on the next frame.
-      const fresh = !!spectrum && spectrum !== drawn && spectrum.db.length >= 2;
-      drawn = spectrum;
-      if (fresh && spectrum) {
+      // Redrawn every animation frame now, not only when a new payload lands: commit()'s own
+      // dt-scaled dose (phosphor.ts's DOSE_REF_DT) already keeps the per-second brightness
+      // independent of how often this runs, so spreading each update's dose over every frame
+      // instead of lumping it into one draw per ~60 Hz spectrum event is dose-neutral — it just
+      // stops the lump-then-decay cycle a higher-refresh display was showing as visible flicker at
+      // any real `punch` above 0 (reported live even against a synthetic pure tone, which ruled out
+      // signal jitter as the cause — see phosphor.ts's own `commit` doc for what `punch` trades
+      // off). Same "gentle fade-away" during silence as before: the backend keeps emitting the same
+      // idle-decayed spectrum values: we just redraw whichever one is latest every frame now,
+      // instead of only on the frame where the object reference first changed.
+      if (spectrum && spectrum.db.length >= 2) {
         const n = spectrum.db.length;
         const lnF0 = Math.log(spectrum.f_min);
         const lnF1 = Math.log(spectrum.f_max);
@@ -481,10 +505,19 @@ export function EqChart({
           if (i === n - 1) ctx.lineTo(x1, plotBot); // down to baseline at the right edge
         }
         ctx.closePath(); // straight line back along the baseline to the left edge
+        // See SPEC_UPDATE_HZ's own doc: pins the total ink laid down per second to what glowBase/
+        // SPEC_GLOW_TIP were tuned against, independent of how much faster than that this actually
+        // redraws (dt varies per frame, so this can't be folded into the cached gradient above).
+        // Clamped to 1 rather than left to exceed it: `globalAlpha` silently no-ops (keeps its
+        // previous value) on an out-of-range assignment instead of clamping itself, and a display
+        // slower than SPEC_UPDATE_HZ is enough of an edge case that reading a touch dim there beats
+        // a stale globalAlpha carried over from whatever the last frame happened to set.
+        ctx.globalAlpha = Math.min(1, dt * SPEC_UPDATE_HZ);
         ctx.fill();
+        ctx.globalAlpha = 1;
       }
 
-      phos.commit(dt, specParams.tau, specParams.tail);
+      phos.commit(dt, specParams.tau, specParams.tail, specParams.punch);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -805,9 +838,9 @@ export function EqChart({
             <span className="vs-tune-label">{t("scope.trail")}</span>
             <input
               type="range"
-              min={0.02}
-              max={0.6}
-              step={0.01}
+              min={0.1}
+              max={2.0}
+              step={0.1}
               value={specParams.tau}
               onChange={(e) => {
                 const tau = Number(e.currentTarget.value);
@@ -836,7 +869,7 @@ export function EqChart({
             <input
               type="range"
               min={0.02}
-              max={0.8}
+              max={0.2}
               step={0.01}
               value={specParams.glowBase}
               onChange={(e) => {
@@ -845,6 +878,21 @@ export function EqChart({
               }}
             />
             <b>{specParams.glowBase.toFixed(2)}</b>
+          </label>
+          <label className="vs-tune-row" title={t("scope.punchHint")}>
+            <span className="vs-tune-label">{t("scope.punch")}</span>
+            <input
+              type="range"
+              min={0}
+              max={1.0}
+              step={0.05}
+              value={specParams.punch}
+              onChange={(e) => {
+                const punch = Number(e.currentTarget.value);
+                setSpecParams((p) => ({ ...p, punch }));
+              }}
+            />
+            <b>{specParams.punch.toFixed(2)}</b>
           </label>
         </div>
       )}
