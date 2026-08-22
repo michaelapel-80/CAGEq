@@ -53,7 +53,7 @@ type Params = {
   focus: number; // velocity-glow reference — see Vectorscope's own `focus` doc
   beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
 };
-const DEFAULTS: Params = { trailTau: 0.3, tail: 24, glow: 0.07, focus: 90, beamWidth: 0.85 };
+const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.07, focus: 90, beamWidth: 1.0 };
 const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05;
 const VEL_REF_RATE = 48000;
