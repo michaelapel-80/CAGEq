@@ -611,6 +611,12 @@ select:disabled {
   text-align: right;
   font-weight: 600;
 }
+/* True peak reading above 0 dBTP — a genuine inter-sample over, not just "loud". Distinct from the
+   amber peak/momentary marks (which just mean "this is the fast-moving reading"), since this one's
+   specifically a clipping-risk flag. */
+.mr-over {
+  color: #e5484d;
+}
 
 /* --- §5.2 chart view swap: magnitude Response vs Impulse -------------------- */
 .chart-view {

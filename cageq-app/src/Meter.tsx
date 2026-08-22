@@ -352,7 +352,7 @@ export function Meter({
       </div>
       <div className="meter-read">
         <span className="mr-k">pk</span>
-        <span className="mr-v">{num(nums?.peak_db)}</span>
+        <span className={`mr-v${showNums && nums!.peak_db > 0 ? " mr-over" : ""}`}>{num(nums?.peak_db)}</span>
         <span className="mr-k">M</span>
         <span className="mr-v">{num(nums?.momentary_lufs)}</span>
         <span className="mr-k">rms</span>
