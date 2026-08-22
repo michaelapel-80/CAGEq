@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefOb
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, logGrid, phaseDeg } from "./biquad";
-import { createPhosphor } from "./phosphor";
+import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { useTunableParams } from "./useTunableParams";
 
 /**
@@ -122,20 +122,27 @@ const SPEC_GLOW_TIP = 0.025; // brightness near the current level (vertical fall
 const SPEC_NEUTRAL: [number, number, number] = [15, 15, 15]; // light mode's --fg (#0f0f0f)
 const SPEC_TINT = 0.63; // blend the accent this far into the neutral glow — a hint of colour, not a rival to the curves
 // Reference cadence the fill's own alpha (glowBase/SPEC_GLOW_TIP) is calibrated against — matches
-// cageq-monitor's SPECTRUM_INTERVAL (~60 Hz). The backdrop effect below now redraws every animation
+// cageq-monitor's SPECTRUM_INTERVAL (~60 Hz). The backdrop effect below redraws every animation
 // frame rather than only when a new payload lands (fixed a `punch`-exposed flicker — see its own
-// comment), and phosphor.ts's own dose normalization (DOSE_REF_DT) is *not* a substitute for this:
-// that one corrects for the caller's rAF/display rate, which was already the same before and after
-// this change (commit() always ran every rAF frame; only whether a fill was drawn each time did
-// not) — it has no notion of "how many of those commits actually carried new content", so drawing 4x
-// more often on a 240 Hz display without this genuinely injects ~4x the paint. `dt * SPEC_UPDATE_HZ`
-// is passed as commit()'s `doseMult` (a further multiplier on its own dose math, in the shader's
-// float precision) to pin the *total* ink laid down per second to what `glowBase`/`SPEC_GLOW_TIP`
-// were originally tuned against, regardless of the display's own rate — deliberately NOT applied as
-// a `ctx.globalAlpha` scale on the fill itself: that's an 8-bit canvas op, and a low globalAlpha on a
-// smooth gradient visibly dithered in this WebView2 build (Chromium/Skia's own anti-banding dither,
-// made visible by pushing an already-smooth low-alpha gradient into a handful of 8-bit levels).
+// comment), which injects the fill's ink far more often than this was tuned against on any display
+// faster than SPEC_UPDATE_HZ — corrected via commit()'s `doseMult` (a further multiplier on its own
+// dose math, in the shader's float precision — deliberately NOT a `ctx.globalAlpha` scale on the
+// fill itself: that's an 8-bit canvas op, and a low globalAlpha on a smooth gradient visibly
+// dithered in this WebView2 build, Chromium/Skia's own anti-banding dither made visible by pushing
+// an already-smooth low-alpha gradient into a handful of 8-bit levels).
+//
+// `doseMult` must be `SPEC_UPDATE_HZ / DOSE_REF_FPS` — a plain constant, NOT scaled by `dt` again.
+// First attempt used `dt * SPEC_UPDATE_HZ` and reintroduced refresh-rate-dependent brightness, just
+// inverted (brighter at LOW Hz this time): commit()'s own `dt/DOSE_REF_DT` already fully corrects
+// for render rate on its own (that's its entire purpose), so multiplying in a SECOND `dt`-dependent
+// term made the total dose scale as dt² instead of being rate-independent — overcorrecting at high
+// Hz, undercorrecting at low Hz. The fix restores exactly one power of `dt` (the one `uDose` already
+// contributes): with a fixed `doseMult`, total dose-per-second at any display rate F works out to
+// F × glowBase × (dt/DOSE_REF_DT) × doseMult, and since dt ≈ 1/F this reduces to a constant
+// (glowBase × doseMult / DOSE_REF_DT) with no F left in it at all — confirmed algebraically at
+// 60/120/240 Hz before landing, not just eyeballed on one machine.
 const SPEC_UPDATE_HZ = 60;
+const SPEC_DOSE_MULT = SPEC_UPDATE_HZ / DOSE_REF_FPS;
 
 /** Live-tunable trail/glow — a gear-icon panel (like the scope views' `.vs-tuning`) rather than
  *  fixed constants, specifically so `tau` can be re-tuned without a recompile: it's re-tuned often
@@ -517,11 +524,11 @@ export function EqChart({
         // canvas (a low ctx.globalAlpha on a smooth gradient visibly dithers in this WebView2 build).
       }
 
-      // See SPEC_UPDATE_HZ's own doc: pins the total ink laid down per second to what glowBase/
-      // SPEC_GLOW_TIP were tuned against, independent of how much faster (or slower) than that this
-      // actually redraws — phosphor.ts's own commit doc explains why this is a `doseMult` argument
-      // (float, shader-side) rather than a canvas-side alpha scale.
-      phos.commit(dt, specParams.tau, specParams.tail, specParams.punch, dt * SPEC_UPDATE_HZ);
+      // See SPEC_DOSE_MULT's own doc: pins the total ink laid down per second to what glowBase/
+      // SPEC_GLOW_TIP were tuned against, independent of the display's own rate — a fixed ratio, not
+      // scaled by this frame's `dt` (commit()'s own dose math already accounts for `dt` once; doing
+      // so a second time here previously reintroduced refresh-rate-dependent brightness).
+      phos.commit(dt, specParams.tau, specParams.tail, specParams.punch, SPEC_DOSE_MULT);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
