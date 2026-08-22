@@ -258,7 +258,7 @@
   },
 
   "meter": {
-    "levelTitle": "Ausgangspegel (dBFS): Phosphor-Füllung, Peak bernstein, RMS neutral",
+    "levelTitle": "Ausgangspegel (dBFS): Phosphorstrahl, True-Peak (dBTP) bernstein, RMS neutral",
     "lufsTitle": "Lautheit (LUFS): Short-Term-Füllung, Momentary-Marke (BS.1770)",
     "unavailable": "Meter nicht verfügbar: {{error}}"
   },

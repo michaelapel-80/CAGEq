@@ -258,7 +258,7 @@
   },
 
   "meter": {
-    "levelTitle": "Output level (dBFS): phosphor fill, amber peak, neutral RMS",
+    "levelTitle": "Output level (dBFS): phosphor beam, amber true-peak (dBTP), neutral RMS",
     "lufsTitle": "Loudness (LUFS): short-term fill, momentary mark (BS.1770)",
     "unavailable": "Meter unavailable: {{error}}"
   },

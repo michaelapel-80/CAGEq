@@ -17,7 +17,9 @@ use serde::Serialize;
 /// One meter reading, pushed to the UI ~20×/s. Plain data, so it's platform-independent.
 #[derive(Clone, Debug, Serialize)]
 pub struct MeterUpdate {
-    /// Peak level, dBFS — a PPM-style follower (instant attack, brief hold, release), floored at -120.
+    /// Peak level, dBTP (BS.1770 oversampled true peak — catches inter-sample overs a plain
+    /// sample-peak scan would miss, so this can read slightly above 0 on hot/limited material) — a
+    /// PPM-style follower on top of that (instant attack, brief hold, release), floored at -120.
     pub peak_db: f32,
     /// True RMS level (VU-integrated), dBFS, floored at -120.
     pub rms_db: f32,
@@ -798,10 +800,13 @@ mod windows_impl {
         let capture = audio_client.get_audiocaptureclient()?;
 
         // K-weighted loudness at the *actual* endpoint rate (ebur128 recomputes coefficients).
+        // TRUE_PEAK (which subsumes SAMPLE_PEAK's own bits) also gets us BS.1770 oversampled true
+        // peak "for free" off the same instance — see block_peak's own doc below for why that
+        // replaced a plain sample-peak scan.
         let mut ebu = ebur128::EbuR128::new(
             channels as u32,
             rate,
-            ebur128::Mode::M | ebur128::Mode::S | ebur128::Mode::SAMPLE_PEAK,
+            ebur128::Mode::M | ebur128::Mode::S | ebur128::Mode::TRUE_PEAK,
         )
         .map_err(|e| format!("ebur128 init: {e:?}"))?;
 
@@ -813,7 +818,13 @@ mod windows_impl {
         let mut frames: Vec<f32> = Vec::new(); // interleaved, reused each read for ebur128
         let mut mono: Vec<f32> = Vec::new(); // per-read mono downmix, fed to the FFT
         let mut scope_lr: Vec<f32> = Vec::new(); // (l, r) pairs since the last scope emit
-        // Per-tick block accumulators (reset every emit).
+        // Per-tick block accumulators (reset every emit). `block_peak` is BS.1770 true peak
+        // (linear, can exceed 1.0 — i.e. positive dBTP — on real inter-sample overs), not a plain
+        // sample-peak scan: a reconstruction filter can overshoot between samples on hot/limited
+        // material, which a max-abs-of-samples scan can't see at all — ebur128's oversampled filter
+        // (already running for the LUFS numbers on this same instance) catches it. Folded in per
+        // read below rather than read once per tick, since `ebu.prev_true_peak` only covers the
+        // frames from the single most recent `add_frames` call, and a tick can span several reads.
         let mut block_peak = 0.0f32;
         let mut block_sum_sq = 0.0f64;
         let mut block_count: u64 = 0;
@@ -862,10 +873,6 @@ mod windows_impl {
                     }
                     frames.push(s);
                     frame_sum += s;
-                    let a = s.abs();
-                    if a > block_peak {
-                        block_peak = a;
-                    }
                     block_sum_sq += (s as f64) * (s as f64);
                     block_count += 1;
                 }
@@ -875,8 +882,17 @@ mod windows_impl {
                     scope_lr.push(ch1);
                 }
             }
-            if !frames.is_empty() {
-                let _ = ebu.add_frames_f32(&frames);
+            if !frames.is_empty() && ebu.add_frames_f32(&frames).is_ok() {
+                // This read's true peak (max(sample_peak, true_peak) internally — see
+                // `prev_true_peak`'s own doc), folded into the tick-spanning accumulator above.
+                for c in 0..channels as u32 {
+                    if let Ok(tp) = ebu.prev_true_peak(c) {
+                        let tp = tp as f32;
+                        if tp > block_peak {
+                            block_peak = tp;
+                        }
+                    }
+                }
             }
             if !mono.is_empty() {
                 spectrum.push(&mono);
