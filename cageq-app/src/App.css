@@ -559,10 +559,12 @@ select:disabled {
   right: 0;
   bottom: 0;
   border-radius: 4px;
+  /* Bumped brighter (was 70%/28%, then 85%/40%) so the flat CSS gradient reads closer in intensity
+     to the Level bar's own WebGL beam alongside it — same two-stop gradient, no renderer change. */
   background: linear-gradient(
     to top,
-    color-mix(in srgb, var(--accent) 70%, transparent),
-    color-mix(in srgb, var(--accent) 28%, transparent)
+    color-mix(in srgb, var(--accent) 100%, transparent),
+    color-mix(in srgb, var(--accent) 55%, transparent)
   );
 }
 /* Horizontal marks, positioned by inline `bottom`. RMS = neutral; the "fast" marks (peak on the
