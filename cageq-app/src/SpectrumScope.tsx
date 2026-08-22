@@ -18,7 +18,7 @@ import type { ScopeEq } from "./Vectorscope";
  *  than the scopes' sample-domain inverse cascade: this view never sees raw samples, only the
  *  backend's already-FFT'd, already-log-binned dB values. */
 type Params = { trailTau: number; tail: number; glow: number; undistort: boolean };
-const DEFAULTS: Params = { trailTau: 0.15, tail: 12, glow: 0.225, undistort: true };
+const DEFAULTS: Params = { trailTau: 0.18, tail: 12, glow: 0.225, undistort: true };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation, and
