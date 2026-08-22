@@ -18,7 +18,20 @@ import type { ScopeEq } from "./Vectorscope";
  *  than the scopes' sample-domain inverse cascade: this view never sees raw samples, only the
  *  backend's already-FFT'd, already-log-binned dB values. */
 type Params = { trailTau: number; tail: number; glow: number; undistort: boolean };
-const DEFAULTS: Params = { trailTau: 0.15, tail: 12, glow: 0.15, undistort: true };
+const DEFAULTS: Params = { trailTau: 0.15, tail: 12, glow: 0.0225, undistort: true };
+// Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
+// `exp(-dt/trailTau)` between them), accumulated brightness is approximately
+// `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation, and
+// Vectorscope.tsx's identical TAU_REF for the fuller reasoning/history) — so moving Trail longer
+// measurably brightens a steady/dwelling signal even with Glow untouched. Unlike the scope views,
+// this one already redraws every animation frame (no dedup-by-payload-identity gate), so it doesn't
+// need their separate SCOPE_DOSE_RATIO correction — commit()'s own dt/DOSE_REF_DT already fully
+// normalizes its redraw cadence on its own. Only the `TAU_REF/trailTau` term is needed here.
+// Anchored at one real second: `glow` reads as "steady-state brightness units per second of
+// persistence", the same physical meaning as the scope views' own Glow. DEFAULTS.glow below is
+// `old_glow * old_trailTau` (0.15 * 0.15), chosen so the shipped default renders identically to
+// before this change — only the number's meaning moved.
+const TAU_REF = 1;
 
 /** Cache for the per-bin correction curve (filter response + preamp, dB), keyed by reference/value
  *  so it's rebuilt only when the EQ or bin layout actually changes, not on every 60 fps frame. */
@@ -603,7 +616,8 @@ export function SpectrumScope() {
         }
       }
 
-      phos.commit(dt, p.trailTau, p.tail);
+      // TAU_REF/p.trailTau is the Trail/Glow orthogonality fix — see TAU_REF's own doc.
+      phos.commit(dt, p.trailTau, p.tail, 0, TAU_REF / p.trailTau);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -618,7 +632,7 @@ export function SpectrumScope() {
   const CONTROLS: { key: NumKey; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
-    { key: "glow", label: t("scope.glow"), min: 0.05, max: 1, step: 0.05 },
+    { key: "glow", label: t("scope.glow"), min: 0.002, max: 0.1, step: 0.002 },
   ];
 
   return (
@@ -690,7 +704,7 @@ export function SpectrumScope() {
                   value={params[cc.key]}
                   onChange={(e) => set(cc.key, Number(e.currentTarget.value))}
                 />
-                <b>{params[cc.key].toFixed(cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : 2)}</b>
+                <b>{params[cc.key].toFixed(cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : cc.step >= 0.01 ? 2 : 3)}</b>
               </label>
             ))}
             <div className="vs-tune-sep" />
