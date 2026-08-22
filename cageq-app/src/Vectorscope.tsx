@@ -43,7 +43,7 @@ type Params = {
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
-const DEFAULTS: Params = { trailTau: 0.08, tail: 12, glow: 0.032, beam: 1.0, focus: 8, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
+const DEFAULTS: Params = { trailTau: 0.08, tail: 12, glow: 0.32, beam: 1.0, focus: 8, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
@@ -70,12 +70,24 @@ const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, no
 // *only* moving Trail longer measurably brightens a steady/dwelling signal even with Glow untouched,
 // reported live as the two sliders reading as coupled rather than independent controls (persistence
 // length vs. brightness, which is what they're meant to be). `TAU_REF / trailTau` in doseMult below
-// cancels that trailTau term. Anchored at one real second, not at this view's own (arbitrary, prone
-// to drifting with the next re-tune) default trailTau: with that anchor, `glow` reads as "steady-state
-// brightness units per second of persistence" — a fixed, physically meaningful reference instead of
-// an implementation detail. DEFAULTS.glow below is `old_glow * old_trailTau` (0.40 * 0.08), chosen so
-// the shipped default renders *identically* to before this change — only the number's meaning moved.
-const TAU_REF = 1;
+// cancels that trailTau term. Anchored at a real 100 ms, not at this view's own (arbitrary, prone to
+// drifting with the next re-tune) default trailTau: with that anchor, `glow` reads as "steady-state
+// brightness units per 100 ms of persistence" — a fixed, physically meaningful reference instead of
+// an implementation detail.
+//
+// First attempt anchored at a full second (TAU_REF=1), which is *also* physically meaningful but
+// shrinks `glow` by trailTau/TAU_REF — here, 0.08/1 = 12.5x. That shrunk value is what gets drawn
+// onto the 8-bit 2D scratch canvas for each velocity bucket (glow * b/(VEL_BUCKETS-1)) *before*
+// doseMult's float-precision correction ever applies — the dimmest active buckets round to just 0 or
+// 1 out of 255, so segments landing there flip unpredictably between invisible and (once
+// dose-multiplied back up) suddenly fully saturated. Reported live as reproducible, sharply-banded
+// "teeth" on periodic content — the same segment lands in the same now-miscalibrated bucket every
+// cycle. 100ms shrinks `glow` by only 0.08/0.1 = 0.8x here (i.e. barely at all, close to its
+// original magnitude), staying comfortably clear of that quantisation cliff while still being a
+// fixed, non-arbitrary reference. DEFAULTS.glow below is `old_glow * old_trailTau / TAU_REF`
+// (0.40 * 0.08 / 0.1 = 0.32), chosen so the shipped default renders identically to before the
+// original decoupling change — only the number's meaning moved, twice now.
+const TAU_REF = 0.1;
 
 /** Parse a `#rrggbb` hex (the `--accent` CSS var) to [r,g,b]; a green phosphor fallback. */
 function parseHex(hex: string): [number, number, number] {
@@ -347,9 +359,21 @@ export function Vectorscope({
         // SCOPE_UPDATE_HZ's own doc) so this fix is rate-independence *only*, not a re-tune too. The
         // further `TAU_REF/p.trailTau` factor is the separate Trail/Glow orthogonality fix — see
         // TAU_REF's own doc.
+        //
+        // `dtSinceTrace/dt` is clamped to 4: it's meant to track real timing (steady state ≈1, both
+        // sides measuring roughly the same real interval), but `dt` — this commit's own rAF interval
+        // — has no lower bound, and a single anomalously small one (timer jitter, a coalesced rAF
+        // burst after a stall, a GC pause) spikes the ratio arbitrarily, injecting one frame with far
+        // more dose than any real refresh rate would produce. Reported live as occasional fully
+        // colour-saturated, low-brightness lines never seen before this fix — a bright one-frame
+        // spike decaying away, exactly what an unclamped dose injection would leave behind. Only this
+        // jitter-sensitive ratio is clamped, not the whole doseMult: TAU_REF/p.trailTau legitimately
+        // needs to be large at the Trail slider's short end, and clamping past that would just
+        // reintroduce the Trail/Glow coupling this whole fix exists to remove.
         const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
         lastTrace = now;
-        doseMult = dt > 0 ? (dtSinceTrace / dt) * SCOPE_DOSE_RATIO * (TAU_REF / p.trailTau) : 1;
+        const rateRatio = dt > 0 ? Math.min(4, dtSinceTrace / dt) : 1;
+        doseMult = rateRatio * SCOPE_DOSE_RATIO * (TAU_REF / p.trailTau);
         const buckets: Path2D[] = [];
         for (let b = 0; b < VEL_BUCKETS; b++) buckets.push(new Path2D());
         // Full-bright segment length (px), scaled to a reference rate: at a higher rate the beam
@@ -486,7 +510,7 @@ export function Vectorscope({
   const CONTROLS: { key: keyof Params; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
-    { key: "glow", label: t("scope.glow"), min: 0.002, max: 0.1, step: 0.002 },
+    { key: "glow", label: t("scope.glow"), min: 0.02, max: 1, step: 0.02 },
     { key: "beam", label: t("scope.beam"), min: 0.1, max: 5, step: 0.05 },
     { key: "focus", label: t("scope.focus"), min: 1, max: 24, step: 0.5 },
     { key: "radiusFrac", label: t("scope.scale"), min: 0.3, max: 0.5, step: 0.01 },

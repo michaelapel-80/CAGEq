@@ -18,7 +18,7 @@ import type { ScopeEq } from "./Vectorscope";
  *  than the scopes' sample-domain inverse cascade: this view never sees raw samples, only the
  *  backend's already-FFT'd, already-log-binned dB values. */
 type Params = { trailTau: number; tail: number; glow: number; undistort: boolean };
-const DEFAULTS: Params = { trailTau: 0.15, tail: 12, glow: 0.0225, undistort: true };
+const DEFAULTS: Params = { trailTau: 0.15, tail: 12, glow: 0.225, undistort: true };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation, and
@@ -27,11 +27,17 @@ const DEFAULTS: Params = { trailTau: 0.15, tail: 12, glow: 0.0225, undistort: tr
 // this one already redraws every animation frame (no dedup-by-payload-identity gate), so it doesn't
 // need their separate SCOPE_DOSE_RATIO correction — commit()'s own dt/DOSE_REF_DT already fully
 // normalizes its redraw cadence on its own. Only the `TAU_REF/trailTau` term is needed here.
-// Anchored at one real second: `glow` reads as "steady-state brightness units per second of
-// persistence", the same physical meaning as the scope views' own Glow. DEFAULTS.glow below is
-// `old_glow * old_trailTau` (0.15 * 0.15), chosen so the shipped default renders identically to
-// before this change — only the number's meaning moved.
-const TAU_REF = 1;
+// Anchored at a real 100 ms: `glow` reads as "steady-state brightness units per 100 ms of
+// persistence", the same physical meaning as the scope views' own Glow.
+//
+// First attempt anchored at a full second (TAU_REF=1) — see Vectorscope.tsx's identical doc for why
+// that shrinks `glow` enough to risk 8-bit canvas quantisation banding on the gradient stroke's
+// faint end. 100ms shrinks `glow` by only 0.15/0.1 = 1.5x here (barely at all), staying comfortably
+// clear of that cliff while still being a fixed, non-arbitrary reference. DEFAULTS.glow below is
+// `old_glow * old_trailTau / TAU_REF` (0.15 * 0.15 / 0.1 = 0.225), chosen so the shipped default
+// renders identically to before the original decoupling change — only the number's meaning moved,
+// twice now.
+const TAU_REF = 0.1;
 
 /** Cache for the per-bin correction curve (filter response + preamp, dB), keyed by reference/value
  *  so it's rebuilt only when the EQ or bin layout actually changes, not on every 60 fps frame. */
@@ -632,7 +638,7 @@ export function SpectrumScope() {
   const CONTROLS: { key: NumKey; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
-    { key: "glow", label: t("scope.glow"), min: 0.002, max: 0.1, step: 0.002 },
+    { key: "glow", label: t("scope.glow"), min: 0.02, max: 1, step: 0.02 },
   ];
 
   return (
