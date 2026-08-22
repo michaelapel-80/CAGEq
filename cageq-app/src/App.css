@@ -527,8 +527,7 @@ select:disabled {
    other DPI it renders at its own intrinsic (backing-store) size instead, anchored top-left and
    overflowing past the container's right/bottom edge. `width`/`height: 100%` force it to the
    container regardless of the backing-store resolution actually being drawn to.
-   Consequence worth knowing if `.vectorscope-canvas` (App.css) is ever touched: it has the same
-   `inset: 0`-only rule and has gotten away with it only because it's been tested at dpr:1 so far. */
+   `.vectorscope-canvas` (below) is the same replaced-element case and carries the same fix. */
 .vbar-beam {
   position: absolute;
   inset: 0;
@@ -784,6 +783,8 @@ select:disabled {
 .vectorscope-canvas {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
   display: block;
   pointer-events: none; /* decorative — never intercept clicks meant for the toolbar/tuning panel */
 }
