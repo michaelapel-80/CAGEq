@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, logGrid, phaseDeg } from "./biquad";
 import { createPhosphor } from "./phosphor";
+import { useTunableParams } from "./useTunableParams";
 
 /**
  * §5.2 interactive diagram.
@@ -155,7 +156,7 @@ const SPEC_UPDATE_HZ = 60;
  * phosphor.ts's `commit` doc) dials that discount down without going all the way to `add`'s
  * uncapped stacking — "a little pop", not full saturation. */
 type SpecParams = { tau: number; tail: number; glowBase: number; punch: number };
-const SPEC_DEFAULTS: SpecParams = { tau: 0.3, tail: 12, glowBase: 0.15, punch: 0.85 };
+const SPEC_DEFAULTS: SpecParams = { tau: 0.3, tail: 12, glowBase: 0.13, punch: 0.85 };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -216,7 +217,10 @@ export function EqChart({
   // unbounded across a long session that's a steady GPU-memory drain invisible in the JS heap (see
   // the identical fix in Vectorscope's dwell-spot bloom).
   const specGradCache = useRef<{ key: string; grad: CanvasGradient } | null>(null);
-  const [specParams, setSpecParams] = useState<SpecParams>(SPEC_DEFAULTS);
+  const { params: specParams, setParams: setSpecParams, saveAsDefault: saveSpecDefault, resetToFactory: resetSpecFactory } = useTunableParams(
+    "cageq-eqchart-spec-params",
+    SPEC_DEFAULTS,
+  );
   const [specTuning, setSpecTuning] = useState(false);
   const clipId = useId(); // clips the plotted curves to the plot rect (see refPaths)
   // Manual double-click detection from bubbled `click` events. The native `dblclick` is
@@ -815,7 +819,10 @@ export function EqChart({
         <div className="vs-tuning">
           <div className="vs-tune-head">
             <span className="vs-tune-title">{t("scope.tune")}</span>
-            <button type="button" className="vs-tune-reset" onClick={() => setSpecParams(SPEC_DEFAULTS)}>
+            <button type="button" className="vs-tune-reset" onClick={saveSpecDefault}>
+              {t("scope.saveDefault")}
+            </button>
+            <button type="button" className="vs-tune-reset" onClick={resetSpecFactory}>
               {t("scope.reset")}
             </button>
             <button
