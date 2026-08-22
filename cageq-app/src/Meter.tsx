@@ -53,7 +53,7 @@ type Params = {
   focus: number; // velocity-glow reference — see Vectorscope's own `focus` doc
   beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
 };
-const DEFAULTS: Params = { trailTau: 0.06, tail: 12, glow: 0.06, focus: 8, beamWidth: 0.85 };
+const DEFAULTS: Params = { trailTau: 0.3, tail: 24, glow: 0.07, focus: 90, beamWidth: 0.85 };
 const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05;
 const VEL_REF_RATE = 48000;
@@ -262,9 +262,9 @@ export function Meter({
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
   const CONTROLS: { key: keyof Params; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
-    { key: "tail", label: t("scope.tail"), min: 1, max: 24, step: 1 },
-    { key: "glow", label: t("scope.glow"), min: 0.02, max: 1, step: 0.02 },
-    { key: "focus", label: t("scope.focus"), min: 1, max: 24, step: 0.5 },
+    { key: "tail", label: t("scope.tail"), min: 1, max: 48, step: 1 },
+    { key: "glow", label: t("scope.glow"), min: 0.02, max: 0.1, step: 0.01 },
+    { key: "focus", label: t("scope.focus"), min: 20, max: 200, step: 5.0 },
     { key: "beamWidth", label: t("scope.beam"), min: 0.1, max: 1, step: 0.05 },
   ];
 
