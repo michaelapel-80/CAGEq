@@ -53,7 +53,7 @@ type Params = {
   focus: number; // velocity-glow reference — see Vectorscope's own `focus` doc
   beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
 };
-const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.07, focus: 90, beamWidth: 1.0 };
+const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.021, focus: 90, beamWidth: 1.0 };
 // The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
 // `doseMult` comment (same reasoning as Vectorscope.tsx's identical constant) for why this matters:
 // `glow`'s tuned defaults were dialed in under the OLD, refresh-rate-dependent dose behaviour, which
@@ -66,6 +66,19 @@ const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.07, focus: 90, beamW
 // silently change an already-saved value — exactly the retweak this is trying to avoid.)
 const SCOPE_UPDATE_HZ = 60;
 const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, not per frame
+// Trail/Glow orthogonality: at steady state (a dose landing every `dtSinceTrace` seconds, decaying
+// at `exp(-dt/trailTau)` between doses), accumulated brightness is approximately
+// `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation) — so
+// *only* moving Trail longer measurably brightens a steady/dwelling signal even with Glow untouched,
+// reported live on the scope views as the two sliders reading as coupled rather than independent
+// controls (persistence length vs. brightness, which is what they're meant to be) — the same
+// mechanism applies here. `TAU_REF / trailTau` in doseMult below cancels that trailTau term.
+// Anchored at one real second, not at this view's own (arbitrary, prone to drifting with the next
+// re-tune) default trailTau: with that anchor, `glow` reads as "steady-state brightness units per
+// second of persistence" — a fixed, physically meaningful reference instead of an implementation
+// detail. DEFAULTS.glow below is `old_glow * old_trailTau` (0.07 * 0.3), chosen so the shipped
+// default renders *identically* to before this change — only the number's meaning moved.
+const TAU_REF = 1;
 const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05;
 const VEL_REF_RATE = 48000;
@@ -223,10 +236,12 @@ export function Meter({
         // true "time since the last real trace" for this call's own (too-short) dt — confirmed live
         // to remove the rate-dependence. The extra `SCOPE_UPDATE_HZ/DOSE_REF_FPS` factor then
         // restores the same absolute calibration `glow` was originally tuned against (see
-        // SCOPE_UPDATE_HZ's own doc), so this is rate-independence only, not a re-tune too.
+        // SCOPE_UPDATE_HZ's own doc), so this is rate-independence only, not a re-tune too. The
+        // further `TAU_REF/p.trailTau` factor is the separate Trail/Glow orthogonality fix — see
+        // TAU_REF's own doc.
         const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
         lastTrace = now;
-        doseMult = dt > 0 ? (dtSinceTrace / dt) * SCOPE_DOSE_RATIO : 1;
+        doseMult = dt > 0 ? (dtSinceTrace / dt) * SCOPE_DOSE_RATIO * (TAU_REF / p.trailTau) : 1;
         const W = cv.width;
         const cx = W / 2;
         const rate = s.rate > 0 ? s.rate : 48000;
@@ -290,7 +305,7 @@ export function Meter({
   const CONTROLS: { key: keyof Params; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), min: 1, max: 48, step: 1 },
-    { key: "glow", label: t("scope.glow"), min: 0.02, max: 0.1, step: 0.01 },
+    { key: "glow", label: t("scope.glow"), min: 0.002, max: 0.05, step: 0.001 },
     { key: "focus", label: t("scope.focus"), min: 20, max: 200, step: 5.0 },
     { key: "beamWidth", label: t("scope.beam"), min: 0.1, max: 1, step: 0.05 },
   ];
@@ -323,7 +338,7 @@ export function Meter({
             </button>
           </div>
           {CONTROLS.map((cc) => {
-            const dp = cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : 2;
+            const dp = cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : cc.step >= 0.01 ? 2 : 3;
             return (
               <label key={cc.key} className="vs-tune-row">
                 <span className="vs-tune-label">{cc.label}</span>
