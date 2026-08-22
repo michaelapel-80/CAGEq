@@ -176,6 +176,18 @@ const PEAK_MIN_SEPARATION_OCTAVES = 1 / 3;
 // ladder is nowhere near 60dB down within the range anyone's looking at), tight enough to reject
 // content that's actually down at the floor.
 const PEAK_MAX_RANGE_DB = 60;
+// A candidate within this many partials of a lower, already-established peak still counts as
+// belonging to that peak's harmonic series (see `harmonicOf`) — a mains hum's 50/100/150/200 Hz
+// ladder or a sawtooth's n*f0 shouldn't compete for their own readout slots once the fundamental
+// they ride on is already shown. No real instrument's audible partials go much past this.
+const HARMONIC_MAX_N = 16;
+// How far (in cents — 1200ths of an octave, the standard log-pitch unit) a candidate may drift from
+// an exact integer multiple and still count as that harmonic, rather than an unrelated peak that
+// happens to land nearby. Cents rather than a flat Hz or percent tolerance for the same reason
+// PEAK_MIN_SEPARATION_OCTAVES is in octaves: it means the same thing at 100 Hz and 10 kHz. Under a
+// quarter-tone (50 cents) — the backend's own bin spacing is ~26 cents (~1.5%, see `interpolatePeak`),
+// so this is under two bins of slack either side of the ideal ratio.
+const HARMONIC_TOLERANCE_CENTS = 45;
 // Shown in an empty readout slot instead of leaving it blank — an empty chip popping in and out of
 // existence every time the peak count changes (even just from frame-to-frame noise near a gate's
 // threshold) reads as more of a glitch than a fixed-width dash sitting there quietly does.
@@ -205,11 +217,31 @@ function interpolatePeak(v: Float64Array, i: number, n: number): { i: number; v:
   return { i: i + d, v: y0 - 0.25 * (ym1 - yp1) * d };
 }
 
+/** Is `f` an integer multiple (2nd..`HARMONIC_MAX_N`th partial) of `root`, within
+ *  `HARMONIC_TOLERANCE_CENTS`? Used by `findPeaks` to fold a peak into a lower one's harmonic
+ *  series. Deliberately only tests the pairwise ratio between two *actually detected* peaks —
+ *  it doesn't try to infer an absent fundamental from its partials (e.g. content with 200/300/400 Hz
+ *  present but no energy at the true 100 Hz root: 300 and 400 fold into neither 200 nor each other,
+ *  since 1.5x and 2x-of-a-different-root aren't integer ratios of what's actually there). That's a
+ *  real limitation, not nothing — but recovering it needs real pitch estimation (autocorrelation or
+ *  harmonic-product-spectrum over the whole partial set), a different and much larger feature than
+ *  decluttering the readout of ladders whose root *is* present and already shown. */
+function harmonicOf(f: number, root: number): boolean {
+  if (f <= root) return false;
+  const n = Math.round(f / root);
+  if (n < 2 || n > HARMONIC_MAX_N) return false;
+  const cents = 1200 * Math.log2(f / (n * root));
+  return Math.abs(cents) < HARMONIC_TOLERANCE_CENTS;
+}
+
 /** Up to `PEAK_COUNT` distinct spectral peaks in `v[0..n)` (bin i's frequency given by `binHz`):
  *  none at all when the whole frame is at or below the noise floor, local maxima prominent enough
  *  to be a real peak rather than FFT noise, loud enough to be real content rather than noise-floor
  *  ripple (`PEAK_MAX_RANGE_DB`), spaced far enough apart that they aren't all just one resonance's
- *  shoulder. Returns the *largest* qualifying peaks, then reorders them to ascending frequency —
+ *  shoulder, and — of the peaks left standing — not an integer-ratio harmonic of a lower one that's
+ *  also present (`harmonicOf`): a fundamental's own ladder folds into it rather than each partial
+ *  spending a slot competing on its own. Returns the *largest* qualifying peaks, then reorders them
+ *  to ascending frequency —
  *  picking by magnitude and presenting by frequency are different steps on purpose, so a strong
  *  low-frequency hum and a quieter but still-qualifying high note both land in the order a reader
  *  scans the axis, not loudest-first. */
@@ -261,17 +293,32 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { 
   // thing actually in the frame (computed at the top, step 0) rather than each candidate's own
   // immediate neighbours.
   const audible = prominent.filter((c) => loudest - c.v <= PEAK_MAX_RANGE_DB);
-  // 3) Greedy pick by magnitude, skipping anything too close (in octaves) to an already-picked
-  // peak — otherwise the loudest region's own harmonics could fill every remaining slot.
-  audible.sort((a, b) => b.v - a.v);
+  // 3) Harmonic folding: scanning low-to-high frequency, a candidate that's an integer multiple of
+  // an already-established root (`harmonicOf`) is absorbed into that root's family instead of
+  // becoming a root itself — so only the *lowest* member of each detected harmonic series ever
+  // competes for a slot below, regardless of which partial happens to be loudest (a resonance or a
+  // speaker's own response routinely makes some harmonic louder than the true fundamental, but the
+  // fundamental is still the one worth reporting). Ascending order matters: it's what makes "lowest
+  // surviving member" the thing each family collapses to, and it's why a later, higher partial can
+  // fold into a root added just before it in this same pass (100 → 200 → 300 → 400 all settle on
+  // root 100, tested against roots seen so far, not just the original candidate).
+  const byFreqAsc = audible.slice().sort((a, b) => binHz(a.i) - binHz(b.i));
+  const roots: { i: number; v: number }[] = [];
+  for (const c of byFreqAsc) {
+    const f = binHz(c.i);
+    if (!roots.some((r) => harmonicOf(f, binHz(r.i)))) roots.push(c);
+  }
+  // 4) Greedy pick by magnitude, skipping anything too close (in octaves) to an already-picked
+  // peak — otherwise one broad resonance's own ripples could fill every remaining slot.
+  roots.sort((a, b) => b.v - a.v);
   const picked: { i: number; v: number }[] = [];
-  for (const c of audible) {
+  for (const c of roots) {
     if (picked.length >= PEAK_COUNT) break;
     const f = binHz(c.i);
     if (picked.some((p) => Math.abs(Math.log2(f / binHz(p.i))) < PEAK_MIN_SEPARATION_OCTAVES)) continue;
     picked.push(c);
   }
-  // 4) Presented by frequency, not the magnitude order they were picked in. Interpolated last,
+  // 5) Presented by frequency, not the magnitude order they were picked in. Interpolated last,
   // after every index-based comparison above (prominence's neighbour walk, the octave-separation
   // check) is done with the coarse integer bin — those decisions don't need sub-bin precision, only
   // the final reported frequency/level do.
