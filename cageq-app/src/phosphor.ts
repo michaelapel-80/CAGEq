@@ -115,8 +115,22 @@ export type Phosphor = {
    * going all the way to `add`'s full saturation — for a backdrop that wants a *little* pop without
    * competing with what's drawn over it. No effect on `add` blend (already maximally additive) or
    * the 2D fallback (ignored, like `tail`).
+   *
+   * `doseMult` (default 1) is a further multiplier on top of the built-in `dt/DOSE_REF_DT` dose
+   * normalization — for a caller that redraws more (or less) often per second than the update rate
+   * its own per-trace alpha was tuned against (e.g. EqChart's spectrum backdrop, now redrawn every
+   * animation frame instead of only when a fresh payload lands — DOSE_REF_DT alone only corrects for
+   * the caller's own render rate, it has no notion of "how many of those frames actually carried new
+   * content"). Deliberately a multiplier on `uDose` in the shader (full float precision), not
+   * something the caller pre-applies via `ctx.globalAlpha` on the 2D trace: `begin()`'s scratch
+   * canvas is always 8-bit regardless of this accumulator's own half-float storage, and a `doseMult`
+   * well under 1 pushes a smooth gradient's own alpha down into a handful of discrete 8-bit levels —
+   * exactly the regime Chromium's own anti-banding dither becomes visible in, which read live as a
+   * stippled, almost-dithered texture across the backdrop. Scaling in the shader instead means the
+   * canvas always draws its trace at its original, undiminished alpha (whatever precision that had
+   * before), and the correction lands in the same lossless float multiply `uDose` already is.
    */
-  commit(dt: number, tau: number, tail?: number, punch?: number): void;
+  commit(dt: number, tau: number, tail?: number, punch?: number, doseMult?: number): void;
   /** True for the half-float GL backend; false when running the 8-bit canvas fallback. */
   readonly precise: boolean;
   dispose(): void;
@@ -320,7 +334,7 @@ function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
       scratch.ctx!.clearRect(0, 0, target.width, target.height);
       return scratch.ctx!;
     },
-    commit(dt, tau, tail = 1, punch = 0) {
+    commit(dt, tau, tail = 1, punch = 0, doseMult = 1) {
       const W = target.width;
       const H = target.height;
       if (dead || W === 0 || H === 0 || gl.isContextLost()) return;
@@ -341,7 +355,7 @@ function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
       gl.uniform1f(uKnee, TAIL_KNEE);
       gl.uniform1f(uFloor, TAIL_FLOOR_PER_SEC * dt);
       gl.uniform1f(uOver, blend === "over" ? 1 : 0);
-      gl.uniform1f(uDose, dt / DOSE_REF_DT);
+      gl.uniform1f(uDose, (dt / DOSE_REF_DT) * doseMult);
       gl.uniform1f(uPunch, punch);
       gl.uniform1i(uPrev, 0);
       gl.uniform1i(uTrace, 1);
@@ -416,18 +430,19 @@ function create2d(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
       scratch.ctx!.clearRect(0, 0, target.width, target.height);
       return scratch.ctx!;
     },
-    commit(dt, tau) {
+    commit(dt, tau, _tail = 1, _punch = 0, doseMult = 1) {
       const W = target.width;
       const H = target.height;
       ctx.globalCompositeOperation = "destination-out";
       ctx.fillStyle = `rgba(0,0,0,${1 - Math.exp(-dt / tau)})`;
       ctx.fillRect(0, 0, W, H);
       ctx.globalCompositeOperation = blend === "over" ? "source-over" : "lighter";
-      // Same dt-normalized dose as the GL path (see DOSE_REF_DT's doc) — `globalAlpha` can't exceed
-      // 1 (the spec ignores an out-of-range assignment rather than clamping it), so a dose scale
-      // above 1 — any refresh rate below DOSE_REF_FPS — is spread across that many additive draws of
-      // the same frame instead of one draw at an alpha it can't express.
-      const doseScale = dt / DOSE_REF_DT;
+      // Same dt-normalized dose as the GL path (see DOSE_REF_DT's doc), further scaled by
+      // `doseMult` (see commit()'s own doc) — `globalAlpha` can't exceed 1 (the spec ignores an
+      // out-of-range assignment rather than clamping it), so a dose scale above 1 — any refresh rate
+      // below DOSE_REF_FPS, or a caller-supplied doseMult above 1 — is spread across that many
+      // additive draws of the same frame instead of one draw at an alpha it can't express.
+      const doseScale = (dt / DOSE_REF_DT) * doseMult;
       const passes = Math.max(1, Math.ceil(doseScale));
       ctx.globalAlpha = doseScale / passes;
       for (let i = 0; i < passes; i++) ctx.drawImage(scratch.cv, 0, 0);

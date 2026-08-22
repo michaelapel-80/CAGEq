@@ -127,10 +127,13 @@ const SPEC_TINT = 0.63; // blend the accent this far into the neutral glow — a
 // that one corrects for the caller's rAF/display rate, which was already the same before and after
 // this change (commit() always ran every rAF frame; only whether a fill was drawn each time did
 // not) — it has no notion of "how many of those commits actually carried new content", so drawing 4x
-// more often on a 240 Hz display without this genuinely injects ~4x the paint. Scaling the fill's
-// own alpha by `dt * SPEC_UPDATE_HZ` (via `ctx.globalAlpha`, since it varies every frame and can't be
-// baked into the cached gradient) keeps the *total* ink laid down per second pinned to what
-// `glowBase`/`SPEC_GLOW_TIP` were originally tuned against, regardless of the display's own rate.
+// more often on a 240 Hz display without this genuinely injects ~4x the paint. `dt * SPEC_UPDATE_HZ`
+// is passed as commit()'s `doseMult` (a further multiplier on its own dose math, in the shader's
+// float precision) to pin the *total* ink laid down per second to what `glowBase`/`SPEC_GLOW_TIP`
+// were originally tuned against, regardless of the display's own rate — deliberately NOT applied as
+// a `ctx.globalAlpha` scale on the fill itself: that's an 8-bit canvas op, and a low globalAlpha on a
+// smooth gradient visibly dithered in this WebView2 build (Chromium/Skia's own anti-banding dither,
+// made visible by pushing an already-smooth low-alpha gradient into a handful of 8-bit levels).
 const SPEC_UPDATE_HZ = 60;
 
 /** Live-tunable trail/glow — a gear-icon panel (like the scope views' `.vs-tuning`) rather than
@@ -505,19 +508,16 @@ export function EqChart({
           if (i === n - 1) ctx.lineTo(x1, plotBot); // down to baseline at the right edge
         }
         ctx.closePath(); // straight line back along the baseline to the left edge
-        // See SPEC_UPDATE_HZ's own doc: pins the total ink laid down per second to what glowBase/
-        // SPEC_GLOW_TIP were tuned against, independent of how much faster than that this actually
-        // redraws (dt varies per frame, so this can't be folded into the cached gradient above).
-        // Clamped to 1 rather than left to exceed it: `globalAlpha` silently no-ops (keeps its
-        // previous value) on an out-of-range assignment instead of clamping itself, and a display
-        // slower than SPEC_UPDATE_HZ is enough of an edge case that reading a touch dim there beats
-        // a stale globalAlpha carried over from whatever the last frame happened to set.
-        ctx.globalAlpha = Math.min(1, dt * SPEC_UPDATE_HZ);
-        ctx.fill();
-        ctx.globalAlpha = 1;
+        ctx.fill(); // full, undiminished gradient alpha — see SPEC_UPDATE_HZ's own doc for why the
+        // per-second correction below happens in commit()'s float dose math, not here on the 8-bit
+        // canvas (a low ctx.globalAlpha on a smooth gradient visibly dithers in this WebView2 build).
       }
 
-      phos.commit(dt, specParams.tau, specParams.tail, specParams.punch);
+      // See SPEC_UPDATE_HZ's own doc: pins the total ink laid down per second to what glowBase/
+      // SPEC_GLOW_TIP were tuned against, independent of how much faster (or slower) than that this
+      // actually redraws — phosphor.ts's own commit doc explains why this is a `doseMult` argument
+      // (float, shader-side) rather than a canvas-side alpha scale.
+      phos.commit(dt, specParams.tau, specParams.tail, specParams.punch, dt * SPEC_UPDATE_HZ);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
