@@ -368,27 +368,38 @@ select:disabled {
 }
 
 /* --- preamp readout overlaid on the chart's top-right (reclaims vertical space) --- */
+/* `.chart-wrap`'s height is JS-owned now (App.tsx's `chartWrapHeight` effect: ResizeObserver on
+   this element, height set from its own WIDTH alone, applied via inline `style`) — the single,
+   always-active source of truth every one of the four chart views (Eq/Impulse/Spectrum/Scope)
+   fills identically via plain `width:100%;height:100%` on their own root element. Derived from
+   width alone, never from any view's content, so nothing inside can grow this box — structurally,
+   not by convention.
+   That replaces three formulas that used to merely have to *agree*: Eq/Impulse's in-flow SVG
+   (intrinsic `height:auto` from its own `viewBox` ratio) and Spectrum/Scope's own
+   `height: calc(100% - 0.5rem); margin-top: 0.5rem`. `aspect-ratio` on a plain (non-replaced) box
+   is only a *default* for auto-sizing — content that wants more room is legally allowed to grow
+   the box past it — so any small disagreement between those three could grow `.chart-wrap`, which
+   `chartAreaHeight` (App.tsx, still needed — see its own comment, it does something unrelated)
+   then propagated to the other views too, compounding into a real, live-reported runaway-expansion
+   bug (eventually a page scrollbar at the default window size). `overflow: hidden` (kept below) was
+   a hard cap added while chasing that; it stays as cheap, independently-justified insurance, but the
+   JS height is what actually removes the failure mode rather than just containing it. */
 .chart-wrap {
   position: relative;
-  /* Same ratio as EqChart/ImpulseChart's `viewBox="0 0 720 215"` (+ their `height:auto` SVG
-     sizing) — their real rendered height already scales with width this way; locking chart-wrap
-     itself to the same ratio makes the canvas-based instruments (Monitor/Scope, which measure this
-     box directly rather than rendering an SVG) agree with that height instead of drifting from a
-     hardcoded one and shifting the whole panel's layout on every chart-view switch. */
+  box-sizing: border-box;
+  /* The one shared top inset every view used to reserve individually (Eq's old `margin-top:8px`,
+     Spectrum/Scope's `margin-top:0.5rem` — already the same value at this app's fixed root
+     font-size) — `box-sizing:border-box` is required so this is absorbed into the already-fixed JS
+     height instead of adding on top of it (which would reintroduce the exact overflow this rewrite
+     removes). Doesn't shift `.chart-preamp` below: an absolutely-positioned child's containing-block
+     origin is its ancestor's *padding edge*, which padding doesn't move — only in-flow content
+     (every view's own root element) shifts down. */
+  padding-top: 8px;
+  /* CSS-only fallback for the instant before the JS effect (App.tsx) sets an explicit pixel height
+     — same 720:215 ratio as the JS formula (deliberately not rounded there, to match), so this is
+     never visibly "wrong then corrected", just a redundant confirmation once JS takes over (inline
+     `style` always wins over this once set). */
   aspect-ratio: 720 / 215;
-  /* Load-bearing, not decorative: `aspect-ratio` on a normal (non-replaced) box is only a *default*
-     for `auto` sizing — content that needs more room than the ratio gives is legally allowed to grow
-     the box past it (this is NOT true of a replaced element like <img>/<canvas>, where the ratio
-     genuinely constrains rendering; `.chart-wrap` is a plain div). Every view's own inner sizing
-     (Eq/Impulse's in-flow SVG, Spectrum/Scope's `height: calc(100% - 0.5rem)`) is built to land
-     exactly on this ratio, but "exactly" across three different sizing mechanisms plus sub-pixel
-     rounding is fragile — any of them coming out even slightly tall grows `.chart-wrap`, which
-     `chartAreaHeight` (App.tsx) then measures and propagates to the OTHER views too, compounding
-     into the real bug this was chasing: a live-reported runaway expansion (eventually a real
-     scrollbar at the default window size). `overflow: hidden` makes the aspect-ratio a hard,
-     unconditional cap regardless of what's inside or how it's sized — the single fix that closes
-     every variant of this failure mode at once, instead of chasing each sizing mechanism's own
-     precision one at a time. */
   overflow: hidden;
 }
 .chart-preamp {
@@ -659,18 +670,16 @@ select:disabled {
 }
 
 /* Scope chart view (v1, free-running — filter.md §5.3d): the time-domain scope and the vectorscope
-   side by side, sharing the row the vectorscope alone used to fill. Inset from the top a little —
-   `.chart-wrap`'s own height (from its `aspect-ratio:720/215`, above) is untouched, only this
-   row's own share of it shrinks by the same amount as the margin, so the panel's total height
-   stays identical to Eq/Impulse; only the content within visibly sits a bit lower. This
-   selector only ever matches the scope view's own row, so Eq/Impulse are never affected. */
+   side by side, sharing the row the vectorscope alone used to fill. Fills `.chart-wrap`'s own
+   (JS-owned, see its doc) box exactly, same as every other chart view — the top inset that used to
+   be this row's own `margin-top` + compensating `height: calc()` is now `.chart-wrap`'s shared
+   `padding-top`, one level up. */
 .scope-row {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   width: 100%;
-  height: calc(100% - 0.5rem);
-  margin-top: 0.5rem;
+  height: 100%;
 }
 /* The time scope takes the leftover width, at `.scope-row`'s full (chart-wrap-derived) height —
    `.scope-row`'s own `align-items:center` doesn't stretch children, so this needs it explicitly. */
@@ -681,14 +690,13 @@ select:disabled {
 }
 
 /* Monitor chart view: the CRT spectrum analyzer fills the whole chart-wrap alone, same as EqChart
-   does for the Frequency view (no row-sharing, unlike the time scope/vectorscope pair). Inset from
-   the top a little, same reasoning as `.scope-row` above — the height reduction matches the
-   margin, so `.chart-wrap`'s (and the panel's) total height is unaffected, and this selector only
-   ever matches the Spectrum view's own element, so Eq/Impulse are never touched. */
+   does for the Frequency view (no row-sharing, unlike the time scope/vectorscope pair). Fills
+   `.chart-wrap`'s own (JS-owned, see its doc) box exactly, same as every other chart view — the
+   top inset that used to be this element's own `margin-top` + compensating `height: calc()` is now
+   `.chart-wrap`'s shared `padding-top`, one level up. */
 .spectrumscope-wrap {
   width: 100%;
-  height: calc(100% - 0.5rem);
-  margin-top: 0.5rem;
+  height: 100%;
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
@@ -1052,19 +1060,13 @@ select:disabled {
 }
 
 /* --- §5.2 chart legend: chips below the plot (not overlapping it) ---------- */
-/* The chart stacks a phosphor-spectrum canvas behind the SVG; both share the plot geometry.
-   `margin-top` here (unlike `.spectrumscope-wrap`'s own `margin-top` + `height: calc()`) has NO
-   compensating height reduction — that combination was tried twice on `.eq-chart` and broke live
-   both times, for a reason never root-caused. This is the simpler, cruder version: the SVG stays
-   exactly as it always was (in-flow, `height:auto`, untouched), so it renders 8px taller than the
-   space left for it and that excess gets clipped by `.chart-wrap`'s `overflow: hidden` instead of
-   growing the page — a real trade (whatever sits in that bottom 8px, e.g. axis-label text hugging
-   the tube's edge, can get cropped) accepted for now in place of a properly unified sizing model.
-   PAD's own top/bottom insets (EqChart.tsx) are back to symmetric — this margin is now the only
-   source of the extra top gap, not stacked on top of an internal one too. */
+/* The chart stacks a phosphor-spectrum canvas behind the SVG; both share the plot geometry. Fills
+   `.chart-wrap`'s own (JS-owned, see its doc) box exactly — same `width:100%;height:100%` every
+   chart view now uses, no per-view margin/calc of its own. */
 .eq-chart {
   position: relative;
-  margin-top: 8px;
+  width: 100%;
+  height: 100%;
 }
 /* Same dark "instrument screen" the scope views sit on (`.vs-screen` — background, vignette,
    hairline, drop shadow, all shared verbatim) — the phosphor accumulator itself converges toward
@@ -1091,7 +1093,13 @@ select:disabled {
   top: 0;
   left: 0;
   width: 100%;
-  height: auto; /* matches the SVG's width:100%/height:auto so viewBox coords line up */
+  /* Container-relative, matching the SVG below (`.eq-chart svg`) — was `height:auto` (this
+     canvas's own intrinsic 720:215 buffer ratio), which independently recomputed the same number
+     the SVG's own sizing did, rather than sharing one source for it. Two formulas that only happen
+     to agree is exactly the pattern `.chart-wrap`'s own rewrite exists to eliminate (see its doc) —
+     just one level down, between this canvas and the SVG instead of between `.chart-wrap` and its
+     children. */
+  height: 100%;
   pointer-events: none;
 }
 /* The SVG must be positioned too, otherwise the absolute canvas (a positioned element) paints

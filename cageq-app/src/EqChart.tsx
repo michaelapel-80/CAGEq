@@ -212,19 +212,19 @@ const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.48 };
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
 const F_MAX = 20000;
-/** The plot rect's bottom inset, as a fraction of `height` — SpectrumScope's own literal
+/** The plot rect's top/bottom inset, as a fraction of `height` — SpectrumScope's own literal
  *  `plotTop = H*0.03` value. Exported so App.tsx's meter-bar alignment (`plotBox`, sized to match
  *  this chart's real plot-area Y extent) derives the same number instead of carrying its own
  *  hardcoded copy — that's exactly what went stale the last time `PAD` changed and this wasn't
- *  exported yet. */
-export const EQ_BOTTOM_INSET_FRAC = 0.03;
-/** The plot rect's top inset — same value as the bottom one. `.eq-chart` now gets its visible top
- *  gap from a plain CSS `margin-top` (App.css) instead of an asymmetric PAD fudge here: that fudge
- *  existed specifically because giving `.eq-chart` a real margin kept breaking live (see the CSS
- *  rule's own doc for the two failed attempts), so PAD carried the whole gap on its own for a while.
- *  Kept as its own constant, not folded back into `EQ_BOTTOM_INSET_FRAC`, in case that history
- *  repeats and this needs to grow again without touching every callsite that assumes t and b match. */
-export const EQ_TOP_INSET_FRAC = 0.03;
+ *  exported yet.
+ *
+ *  Was two separate constants (`EQ_TOP_INSET_FRAC`/`EQ_BOTTOM_INSET_FRAC`) while `.eq-chart`'s own
+ *  outer box was sized by an uncompensated CSS margin that could overflow `.chart-wrap` — PAD's top
+ *  inset briefly had to carry extra fudge on its own to fake a visible gap without touching that
+ *  margin, since giving `.eq-chart` a real margin kept breaking live. Now that `.chart-wrap`'s own
+ *  height is JS-owned (App.css/App.tsx) and every view shares one shared top inset there instead,
+ *  that reason is gone and top/bottom are safely merged back to one number. */
+export const EQ_V_INSET_FRAC = 0.03;
 // Reference curves (measured raw / target) only count toward the Y auto-scale up to this
 // frequency: they diverge sharply in the top octaves (measurement noise + treble roll-off),
 // which would otherwise blow the scale out to ±24 dB. Still drawn full-range (then clipped).
@@ -313,12 +313,12 @@ export function EqChart({
 
   const phaseOn = !!phase && !isHidden(phase.id);
   // Four margins, all a thin buffer only — a fixed 10px on the log-frequency axis (no natural
-  // "percent of W" scale to tie it to) and fractions of H on the dB axis (see EQ_TOP_INSET_FRAC's
-  // own doc for why top and bottom differ), not picked-to-fit values: every axis label (dB, Hz,
-  // phase-degree) draws ON the tube itself now, same as the scope views' own on-tube readouts (see
-  // the gridlines' own doc), so none of the four needs the larger external margin it used to reserve
-  // for that text — including `r`, which no longer varies with `phaseOn` for the same reason.
-  const PAD = { l: 10, r: 10, t: H * EQ_TOP_INSET_FRAC, b: H * EQ_BOTTOM_INSET_FRAC };
+  // "percent of W" scale to tie it to) and EQ_V_INSET_FRAC*H on the dB axis, not picked-to-fit
+  // values: every axis label (dB, Hz, phase-degree) draws ON the tube itself now, same as the scope
+  // views' own on-tube readouts (see the gridlines' own doc), so none of the four needs the larger
+  // external margin it used to reserve for that text — including `r`, which no longer varies with
+  // `phaseOn` for the same reason.
+  const PAD = { l: 10, r: 10, t: H * EQ_V_INSET_FRAC, b: H * EQ_V_INSET_FRAC };
 
   const { freqs, curves, yMin, yMax, step } = useMemo(() => {
     const freqs = logGrid(480, F_MIN, F_MAX);
@@ -713,7 +713,12 @@ export function EqChart({
     <svg
       ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
-      style={{ width: "100%", height: "auto", userSelect: "none", touchAction: "none" }}
+      // Container-relative (`.eq-chart`'s own JS-owned box, see .chart-wrap's doc in App.css),
+      // not the old intrinsic `height:auto` derived from this SVG's own viewBox ratio — the box's
+      // own ratio now comes from the exact same 720:215 division `.chart-wrap`'s JS height uses, so
+      // this never needs `preserveAspectRatio="none"` to avoid letterboxing: the ratios genuinely
+      // agree, not just approximately.
+      style={{ width: "100%", height: "100%", userSelect: "none", touchAction: "none" }}
       role="img"
       aria-label={t("chart.aria")}
       onClick={(e) => {

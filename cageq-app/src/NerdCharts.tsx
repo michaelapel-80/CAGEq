@@ -78,7 +78,10 @@ export function ImpulseChart({
 
   return (
     <div className="eq-chart">
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto" }} role="img" aria-label={t("chart.impulseAria")}>
+      {/* Container-relative (`.eq-chart`'s own JS-owned box — see `.chart-wrap`'s doc in App.css),
+          not intrinsic `height:auto` — see EqChart.tsx's own SVG for the fuller reasoning, shared
+          verbatim since this uses the identical `.eq-chart` wrapper class. */}
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "100%" }} role="img" aria-label={t("chart.impulseAria")}>
         {DB_TICKS.map((db) => (
           <g key={db}>
             <line x1={PAD.l} x2={W - PAD.r} y1={yDb(db)} y2={yDb(db)} stroke="currentColor" strokeOpacity={db === 0 ? 0.28 : 0.1} />

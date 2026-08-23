@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useTranslation, Trans } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -7,7 +7,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
 import { Band, composedCurveDb, logGrid } from "./biquad";
-import { EqChart, EQ_TOP_INSET_FRAC, EQ_BOTTOM_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData } from "./EqChart";
+import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import { ScrubNumber } from "./ScrubNumber";
@@ -534,12 +534,19 @@ function App() {
   // letting them stretch past it (the chart-wrap also holds the legend). Measured near the return.
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const [plotBox, setPlotBox] = useState<{ top: number; height: number } | null>(null);
+  // `.chart-wrap`'s own height, in real pixels — the single source of truth every chart view
+  // (Eq/Impulse/Spectrum/Scope) fills identically via plain `width:100%;height:100%` (App.css).
+  // Measured near the return, see that effect's own doc for why this replaced CSS `aspect-ratio`
+  // as the *primary* mechanism (aspect-ratio stays in App.css as a same-formula fallback only).
+  const [chartWrapHeight, setChartWrapHeight] = useState<number | null>(null);
   // The combined chart-row + legend area's total rendered height, captured whenever Eq/Impulse
   // (SVG-based) is showing and reused to size Spectrum/Scope's canvas-based views to the exact same
-  // pixel height — see the measuring effect near plotBox's. Chart-wrap's own aspect-ratio (App.css)
-  // already keeps the *chart* portion consistent across views; this covers the legend strip below
-  // it too, whose real height (a variable number of toggle chips, wrapping or not) isn't worth
-  // separately reverse-engineering when the real Eq/Impulse value is right there to measure.
+  // pixel height — see the measuring effect near plotBox's. `.chart-wrap`'s own height is now
+  // JS-pinned (chartWrapHeight, above) identically for every view, so this is no longer covering
+  // *that* — it's now solely reconciling `.chart-legend-host` below it (a sibling of chart-row, not
+  // nested in chart-wrap): Eq's legend is a variable number of toggle chips that can wrap to a
+  // second line, while Spectrum/Scope never portal anything into that host at all, so their own
+  // natural height there would otherwise differ from Eq's real one and visibly jump on switch.
   const chartAreaRef = useRef<HTMLDivElement>(null);
   const [chartAreaHeight, setChartAreaHeight] = useState<number | null>(null);
   // The chart legend renders (via portal) into this full-width host *below* the chart-row, so its
@@ -1775,13 +1782,47 @@ function App() {
     return idx === -1 ? null : `v${idx + 1}`;
   };
 
+  // `.chart-wrap`'s own height, derived from its own rendered WIDTH alone — the single, always-
+  // active source of truth every chart view fills identically (see App.css's `.chart-wrap` doc for
+  // the full "why": this replaces CSS `aspect-ratio` as the primary mechanism, since aspect-ratio on
+  // a plain box is only a *default* for auto-sizing that in-flow content could grow past, which is
+  // what caused a real, live-reported runaway-expansion bug this session). Derived from width only,
+  // never from any view's own content, so nothing rendered inside `.chart-wrap` can grow it — by
+  // construction, not by convention.
+  //
+  // Observes `.chart-wrap` itself, unlike plotBox/chartAreaHeight below (which observe a *child*
+  // `<svg>` that gets swapped out on every chartView change, hence their dependency arrays) — this
+  // box is stable across all four views and only unmounts with `result`, so it doesn't need to
+  // re-subscribe on chartView/dryActive/loading. `useLayoutEffect`, not `useEffect`: commits before
+  // the browser paints, so there's no visible frame where this hasn't run yet. Not the whole safety
+  // net on its own, though — `.chart-wrap`'s own `aspect-ratio:720/215` CSS fallback computes this
+  // exact same number, so the browser already paints the correct final height even before this
+  // effect's first run; the two are provably identical (same ratio, same width), never "wrong then
+  // corrected". Deliberately NOT rounded, to match: CSS `aspect-ratio` doesn't round either, and
+  // rounding here would introduce a needless mismatch against that fallback at the handoff instant.
+  useLayoutEffect(() => {
+    const el = chartWrapRef.current;
+    if (!el) return;
+    const measure = () => {
+      const w = el.getBoundingClientRect().width;
+      setChartWrapHeight(w > 0 ? w * (215 / 720) : null);
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    measure();
+    return () => ro.disconnect();
+  }, [!!result]);
+
   // Measure the chart's rendered SVG so the meter bars can match its plot-area Y extent. EqChart's
-  // plot rect is inset top/bottom by EQ_TOP_INSET_FRAC/EQ_BOTTOM_INSET_FRAC * height (imported, not
-  // a second copy of either fraction) — this used to hardcode the plot's old fixed-pixel PAD.t/PAD.b
-  // (12/24 of a 215-tall viewBox) directly, which silently went stale the last time EqChart's own
-  // PAD changed, since nothing here depended on it. Deriving the same fractions EqChart actually
-  // uses can't drift again. Measures the SVG rather than `.eq-chart` so it stays right for Impulse
-  // too (same viewBox, same PAD-derived plot rect, no spectrum backdrop).
+  // plot rect is inset top/bottom by EQ_V_INSET_FRAC * height (imported, not a second copy of the
+  // fraction) — this used to hardcode the plot's old fixed-pixel PAD.t/PAD.b (12/24 of a 215-tall
+  // viewBox) directly, which silently went stale the last time EqChart's own PAD changed, since
+  // nothing here depended on it. Deriving the same fraction EqChart actually uses can't drift again.
+  // Measures the SVG rather than `.eq-chart` so it stays right for Impulse too (same viewBox, same
+  // PAD-derived plot rect, no spectrum backdrop). Structurally separate from chartWrapHeight above
+  // (which sizes the box) — this is only ever meaningful relative to EqChart's own dB axis, so it
+  // stays gated to "only while an `<svg>` exists" and frozen at its last value otherwise, same as
+  // chartAreaHeight below.
   useEffect(() => {
     const svg = chartWrapRef.current?.querySelector("svg");
     // The scope view is a canvas (no SVG); keep the last measured box so the meters beside it don't
@@ -1789,9 +1830,8 @@ function App() {
     if (!svg) return;
     const measure = () => {
       const h = svg.getBoundingClientRect().height;
-      const top = EQ_TOP_INSET_FRAC * h;
-      const bottom = EQ_BOTTOM_INSET_FRAC * h;
-      setPlotBox(h > 0 ? { top, height: h - top - bottom } : null);
+      const inset = EQ_V_INSET_FRAC * h;
+      setPlotBox(h > 0 ? { top: inset, height: h - 2 * inset } : null);
     };
     const ro = new ResizeObserver(measure);
     ro.observe(svg);
@@ -2434,7 +2474,7 @@ function App() {
                       won't exactly match Eq/Impulse's real legend height on its own. */}
                   <div ref={chartAreaRef} style={spectrumView || scopeView ? { height: chartAreaHeight ?? undefined } : undefined}>
                   <div className="chart-row">
-                  <div className="chart-wrap" ref={chartWrapRef}>
+                  <div className="chart-wrap" ref={chartWrapRef} style={{ height: chartWrapHeight ?? undefined }}>
                     {scopeView ? (
                       <div className="scope-row">
                         <TimeScope />
