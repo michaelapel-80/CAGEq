@@ -2460,7 +2460,34 @@ function App() {
                     </option>
                   ))}
                 </select>
-                <button type="button" onClick={() => apply()} disabled={applying || dryActive} style={{ marginLeft: "auto" }}>
+                {/* Preamp badge — moved out of `.chart-wrap` (used to float top-right inside it,
+                    absolutely positioned) to make room there for EqChart's own hover-cursor readout,
+                    which needed that corner more. `marginLeft:auto` moved here from Apply (below) so
+                    the two sit together as one group at the row's right edge — Apply's own on-screen
+                    position ends up roughly where it always was, just with this badge immediately to
+                    its left instead of a bare gap. Same visibility rule as before: a property of the
+                    correction, not the live signal, so hidden on the scope (stereo image, no level)
+                    and the CRT spectrum analyzer (its own clean instrument screen). */}
+                {result && !scopeView && !spectrumView && (
+                  <div
+                    className="chart-preamp"
+                    style={{ marginLeft: "auto" }}
+                    title={loudness?.mode === "FinalVolume" ? tr("correction.preampTitleMax") : tr("correction.preampTitleMatched")}
+                  >
+                    {tr("correction.preamp")} <b>{result.preamp_db.toFixed(1)} dB</b>
+                    <span className="chart-preamp-mode">{loudness?.mode === "FinalVolume" ? tr("correction.preampMax") : tr("correction.preampMatched")}</span>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => apply()}
+                  disabled={applying || dryActive}
+                  // The preamp badge above carries `marginLeft:auto` instead when it's rendered so
+                  // the two group together at the right; when it's absent (no result yet, or
+                  // Scope/Spectrum view) this falls back to carrying the auto margin itself, same as
+                  // the button always did before the badge moved here.
+                  style={result && !scopeView && !spectrumView ? undefined : { marginLeft: "auto" }}
+                >
                   {applying ? tr("correction.fitting") : dryActive ? tr("correction.applyDry") : tr("correction.apply", { slot: slotLabel(activeSlot) })}
                 </button>
               </div>
@@ -2518,18 +2545,6 @@ function App() {
                           onHover: setHoverBand,
                         }}
                       />
-                    )}
-                    {/* Preamp is a property of the correction, not the live signal — hide it on the
-                        scope (which shows the stereo image, not a level) and on the CRT spectrum
-                        analyzer (its own clean instrument screen, no chart-style overlay). */}
-                    {!scopeView && !spectrumView && (
-                      <div
-                        className="chart-preamp"
-                        title={loudness?.mode === "FinalVolume" ? tr("correction.preampTitleMax") : tr("correction.preampTitleMatched")}
-                      >
-                        {tr("correction.preamp")} <b>{result.preamp_db.toFixed(1)} dB</b>
-                        <span className="chart-preamp-mode">{loudness?.mode === "FinalVolume" ? tr("correction.preampMax") : tr("correction.preampMatched")}</span>
-                      </div>
                     )}
                   </div>
                     {/* §5.3c post-EQ meters beside the chart (loopback, post-EQ) — always on. */}

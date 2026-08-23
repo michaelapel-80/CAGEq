@@ -391,9 +391,7 @@ select:disabled {
      Spectrum/Scope's `margin-top:0.5rem` — already the same value at this app's fixed root
      font-size) — `box-sizing:border-box` is required so this is absorbed into the already-fixed JS
      height instead of adding on top of it (which would reintroduce the exact overflow this rewrite
-     removes). Doesn't shift `.chart-preamp` below: an absolutely-positioned child's containing-block
-     origin is its ancestor's *padding edge*, which padding doesn't move — only in-flow content
-     (every view's own root element) shifts down. */
+     removes). */
   padding-top: 8px;
   /* CSS-only fallback for the instant before the JS effect (App.tsx) sets an explicit pixel height
      — same 720:215 ratio as the JS formula (deliberately not rounded there, to match), so this is
@@ -402,10 +400,9 @@ select:disabled {
   aspect-ratio: 720 / 215;
   overflow: hidden;
 }
+/* In normal flow now (the target row, App.tsx — used to float absolutely inside `.chart-wrap`'s
+   top-right, before that corner was needed for EqChart's own hover-cursor readout instead). */
 .chart-preamp {
-  position: absolute;
-  top: 12px;
-  right: 12px;
   display: flex;
   align-items: baseline;
   gap: 0.35em;
@@ -415,7 +412,6 @@ select:disabled {
   border-radius: 5px;
   background: color-mix(in srgb, var(--surface) 78%, transparent);
   border: 1px solid rgba(128, 128, 128, 0.25);
-  pointer-events: none;
 }
 .chart-preamp b {
   font-variant-numeric: tabular-nums;
@@ -1103,10 +1099,11 @@ select:disabled {
   position: relative;
 }
 /* The spectrum-backdrop tuning gear (.vs-tools, shared chrome with the scope views) defaults to
-   top-right, the same corner as .chart-preamp (top:4px/right:12px) — move it to top-left instead
-   of chasing that badge's (variable-width) size with an offset. The tuning panel defaults to
+   top-right — moved to top-left instead, originally to avoid the preamp badge that used to float
+   in that same corner (since moved out to App.tsx's target row, freeing the corner for the
+   hover-cursor readout instead — see .ss-cursor). Left here anyway: the tuning panel defaults to
    top-left too (the scope views put gear and panel in opposite corners), so push the panel down
-   below the gear's own row rather than flipping it to the right, which would just trade the badge
+   below the gear's own row rather than flipping it to the right, which would just trade one
    collision for the gear itself always sitting behind it. */
 .eq-chart .vs-tools {
   left: 6px;

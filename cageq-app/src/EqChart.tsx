@@ -228,6 +228,13 @@ export const EQ_V_INSET_FRAC = 0;
 // which would otherwise blow the scale out to ±24 dB. Still drawn full-range (then clipped).
 const RANGE_F_MAX = 12000;
 const fmtHz = (f: number) => (f >= 1000 ? `${f / 1000}k` : `${f}`);
+/** Precise continuous-frequency formatting for the hover cursor readout — unlike `fmtHz` above
+ *  (built for a handful of fixed, always-round grid-tick values), this takes an arbitrary hovered
+ *  frequency. Same formatting SpectrumScope's own `fmtPeakHz` uses, for the same reading. */
+const fmtCursorHz = (hz: number) => (hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 1 : 2)} kHz` : `${Math.round(hz)} Hz`);
+// Plain cool white, not an accent colour — a reading tool, not a curve, same reasoning as
+// SpectrumScope's identically-named constant.
+const CURSOR_LINE_COLOR = "rgba(230,240,255,0.55)";
 
 export function EqChart({
   series,
@@ -276,6 +283,17 @@ export function EqChart({
   // The top-edge stroke's own layer — cleared and fully redrawn every frame instead of running
   // through the phosphor accumulator (see the render effect's own comment for why).
   const specStrokeRef = useRef<HTMLCanvasElement>(null);
+  // Hover cursor: the fraction (0..1) of the plot's own width the mouse is over, or `null` when
+  // not hovering — same pattern as SpectrumScope's identically-named ref (see that file's own doc
+  // for why this is a ref written by the pointer handlers and read once per frame, not React state).
+  const hoverRef = useRef<number | null>(null);
+  // The cursor readout's own DOM — a self-contained overlay inside `.eq-chart` (same `.ss-cursor`
+  // pattern SpectrumScope uses: position via `left`% + opacity, both written imperatively from the
+  // rAF loop below, not React state — see that component's own doc for why). Local to EqChart
+  // (not a prop) since the readout lives inside the chart itself, not somewhere the caller places.
+  const cursorElRef = useRef<HTMLDivElement | null>(null);
+  const cursorHzRef = useRef<HTMLSpanElement | null>(null);
+  const cursorDbRef = useRef<HTMLSpanElement | null>(null);
   const { params: specParams, setParams: setSpecParams, saveAsDefault: saveSpecDefault, resetToFactory: resetSpecFactory } = useTunableParams(
     "cageq-eqchart-spec-params",
     SPEC_DEFAULTS,
@@ -519,6 +537,10 @@ export function EqChart({
     // own comment for why. `NaN` marks "not yet initialized" so the first real frame snaps straight
     // to target instead of animating in from zero.
     let yStrokeSmooth = new Float64Array(0).fill(NaN);
+    // Whether the cursor readout was showing last frame — same one-shot-hide idea SpectrumScope's
+    // own `cursorShown` uses, so leaving the tube doesn't need a per-frame DOM write to keep
+    // confirming it's still hidden.
+    let cursorShown = false;
 
     const render = () => {
       const now = performance.now();
@@ -641,6 +663,65 @@ export function EqChart({
         strokeCtx.stroke();
       }
 
+      // Hover cursor — independent of `spectrum` being present (the frequency axis is worth
+      // reading with nothing playing, e.g. lining up a filter by ear against a known Hz), drawn on
+      // the same non-accumulating stroke layer as the spectrum's own edge above (already cleared
+      // and redrawn every frame). Frequency always shown; the backdrop's own level only when
+      // there's live data to read it from — same split SpectrumScope's own cursor makes, see that
+      // file's doc for the fuller reasoning. `vx` is the mouse's own viewBox-X position directly
+      // (from `hoverRef`, a 0..1 fraction of the SVG's CSS width — exact since
+      // `preserveAspectRatio="none"` guarantees a uniform stretch), not round-tripped through `x()`/
+      // `invX()`: those are the *outer* render's closures, captured fresh every render but not
+      // rebuilt inside this mount-once effect, so reading `PAD`/`W`/`H` directly off
+      // `specDrawCtx.current` (already destructured above) here — same as `fx`/`sy` do — is what
+      // actually stays correct if `PAD` is ever non-zero again, rather than relying on the (also
+      // currently-correct, but not provably-so) captured closures of `x`/`invX`.
+      const hoverFrac = hoverRef.current;
+      if (hoverFrac !== null) {
+        const vx = hoverFrac * W;
+        strokeCtx.strokeStyle = CURSOR_LINE_COLOR;
+        strokeCtx.lineWidth = Math.max(1, H / SPEC_STROKE_REF_H);
+        strokeCtx.beginPath();
+        strokeCtx.moveTo(vx, PAD.t);
+        strokeCtx.lineTo(vx, H - PAD.b);
+        strokeCtx.stroke();
+
+        const hz = Math.exp(lnMin + ((vx - PAD.l) / (W - PAD.l - PAD.r)) * lnSpan);
+        let dbText: string | null = null;
+        if (spectrum && spectrum.db.length >= 2 && spectrum.signal) {
+          // Linear interpolation between the two bins straddling the cursor, on the same
+          // undo-corrected values the backdrop itself draws — reads the underlying data directly
+          // rather than the cosmetically-smoothed spline traced through it, matching SpectrumScope's
+          // identical cursor-readout choice (that file's own doc has the fuller reasoning).
+          const n = spectrum.db.length;
+          const lnF0 = Math.log(spectrum.f_min);
+          const lnF1 = Math.log(spectrum.f_max);
+          const fi = clamp(((Math.log(hz) - lnF0) / (lnF1 - lnF0)) * (n - 1), 0, n - 1);
+          const i0 = Math.floor(fi);
+          const i1 = Math.min(n - 1, i0 + 1);
+          const ft = fi - i0;
+          const raw = spectrum.db[i0] * (1 - ft) + spectrum.db[i1] * ft;
+          const corrDb = eqBands !== undefined ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]))[0] : 0) + preampDb : 0;
+          dbText = `${(raw - corrDb).toFixed(1)} dB`;
+        }
+        cursorShown = true;
+        if (cursorHzRef.current) cursorHzRef.current.textContent = fmtCursorHz(hz);
+        if (cursorDbRef.current) cursorDbRef.current.textContent = dbText;
+        if (cursorElRef.current) {
+          // A CSS percentage of the *plot rect*, not of the whole box — matches `vx`'s own PAD.l
+          // origin (SpectrumScope's equivalent uses the full box because it has no PAD at all).
+          // Not a pixel offset computed from `W`/`H`: this effect mounts once and never re-runs on
+          // resize, so a measured pixel value closed over here would go stale the first time the
+          // box's actual size changed — a CSS percentage needs no such measurement.
+          const plotFrac = (W - PAD.l - PAD.r) > 0 ? (vx - PAD.l) / (W - PAD.l - PAD.r) : 0;
+          cursorElRef.current.style.left = `${plotFrac * 100}%`;
+          cursorElRef.current.style.opacity = "1";
+        }
+      } else if (cursorShown) {
+        cursorShown = false;
+        if (cursorElRef.current) cursorElRef.current.style.opacity = "0";
+      }
+
       // Two independent corrections multiplied into one doseMult: SPEC_DOSE_MULT (see its own doc)
       // pins the total ink laid down per second to what the wash's alpha was tuned against,
       // independent of the display's own render rate; TAU_REF/tau (see its own doc, above) cancels
@@ -736,6 +817,13 @@ export function EqChart({
       style={{ width: "100%", height: "100%", userSelect: "none", touchAction: "none" }}
       role="img"
       aria-label={t("chart.aria")}
+      onMouseMove={(e) => {
+        const r = svgRef.current!.getBoundingClientRect();
+        hoverRef.current = clamp((e.clientX - r.left) / r.width, 0, 1);
+      }}
+      onMouseLeave={() => {
+        hoverRef.current = null;
+      }}
       onClick={(e) => {
         // Symmetric double-click gestures (detected manually — see lastTap): a second click
         // close to the first (time + screen distance) *and over the same target* → over that
@@ -975,6 +1063,19 @@ export function EqChart({
       })}
 
     </svg>
+
+      {/* Hover-cursor readout: frequency (+ the spectrum backdrop's level, while live) under the
+          mouse — same `.ss-cursor` styling and imperative-write pattern as SpectrumScope's own (see
+          that component's doc for the fuller reasoning), just living inside this chart's own box
+          instead of the caller's — moving it out to App.tsx's target row was tried and reverted:
+          this reads as "what's under my cursor *on the chart*", which belongs on the chart itself,
+          the same way SpectrumScope's own cursor does. Positioned via `left`% + `opacity`, both
+          written from the render loop above. `pointer-events:none` so the label can never steal the
+          hover it's reporting. */}
+      <div className="ss-cursor" ref={cursorElRef} aria-hidden="true">
+        <span ref={cursorHzRef} className="ss-cursor-hz" />
+        <span ref={cursorDbRef} className="ss-cursor-db" />
+      </div>
 
       {/* Spectrum-backdrop tuning — only when there's a backdrop to tune (see SpecParams' doc
           comment for why fade/glow are live-adjustable rather than fixed constants). Same
