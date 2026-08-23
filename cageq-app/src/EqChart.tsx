@@ -207,7 +207,7 @@ type SpecParams = { tau: number; tail: number; glowBase: number };
 // brightness under the new TAU_REF/tau-corrected formula — confirming the blend swap alone was a
 // visual no-op — then hand-retuned live from that baseline to today's value, same as every other
 // view's glow default gets touched up after its own anchor change.
-const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.48 };
+const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3 };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -1079,12 +1079,13 @@ export function EqChart({
 
       {/* Spectrum-backdrop tuning — only when there's a backdrop to tune (see SpecParams' doc
           comment for why fade/glow are live-adjustable rather than fixed constants). Same
-          `.vs-tools`/`.vs-tuning` chrome, and now the same *positioning*, as the scope views' own
-          gear-icon panels: `.eq-chart-screen` fills `.eq-chart`'s whole box, so the shared
-          `.eq-chart .vs-tools` CSS rule's fixed 6px offset already lands the gear in the screen's own
-          corner, the same as `.vs-tools`'s default does against `.vs-screen` — no inline PAD-based
-          positioning needed (an earlier version computed it inline, back when the screen was sized to
-          PAD instead of filling the box, and had its own corner to chase). */}
+          `.vs-tools`/`.vs-tuning` chrome AND the same default *positioning* (top-right gear,
+          top-left panel) as the scope views' own gear-icon panels — no `.eq-chart`-specific
+          override needed: `.eq-chart-screen` fills `.eq-chart`'s whole box the same way `.vs-screen`
+          fills the scope views' own, so the shared default rules just land correctly here too. (An
+          earlier version pushed the gear to top-left instead, to dodge the preamp badge that used to
+          float in this same corner — that badge has since moved to App.tsx's target row, so the
+          override was removed rather than left as dead, unused CSS.) */}
       {spectrumRef && (
         <div className="vs-tools">
           <button
