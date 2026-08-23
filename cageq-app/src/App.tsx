@@ -7,7 +7,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
 import { Band, composedCurveDb, logGrid } from "./biquad";
-import { EqChart, Marker, PhaseCurve, RefCurve, Series, SpectrumData } from "./EqChart";
+import { EqChart, EQ_TOP_INSET_FRAC, EQ_BOTTOM_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import { ScrubNumber } from "./ScrubNumber";
@@ -1776,7 +1776,12 @@ function App() {
   };
 
   // Measure the chart's rendered SVG so the meter bars can match its plot-area Y extent. EqChart's
-  // viewBox is 720×215 with PAD.t=12 / PAD.b=24 → the plot spans y 12..191 of 215.
+  // plot rect is inset top/bottom by EQ_TOP_INSET_FRAC/EQ_BOTTOM_INSET_FRAC * height (imported, not
+  // a second copy of either fraction) — this used to hardcode the plot's old fixed-pixel PAD.t/PAD.b
+  // (12/24 of a 215-tall viewBox) directly, which silently went stale the last time EqChart's own
+  // PAD changed, since nothing here depended on it. Deriving the same fractions EqChart actually
+  // uses can't drift again. Measures the SVG rather than `.eq-chart` so it stays right for Impulse
+  // too (same viewBox, same PAD-derived plot rect, no spectrum backdrop).
   useEffect(() => {
     const svg = chartWrapRef.current?.querySelector("svg");
     // The scope view is a canvas (no SVG); keep the last measured box so the meters beside it don't
@@ -1784,7 +1789,9 @@ function App() {
     if (!svg) return;
     const measure = () => {
       const h = svg.getBoundingClientRect().height;
-      setPlotBox(h > 0 ? { top: (12 / 215) * h, height: (179 / 215) * h } : null);
+      const top = EQ_TOP_INSET_FRAC * h;
+      const bottom = EQ_BOTTOM_INSET_FRAC * h;
+      setPlotBox(h > 0 ? { top, height: h - top - bottom } : null);
     };
     const ro = new ResizeObserver(measure);
     ro.observe(svg);

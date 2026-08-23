@@ -212,6 +212,19 @@ const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.48 };
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
 const F_MAX = 20000;
+/** The plot rect's bottom inset, as a fraction of `height` — SpectrumScope's own literal
+ *  `plotTop = H*0.03` value. Exported so App.tsx's meter-bar alignment (`plotBox`, sized to match
+ *  this chart's real plot-area Y extent) derives the same number instead of carrying its own
+ *  hardcoded copy — that's exactly what went stale the last time `PAD` changed and this wasn't
+ *  exported yet. */
+export const EQ_BOTTOM_INSET_FRAC = 0.03;
+/** The plot rect's top inset — same value as the bottom one. `.eq-chart` now gets its visible top
+ *  gap from a plain CSS `margin-top` (App.css) instead of an asymmetric PAD fudge here: that fudge
+ *  existed specifically because giving `.eq-chart` a real margin kept breaking live (see the CSS
+ *  rule's own doc for the two failed attempts), so PAD carried the whole gap on its own for a while.
+ *  Kept as its own constant, not folded back into `EQ_BOTTOM_INSET_FRAC`, in case that history
+ *  repeats and this needs to grow again without touching every callsite that assumes t and b match. */
+export const EQ_TOP_INSET_FRAC = 0.03;
 // Reference curves (measured raw / target) only count toward the Y auto-scale up to this
 // frequency: they diverge sharply in the top octaves (measurement noise + treble roll-off),
 // which would otherwise blow the scale out to ±24 dB. Still drawn full-range (then clipped).
@@ -298,10 +311,14 @@ export function EqChart({
   const isHidden = (id: string) => (id in overrides ? overrides[id] : defaultHidden[id] === true);
   const toggle = (id: string) => setOverrides((o) => ({ ...o, [id]: !isHidden(id) }));
 
-  // The phase overlay needs a right axis (degrees) — reserve room for its labels only when
-  // it's actually shown, so the plot doesn't lose width when it isn't.
   const phaseOn = !!phase && !isHidden(phase.id);
-  const PAD = { l: 40, r: phaseOn ? 34 : 12, t: 12, b: 24 };
+  // Four margins, all a thin buffer only — a fixed 10px on the log-frequency axis (no natural
+  // "percent of W" scale to tie it to) and fractions of H on the dB axis (see EQ_TOP_INSET_FRAC's
+  // own doc for why top and bottom differ), not picked-to-fit values: every axis label (dB, Hz,
+  // phase-degree) draws ON the tube itself now, same as the scope views' own on-tube readouts (see
+  // the gridlines' own doc), so none of the four needs the larger external margin it used to reserve
+  // for that text — including `r`, which no longer varies with `phaseOn` for the same reason.
+  const PAD = { l: 10, r: 10, t: H * EQ_TOP_INSET_FRAC, b: H * EQ_BOTTOM_INSET_FRAC };
 
   const { freqs, curves, yMin, yMax, step } = useMemo(() => {
     const freqs = logGrid(480, F_MIN, F_MAX);
@@ -679,6 +696,15 @@ export function EqChart({
 
   return (
     <div className="eq-chart">
+    {/* Dark instrument-screen patch, only when there's a backdrop to put on it (matches the tuning
+        gear's own `spectrumRef &&` gate below). Fills the *whole* box (plain CSS `inset:0`), not the
+        plot rect — same split SpectrumScope's own `.vs-screen` makes: the screen is the container's
+        full bounds, and PAD only insets the *content* drawn inside it (gridlines, curves, labels),
+        never the screen's own visible edges. Sizing the screen to PAD directly (tried first) meant
+        it could never match the scope tubes' own footprint no matter how far PAD shrank, since it was
+        answering a different question — "how much margin does the content want" is not "how big is
+        the screen". */}
+    {spectrumRef && <div className="eq-spectrum-screen" aria-hidden="true" />}
     {/* phosphor spectrum backdrop — same viewBox coords as the SVG (CSS-scaled to match), behind it */}
     <canvas ref={specCanvasRef} className="eq-spectrum-canvas" width={W} height={H} aria-hidden="true" />
     {/* Top-edge stroke, its own non-accumulating layer above the wash — see the render effect's own
@@ -722,7 +748,12 @@ export function EqChart({
           <rect x={PAD.l} y={PAD.t} width={W - PAD.l - PAD.r} height={H - PAD.t - PAD.b} />
         </clipPath>
       </defs>
-      {/* dB gridlines + labels */}
+      {/* dB gridlines + labels, both drawn ON the dark `.eq-spectrum-screen` patch now (see its own
+          doc) rather than lines-inside-labels-outside — the same "readout printed directly on the
+          tube" convention the scope views use (e.g. SpectrumScope's own FREQ_TICKS labels), not a
+          chart with an external axis margin. `currentColor` (the theme's --fg) would be almost
+          invisible against a guaranteed-dark background in light mode, so both use the accent-tinted-
+          on-dark colouring the scope grids already do (e.g. GRID_ALPHA) instead. */}
       {dbTicks.map((db) => (
         <g key={`db${db}`}>
           <line
@@ -730,30 +761,44 @@ export function EqChart({
             x2={W - PAD.r}
             y1={y(db)}
             y2={y(db)}
-            stroke="currentColor"
-            strokeOpacity={db === 0 ? 0.35 : 0.12}
+            stroke="var(--accent)"
+            strokeOpacity={db === 0 ? 0.4 : 0.16}
           />
-          <text x={PAD.l - 6} y={y(db) + 3.5} textAnchor="end" fontSize="10" fill="currentColor" opacity={0.55}>
+          <text x={PAD.l + 5} y={y(db) - 3} textAnchor="start" fontSize="10" fill="var(--accent)" opacity={0.6}>
             {db > 0 ? `+${db}` : db}
           </text>
         </g>
       ))}
 
-      {/* frequency gridlines + labels */}
+      {/* frequency gridlines + labels — same on-tube, accent-coloured treatment as the dB axis above.
+          First/last tick (20 Hz/20 kHz) sit exactly on the plot's own left/right edge (GRID_HZ's own
+          extremes are F_MIN/F_MAX), so those two anchor start/end instead of centring, the same way
+          SpectrumScope's own FREQ_TICKS labels do — a centred label there would overhang past the
+          tube's edge into the corner. */}
       {GRID_HZ.map((f) => (
         <g key={`f${f}`}>
-          <line x1={x(f)} x2={x(f)} y1={PAD.t} y2={H - PAD.b} stroke="currentColor" strokeOpacity={0.12} />
-          <text x={x(f)} y={H - PAD.b + 13} textAnchor="middle" fontSize="10" fill="currentColor" opacity={0.55}>
+          <line x1={x(f)} x2={x(f)} y1={PAD.t} y2={H - PAD.b} stroke="var(--accent)" strokeOpacity={0.16} />
+          <text
+            x={x(f) + (f === F_MIN ? 3 : f === F_MAX ? -3 : 0)}
+            y={H - PAD.b - 5}
+            textAnchor={f === F_MIN ? "start" : f === F_MAX ? "end" : "middle"}
+            fontSize="10"
+            fill="var(--accent)"
+            opacity={0.6}
+          >
             {fmtHz(f)}
           </text>
         </g>
       ))}
 
-      {/* secondary phase axis (degrees), right side — only when the phase overlay is shown */}
+      {/* secondary phase axis (degrees), right side — only when the phase overlay is shown. Moved
+          onto the tube like the dB/Hz labels (same reasoning) — still `phase.color` (a fixed,
+          caller-supplied hex, not `currentColor`), so no contrast fix was needed there, just the
+          position. */}
       {phaseOn && phase && (
         <g>
           {[phaseRange, 0, -phaseRange].map((deg) => (
-            <text key={deg} x={W - PAD.r + 4} y={yPhase(deg) + 3.5} textAnchor="start" fontSize="10" fill={phase.color} opacity={0.85}>
+            <text key={deg} x={W - PAD.r - 4} y={yPhase(deg) + 3.5} textAnchor="end" fontSize="10" fill={phase.color} opacity={0.85}>
               {deg > 0 ? `+${deg}` : deg}°
             </text>
           ))}
@@ -913,7 +958,12 @@ export function EqChart({
 
       {/* Spectrum-backdrop tuning — only when there's a backdrop to tune (see SpecParams' doc
           comment for why fade/glow are live-adjustable rather than fixed constants). Same
-          `.vs-tools`/`.vs-tuning` chrome as the scope views' own gear-icon panels. */}
+          `.vs-tools`/`.vs-tuning` chrome, and now the same *positioning*, as the scope views' own
+          gear-icon panels: `.eq-spectrum-screen` fills `.eq-chart`'s whole box, so the shared
+          `.eq-chart .vs-tools` CSS rule's fixed 6px offset already lands the gear in the screen's own
+          corner, the same as `.vs-tools`'s default does against `.vs-screen` — no inline PAD-based
+          positioning needed (an earlier version computed it inline, back when the screen was sized to
+          PAD instead of filling the box, and had its own corner to chase). */}
       {spectrumRef && (
         <div className="vs-tools">
           <button
