@@ -1094,12 +1094,6 @@ select:disabled {
   top: 0;
   left: 0;
   width: 100%;
-  /* Container-relative, matching the SVG below (`.eq-chart svg`) — was `height:auto` (this
-     canvas's own intrinsic 720:215 buffer ratio), which independently recomputed the same number
-     the SVG's own sizing did, rather than sharing one source for it. Two formulas that only happen
-     to agree is exactly the pattern `.chart-wrap`'s own rewrite exists to eliminate (see its doc) —
-     just one level down, between this canvas and the SVG instead of between `.chart-wrap` and its
-     children. */
   height: 100%;
   pointer-events: none;
 }

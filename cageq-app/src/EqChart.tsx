@@ -212,19 +212,17 @@ const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.48 };
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
 const F_MAX = 20000;
-/** The plot rect's top/bottom inset, as a fraction of `height` — SpectrumScope's own literal
- *  `plotTop = H*0.03` value. Exported so App.tsx's meter-bar alignment (`plotBox`, sized to match
- *  this chart's real plot-area Y extent) derives the same number instead of carrying its own
- *  hardcoded copy — that's exactly what went stale the last time `PAD` changed and this wasn't
- *  exported yet.
+/** The plot rect's top/bottom inset, as a fraction of `height`. Exported so App.tsx's meter-bar
+ *  alignment (`plotBox`) and NerdCharts.tsx's `ImpulseChart` derive the same number EqChart's own
+ *  PAD uses instead of each carrying a second copy that can silently go stale.
  *
- *  Was two separate constants (`EQ_TOP_INSET_FRAC`/`EQ_BOTTOM_INSET_FRAC`) while `.eq-chart`'s own
- *  outer box was sized by an uncompensated CSS margin that could overflow `.chart-wrap` — PAD's top
- *  inset briefly had to carry extra fudge on its own to fake a visible gap without touching that
- *  margin, since giving `.eq-chart` a real margin kept breaking live. Now that `.chart-wrap`'s own
- *  height is JS-owned (App.css/App.tsx) and every view shares one shared top inset there instead,
- *  that reason is gone and top/bottom are safely merged back to one number. */
-export const EQ_V_INSET_FRAC = 0.03;
+ *  Zero — EqChart's own PAD.t/b (and l/r) dropped to 0 too: curves, gridlines, and the spectrum
+ *  backdrop all draw across the full box now, no inset. Keeping the backdrop's own canvas element
+ *  in sync with a nonzero inset (whether baked into its draw coordinates or into its own element
+ *  size/position) kept drifting out of agreement with the SVG's identically-intended inset,
+ *  reported live as the backdrop visibly overshooting the curve's own padded edges (unambiguous
+ *  with a pure test tone at 20 Hz/20 kHz) — zero removes the thing that had to stay in sync. */
+export const EQ_V_INSET_FRAC = 0;
 // Reference curves (measured raw / target) only count toward the Y auto-scale up to this
 // frequency: they diverge sharply in the top octaves (measurement noise + treble roll-off),
 // which would otherwise blow the scale out to ±24 dB. Still drawn full-range (then clipped).
@@ -312,13 +310,15 @@ export function EqChart({
   const toggle = (id: string) => setOverrides((o) => ({ ...o, [id]: !isHidden(id) }));
 
   const phaseOn = !!phase && !isHidden(phase.id);
-  // Four margins, all a thin buffer only — a fixed 10px on the log-frequency axis (no natural
-  // "percent of W" scale to tie it to) and EQ_V_INSET_FRAC*H on the dB axis, not picked-to-fit
-  // values: every axis label (dB, Hz, phase-degree) draws ON the tube itself now, same as the scope
-  // views' own on-tube readouts (see the gridlines' own doc), so none of the four needs the larger
-  // external margin it used to reserve for that text — including `r`, which no longer varies with
-  // `phaseOn` for the same reason.
-  const PAD = { l: 10, r: 10, t: H * EQ_V_INSET_FRAC, b: H * EQ_V_INSET_FRAC };
+  // No margin at all — curves, gridlines, and the spectrum backdrop all draw across the *full*
+  // W×H box, same as SpectrumScope's own full-bleed convention. Was a nonzero inset (PAD.l/r a
+  // fixed 10px, PAD.t/b EQ_V_INSET_FRAC*H), specifically to keep on-tube axis labels from being
+  // clipped at the edge — dropped because keeping the backdrop's own canvas element in sync with
+  // that inset (whether baked into its draw coordinates or into its own element size/position)
+  // kept drifting out of agreement with the SVG's identically-intended inset, reported live as the
+  // backdrop visibly overshooting the curve's own padded edges (unambiguous with a pure test tone
+  // at 20 Hz/20 kHz). Zero removes the thing that had to be kept in sync at all.
+  const PAD = { l: 0, r: 0, t: 0, b: 0 };
 
   const { freqs, curves, yMin, yMax, step } = useMemo(() => {
     const freqs = logGrid(480, F_MIN, F_MAX);
@@ -714,11 +714,25 @@ export function EqChart({
     <svg
       ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
-      // Container-relative (`.eq-chart`'s own JS-owned box, see .chart-wrap's doc in App.css),
-      // not the old intrinsic `height:auto` derived from this SVG's own viewBox ratio — the box's
-      // own ratio now comes from the exact same 720:215 division `.chart-wrap`'s JS height uses, so
-      // this never needs `preserveAspectRatio="none"` to avoid letterboxing: the ratios genuinely
-      // agree, not just approximately.
+      // Container-relative (`.eq-chart`'s own JS-owned box, see .chart-wrap's doc in App.css), not
+      // the old intrinsic `height:auto` derived from this SVG's own viewBox ratio.
+      //
+      // `preserveAspectRatio="none"` is REQUIRED, not cosmetic: the spectrum backdrop's canvases
+      // (above) share this viewBox's coordinate space, and a canvas always *stretches* its buffer to
+      // its CSS box unconditionally. An SVG doesn't — its default `xMidYMid meet` scales to FIT the
+      // box preserving the viewBox's own ratio, then centres the result. The two therefore agree
+      // only while the box is exactly 720:215, and it isn't: `.chart-wrap` is `box-sizing:border-box`
+      // with `padding-top:8px`, so the content box these actually fill is
+      // `width x (width*215/720 - 8)` — very slightly wider than the viewBox. The height constraint
+      // binds, the SVG scales down ~2.6% and centres, and the leftover box (~13px each side at a
+      // typical window width) is space the canvas paints into and the SVG doesn't. That read live as
+      // the backdrop being "wider than the curves", symmetric at both edges — unmistakable against
+      // pure test tones at 20 Hz/20 kHz, whose spikes sat visibly outside the matching gridlines.
+      // With `none` both stretch to the same box by the same rule, at any window size, so they can't
+      // drift apart again. (An earlier revision asserted the opposite here — that the ratios
+      // "genuinely agree, not just approximately" — which was true of the JS-set *border* box and
+      // silently false of the padded content box the elements are actually laid out in.)
+      preserveAspectRatio="none"
       style={{ width: "100%", height: "100%", userSelect: "none", touchAction: "none" }}
       role="img"
       aria-label={t("chart.aria")}

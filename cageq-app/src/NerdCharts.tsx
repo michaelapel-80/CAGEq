@@ -92,9 +92,18 @@ export function ImpulseChart({
           EqChart's own — see .eq-chart-screen's doc in App.css). */}
       <div className="eq-chart-screen" aria-hidden="true" />
       {/* Container-relative (`.eq-chart`'s own JS-owned box — see `.chart-wrap`'s doc in App.css),
-          not intrinsic `height:auto` — see EqChart.tsx's own SVG for the fuller reasoning, shared
-          verbatim since this uses the identical `.eq-chart` wrapper class. */}
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "100%" }} role="img" aria-label={t("chart.impulseAria")}>
+          not intrinsic `height:auto`, and `preserveAspectRatio="none"` for the same reason EqChart's
+          own SVG needs it — see that file for the full explanation. There's no canvas backdrop here
+          to misalign against, so this one is purely for consistency: without it this view would
+          letterbox and centre itself inside the shared `.eq-chart` box while EqChart fills it, i.e.
+          the two instruments would render at slightly different sizes and positions. */}
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+        style={{ width: "100%", height: "100%" }}
+        role="img"
+        aria-label={t("chart.impulseAria")}
+      >
         {/* dB gridlines + labels, both drawn ON the dark screen now — same accent-tinted-on-dark,
             on-tube convention EqChart's own gridlines use (see that file's doc for the full why). */}
         {DB_TICKS.map((db) => (
