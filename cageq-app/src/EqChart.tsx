@@ -252,6 +252,8 @@ export function EqChart({
   preampDb = 0,
   legendHost,
   minSpan,
+  onFreqSweep,
+  onFreqSweepEnd,
   height = 210,
 }: {
   series: Series[];
@@ -278,6 +280,16 @@ export function EqChart({
   /** If given, the legend renders (via portal) into this element instead of inline — used to
    *  place it full-width below the chart+meters row so long labels have room. */
   legendHost?: HTMLElement | null;
+  /** "Frequency finder" — hold the middle mouse button anywhere on the chart to audition a
+   *  temporary, high-Q bandpass swept live to the cursor's frequency (by ear, without needing an
+   *  existing band the way §5.2's isolate/solo do), releasing reverts to the normal cascade.
+   *  Called repeatedly with the current frequency (once on press, then again on every move while
+   *  held) — the caller (App.tsx) owns the actual audio side-effect and start/end distinction, the
+   *  same way `nodes.onChange` owns what a node drag actually does; this component only reports
+   *  gesture + frequency. */
+  onFreqSweep?: (freqHz: number) => void;
+  /** Middle mouse button released (or the gesture was cancelled) — restore the normal cascade. */
+  onFreqSweepEnd?: () => void;
   height?: number;
 }) {
   const { t } = useTranslation();
@@ -292,6 +304,11 @@ export function EqChart({
   // not hovering — same pattern as SpectrumScope's identically-named ref (see that file's own doc
   // for why this is a ref written by the pointer handlers and read once per frame, not React state).
   const hoverRef = useRef<number | null>(null);
+  // Whether the middle-mouse "frequency finder" gesture (onFreqSweep) is currently held — gates
+  // pointermove so it only reports a frequency while actually sweeping, not on every ordinary hover
+  // (pointer capture, below, keeps events routed here even if the cursor leaves the SVG mid-drag,
+  // but doesn't by itself restrict *when* pointermove fires).
+  const sweepingRef = useRef(false);
   // The cursor readout's own DOM — a self-contained overlay inside `.eq-chart` (same `.ss-cursor`
   // pattern SpectrumScope uses: position via `left`% + opacity, both written imperatively from the
   // rAF loop below, not React state — see that component's own doc for why). Local to EqChart
@@ -830,6 +847,43 @@ export function EqChart({
       }}
       onMouseLeave={() => {
         hoverRef.current = null;
+      }}
+      onPointerDown={(e) => {
+        // Middle button only (1) — left is node add/remove (onClick, below) and drag (per-node
+        // handlers), right is unused/native context menu. `preventDefault` suppresses the OS/
+        // browser's own middle-click autoscroll cursor, which would otherwise fire instead — but
+        // per the Pointer Events spec, a UA is then also allowed to skip firing the *compatibility*
+        // mouse events for the rest of this pointer's gesture, which is exactly what happened here
+        // (reported live: the hover-cursor readout, driven by `onMouseMove`, stopped following the
+        // mouse for the whole sweep). Fixed by also updating `hoverRef` directly from the pointer
+        // handlers below, the same fraction `onMouseMove` itself computes — sweeping shouldn't have
+        // to depend on mouse events still firing at all.
+        if (e.button !== 1) return;
+        e.preventDefault();
+        sweepingRef.current = true;
+        svgRef.current?.setPointerCapture(e.pointerId);
+        const r = svgRef.current!.getBoundingClientRect();
+        hoverRef.current = clamp((e.clientX - r.left) / r.width, 0, 1);
+        const { vx } = toViewBox(e.clientX, e.clientY);
+        onFreqSweep?.(Math.round(clamp(invX(vx), F_MIN, F_MAX)));
+      }}
+      onPointerMove={(e) => {
+        if (!sweepingRef.current) return;
+        const r = svgRef.current!.getBoundingClientRect();
+        hoverRef.current = clamp((e.clientX - r.left) / r.width, 0, 1);
+        const { vx } = toViewBox(e.clientX, e.clientY);
+        onFreqSweep?.(Math.round(clamp(invX(vx), F_MIN, F_MAX)));
+      }}
+      onPointerUp={(e) => {
+        if (!sweepingRef.current) return;
+        sweepingRef.current = false;
+        svgRef.current?.releasePointerCapture(e.pointerId);
+        onFreqSweepEnd?.();
+      }}
+      onPointerCancel={() => {
+        if (!sweepingRef.current) return;
+        sweepingRef.current = false;
+        onFreqSweepEnd?.();
       }}
       onClick={(e) => {
         // Symmetric double-click gestures (detected manually — see lastTap): a second click

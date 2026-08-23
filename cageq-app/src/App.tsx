@@ -169,6 +169,10 @@ const appliedBands = (st: Stages): CustomFilter[] =>
 
 /** §5.2 solo: which band, in which stage, is soloed (hear only it, within its stage). */
 type Solo = { stage: StageId; idx: number };
+// The Q of EqChart's middle-mouse "frequency finder" sweep's bandpass — "relatively high" per the
+// feature's own ask, narrow enough to isolate a single resonance while sweeping without being
+// fiddly to land on by ear. No principled ideal value; retune freely if it doesn't feel right.
+const SWEEP_Q = 8;
 /** Apply a solo to a stage set for the *applied* cascade only — never mutates the stored bands.
  *  Forces the soloed band's stage on and every other band in that stage off; other stages are
  *  untouched. The §4.1 loudness match then recomputes the preamp for the reduced cascade (auto-gain). */
@@ -605,6 +609,12 @@ function App() {
   const [isolate, setIsolate] = useState<Solo | null>(null);
   const isolateRef = useRef<Solo | null>(null);
   isolateRef.current = isolate;
+  // §5.2 frequency finder: EqChart's middle-mouse sweep — the same bandpass-audition idea as
+  // isolate, but for an ad-hoc frequency under the cursor instead of an existing band, so there's
+  // no `Solo{stage,idx}` to key off. No `useState` mirror (unlike solo/isolate above): nothing in
+  // the UI reacts to sweep being active — no band row to highlight, since there's no band — it only
+  // ever needs to be read from the throttled apply loop below, so a plain ref is enough.
+  const sweepFreqRef = useRef<number | null>(null);
   // Finding #1: active directives in config.txt outside CAGEq's block that stack on top of every
   // correction (e.g. EqAPO's fresh-install default preamp/example filters). Detected once after
   // load; surfaced passively (never a first-run modal) as a line + reversible review panel.
@@ -1034,9 +1044,16 @@ function App() {
   // Refreshed every render so a queued timer never fires against stale state. While a band is
   // isolated the queued write is a bandpass re-write at its *latest* Fc/Q (so a drag sweeps it),
   // routed through the same throttle as a normal apply — one write in flight, drag frames fold.
+  // Checked before isolate: sweeping already clears isolate/solo on start (see onFreqSweep), so the
+  // two are never both set, but sweep is the more "live, right now" of the two if that ever changed.
   autoApplyRef.current = () => {
     if (inFlight.current) {
       requestApply(60); // a write is in progress — retry shortly
+      return;
+    }
+    const sweepFreq = sweepFreqRef.current;
+    if (sweepFreq != null) {
+      void applyIsolate(sweepFreq, SWEEP_Q);
       return;
     }
     const iso = isolateRef.current;
@@ -1103,6 +1120,30 @@ function App() {
     setIsolate(null);
     requestApply(0); // overwrite the bandpass config with the real cascade
   };
+  // EqChart's own middle-mouse "frequency finder" — see EqChart.tsx's `onFreqSweep` doc for the
+  // gesture. `starting` distinguishes the initial press (mutual exclusion with solo/isolate, plus
+  // an immediate untimed write so the audio catches up as fast as isolate's own toggle does) from a
+  // drag continuing an already-active sweep (just the coalescing throttle, same as a node drag).
+  const onFreqSweep = (freqHz: number) => {
+    if (dryActive) return; // Dry has no device/fit context for `isolate` to key off (see applyIsolate)
+    const starting = sweepFreqRef.current == null;
+    sweepFreqRef.current = freqHz;
+    if (starting) {
+      soloRef.current = null;
+      setSolo(null);
+      isolateRef.current = null;
+      setIsolate(null); // mutual exclusion, same as toggleIsolate
+      setError("");
+      requestApply(0);
+    } else {
+      requestApply(70); // same coalescing cadence as a node drag (updateFilter's own delay)
+    }
+  };
+  const onFreqSweepEnd = () => {
+    if (sweepFreqRef.current == null) return;
+    sweepFreqRef.current = null;
+    requestApply(0); // overwrite the bandpass config with the real cascade
+  };
   // Exit any audition *without* re-applying — for structural edits (add/remove/load/undo/toggleStage)
   // that already fire their own apply; nulling the refs first makes that apply write the normal
   // cascade. The reset is driven imperatively from each handler rather than a `stages`-watching
@@ -1116,6 +1157,11 @@ function App() {
       isolateRef.current = null;
       setIsolate(null);
     }
+    // A sweep in progress is rare here (a structural edit's own trigger is a keyboard shortcut
+    // like undo firing while the middle button is still held — the only way both can be true at
+    // once), but cheap to also cover: EqChart's own onPointerUp still fires normally afterward and
+    // calls onFreqSweepEnd, which would otherwise write a now-pointless extra bandpass reapply.
+    sweepFreqRef.current = null;
   };
   // A stage-tab switch exits the audition (the band isn't visible in another stage) and restores
   // the normal cascade — the one auto-exit that isn't already covered by an edit's own apply.
@@ -2526,6 +2572,8 @@ function App() {
                         preampDb={result?.preamp_db ?? 0}
                         legendHost={legendHost}
                         minSpan={comparisonSpan}
+                        onFreqSweep={onFreqSweep}
+                        onFreqSweepEnd={onFreqSweepEnd}
                         height={215}
                         nodes={{
                           bands: activeBands,
