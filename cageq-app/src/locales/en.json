@@ -129,8 +129,6 @@
     "tail": "Tail",
     "peak": "Peak",
     "glow": "Glow",
-    "punch": "Punch",
-    "punchHint": "0 converges on its own colour and never blooms; 1 stacks toward white like the beam views. In between: a little pop without full saturation.",
     "beam": "Beam",
     "focus": "Focus",
     "scale": "Scale",

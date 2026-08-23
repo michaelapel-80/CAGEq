@@ -305,7 +305,7 @@ export function Meter({
         drawn = s; // idle: draw nothing this frame — the accumulator's own decay fades the trail out
       }
 
-      phos.commit(dt, p.trailTau, p.tail, 0, doseMult);
+      phos.commit(dt, p.trailTau, p.tail, doseMult);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);

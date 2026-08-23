@@ -573,7 +573,7 @@ export function TimeScope() {
       }
 
       // 4) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
-      phos.commit(dt, p.trailTau, p.tail, 0, doseMult);
+      phos.commit(dt, p.trailTau, p.tail, doseMult);
 
       raf = requestAnimationFrame(render);
     };

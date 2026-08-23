@@ -47,12 +47,17 @@
  * Callers don't branch; `precise` reports which backend they got, for tuning copy or diagnostics.
  *
  * ## What must NOT be drawn through this
- * At the default `add` blend, `commit()` is **additive** — that's what produces dwell saturation,
- * where overlapping passes stack toward white. Anything drawn at a constant alpha every frame
- * (Vectorscope's resting spot, TimeScope's peak-hold lines) must therefore live on its own
- * non-accumulating canvas layer, or it will pile up frame over frame instead of holding steady.
- * The `over` blend has no such hazard — it converges rather than stacking — which is why the
- * spectrum *backdrop* uses it: blooming would fight the EQ curves drawn over the top.
+ * `commit()` is **additive** — that's what produces dwell saturation, where overlapping passes
+ * stack toward white. Anything drawn at a constant alpha every frame (Vectorscope's resting spot,
+ * TimeScope's peak-hold lines) must therefore live on its own non-accumulating canvas layer, or it
+ * will pile up frame over frame instead of holding steady.
+ *
+ * This used to also offer an `over` blend (self-limiting, converges on its own colour instead of
+ * stacking toward white) for EqChart's spectrum backdrop, a background element that needed to not
+ * bloom and fight the curves drawn over it — and a `punch` dial partway between the two. Removed
+ * once tuning alone (the same defaults-driven approach the meter already relied on) turned out
+ * sufficient to keep that backdrop from blowing out on plain `add`, the same as every other caller
+ * — see git history if the self-limiting behaviour is ever needed again.
  */
 
 /** Brightness at which the decay has fully handed over to the fast (bright) rate; below it the
@@ -97,10 +102,6 @@ const TAIL_FLOOR_PER_SEC = 0.0015;
 export const DOSE_REF_FPS = 240;
 const DOSE_REF_DT = 1 / DOSE_REF_FPS;
 
-/** How this frame's trace lands on the decayed history. `add` (default) is the scopes' additive
- *  beam; `over` is the plain over-operator for backdrop-style layers that must not bloom. */
-export type PhosphorBlend = "add" | "over";
-
 /** Shared surface of both backends — see the module comment for why the fallback exists. */
 export type Phosphor = {
   /** Clear and return the 2D context for this frame's trace. Sized to the target canvas. */
@@ -110,14 +111,6 @@ export type Phosphor = {
    * `tail` multiplies `tau` for *faint* content only (1 = a plain single exponential), giving the
    * long low-level afterglow a real phosphor has — see FS_ACCUM. Ignored by the 2D fallback, which
    * can only apply one global fade.
-   *
-   * `punch` (0..1, default 0) only matters for the `over` blend: 0 is the plain over-operator
-   * (converges on its own colour, never blooms — see the module doc's "What must NOT be drawn
-   * through this"); 1 makes `over` behave exactly like `add` (stacks toward white, uncapped). Values
-   * in between let content that keeps landing in the same place build up real brightness without
-   * going all the way to `add`'s full saturation — for a backdrop that wants a *little* pop without
-   * competing with what's drawn over it. No effect on `add` blend (already maximally additive) or
-   * the 2D fallback (ignored, like `tail`).
    *
    * `doseMult` (default 1) is a further multiplier on top of the built-in `dt/DOSE_REF_DT` dose
    * normalization — for a caller that redraws more (or less) often per second than the update rate
@@ -133,7 +126,7 @@ export type Phosphor = {
    * canvas always draws its trace at its original, undiminished alpha (whatever precision that had
    * before), and the correction lands in the same lossless float multiply `uDose` already is.
    */
-  commit(dt: number, tau: number, tail?: number, punch?: number, doseMult?: number): void;
+  commit(dt: number, tau: number, tail?: number, doseMult?: number): void;
   /** True for the half-float GL backend; false when running the 8-bit canvas fallback. */
   readonly precise: boolean;
   dispose(): void;
@@ -156,7 +149,7 @@ void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
 // longer, which raises the apparent floor and forces glow up before the faint end reads against it.
 // The point of this module is a trail that reaches zero, not a different look.
 const FS_ACCUM = `precision highp float; varying vec2 vUv;
-uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uOver, uDose, uPunch;
+uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uDose;
 void main(){
   vec4 prev = texture2D(uPrev, vUv);
   // Brightness-dependent decay rate: bright content falls at uKeep, faint content at the slower
@@ -178,16 +171,10 @@ void main(){
   cur.a *= uDose;
   cur.rgb *= cur.a;
   vec4 decayed = max(prev * k - uFloor, 0.0);
-  // "add" stacks toward saturation and has no hue ceiling — the beam overdraw the scopes want.
-  // "over" is the plain over-operator, so repeated identical content converges on its own colour
-  // instead of blooming: what a dim *backdrop* (EqChart's spectrum) wants, where blowing out would
-  // fight the curves drawn on top of it. uPunch (0..1, 0 for every existing caller) partially
-  // undoes "over"'s own self-limiting discount of the existing trail — at 0 it's the plain
-  // (1.0 - cur.a) factor (today's behaviour, unchanged); at 1 the discount vanishes entirely and
-  // the over-branch reduces to exactly the add-branch's formula. A dial between "converges, never
-  // blooms" and "stacks toward white", rather than only the two ends of it.
-  float overKeep = 1.0 - cur.a * (1.0 - uPunch);
-  gl_FragColor = min(uOver > 0.5 ? cur + decayed * overKeep : decayed + cur, 1.0);
+  // Stacks toward saturation and has no hue ceiling — the overdraw every caller wants (see the
+  // module doc's "What must NOT be drawn through this" for the one thing that rules out: anything
+  // meant to hold a *constant* brightness needs its own non-accumulating layer instead).
+  gl_FragColor = min(decayed + cur, 1.0);
 }`;
 
 const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
@@ -228,7 +215,7 @@ function makeScratch(target: HTMLCanvasElement) {
   return { cv, ctx, sync };
 }
 
-function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | null {
+function createGl(target: HTMLCanvasElement): Phosphor | null {
   const gl = target.getContext("webgl", {
     alpha: true,
     premultipliedAlpha: true,
@@ -252,9 +239,7 @@ function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
   const uKeepTail = gl.getUniformLocation(accum, "uKeepTail");
   const uKnee = gl.getUniformLocation(accum, "uKnee");
   const uFloor = gl.getUniformLocation(accum, "uFloor");
-  const uOver = gl.getUniformLocation(accum, "uOver");
   const uDose = gl.getUniformLocation(accum, "uDose");
-  const uPunch = gl.getUniformLocation(accum, "uPunch");
   const uPrev = gl.getUniformLocation(accum, "uPrev");
   const uTrace = gl.getUniformLocation(accum, "uTrace");
   const uTex = gl.getUniformLocation(blit, "uTex");
@@ -337,7 +322,7 @@ function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
       scratch.ctx!.clearRect(0, 0, target.width, target.height);
       return scratch.ctx!;
     },
-    commit(dt, tau, tail = 1, punch = 0, doseMult = 1) {
+    commit(dt, tau, tail = 1, doseMult = 1) {
       const W = target.width;
       const H = target.height;
       if (dead || W === 0 || H === 0 || gl.isContextLost()) return;
@@ -357,9 +342,7 @@ function createGl(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
       gl.uniform1f(uKeepTail, Math.exp(-dt / (tau * Math.max(1, tail))));
       gl.uniform1f(uKnee, TAIL_KNEE);
       gl.uniform1f(uFloor, TAIL_FLOOR_PER_SEC * dt);
-      gl.uniform1f(uOver, blend === "over" ? 1 : 0);
       gl.uniform1f(uDose, (dt / DOSE_REF_DT) * doseMult);
-      gl.uniform1f(uPunch, punch);
       gl.uniform1i(uPrev, 0);
       gl.uniform1i(uTrace, 1);
       gl.activeTexture(gl.TEXTURE0);
@@ -422,7 +405,7 @@ function halfFloatRenderable(): boolean {
 /** The 8-bit path — today's behaviour, including its long-trail ghost. Additive blitting is
  *  associative, so routing the trace through a scratch canvas and adding it in one go is
  *  equivalent to having stroked it straight onto the accumulator. */
-function create2d(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | null {
+function create2d(target: HTMLCanvasElement): Phosphor | null {
   const ctx = target.getContext("2d");
   const scratch = makeScratch(target);
   if (!ctx || !scratch.ctx) return null;
@@ -433,13 +416,13 @@ function create2d(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
       scratch.ctx!.clearRect(0, 0, target.width, target.height);
       return scratch.ctx!;
     },
-    commit(dt, tau, _tail = 1, _punch = 0, doseMult = 1) {
+    commit(dt, tau, _tail = 1, doseMult = 1) {
       const W = target.width;
       const H = target.height;
       ctx.globalCompositeOperation = "destination-out";
       ctx.fillStyle = `rgba(0,0,0,${1 - Math.exp(-dt / tau)})`;
       ctx.fillRect(0, 0, W, H);
-      ctx.globalCompositeOperation = blend === "over" ? "source-over" : "lighter";
+      ctx.globalCompositeOperation = "lighter";
       // Same dt-normalized dose as the GL path (see DOSE_REF_DT's doc), further scaled by
       // `doseMult` (see commit()'s own doc) — `globalAlpha` can't exceed 1 (the spec ignores an
       // out-of-range assignment rather than clamping it), so a dose scale above 1 — any refresh rate
@@ -460,14 +443,14 @@ function create2d(target: HTMLCanvasElement, blend: PhosphorBlend): Phosphor | n
  *  Capability is settled on a throwaway canvas first (see `halfFloatRenderable`) so the caller's
  *  canvas is only ever bound to the context type actually being used — it keeps that type for life.
  *  Returns null only if even a 2D context is unobtainable. */
-export function createPhosphor(target: HTMLCanvasElement, blend: PhosphorBlend = "add"): Phosphor | null {
+export function createPhosphor(target: HTMLCanvasElement): Phosphor | null {
   if (halfFloatRenderable()) {
     try {
-      const gl = createGl(target, blend);
+      const gl = createGl(target);
       if (gl) return gl;
     } catch (e) {
       console.warn("[phosphor] half-float accumulator failed, using the 8-bit fallback", e);
     }
   }
-  return create2d(target, blend);
+  return create2d(target);
 }

@@ -446,7 +446,7 @@ export function Vectorscope({
       }
 
       // 3) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
-      phos.commit(dt, p.trailTau, p.tail, 0, doseMult);
+      phos.commit(dt, p.trailTau, p.tail, doseMult);
 
       // 4) Draw the beam spot every frame — the beam's energy dumped on one point, like a CRT dot.
       // Its brightness eases toward the target (spotVis → spotB) so it fades in when silence lands

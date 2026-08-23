@@ -143,6 +143,25 @@ const SPEC_TINT = 0.63; // blend the accent this far into the neutral glow — a
 // 60/120/240 Hz before landing, not just eyeballed on one machine.
 const SPEC_UPDATE_HZ = 60;
 const SPEC_DOSE_MULT = SPEC_UPDATE_HZ / DOSE_REF_FPS;
+// Trail/Glow orthogonality (same fix, same reasoning, as Vectorscope/TimeScope/Meter/SpectrumScope
+// — see any of theirs for the fuller derivation): at steady state, accumulated brightness scales
+// with `glowBase * tau`, so lengthening the trail silently brightens a dwelling signal even with
+// glowBase untouched. Folding `TAU_REF/tau` into the dose cancels that, anchored at a real 100 ms
+// for the same reason the scope views are: it reads as "glowBase units per 100 ms of persistence",
+// physically meaningful rather than tied to any one view's own default trailTau.
+//
+// This backdrop was deliberately left OUT of that fix when the others got it (see git history):
+// it ran phosphor.ts's `over` blend with a `punch` dial (0 = converges on its own colour, never
+// blooms; 1 = mathematically identical to `add`, see phosphor.ts's own doc) rather than plain
+// `add`, and the orthogonality formula only holds for `add` — `over`'s self-limiting discount stays
+// dose-dependent even at punch=0, so it doesn't cancel the same way. Once the *meter* proved a
+// plain `add` accumulator could be tuned to resist blowout on real program material without any
+// self-limiting compromise, the same approach became worth trying here — `punch` is gone entirely
+// now, this always runs `add` (see the backdrop effect below), and it's on the same footing as
+// every other view. Confirmed punch=1 (already mathematically ≡ add) as a live baseline first, so
+// this switch changes nothing about what's on screen except now being reachable through Trail/Glow
+// like everywhere else.
+const TAU_REF = 0.1;
 
 /** Live-tunable trail/glow — a gear-icon panel (like the scope views' `.vs-tuning`) rather than
  *  fixed constants, specifically so `tau` can be re-tuned without a recompile: it's re-tuned often
@@ -152,18 +171,13 @@ const SPEC_DOSE_MULT = SPEC_UPDATE_HZ / DOSE_REF_FPS;
  *  trail-length re-tune usually wants a brightness re-tune alongside it. `tau` is a genuine
  *  time-constant (seconds), same meaning as every other trailTau in the app — see the backdrop
  *  effect's doc comment for why this used to be `fade`, a flat inverted-direction per-event alpha
- *  with no time-base, and no longer is.
- *
- * `punch`: this backdrop deliberately runs phosphor.ts's `over` blend, not the scopes' `add` — see
- * the backdrop effect's own comment — so repeated content converges on its own colour instead of
- * blooming toward white and fighting the curves drawn over it. Reported live: even at `tau`/
- * `glowBase`'s own max, real (constantly-moving) program material never actually reaches that
- * ceiling, because `over`'s convergence discounts the existing trail by how much freshly landed —
- * real content rarely lands on the exact same pixel enough in a row to build up. `punch` (see
- * phosphor.ts's `commit` doc) dials that discount down without going all the way to `add`'s
- * uncapped stacking — "a little pop", not full saturation. */
-type SpecParams = { tau: number; tail: number; glowBase: number; punch: number };
-const SPEC_DEFAULTS: SpecParams = { tau: 0.3, tail: 12, glowBase: 0.13, punch: 0.85 };
+ *  with no time-base, and no longer is. */
+type SpecParams = { tau: number; tail: number; glowBase: number };
+// `old_glowBase * tau/TAU_REF` (0.09 * 0.3/0.1 = 0.27) reproduced the exact pre-switch on-screen
+// brightness under the new TAU_REF/tau-corrected formula — confirming the blend swap alone was a
+// visual no-op — then hand-retuned live from that baseline to today's value, same as every other
+// view's glow default gets touched up after its own anchor change.
+const SPEC_DEFAULTS: SpecParams = { tau: 0.3, tail: 12, glowBase: 0.36 };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -421,8 +435,7 @@ export function EqChart({
   specDrawCtx.current = { eqBands, preampDb, PAD, H, W, specParams };
   // The spectrum backdrop. Each received payload is drawn as one filled polygon into a scratch
   // canvas and handed to the shared phosphor accumulator (phosphor.ts), which owns the decay and
-  // the composite — the same machinery the scope views use, at the `over` blend rather than their
-  // additive one.
+  // the composite — the same machinery, same additive blend, the scope views use.
   //
   // This previously kept its own timestamped stamp ring and redrew the whole trail every frame,
   // because an in-place `destination-out` fade can't reach zero: in 8-bit storage it stalls
@@ -439,10 +452,10 @@ export function EqChart({
   useEffect(() => {
     const cv = specCanvasRef.current;
     if (!cv) return;
-    // `over`, not the scopes' additive blend: this is a *backdrop* under the EQ curves, so
-    // repeated content must converge on its own colour rather than bloom toward white and compete
-    // with them (see phosphor.ts).
-    const phos = createPhosphor(cv, "over");
+    // Plain additive, same as every scope view — see TAU_REF's own doc above for why this used to
+    // be phosphor.ts's `over` blend instead (a backdrop-specific self-limiting compromise) and why
+    // that's no longer needed.
+    const phos = createPhosphor(cv);
     if (!phos) return;
     let raf = 0;
     let last = performance.now();
@@ -459,12 +472,12 @@ export function EqChart({
       // dt-scaled dose (phosphor.ts's DOSE_REF_DT) already keeps the per-second brightness
       // independent of how often this runs, so spreading each update's dose over every frame
       // instead of lumping it into one draw per ~60 Hz spectrum event is dose-neutral — it just
-      // stops the lump-then-decay cycle a higher-refresh display was showing as visible flicker at
-      // any real `punch` above 0 (reported live even against a synthetic pure tone, which ruled out
-      // signal jitter as the cause — see phosphor.ts's own `commit` doc for what `punch` trades
-      // off). Same "gentle fade-away" during silence as before: the backend keeps emitting the same
-      // idle-decayed spectrum values: we just redraw whichever one is latest every frame now,
-      // instead of only on the frame where the object reference first changed.
+      // stops the lump-then-decay cycle a higher-refresh display was showing as visible flicker
+      // (reported live, back when this ran the `over` blend with `punch` above 0 — signal jitter
+      // was ruled out since it reproduced against a synthetic pure tone too). Same "gentle
+      // fade-away" during silence as before: the backend keeps emitting the same idle-decayed
+      // spectrum values: we just redraw whichever one is latest every frame now, instead of only on
+      // the frame where the object reference first changed.
       if (spectrum && spectrum.db.length >= 2) {
         const n = spectrum.db.length;
         const lnF0 = Math.log(spectrum.f_min);
@@ -524,11 +537,13 @@ export function EqChart({
         // canvas (a low ctx.globalAlpha on a smooth gradient visibly dithers in this WebView2 build).
       }
 
-      // See SPEC_DOSE_MULT's own doc: pins the total ink laid down per second to what glowBase/
-      // SPEC_GLOW_TIP were tuned against, independent of the display's own rate — a fixed ratio, not
-      // scaled by this frame's `dt` (commit()'s own dose math already accounts for `dt` once; doing
-      // so a second time here previously reintroduced refresh-rate-dependent brightness).
-      phos.commit(dt, specParams.tau, specParams.tail, specParams.punch, SPEC_DOSE_MULT);
+      // Two independent corrections multiplied into one doseMult: SPEC_DOSE_MULT (see its own doc)
+      // pins the total ink laid down per second to what glowBase/SPEC_GLOW_TIP were tuned against,
+      // independent of the display's own render rate; TAU_REF/tau (see its own doc, above) cancels
+      // Trail/Glow's steady-state coupling so a longer trail doesn't also silently brighten. Neither
+      // is scaled by this frame's `dt` — commit()'s own dose math already accounts for `dt` once;
+      // doing so again here previously reintroduced refresh-rate-dependent brightness.
+      phos.commit(dt, specParams.tau, specParams.tail, SPEC_DOSE_MULT * (TAU_REF / specParams.tau));
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -883,8 +898,8 @@ export function EqChart({
             <input
               type="range"
               min={0.02}
-              max={0.2}
-              step={0.01}
+              max={1}
+              step={0.02}
               value={specParams.glowBase}
               onChange={(e) => {
                 const glowBase = Number(e.currentTarget.value);
@@ -892,21 +907,6 @@ export function EqChart({
               }}
             />
             <b>{specParams.glowBase.toFixed(2)}</b>
-          </label>
-          <label className="vs-tune-row" title={t("scope.punchHint")}>
-            <span className="vs-tune-label">{t("scope.punch")}</span>
-            <input
-              type="range"
-              min={0}
-              max={1.0}
-              step={0.05}
-              value={specParams.punch}
-              onChange={(e) => {
-                const punch = Number(e.currentTarget.value);
-                setSpecParams((p) => ({ ...p, punch }));
-              }}
-            />
-            <b>{specParams.punch.toFixed(2)}</b>
           </label>
         </div>
       )}

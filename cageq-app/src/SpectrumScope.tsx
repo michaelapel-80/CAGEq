@@ -741,7 +741,7 @@ export function SpectrumScope() {
       }
 
       // TAU_REF/p.trailTau is the Trail/Glow orthogonality fix — see TAU_REF's own doc.
-      phos.commit(dt, p.trailTau, p.tail, 0, TAU_REF / p.trailTau);
+      phos.commit(dt, p.trailTau, p.tail, TAU_REF / p.trailTau);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
