@@ -697,14 +697,15 @@ export function EqChart({
   return (
     <div className="eq-chart">
     {/* Dark instrument-screen patch, only when there's a backdrop to put on it (matches the tuning
-        gear's own `spectrumRef &&` gate below). Fills the *whole* box (plain CSS `inset:0`), not the
-        plot rect — same split SpectrumScope's own `.vs-screen` makes: the screen is the container's
-        full bounds, and PAD only insets the *content* drawn inside it (gridlines, curves, labels),
-        never the screen's own visible edges. Sizing the screen to PAD directly (tried first) meant
-        it could never match the scope tubes' own footprint no matter how far PAD shrank, since it was
-        answering a different question — "how much margin does the content want" is not "how big is
-        the screen". */}
-    {spectrumRef && <div className="eq-spectrum-screen" aria-hidden="true" />}
+        gear's own `spectrumRef &&` gate below — ImpulseChart, which has no backdrop at all, renders
+        this same `.eq-chart-screen` unconditionally instead, see NerdCharts.tsx). Fills the *whole*
+        box (plain CSS `inset:0`), not the plot rect — same split SpectrumScope's own `.vs-screen`
+        makes: the screen is the container's full bounds, and PAD only insets the *content* drawn
+        inside it (gridlines, curves, labels), never the screen's own visible edges. Sizing the screen
+        to PAD directly (tried first) meant it could never match the scope tubes' own footprint no
+        matter how far PAD shrank, since it was answering a different question — "how much margin
+        does the content want" is not "how big is the screen". */}
+    {spectrumRef && <div className="eq-chart-screen" aria-hidden="true" />}
     {/* phosphor spectrum backdrop — same viewBox coords as the SVG (CSS-scaled to match), behind it */}
     <canvas ref={specCanvasRef} className="eq-spectrum-canvas" width={W} height={H} aria-hidden="true" />
     {/* Top-edge stroke, its own non-accumulating layer above the wash — see the render effect's own
@@ -753,7 +754,7 @@ export function EqChart({
           <rect x={PAD.l} y={PAD.t} width={W - PAD.l - PAD.r} height={H - PAD.t - PAD.b} />
         </clipPath>
       </defs>
-      {/* dB gridlines + labels, both drawn ON the dark `.eq-spectrum-screen` patch now (see its own
+      {/* dB gridlines + labels, both drawn ON the dark `.eq-chart-screen` patch now (see its own
           doc) rather than lines-inside-labels-outside — the same "readout printed directly on the
           tube" convention the scope views use (e.g. SpectrumScope's own FREQ_TICKS labels), not a
           chart with an external axis margin. `currentColor` (the theme's --fg) would be almost
@@ -964,7 +965,7 @@ export function EqChart({
       {/* Spectrum-backdrop tuning — only when there's a backdrop to tune (see SpecParams' doc
           comment for why fade/glow are live-adjustable rather than fixed constants). Same
           `.vs-tools`/`.vs-tuning` chrome, and now the same *positioning*, as the scope views' own
-          gear-icon panels: `.eq-spectrum-screen` fills `.eq-chart`'s whole box, so the shared
+          gear-icon panels: `.eq-chart-screen` fills `.eq-chart`'s whole box, so the shared
           `.eq-chart .vs-tools` CSS rule's fixed 6px offset already lands the gear in the screen's own
           corner, the same as `.vs-tools`'s default does against `.vs-screen` — no inline PAD-based
           positioning needed (an earlier version computed it inline, back when the screen was sized to

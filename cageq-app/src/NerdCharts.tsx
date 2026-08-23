@@ -2,6 +2,7 @@ import { useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, FS, impulseResponse } from "./biquad";
+import { EQ_V_INSET_FRAC } from "./EqChart";
 
 /**
  * §5.2 impulse-response view — the applied filter chain's decay, shown *in place of* the
@@ -12,10 +13,15 @@ import { Band, FS, impulseResponse } from "./biquad";
  * a resonance's ring sits tens of dB below it and is invisible on a linear plot. In dB the
  * ring's decay is visible, and the time window auto-sets to where the envelope falls below
  * a floor — so a high-Q boost frames its long ring and a broad shelf its quick settle.
+ *
+ * Same dark `.eq-chart-screen` instrument look and on-tube, accent-coloured axis labels EqChart's
+ * own gridlines use (see that file's doc) — this used to run `currentColor` labels in an external
+ * margin, the same design EqChart itself moved away from, for the same reason: `currentColor`
+ * reads fine against the page's own (theme-following) background but is a mismatch once the plot
+ * sits on a guaranteed-dark screen regardless of theme.
  */
 
 const W = 720;
-const PAD = { l: 44, r: 14, t: 12, b: 26 };
 const MS_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200];
 const WINDOW_DB = -70; // decay tail below this (rel. peak) is treated as settled
 const FLOOR_DB = -80; // display floor
@@ -37,6 +43,10 @@ export function ImpulseChart({
 }) {
   const { t } = useTranslation();
   const H = height;
+  // Same thin-buffer-only margins as EqChart's own PAD (see that file's doc): a fixed 10px on the
+  // time axis, EQ_V_INSET_FRAC*H on the dB axis — not picked-to-fit values, since both axis labels
+  // now draw ON the tube itself instead of reserving external room for them.
+  const PAD = { l: 10, r: 10, t: H * EQ_V_INSET_FRAC, b: H * EQ_V_INSET_FRAC };
   const plotW = W - PAD.l - PAD.r;
 
   const { env, n, peak } = useMemo(() => {
@@ -78,25 +88,36 @@ export function ImpulseChart({
 
   return (
     <div className="eq-chart">
+      {/* Dark instrument screen, unconditional (no spectrum backdrop here to gate it on, unlike
+          EqChart's own — see .eq-chart-screen's doc in App.css). */}
+      <div className="eq-chart-screen" aria-hidden="true" />
       {/* Container-relative (`.eq-chart`'s own JS-owned box — see `.chart-wrap`'s doc in App.css),
           not intrinsic `height:auto` — see EqChart.tsx's own SVG for the fuller reasoning, shared
           verbatim since this uses the identical `.eq-chart` wrapper class. */}
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "100%" }} role="img" aria-label={t("chart.impulseAria")}>
+        {/* dB gridlines + labels, both drawn ON the dark screen now — same accent-tinted-on-dark,
+            on-tube convention EqChart's own gridlines use (see that file's doc for the full why). */}
         {DB_TICKS.map((db) => (
           <g key={db}>
-            <line x1={PAD.l} x2={W - PAD.r} y1={yDb(db)} y2={yDb(db)} stroke="currentColor" strokeOpacity={db === 0 ? 0.28 : 0.1} />
-            <text x={PAD.l - 6} y={yDb(db) + 3.5} textAnchor="end" fontSize="10" fill="currentColor" opacity={0.55}>
+            <line x1={PAD.l} x2={W - PAD.r} y1={yDb(db)} y2={yDb(db)} stroke="var(--accent)" strokeOpacity={db === 0 ? 0.4 : 0.16} />
+            <text x={PAD.l + 5} y={yDb(db) - 3} textAnchor="start" fontSize="10" fill="var(--accent)" opacity={0.6}>
               {db}
             </text>
           </g>
         ))}
+        {/* Time gridlines + labels — same treatment. The 0ms tick always sits exactly on the plot's
+            own left edge (the decay always starts at t=0), so it anchors start like EqChart's own
+            edge ticks (GRID_HZ's F_MIN/F_MAX) instead of centring, which would overhang the corner;
+            later ticks aren't guaranteed to land exactly on the right edge (they stop at whatever
+            multiple of `stepMs` is ≤ the auto-sized decay window), so only this one needs it. */}
         {ticks.map((m) => {
           const i = (m / 1000) * fs;
           const c = (i / n) * (env.length - 1);
+          const x = xCol(c);
           return (
             <g key={m}>
-              <line x1={xCol(c)} x2={xCol(c)} y1={PAD.t} y2={H - PAD.b} stroke="currentColor" strokeOpacity={0.08} />
-              <text x={xCol(c)} y={H - PAD.b + 14} textAnchor="middle" fontSize="10" fill="currentColor" opacity={0.55}>
+              <line x1={x} x2={x} y1={PAD.t} y2={H - PAD.b} stroke="var(--accent)" strokeOpacity={0.16} />
+              <text x={m === 0 ? x + 3 : x} y={H - PAD.b - 5} textAnchor={m === 0 ? "start" : "middle"} fontSize="10" fill="var(--accent)" opacity={0.6}>
                 {m} ms
               </text>
             </g>

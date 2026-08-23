@@ -1069,16 +1069,17 @@ select:disabled {
   height: 100%;
 }
 /* Same dark "instrument screen" the scope views sit on (`.vs-screen` — background, vignette,
-   hairline, drop shadow, all shared verbatim) — the phosphor accumulator itself converges toward
-   *white* (additive, clamped at 1.0) regardless of theme, which reads as a glow against a guaranteed
-   dark background but inverts on the light theme's own white page: freshly-accumulated (bright)
-   content blends into invisibility while less-accumulated, still-dim content shows as a visible grey
-   smudge, so fading looked backwards — reported live as "getting darker" as it should have been
-   fading away. Fills the whole chart box (`inset:0`), not the plot rect inside it — same split
-   `.vs-screen` makes for the scope views: the screen is the container's full bounds, PAD only insets
-   the *content* drawn inside it. Sizing the screen to PAD directly (tried first) meant it could never
-   match the scope tubes' own footprint no matter how far PAD shrank — see the JSX's own comment. */
-.eq-spectrum-screen {
+   hairline, drop shadow, all shared verbatim) — used by both EqChart (originally the only reason
+   this existed: the phosphor accumulator converges toward *white* regardless of theme, which reads
+   as a glow against a guaranteed-dark background but inverts on light theme's own white page — see
+   EqChart.tsx's own doc) and ImpulseChart (no phosphor backdrop at all, just wants the same dark
+   "instrument" look for consistency with every other chart view). Named for the shared `.eq-chart`
+   wrapper both use, not "spectrum" — it has no spectrum-specific meaning of its own. Fills the whole
+   chart box (`inset:0`), not the plot rect inside it — same split `.vs-screen` makes for the scope
+   views: the screen is the container's full bounds, PAD only insets the *content* drawn inside it.
+   Sizing the screen to PAD directly (tried first, for EqChart) meant it could never match the scope
+   tubes' own footprint no matter how far PAD shrank — see EqChart.tsx's own JSX comment. */
+.eq-chart-screen {
   position: absolute;
   inset: 0;
   border-radius: 8px;
