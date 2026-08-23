@@ -381,9 +381,14 @@ select:disabled {
    the box past it — so any small disagreement between those three could grow `.chart-wrap`, which
    `chartAreaHeight` (App.tsx, still needed — see its own comment, it does something unrelated)
    then propagated to the other views too, compounding into a real, live-reported runaway-expansion
-   bug (eventually a page scrollbar at the default window size). `overflow: hidden` (kept below) was
-   a hard cap added while chasing that; it stays as cheap, independently-justified insurance, but the
-   JS height is what actually removes the failure mode rather than just containing it. */
+   bug (eventually a page scrollbar at the default window size).
+   `overflow: hidden` was added as a hard cap while chasing that, then REMOVED once the JS height
+   landed: an explicit inline `height` (unlike the soft `aspect-ratio` default it replaced) can't be
+   grown by content regardless of overflow setting, so it was doing nothing for that bug any more —
+   only clipping Vectorscope's own `.vs-tuning` panel, which *deliberately* overflows this box
+   rightward to cover the meter column instead of the tube (see that rule's own doc) and had done so
+   since before this rewrite existed. Cutting it off at `.chart-wrap`'s own edge instead was a real
+   regression, not a style choice. */
 .chart-wrap {
   position: relative;
   box-sizing: border-box;
@@ -398,7 +403,6 @@ select:disabled {
      never visibly "wrong then corrected", just a redundant confirmation once JS takes over (inline
      `style` always wins over this once set). */
   aspect-ratio: 720 / 215;
-  overflow: hidden;
 }
 /* In normal flow now (the target row, App.tsx — used to float absolutely inside `.chart-wrap`'s
    top-right, before that corner was needed for EqChart's own hover-cursor readout instead). */
