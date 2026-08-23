@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, logGrid, phaseDeg } from "./biquad";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
+import { traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
 
 /**
@@ -109,7 +110,36 @@ function parseHex(hex: string): [number, number, number] | null {
 // --- FFT spectrum backdrop: its own tuning set, independent of the level meter's phosphor ---
 const SPEC_TOP_DB = 0; // top of the fixed dBFS scale
 const SPEC_DYN = 90; // dB shown below the top
-const SPEC_GLOW_TIP = 0.025; // brightness near the current level (vertical falloff)
+// Reference plot height the top-edge stroke's own lineWidth is scaled against — matches the
+// component's default `height` prop, same idea as the scope views' REF_SIZE (their own canvases
+// just have far more range in practical size than this chart's `height` prop typically does).
+const SPEC_STROKE_REF_H = 210;
+// Time constant a light exponential smoothing filter applies to the stroke's own Y values only (not
+// the wash's) before drawing — see the render effect's own comment for why. Deliberately much
+// shorter than the wash's own `tau`: this exists purely to damp small, fast frame-to-frame wobble,
+// not to look like a trail — cageq-monitor's own SPEC_TAU_SECS (0.02s) already smooths the backend
+// data lightly for responsiveness, and this adds just a bit more on top for the eye specifically.
+const STROKE_SMOOTH_TAU = 0.05;
+// Flat (not gradient) alpha for the ambient wash fill under the curve, as a fraction of the live
+// `glowBase` — see the backdrop effect's own comment for why this stopped being a position-graded
+// gradient at all. A fraction of `glowBase` rather than its own fixed constant: the panel only
+// exposes one Glow knob, and a wash pinned to an independent fixed value can't be rebalanced
+// against whatever the stroke (below) is dialed to — it either overpowers a low stroke setting or
+// disappears under a high one. Coupling them keeps their relative balance fixed at this ratio while
+// the one slider scales both together. Bumped from an initial 0.2, reported live as still reading
+// flat/dim even with glowBase maxed — plain `add` at this ratio never got close to the 1.0 clamp
+// (confirming the self-limiting `over` blend really was unnecessary, not just less necessary), so
+// there was real headroom to push the wash brighter without any risk of blowout.
+const SPEC_WASH_FRAC = 0.5;
+// The stroke deliberately does NOT use the wash's tinted-toward-neutral [r,g,b] (see SPEC_NEUTRAL
+// below) — it uses the raw theme accent directly. First tried sharing the wash's colour with only a
+// higher alpha (an explicit SPEC_STROKE_BOOST multiplier) — reported live as looking more opaque but
+// never actually brighter, at any boost value, which is the correct outcome for the wrong fix: alpha
+// only controls how much of a colour shows over the canvas underneath, it can never make that colour
+// itself lighter than its own RGB values. The wash only reads as bright, saturated, near-white
+// because *many frames* of additive accumulation keep summing that dim base colour toward the 1.0
+// clamp — a single-pass stroke has no such stacking to lean on, so it needs to start from a colour
+// that's already bright on its own, not a dim one boosted by opacity alone.
 // The glow's neutral base before tinting toward the accent — fixed, not the theme's own text
 // colour (`--fg`, which is near-black in light mode and near-white in dark mode). Tinting a
 // near-white base toward the accent in dark mode, then compositing that over a dark backdrop
@@ -121,7 +151,7 @@ const SPEC_GLOW_TIP = 0.025; // brightness near the current level (vertical fall
 // instead of correcting for it — same tone, same visual weight in both themes.
 const SPEC_NEUTRAL: [number, number, number] = [15, 15, 15]; // light mode's --fg (#0f0f0f)
 const SPEC_TINT = 0.63; // blend the accent this far into the neutral glow — a hint of colour, not a rival to the curves
-// Reference cadence the fill's own alpha (glowBase/SPEC_GLOW_TIP) is calibrated against — matches
+// Reference cadence the wash fill's own alpha (glowBase * SPEC_WASH_FRAC) is calibrated against — matches
 // cageq-monitor's SPECTRUM_INTERVAL (~60 Hz). The backdrop effect below redraws every animation
 // frame rather than only when a new payload lands (fixed a `punch`-exposed flicker — see its own
 // comment), which injects the fill's ink far more often than this was tuned against on any display
@@ -177,7 +207,7 @@ type SpecParams = { tau: number; tail: number; glowBase: number };
 // brightness under the new TAU_REF/tau-corrected formula — confirming the blend swap alone was a
 // visual no-op — then hand-retuned live from that baseline to today's value, same as every other
 // view's glow default gets touched up after its own anchor change.
-const SPEC_DEFAULTS: SpecParams = { tau: 0.3, tail: 12, glowBase: 0.36 };
+const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.48 };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -232,12 +262,9 @@ export function EqChart({
   const H = height;
   const svgRef = useRef<SVGSVGElement>(null);
   const specCanvasRef = useRef<HTMLCanvasElement>(null); // phosphor spectrum backdrop (imperative)
-  // The spectrum glow gradient's stops depend only on theme + plot geometry, never on the spectrum
-  // data itself — cached and rebuilt only when those change, instead of every spectrum frame (up to
-  // 60/s). A fresh CanvasGradient costs the GPU compositor a shader/texture each time; left
-  // unbounded across a long session that's a steady GPU-memory drain invisible in the JS heap (see
-  // the identical fix in Vectorscope's dwell-spot bloom).
-  const specGradCache = useRef<{ key: string; grad: CanvasGradient } | null>(null);
+  // The top-edge stroke's own layer — cleared and fully redrawn every frame instead of running
+  // through the phosphor accumulator (see the render effect's own comment for why).
+  const specStrokeRef = useRef<HTMLCanvasElement>(null);
   const { params: specParams, setParams: setSpecParams, saveAsDefault: saveSpecDefault, resetToFactory: resetSpecFactory } = useTunableParams(
     "cageq-eqchart-spec-params",
     SPEC_DEFAULTS,
@@ -433,9 +460,12 @@ export function EqChart({
   // that's refreshed every render, read fresh each frame.
   const specDrawCtx = useRef({ eqBands, preampDb, PAD, H, W, specParams });
   specDrawCtx.current = { eqBands, preampDb, PAD, H, W, specParams };
-  // The spectrum backdrop. Each received payload is drawn as one filled polygon into a scratch
-  // canvas and handed to the shared phosphor accumulator (phosphor.ts), which owns the decay and
-  // the composite — the same machinery, same additive blend, the scope views use.
+  // The spectrum backdrop. Each received payload is drawn as a smooth curve (traceSmooth, spline.ts)
+  // through the bins' own values — filled down to the baseline for a dim ambient wash, then stroked
+  // again on top at full `glowBase` (see the render loop's own comments for why two layers, and why
+  // smoothed rather than a per-bin staircase) — into a scratch canvas handed to the shared phosphor
+  // accumulator (phosphor.ts), which owns the decay and the composite — the same machinery, same
+  // additive blend, the scope views use.
   //
   // This previously kept its own timestamped stamp ring and redrew the whole trail every frame,
   // because an in-place `destination-out` fade can't reach zero: in 8-bit storage it stalls
@@ -446,12 +476,11 @@ export function EqChart({
   // straight back into the same trap. Half-float storage removes it, so the ring, its cutoff and
   // capacity constants, and the per-frame history redraw are all gone.
   //
-  // One filled polygon per payload (the bins' staircase outline, closed down to the baseline)
-  // rather than a `fillRect` per bin: identical shape — adjacent same-height rectangles *are* that
-  // polygon — for ~240x fewer draw calls.
   useEffect(() => {
     const cv = specCanvasRef.current;
-    if (!cv) return;
+    const strokeCv = specStrokeRef.current;
+    const strokeCtx = strokeCv?.getContext("2d");
+    if (!cv || !strokeCtx) return;
     // Plain additive, same as every scope view — see TAU_REF's own doc above for why this used to
     // be phosphor.ts's `over` blend instead (a backdrop-specific self-limiting compromise) and why
     // that's no longer needed.
@@ -459,6 +488,20 @@ export function EqChart({
     if (!phos) return;
     let raf = 0;
     let last = performance.now();
+    // Each bin's own (x, top-edge y) — the wash fill draws `yScratch` straight; the stroke draws a
+    // separately time-smoothed copy of it (`yStrokeSmooth`, below) instead. Computed once per frame
+    // so neither redundantly repeats the correction lookup, matching the scope views' own
+    // scratch-buffer pattern (e.g. SpectrumScope's vScratch). Fed straight to `traceSmooth`
+    // (spline.ts) — a plain per-bin polyline visibly showed the individual FFT bins as a jagged
+    // staircase once the stroke below existed to trace it crisply (reported live), most noticeably
+    // in the dense top octaves; this is
+    // the exact same fix SpectrumScope's own trace already uses on the identical underlying data.
+    let xScratch = new Float64Array(0);
+    let yScratch = new Float64Array(0);
+    // A second, time-smoothed copy of yScratch's values, used only by the stroke below — see its
+    // own comment for why. `NaN` marks "not yet initialized" so the first real frame snaps straight
+    // to target instead of animating in from zero.
+    let yStrokeSmooth = new Float64Array(0).fill(NaN);
 
     const render = () => {
       const now = performance.now();
@@ -467,6 +510,11 @@ export function EqChart({
       const { eqBands, preampDb, PAD, H, W, specParams } = specDrawCtx.current;
       const spectrum = spectrumRef?.current ?? null;
       const ctx = phos.begin();
+      // Own layer, cleared and fully redrawn every frame — see the stroke's own comment below for
+      // why it doesn't run through the phosphor accumulator like the wash does. Unconditional (not
+      // only when `spectrum` is present) so a truly empty frame doesn't leave a stale line sitting
+      // on screen forever, the way a non-accumulating layer with nothing decaying it otherwise would.
+      strokeCtx.clearRect(0, 0, W, H);
 
       // Redrawn every animation frame now, not only when a new payload lands: commit()'s own
       // dt-scaled dose (phosphor.ts's DOSE_REF_DT) already keeps the per-second brightness
@@ -504,41 +552,80 @@ export function EqChart({
         const [nr, ng, nb] = SPEC_NEUTRAL;
         const acc = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
         // A hint of the accent mixed into the (fixed, theme-independent — see SPEC_NEUTRAL) neutral
-        // base — lifts the glow off flat grey without letting it read as another curve.
+        // base — lifts the glow off flat grey without letting it read as another curve. Only for the
+        // wash: it's a dim backdrop by design, and gets its real brightness from accumulation over
+        // many frames, not from this base colour's own value. The stroke (below) uses `acc` directly,
+        // undimmed — see SPEC_WASH_FRAC's own doc for why sharing this tinted colour didn't work.
         const [r, g, b] = acc
           ? [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round)
           : [nr, ng, nb];
-        const gradKey = `${plotBot}|${plotTop}|${r},${g},${b}|${specParams.glowBase}`;
-        let grad = specGradCache.current?.key === gradKey ? specGradCache.current.grad : null;
-        if (!grad) {
-          grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
-          grad.addColorStop(0, `rgba(${r},${g},${b},${specParams.glowBase})`); // brightest at the floor
-          grad.addColorStop(1, `rgba(${r},${g},${b},${SPEC_GLOW_TIP})`); // fades out toward the top
-          specGradCache.current = { key: gradKey, grad };
-        }
-        ctx.fillStyle = grad;
+        const [sr, sg, sb] = acc ?? [nr, ng, nb];
 
-        // One filled polygon — the bins' staircase outline closed down to the baseline — rather
-        // than a fillRect per bin. Same shape, ~240x fewer draw calls.
-        ctx.beginPath();
-        ctx.moveTo(fx(0), plotBot); // baseline, left edge — closePath draws the return trip
-        for (let i = 0; i < n; i++) {
-          const x0 = fx(i);
-          const x1 = i < n - 1 ? fx(i + 1) : x0 + 1;
-          const db = undoing ? spectrum.db[i] - (corr ? corr[i] : 0) - preampDb : spectrum.db[i];
-          const yTop = sy(db);
-          ctx.lineTo(x0, yTop); // up (or down) to this bin's top
-          ctx.lineTo(x1, yTop); // across its width
-          if (i === n - 1) ctx.lineTo(x1, plotBot); // down to baseline at the right edge
+        if (xScratch.length < n) {
+          xScratch = new Float64Array(n);
+          yScratch = new Float64Array(n);
+          const grown = new Float64Array(n).fill(NaN);
+          grown.set(yStrokeSmooth); // preserve already-settled bins; new ones start at NaN (unset)
+          yStrokeSmooth = grown;
         }
-        ctx.closePath(); // straight line back along the baseline to the left edge
-        ctx.fill(); // full, undiminished gradient alpha — see SPEC_UPDATE_HZ's own doc for why the
-        // per-second correction below happens in commit()'s float dose math, not here on the 8-bit
-        // canvas (a low ctx.globalAlpha on a smooth gradient visibly dithers in this WebView2 build).
+        for (let i = 0; i < n; i++) {
+          const db = undoing ? spectrum.db[i] - (corr ? corr[i] : 0) - preampDb : spectrum.db[i];
+          xScratch[i] = fx(i);
+          yScratch[i] = sy(db);
+        }
+
+        // Smoothed copy of yScratch for the stroke only — see STROKE_SMOOTH_TAU's own doc. Plain
+        // per-bin exponential decay toward the raw target, dt-scaled the same way every decay in
+        // this app is (`exp(-dt/tau)`) so it's frame-rate independent. NaN (unset, a fresh bin) snaps
+        // straight to target instead of animating in from zero.
+        const strokeK = Math.exp(-dt / STROKE_SMOOTH_TAU);
+        for (let i = 0; i < n; i++) {
+          yStrokeSmooth[i] = Number.isNaN(yStrokeSmooth[i]) ? yScratch[i] : yScratch[i] + (yStrokeSmooth[i] - yScratch[i]) * strokeK;
+        }
+
+        // Ambient wash: the smooth curve (traceSmooth, spline.ts) closed down to the baseline, at a
+        // flat, non-gradient alpha — see SPEC_WASH_FRAC's own doc for why a position-graded gradient
+        // (in either direction) was the wrong tool here regardless of which end was bright.
+        // traceSmooth's own leading `moveTo` becomes this path's true start point, so `closePath`
+        // below draws straight back to it — no separate "walk up from the baseline" segment needed.
+        ctx.fillStyle = `rgba(${r},${g},${b},${specParams.glowBase * SPEC_WASH_FRAC})`;
+        ctx.beginPath();
+        traceSmooth(ctx, xScratch, yScratch, n);
+        ctx.lineTo(xScratch[n - 1], plotBot); // down to baseline at the right edge
+        ctx.lineTo(xScratch[0], plotBot); // across baseline to the left edge
+        ctx.closePath(); // straight line back up to the curve's own start
+        ctx.fill(); // full, undiminished alpha — see SPEC_UPDATE_HZ's own doc for why the per-second
+        // correction happens in commit()'s float dose math below, not here on the 8-bit canvas (a low
+        // ctx.globalAlpha on a smooth gradient visibly dithers in this WebView2 build).
+
+        // The informative edge: the same smooth curve, stroked at the live-tunable `glowBase` on its
+        // own non-accumulating layer (`strokeCtx`) — a stroke is, by construction, drawn at each X's
+        // own Y, so it's anchored to that bin's actual value with no gradient needed at all, but it
+        // moves with the real signal every ~60 Hz update. Running it through the phosphor accumulator
+        // like the wash (tried first) left multiple recent positions smeared together on top of the
+        // wash's own trail — reported live as looking wrong once the stroke was actually legible
+        // enough to notice. This is meant to read as "where the signal is *right now*", exactly the
+        // "constant redraw every frame" case phosphor.ts's own module doc says must live off the
+        // accumulator (same reason Vectorscope's resting spot and TimeScope's peak-hold lines do) —
+        // the wash is what shows *recent history*, and only it should decay.
+        //
+        // Draws `yStrokeSmooth`, not the raw `yScratch` the wash uses: with the stroke off the
+        // accumulator, it lost a side effect that came along with being on it — recent frames used
+        // to blend together there, which incidentally low-pass-filtered small frame-to-frame Y noise
+        // for free. Redrawing a fully independent line every frame exposes that noise directly
+        // (reported live as jitter). STROKE_SMOOTH_TAU restores just enough of it, but in the
+        // geometry the line is built from rather than the pixels — still exactly one crisp line per
+        // frame, no accumulation, no smearing of past positions.
+        strokeCtx.strokeStyle = `rgba(${sr},${sg},${sb},${specParams.glowBase})`;
+        strokeCtx.lineWidth = Math.max(1, H / SPEC_STROKE_REF_H) * 1.5;
+        strokeCtx.lineJoin = "round";
+        strokeCtx.beginPath();
+        traceSmooth(strokeCtx, xScratch, yStrokeSmooth, n);
+        strokeCtx.stroke();
       }
 
       // Two independent corrections multiplied into one doseMult: SPEC_DOSE_MULT (see its own doc)
-      // pins the total ink laid down per second to what glowBase/SPEC_GLOW_TIP were tuned against,
+      // pins the total ink laid down per second to what the wash's alpha was tuned against,
       // independent of the display's own render rate; TAU_REF/tau (see its own doc, above) cancels
       // Trail/Glow's steady-state coupling so a longer trail doesn't also silently brighten. Neither
       // is scaled by this frame's `dt` — commit()'s own dose math already accounts for `dt` once;
@@ -594,6 +681,9 @@ export function EqChart({
     <div className="eq-chart">
     {/* phosphor spectrum backdrop — same viewBox coords as the SVG (CSS-scaled to match), behind it */}
     <canvas ref={specCanvasRef} className="eq-spectrum-canvas" width={W} height={H} aria-hidden="true" />
+    {/* Top-edge stroke, its own non-accumulating layer above the wash — see the render effect's own
+        comment for why this can't share the phosphor-accumulated canvas above. */}
+    <canvas ref={specStrokeRef} className="eq-spectrum-canvas" width={W} height={H} aria-hidden="true" />
     <svg
       ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
