@@ -2514,7 +2514,7 @@ function App() {
                       // sig[0]=1 and only the loop over `bands`, skipped here, would shape it further).
                       <ImpulseChart bands={dryActive ? [] : result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
                     ) : spectrumView ? (
-                      <SpectrumScope />
+                      <SpectrumScope legendHost={legendHost} />
                     ) : (
                       <EqChart
                         series={chartSeries}

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { composedCurveDb } from "./biquad";
@@ -313,7 +314,17 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { 
  * heavier `scope` stream, `spectrum` is always emitted whenever monitoring runs — Meter and
  * EqChart already consume it the same passive way).
  */
-export function SpectrumScope() {
+export function SpectrumScope({
+  legendHost,
+}: {
+  /** The peak readout renders (via portal) into this element instead of inline below the tube —
+   *  same mechanism, and the same element, as EqChart's own `legendHost` (App.tsx's
+   *  `.chart-legend-host`, a sibling of `.chart-row`, outside `.chart-wrap` entirely). Keeps the
+   *  readout out of the tube's own height budget — it used to sit inside `.spectrumscope-wrap` as a
+   *  flex sibling of `.vs-screen`, which meant the tube was always shorter than `.chart-wrap`'s own
+   *  full height by exactly the readout's height, unlike every other view's own screen. */
+  legendHost?: HTMLElement | null;
+}) {
   const { t } = useTranslation();
   // Ref'd on `.vs-screen` (the CRT box itself), not the outer wrap — the wrap also hosts the
   // peak readout row below the tube (see the return JSX), and the canvases' backing-store
@@ -723,13 +734,15 @@ export function SpectrumScope() {
   ];
 
   return (
+    <>
     <div className="spectrumscope-wrap">
       {/* width/height here are CSS "100%" (matching this box exactly, sub-pixel precise, since its
-          own size comes from the flex rule in App.css rather than an inline style) — the
-          JS-measured `resW`/`resH` state feeds only the canvas backing-store *resolution*
-          attributes below, never the display size. A JS-measured, floored pixel value here would
-          drift by up to 1px from the box's true (CSS-computed) height and show up as exactly the
-          kind of small persistent misalignment against EqChart's own height:auto SVG sizing. */}
+          own size comes from `.spectrumscope-wrap .vs-screen`'s own `width:100%;height:100%` rather
+          than an inline style) — the JS-measured `resW`/`resH` state feeds only the canvas
+          backing-store *resolution* attributes below, never the display size. A JS-measured,
+          floored pixel value here would drift by up to 1px from the box's true (CSS-computed)
+          height and show up as exactly the kind of small persistent misalignment against EqChart's
+          own SVG sizing. */}
       <div className="vs-screen" ref={screenRef} onMouseMove={onScopeHover} onMouseLeave={onScopeHoverEnd}>
         <canvas
           ref={gridRef}
@@ -815,26 +828,35 @@ export function SpectrumScope() {
           </div>
         )}
       </div>
-      {/* Numeric peak readout, below the tube — up to PEAK_COUNT chips, one per cross marked on the
-          tube above, presented left-to-right by frequency (see `findPeaks`). The trail's own long
-          afterglow (`tail`, phosphor.ts) already shows *where* the spectrum has recently been, but
-          reading an exact level or frequency off a glowing curve isn't realistic — this is the same
-          information as a number. A fixed PEAK_COUNT of slots is rendered upfront, ALWAYS all
-          PEAK_COUNT of them (see App.css — no more collapsing an empty slot to `display:none`), so
-          the row's own width and each chip's own position never depend on how many peaks are
-          currently found; and each chip is two independently-sized fixed-width fields (frequency,
-          level — App.css again) rather than one free-width text node, so a peak sliding from
-          "60 Hz" to "8.2 kHz" can't shift every chip after it sideways either. An empty slot shows
-          PEAK_PLACEHOLDER_HZ/DB ("--- Hz"/"--- dB") rather than going fully blank, for the same
-          reason: a chip popping between text and nothing every time the peak count changes reads
-          as a glitch, where a quiet dash sitting in a fixed-width field doesn't. Slots are filled
-          or reset to the placeholder by writing their text (see the trail effect) rather than
-          mapping over a variable-length array, since the array itself lives outside React state.
-          Updated imperatively, NOT via React state: `spectrum` arrives well above React's
-          comfortable render rate, and driving a state update from it once re-rendered the entire
-          App tree per arrival (see cageq-monitor's `SpectrumUpdate` doc / this component's own
-          history) — the fix there was moving the data off state entirely, so adding a state-driven
-          readout here would reintroduce exactly that. */}
+    </div>
+    {/* Numeric peak readout — up to PEAK_COUNT chips, one per cross marked on the tube, presented
+        left-to-right by frequency (see `findPeaks`). The trail's own long afterglow (`tail`,
+        phosphor.ts) already shows *where* the spectrum has recently been, but reading an exact
+        level or frequency off a glowing curve isn't realistic — this is the same information as a
+        number. A fixed PEAK_COUNT of slots is rendered upfront, ALWAYS all PEAK_COUNT of them (see
+        App.css — no more collapsing an empty slot to `display:none`), so the row's own width and
+        each chip's own position never depend on how many peaks are currently found; and each chip
+        is two independently-sized fixed-width fields (frequency, level — App.css again) rather than
+        one free-width text node, so a peak sliding from "60 Hz" to "8.2 kHz" can't shift every chip
+        after it sideways either. An empty slot shows PEAK_PLACEHOLDER_HZ/DB ("--- Hz"/"--- dB")
+        rather than going fully blank, for the same reason: a chip popping between text and nothing
+        every time the peak count changes reads as a glitch, where a quiet dash sitting in a
+        fixed-width field doesn't. Slots are filled or reset to the placeholder by writing their
+        text (see the trail effect) rather than mapping over a variable-length array, since the
+        array itself lives outside React state. Updated imperatively, NOT via React state:
+        `spectrum` arrives well above React's comfortable render rate, and driving a state update
+        from it once re-rendered the entire App tree per arrival (see cageq-monitor's
+        `SpectrumUpdate` doc / this component's own history) — the fix there was moving the data off
+        state entirely, so adding a state-driven readout here would reintroduce exactly that.
+
+        Portaled into `legendHost` (App.tsx's `.chart-legend-host`, outside `.chart-wrap` entirely —
+        same mechanism EqChart's own legend uses), not rendered inline below the tube any more: it
+        used to sit inside `.spectrumscope-wrap` as a flex sibling of `.vs-screen`, which made the
+        tube always shorter than `.chart-wrap`'s own full height by exactly this row's height —
+        unlike every other view's own screen, which fills the box completely. See `legendPortal`'s
+        own doc for the (host-less) inline fallback this never actually takes in practice, since
+        App.tsx always supplies `legendHost`. */}
+    {legendPortal(
       <div className="ss-readout" title={t("scope.peak")}>
         {Array.from({ length: PEAK_COUNT }, (_, j) => (
           <span
@@ -858,7 +880,16 @@ export function SpectrumScope() {
             />
           </span>
         ))}
-      </div>
-    </div>
+      </div>,
+      legendHost,
+    )}
+    </>
   );
+}
+
+/** Render into `host` via a portal when provided, else inline (mirrors EqChart.tsx's identically
+ *  named helper — small enough that duplicating it across the two chart views that need it is
+ *  cheaper than a shared module for one three-line function). */
+function legendPortal(markup: ReactNode, host?: HTMLElement | null) {
+  return host ? createPortal(markup, host) : markup;
 }

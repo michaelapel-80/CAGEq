@@ -441,11 +441,12 @@ select:disabled {
   flex-direction: column;
   gap: 0.3rem;
 }
-/* Reserves the same height as `.eq-legend`'s own `min-height` (below) even when nothing is
-   portaled into it — Spectrum/Scope don't populate a legend at all, and without this the host
-   collapses to 0 height there while Eq/Impulse (which always portal an `.eq-legend`) keep
-   theirs, so the panel's total height still differed between views even after the chart itself
-   was made consistent (§ chart-wrap aspect-ratio, above). */
+/* Reserves the same height as `.eq-legend`'s own `min-height` (below) as a floor for whichever view
+   portals the least content in here — Scope still portals nothing at all (its peak-equivalent
+   concept doesn't exist for a goniometer), and without this the host would collapse to 0 height
+   there while Eq/Impulse (`.eq-legend`) and Spectrum (`.ss-readout`, since it moved here too — see
+   that rule's own doc) keep theirs, differing again after the chart box itself was made consistent
+   (§ chart-wrap aspect-ratio, above). */
 .chart-legend-host {
   min-height: 1.9rem;
 }
@@ -689,22 +690,20 @@ select:disabled {
    does for the Frequency view (no row-sharing, unlike the time scope/vectorscope pair). Fills
    `.chart-wrap`'s own (JS-owned, see its doc) box exactly, same as every other chart view — the
    top inset that used to be this element's own `margin-top` + compensating `height: calc()` is now
-   `.chart-wrap`'s shared `padding-top`, one level up. */
+   `.chart-wrap`'s shared `padding-top`, one level up.
+   Used to be a flex column sharing this box with `.ss-readout` (the peak readout row) stacked
+   below the tube — which meant the tube was always shorter than `.chart-wrap`'s own full height by
+   exactly the readout row's height, the same "included in the height budget" bug EqChart's own
+   legend never had (it's portaled out to `.chart-legend-host`, outside `.chart-wrap` entirely).
+   `.ss-readout` now portals there too (see SpectrumScope.tsx's own `legendHost` prop), so this
+   wraps only `.vs-screen` and can go back to plain full-box sizing. */
 .spectrumscope-wrap {
   width: 100%;
   height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
 }
-/* The tube shrinks to make room for the peak readout row below it — same "reduce the instrument's
-   own share, leave the panel's total height alone" idea as the wrap's own inset above, one level
-   deeper. `min-height: 0` is load-bearing on a flex child holding an absolutely-positioned canvas
-   (see `.vs-screen`'s children) — without it a flex item won't shrink past its content's intrinsic
-   size, and canvases report their own attribute width/height as that size. */
 .spectrumscope-wrap .vs-screen {
-  flex: 1 1 auto;
-  min-height: 0;
+  width: 100%;
+  height: 100%;
 }
 /* Numeric peak readout: level + frequency of each cross marked on the tube above (up to
    PEAK_COUNT). The trail's own long afterglow already shows *where* the spectrum has recently been
@@ -716,9 +715,10 @@ select:disabled {
    below), CENTERING THE GROUP means the group's total on-screen position still depends on how much
    of it is visually "there", so a change in how many peaks are populated shifted the whole row
    sideways under the centering, on top of anything else. A grid's columns are simply fixed slots —
-   peak index 2 lives in column 3, full stop, whether 1 peak is showing or all 5 are. */
+   peak index 2 lives in column 3, full stop, whether 1 peak is showing or all 5 are.
+   Portaled into `.chart-legend-host` (SpectrumScope.tsx's own `legendHost` prop), not a flex
+   sibling of `.vs-screen` inside `.spectrumscope-wrap` any more — see that rule's own doc. */
 .ss-readout {
-  flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(5, 6.7rem);
   column-gap: 1.1rem;
