@@ -201,13 +201,18 @@ const TAU_REF = 0.1;
  *  trail-length re-tune usually wants a brightness re-tune alongside it. `tau` is a genuine
  *  time-constant (seconds), same meaning as every other trailTau in the app — see the backdrop
  *  effect's doc comment for why this used to be `fade`, a flat inverted-direction per-event alpha
- *  with no time-base, and no longer is. */
-type SpecParams = { tau: number; tail: number; glowBase: number };
+ *  with no time-base, and no longer is.
+ *
+ *  `undistort` shares the scope views' own meaning (see `preampDb`'s own doc for what it actually
+ *  undoes) — a live toggle rather than always-on, for the same reason SpectrumScope's own copy of
+ *  this switch is: sometimes the *post-EQ* shape is what's actually wanted on screen (comparing the
+ *  backdrop directly against the curve drawn over it, not the reconstructed source underneath it). */
+type SpecParams = { tau: number; tail: number; glowBase: number; undistort: boolean };
 // `old_glowBase * tau/TAU_REF` (0.09 * 0.3/0.1 = 0.27) reproduced the exact pre-switch on-screen
 // brightness under the new TAU_REF/tau-corrected formula — confirming the blend swap alone was a
 // visual no-op — then hand-retuned live from that baseline to today's value, same as every other
 // view's glow default gets touched up after its own anchor change.
-const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3 };
+const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3, undistort: true };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -579,8 +584,9 @@ export function EqChart({
         // (post-EQ) capture to undo everything applied and recover the actual source. `eqBands` is
         // `undefined` only mid self-test (correction fully off, capture as-is since the EQ is
         // changing under it); empty (Dry — no filters, still the loudness-match preamp) still gets
-        // the preamp term.
-        const undoing = eqBands !== undefined;
+        // the preamp term. Also gated on the live `undistort` toggle (SpecParams) — same "sometimes
+        // the post-EQ shape is what's actually wanted" reasoning SpectrumScope's own switch has.
+        const undoing = specParams.undistort && eqBands !== undefined;
         let corr: Float64Array | null = null;
         if (undoing && eqBands.length) {
           const bf = new Float64Array(n);
@@ -701,7 +707,8 @@ export function EqChart({
           const i1 = Math.min(n - 1, i0 + 1);
           const ft = fi - i0;
           const raw = spectrum.db[i0] * (1 - ft) + spectrum.db[i1] * ft;
-          const corrDb = eqBands !== undefined ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]))[0] : 0) + preampDb : 0;
+          const corrDb =
+            specParams.undistort && eqBands !== undefined ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]))[0] : 0) + preampDb : 0;
           dbText = `${(raw - corrDb).toFixed(1)} dB`;
         }
         cursorShown = true;
@@ -1169,6 +1176,18 @@ export function EqChart({
               }}
             />
             <b>{specParams.glowBase.toFixed(2)}</b>
+          </label>
+          <div className="vs-tune-sep" />
+          <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHintSpectrum")}>
+            <span className="vs-tune-label">{t("scope.undistort")}</span>
+            <input
+              type="checkbox"
+              checked={specParams.undistort}
+              onChange={(e) => {
+                const undistort = e.currentTarget.checked;
+                setSpecParams((p) => ({ ...p, undistort }));
+              }}
+            />
           </label>
         </div>
       )}

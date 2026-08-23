@@ -136,6 +136,7 @@
     "rotate": "Rotate",
     "undistort": "Undistort",
     "undistortHint": "Inverse-filter the loopback to show the pre-EQ image (for oscilloscope music with correction on)",
+    "undistortHintSpectrum": "Undo the applied filters and preamp to show the pre-EQ spectrum, not the post-EQ capture",
     "modeLr": "L/R",
     "modeMix": "Mix",
     "toMixTitle": "Switch to mono mixdown — one full-height trace instead of split L/R lanes",
