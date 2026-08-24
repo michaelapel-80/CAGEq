@@ -57,8 +57,6 @@
     "scope": "Scope",
     "scopeTitle": "Vektorskop – das Live-Stereobild (L/R-Goniometer)",
     "preamp": "Preamp",
-    "preampMax": "max",
-    "preampMatched": "angeglichen",
     "preampTitleMax": "Preamp für maximale clipping-freie Lautstärke",
     "preampTitleMatched": "Preamp für den lautheitsangeglichenen Pegel (Auto-LUFS)",
     "clipping": "⚠ Notfall-Clipping-Schutz aktiv statt Lautheitsausgleich – extreme Spitze.",

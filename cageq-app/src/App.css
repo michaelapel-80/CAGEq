@@ -420,12 +420,6 @@ select:disabled {
 .chart-preamp b {
   font-variant-numeric: tabular-nums;
 }
-.chart-preamp-mode {
-  font-size: 0.66rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  opacity: 0.6;
-}
 
 /* --- §5.3c post-EQ output meter (WASAPI loopback): vertical, beside the chart -------------- */
 .chart-row {

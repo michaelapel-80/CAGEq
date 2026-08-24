@@ -57,8 +57,6 @@
     "scope": "Scope",
     "scopeTitle": "Vectorscope — the live stereo image (L/R goniometer)",
     "preamp": "Preamp",
-    "preampMax": "max",
-    "preampMatched": "matched",
     "preampTitleMax": "Preamp for maximum clipping-free volume",
     "preampTitleMatched": "Preamp for the loudness-matched level (Auto-LUFS)",
     "clipping": "⚠ Emergency clipping protection active instead of the loudness match — extreme peak.",

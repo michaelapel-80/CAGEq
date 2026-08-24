@@ -2561,8 +2561,14 @@ function App() {
                     style={{ marginLeft: "auto" }}
                     title={loudness?.mode === "FinalVolume" ? tr("correction.preampTitleMax") : tr("correction.preampTitleMatched")}
                   >
-                    {tr("correction.preamp")} <b>{result.preamp_db.toFixed(1)} dB</b>
-                    <span className="chart-preamp-mode">{loudness?.mode === "FinalVolume" ? tr("correction.preampMax") : tr("correction.preampMatched")}</span>
+                    {/* Mode shown by colour alone now, not a text label (German "angeglichen"
+                        overflowed the target row once the badge moved here) — same
+                        Comparison-blue/FinalVolume-amber the .ld-mode segmented toggle itself
+                        uses (App.tsx's loudness section), so the number reads as the same mode
+                        indicator wherever it's seen. The tooltip above still carries the full
+                        explanation on hover. */}
+                    {tr("correction.preamp")}{" "}
+                    <b style={{ color: loudness?.mode === "FinalVolume" ? "#daa520" : "#3b82f6" }}>{result.preamp_db.toFixed(1)} dB</b>
                   </div>
                 )}
                 <button
