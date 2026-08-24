@@ -1583,6 +1583,34 @@ function App() {
     if (activeSlot !== "A" && activeSlot !== "B") return;
     setSlotPreset((sp) => ({ ...sp, [activeSlot]: { id, name, at: "head", sig: presetSig(query, measurementPath, targetPath, stages) } }));
   };
+  // The other editable slot, if any (null on Dry, which has no `slotPreset` entry at all).
+  const siblingSlot = (): "A" | "B" | null => (activeSlot === "A" ? "B" : activeSlot === "B" ? "A" : null);
+  // A save/overwrite/version-save only ever re-anchors the *active* slot (setActiveSlotLoaded,
+  // above) — but if the sibling slot has the very same preset loaded `at: "head"`, its content
+  // didn't change, only the library did, so its ref needs correcting too or it silently
+  // misrepresents what's actually loaded there (reported live: saving a new version of a preset
+  // loaded in both slots bumped the vN *label* shown on both, since the label is computed live
+  // from the library — App.tsx:1821's `presetVerLabel` — but only the saving slot's actual content
+  // moved; the other slot kept showing the old content under the new, wrong version number, with
+  // no dirty flag). Two different corrections depending on what the save actually did to the old
+  // head:
+  //   - `archivedAt` (saveNewVersion): the old head was preserved as that exact archived version,
+  //     so the sibling's `sig` (still that content) is still valid — just redirect `at` off
+  //     `"head"` onto the archived timestamp so `presetVerLabel` reports the older vN instead.
+  //   - omitted (commitSave/overwritePresetInPlace): the old head was overwritten in place with
+  //     no archived copy — the sibling's content is now orphaned relative to the library, so
+  //     there's nothing valid to redirect `at` to. Refresh its `sig` to the *new* head's instead,
+  //     leaving `at: "head"` — `slotDirty` (App.tsx:1810) then correctly flags it as diverged,
+  //     the same way editing away from a loaded preset in the active slot already does.
+  const reconcileSiblingSlot = (id: string, archivedAt?: number) => {
+    const other = siblingSlot();
+    const ref = other && slotPreset[other];
+    if (!other || !ref || ref.id !== id || ref.at !== "head") return;
+    setSlotPreset((sp) => ({
+      ...sp,
+      [other]: archivedAt != null ? { ...ref, at: archivedAt } : { ...ref, sig: presetSig(query, measurementPath, targetPath, stages) },
+    }));
+  };
 
   // Save the current controls as a preset or template. Empty name → inline field error.
   // A name collision with the user's own entry of the same kind asks before overwriting
@@ -1608,7 +1636,10 @@ function App() {
           ? { ...lib, presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, stages, versions: existingVersions }) }
           : { ...lib, templates: upsert(lib.templates, { id, name, stage: activeStage, bands: stages[activeStage].bands }) },
       );
-      if (kind === "preset") setActiveSlotLoaded(id, name);
+      if (kind === "preset") {
+        reconcileSiblingSlot(id);
+        setActiveSlotLoaded(id, name);
+      }
       setSaveForm(null);
     };
     if (existing) {
@@ -1635,6 +1666,7 @@ function App() {
       ...lib,
       presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, stages, versions: p.versions }),
     }));
+    reconcileSiblingSlot(p.id);
     setActiveSlotLoaded(p.id, p.name);
   };
 
@@ -1643,6 +1675,11 @@ function App() {
   // save-version keeps the prior state to A/B against. Capped; nothing is captured automatically.
   const MAX_VERSIONS = 10;
   const saveNewVersion = (p: UserPreset) => {
+    // Hoisted rather than called inline inside the updater below: `reconcileSiblingSlot` needs
+    // the exact same timestamp the archived version is actually saved under, not a second,
+    // independently-timed `Date.now()` call that could disagree by a millisecond and never match
+    // (`presetVerLabel`'s `versions.findIndex(v => v.at === ref.at)` needs an exact hit).
+    const archivedAt = Date.now();
     setLibrary((lib) => ({
       ...lib,
       presets: upsert(lib.presets, {
@@ -1654,10 +1691,14 @@ function App() {
         stages,
         versions: [
           ...(p.versions ?? []),
-          { at: Date.now(), model: p.model, measurementPath: p.measurementPath, targetPath: p.targetPath, stages: p.stages },
+          { at: archivedAt, model: p.model, measurementPath: p.measurementPath, targetPath: p.targetPath, stages: p.stages },
         ].slice(-MAX_VERSIONS),
       }),
     }));
+    // The sibling slot (if it had this same preset's head loaded) still shows that exact prior
+    // state, which is now archived at `archivedAt` rather than gone — redirect it there instead
+    // of leaving it claiming `"head"` (see reconcileSiblingSlot's own doc for the bug this fixes).
+    reconcileSiblingSlot(p.id, archivedAt);
     // The prior stored head becomes a version and the editor state becomes the new head, clean.
     setActiveSlotLoaded(p.id, p.name);
   };
