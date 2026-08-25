@@ -64,6 +64,24 @@ function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: Spe
 }
 const REF_SIZE = 512;
 const GRID_ALPHA = 0.22;
+// Time constant a light exponential smoothing filter applies to the drawn trace's Y values before
+// stroking — same mechanism as EqChart's own `STROKE_SMOOTH_TAU`, ported here as the fix for the
+// window-drag stutter (see the render loop's own comment): the backend only emits a new spectrum
+// payload at ~60Hz, and drawing the raw target straight meant this trace's geometry was
+// bit-identical for however many rAF frames land between two backend payloads. Even at a steady
+// 240Hz that 4:1 ratio was already visibly steppy at short Trail settings (confirmed live: a longer
+// Trail didn't smooth it out either, since more persistence just blends more copies of the same
+// step together rather than adding real in-between motion) — dragging then made it far worse, since
+// Windows' native window-move loop samples/presents frames on its own cadence, not necessarily
+// locked to that same 4:1 ratio, so the 60Hz steps land at irregular intervals relative to what's
+// actually shown — visible judder on top of the steadier-state steppiness, with the rAF loop itself
+// completely unaffected either way (confirmed live: an on-canvas FPS counter never dropped through
+// the stutter). Smoothing toward the target every frame instead means the drawn geometry is never
+// twice identical, fixing both. Shorter than EqChart's own 0.05: this view's trace moves faster/more
+// abruptly (raw FFT bins, no phase content to slow it down the way EqChart's filter-response curve
+// has), and 0.05 read as visibly laggy here — 0.03 is barely above the backend's own SPEC_TAU_SECS
+// (0.02) smoothing, just enough to fix the stepping without adding a perceptible extra delay.
+const STROKE_SMOOTH_TAU = 0.03;
 // Same fixed dBFS scale as EqChart's spectrum backdrop (§5.4) — consistent reading between the
 // Eq pane's backdrop and this standalone analyzer.
 const SPEC_TOP_DB = 0;
@@ -520,6 +538,10 @@ export function SpectrumScope({
     // Every bin's (possibly corrected) value, one-to-one with xScratch/yScratch — `findPeaks` reads
     // this directly for true bin-to-bin adjacency (needed to detect local maxima correctly).
     let vScratch = new Float64Array(0);
+    // Exponentially-smoothed copy of yScratch actually drawn — see the render loop's own comment
+    // (the window-drag stutter fix). NaN marks "not yet initialized" so a fresh bin snaps straight
+    // to target instead of animating in from zero.
+    let yScratchSmooth = new Float64Array(0).fill(NaN);
 
     const render = () => {
       const now = performance.now();
@@ -568,6 +590,9 @@ export function SpectrumScope({
           xScratch = new Float64Array(n);
           yScratch = new Float64Array(n);
           vScratch = new Float64Array(n);
+          const grown = new Float64Array(n).fill(NaN);
+          grown.set(yScratchSmooth); // preserve already-settled bins; new ones start at NaN (unset)
+          yScratchSmooth = grown;
         }
         // One point per bin, no deduplication — see `hermiteTangent`'s doc for why that's safe now:
         // the backend's Gaussian reduction essentially never produces two adjacent bins with the
@@ -579,9 +604,16 @@ export function SpectrumScope({
           xScratch[i] = (i / (n - 1)) * W;
           yScratch[i] = plotBot - frac * (plotBot - plotTop);
         }
+        // Light exponential smoothing toward the raw target — see STROKE_SMOOTH_TAU's own doc for why
+        // (the window-drag stutter fix). NaN (unset, a fresh bin) snaps straight to target instead of
+        // animating in from zero.
+        const smoothK = Math.exp(-dt / STROKE_SMOOTH_TAU);
+        for (let i = 0; i < n; i++) {
+          yScratchSmooth[i] = Number.isNaN(yScratchSmooth[i]) ? yScratch[i] : yScratch[i] + (yScratchSmooth[i] - yScratch[i]) * smoothK;
+        }
         // n >= 2 already guaranteed by the outer `if`.
         ctx.beginPath();
-        traceSmooth(ctx, xScratch, yScratch, n);
+        traceSmooth(ctx, xScratch, yScratchSmooth, n);
         ctx.stroke();
 
         // Peak crosses: recomputed and redrawn every frame (not throttled — see below), so they
