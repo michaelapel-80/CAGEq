@@ -35,9 +35,15 @@ pub struct MeterUpdate {
     /// otherwise, so always-covered low segments stay bright and peaks leave a fading afterglow —
     /// the meter's glow. Empty while idle.
     pub bins: Vec<f32>,
-    /// The endpoint's shared-mode mix sample rate (Hz) — i.e. Windows' configured playback rate
-    /// for this device, which the loopback runs at. `0` while the session is (re)opening. The UI
-    /// surfaces it next to the device picker (filter.md §8, read-only format display).
+    /// The endpoint's real, uncapped shared-mode mix sample rate (Hz) — i.e. Windows' configured
+    /// playback rate for this device. `0` while the session is (re)opening. The UI surfaces it
+    /// next to the device picker (filter.md §8, read-only format display) for its original
+    /// purpose: matching the *device's* configured rate to the source material's own rate to
+    /// avoid Windows resampling. Deliberately NOT `run_session`'s own (possibly lower —
+    /// `CAPTURE_RATE_CAP`) internal analysis rate: that's what the loopback capture and every
+    /// on-screen scope/spectrum/meter reading is actually computed from, but reporting it here
+    /// instead of the true device rate would make this readout lie about what device rate you
+    /// actually need to match, which defeats its whole purpose.
     pub sample_rate: u32,
 }
 
@@ -856,9 +862,13 @@ mod windows_impl {
 
         // Capture at the endpoint's shared-mode mix rate/channels (capped — see
         // CAPTURE_RATE_CAP's own doc), but ask for f32 with autoconvert so we always parse a
-        // known sample type.
+        // known sample type. `device_rate` is the endpoint's real, uncapped rate — kept
+        // separately so `MeterUpdate.sample_rate` can still report Windows' actual configured
+        // rate to the UI (its own doc's whole point: "match your device sample rate to the
+        // source sample rate") rather than silently reporting the internal analysis cap instead.
         let mix = audio_client.get_mixformat()?;
-        let rate = mix.get_samplespersec().min(CAPTURE_RATE_CAP);
+        let device_rate = mix.get_samplespersec();
+        let rate = device_rate.min(CAPTURE_RATE_CAP);
         let channels = mix.get_nchannels();
         let desired =
             WaveFormat::new(32, 32, &SampleType::Float, rate as usize, channels as usize, None);
@@ -1015,7 +1025,7 @@ mod windows_impl {
                     ),
                     signal: last_signal.elapsed() < SILENCE_GAP,
                     bins: intensity.iter().map(|&v| round_to(v, 3)).collect(),
-                    sample_rate: rate,
+                    sample_rate: device_rate,
                 });
 
                 block_peak = 0.0;
