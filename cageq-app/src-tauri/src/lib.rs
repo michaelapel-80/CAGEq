@@ -64,7 +64,10 @@ struct ScopeViewers(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 /// from `tauri::ipc`, and its only accessor is Tauri's internal fetch command — so the guard has to
 /// sit upstream of `send`. Nor can the payload just be kept under the 8 KiB direct-eval threshold
 /// (which uses no queue at all): `SCOPE_MAX_POINTS` is 2048 pairs ≈ 45 KB of JSON, and fitting
-/// would mean ≲350 pairs, less than half the trace density the scope draws.
+/// would mean ≲350 pairs, less than half the trace density the scope draws. (cageq-monitor also
+/// caps the capture request itself — `CAPTURE_RATE_CAP` — so this budget doesn't have to chase an
+/// arbitrarily high device rate; see that constant's own doc for why it's lower than it looks like
+/// it should need to be.)
 type Subs<T> = std::sync::Arc<std::sync::Mutex<Vec<(String, tauri::ipc::Channel<T>)>>>;
 
 /// Last heartbeat per webview label — see [`StreamSubs`] and `stream_heartbeat`.

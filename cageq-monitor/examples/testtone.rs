@@ -286,12 +286,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let desired = WaveFormat::new(32, 32, &SampleType::Float, rate as usize, channels as usize, None);
     let block_align = desired.get_blockalign() as usize;
 
+    // Buffer duration: at least 100ms (BUFFER_FLOOR_HNS), not just the device's own bare
+    // `get_device_period()` default. That default is a *latency* setting — some devices/drivers
+    // report a shorter default period at higher sample rates (lower configured latency there),
+    // and this stream is `StreamMode::PollingShared`, which the `wasapi` crate's own docs on
+    // `initialize_client` call out as "less efficient and more prone to glitches when running at
+    // low latency" (event-driven mode avoids that, but isn't worth the extra API surface here).
+    // Reported live: every waveform, including plain sine (i.e. not a per-sample CPU-cost issue —
+    // sine's own `Waveform::sample` is a single `sin()` call, no k_max loop to blow up), glitched
+    // specifically above 96 kHz with no `--rate` override (so no AUTOCONVERT resampling involved
+    // either — the device's own native mix rate was already >96kHz). A dev test-signal generator
+    // has no reason to chase low latency at all — a fixed, generous floor trades a bit of startup/
+    // stop delay (already covered by the fade in/out) for headroom against exactly this.
+    const BUFFER_FLOOR_HNS: i64 = 1_000_000; // 100ms, in 100ns units
     let (def_period, _min_period) = audio_client.get_device_period()?;
-    let mode = StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: def_period };
+    let buffer_duration_hns = def_period.max(BUFFER_FLOOR_HNS);
+    let mode = StreamMode::PollingShared { autoconvert: true, buffer_duration_hns };
     audio_client
         .initialize_client(&desired, &Direction::Render, &mode)
         .map_err(|e| format!("initialize_client at {rate} Hz failed ({e:?}) — the endpoint may not accept this source rate"))?;
     let render = audio_client.get_audiorenderclient()?;
+    eprintln!(
+        "[testtone] device period: default {:.1}ms, using {:.1}ms, actual buffer {} frames",
+        def_period as f64 / 10_000.0,
+        buffer_duration_hns as f64 / 10_000.0,
+        audio_client.get_buffer_size().unwrap_or(0)
+    );
 
     let total_frames: Option<u64> = seconds.map(|s| (s * rate as f32) as u64);
     let fade_frames = (0.12 * rate as f32) as u64; // 120 ms fade in/out — kills startup/stop pops

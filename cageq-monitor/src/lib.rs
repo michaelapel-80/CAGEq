@@ -107,8 +107,59 @@ mod windows_impl {
     use realfft::num_complex::Complex;
     use realfft::{RealFftPlanner, RealToComplex};
     use wasapi::{
-        initialize_mta, Device, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
+        initialize_mta, AudioClient, Device, DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat,
     };
+
+    /// Floor on the shared-mode stream buffer's duration (100ns units — 100ms), used by both
+    /// `render_pink` and `run_session`'s own `StreamMode::PollingShared`. The device's own bare
+    /// `get_device_period()` default is a *latency* setting, not a safety margin — some
+    /// devices/drivers report a shorter default period at higher sample rates (lower configured
+    /// latency there), and polling mode is the `wasapi` crate's own documented "more prone to
+    /// glitches when running at low latency" mode (event-driven mode avoids that, but isn't worth
+    /// the extra API surface for either of these). Neither loopback capture nor the self-test's
+    /// pink noise has any reason to chase low latency — a fixed, generous floor trades startup
+    /// delay (both already fade in) for real headroom. Same fix, same reasoning, as
+    /// `cageq-monitor/examples/testtone.rs`'s own `BUFFER_FLOOR_HNS` — ported here since that fix
+    /// only covered the dev example, not this library's own two `PollingShared` sites.
+    const BUFFER_FLOOR_HNS: i64 = 1_000_000;
+
+    /// `get_device_period()`'s own default, floored at [`BUFFER_FLOOR_HNS`] — see that constant's
+    /// own doc for why the bare default isn't safe to hand `StreamMode::PollingShared` as-is.
+    fn safe_buffer_hns(audio_client: &AudioClient) -> Result<i64, Box<dyn Error>> {
+        let (def_period, _min_period) = audio_client.get_device_period()?;
+        Ok(def_period.max(BUFFER_FLOOR_HNS))
+    }
+
+    /// Ceiling on the rate `run_session` ever asks the capture endpoint for, regardless of the
+    /// device's own (possibly much higher) native mix rate — nothing in this crate's analysis
+    /// (spectrum/scope/meter) needs more than this to be useful. `autoconvert: true` (already set)
+    /// makes Windows' own shared-mode engine resample the loopback down to this transparently —
+    /// the same AUTOCONVERT mechanism `cageq-monitor/examples/testtone.rs`'s `--rate` flag uses
+    /// deliberately in the opposite direction (forcing a *source* rate below the device's, to test
+    /// the resampler).
+    ///
+    /// First tried at 96 kHz — fixed silently-dropped samples at *extreme* device rates
+    /// (192/384 kHz), where the whole capture loop's own per-second cost (the spectrum FFT
+    /// especially — its analysis window scales up with rate, and it's recomputed on every hop, so
+    /// its cost grows faster than linearly with rate) had clearly outrun real time. But testing at
+    /// 96 kHz then found a moderate 88.2 kHz device rate *also* wasn't safe: the loop was measured
+    /// (a temporary counter in `TimeScope.tsx`) actually managing only ~44 scope emits/sec against
+    /// the intended 60 (`SCOPE_INTERVAL`), ~23ms real cadence instead of 16ms — enough for more
+    /// than `SCOPE_MAX_POINTS` samples to pile up between emits, silently truncating the excess and
+    /// splicing a real discontinuity into `TimeScope`'s ring buffer (visible only once the display
+    /// window was wide enough to span one of those seams — narrow ms/div settings could dodge it by
+    /// chance).
+    ///
+    /// That measurement was taken in a **debug build**, though — release measured ~13x lower CPU
+    /// for the same session (~4% of a single core in debug vs ~0.3% in release, live-measured), the
+    /// usual gap for tight numeric loops (FFT, biquad filtering) with debug's lack of inlining/
+    /// vectorization. 96 kHz may well be genuinely safe in release, where this whole analysis
+    /// pipeline was always going to actually run — restored to 96 kHz so that's testable at all
+    /// (a lower cap here would silently mask a release build that never even attempts the rate in
+    /// question). If a release build still shows the symptom (scope-only glitch, clean spectrum,
+    /// `n` pinned at exactly `SCOPE_MAX_POINTS`) at 96 kHz, lower this — not `SCOPE_MAX_POINTS` — to
+    /// whatever rate that same build actually keeps up with.
+    const CAPTURE_RATE_CAP: u32 = 96_000;
 
     /// dB floor for peak/RMS so a silent endpoint reports a finite number, not -inf.
     const DB_FLOOR: f32 = -120.0;
@@ -235,8 +286,17 @@ mod windows_impl {
     const SCOPE_INTERVAL: Duration = Duration::from_millis(16);
     /// Max (l, r) pairs sent per emit — the *contiguous tail* of the window, in order and **not**
     /// stride-decimated, so the front-end can connect them into a continuous beam trace. Decimation
-    /// would shred the drawn Lissajous figures of oscilloscope-music. A 16 ms window at ≤48 kHz
-    /// (~768 pairs) fits under this; higher rates send their most recent SCOPE_MAX_POINTS.
+    /// would shred the drawn Lissajous figures of oscilloscope-music.
+    ///
+    /// Must comfortably cover what a full `SCOPE_INTERVAL` (16 ms) window *actually* generates —
+    /// this is a genuine cap, not just a display-density choice: whatever's generated beyond it is
+    /// silently dropped by `tail_pairs` (only the newest `SCOPE_MAX_POINTS` survive), which
+    /// `TimeScope.tsx`'s ring buffer then splices to the *next* emit as if no time had passed — a
+    /// real discontinuity in an otherwise-continuous stream, not a cosmetic one. "What 16 ms
+    /// generates" turned out not to be simply `rate × 0.016`, though — see `CAPTURE_RATE_CAP`'s own
+    /// doc for the full story (the capture loop's own cadence can slip well past 16 ms under load
+    /// long before any raw device rate gets exotic). 2048 (≈768 pairs at ≤48 kHz) is back to being
+    /// enough now that `run_session` caps the capture request itself at `CAPTURE_RATE_CAP`.
     const SCOPE_MAX_POINTS: usize = 2048;
 
     /// A running loopback monitor. Dropping it (or calling [`Monitor::stop`]) ends the thread.
@@ -358,8 +418,7 @@ mod windows_impl {
         let desired =
             WaveFormat::new(32, 32, &SampleType::Float, rate as usize, channels as usize, None);
         let block_align = desired.get_blockalign() as usize;
-        let (def_period, _min_period) = audio_client.get_device_period()?;
-        let mode = StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: def_period };
+        let mode = StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: safe_buffer_hns(&audio_client)? };
         audio_client.initialize_client(&desired, &Direction::Render, &mode)?;
         let render = audio_client.get_audiorenderclient()?;
 
@@ -784,18 +843,18 @@ mod windows_impl {
         let device = resolve_device(&enumerator, endpoint_id)?;
         let mut audio_client = device.get_iaudioclient()?;
 
-        // Capture at the endpoint's shared-mode mix rate/channels, but ask for f32 with
-        // autoconvert so we always parse a known sample type.
+        // Capture at the endpoint's shared-mode mix rate/channels (capped — see
+        // CAPTURE_RATE_CAP's own doc), but ask for f32 with autoconvert so we always parse a
+        // known sample type.
         let mix = audio_client.get_mixformat()?;
-        let rate = mix.get_samplespersec();
+        let rate = mix.get_samplespersec().min(CAPTURE_RATE_CAP);
         let channels = mix.get_nchannels();
         let desired =
             WaveFormat::new(32, 32, &SampleType::Float, rate as usize, channels as usize, None);
         let bytes_per_frame = desired.get_blockalign() as usize;
 
-        let (def_period, _min_period) = audio_client.get_device_period()?;
         let mode =
-            StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: def_period };
+            StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: safe_buffer_hns(&audio_client)? };
         audio_client.initialize_client(&desired, &Direction::Capture, &mode)?;
         let capture = audio_client.get_audiocaptureclient()?;
 
