@@ -323,31 +323,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("[testtone] Ctrl+C to stop.");
 
-    audio_client.start_stream()?;
-
     // Signal state.
     let mut frame: u64 = 0;
     let mut rng: u32 = 0x2545_f491; // xorshift white-noise source (no rand dependency needed)
     let (mut b0, mut b1, mut b2) = (0f32, 0f32, 0f32); // Paul Kellet economy pink-noise filter
-    // Tone phase as a *wrapped incremental accumulator*, not `sin(2π·f·frame/rate)`: computing the
-    // latter from an ever-growing `frame` loses precision in binades, dirtying the tone step-wise
-    // over time (a confound that looks like the resampler degrading). Wrapping keeps the argument
-    // in [0, 2π) so it stays bounded and precise indefinitely. `f64`, not `f32` (the rest of this
-    // file's signal path): each harmonic below evaluates `sin(k * phase)`, which multiplies
-    // whatever rounding error `phase` carries by `k` — invisible in the fundamental itself, but
-    // amplified enough by a rich signal's top harmonics (a narrow-duty pulse train's `k_max` can
-    // run into the hundreds) to visibly drift the Gibbs ringing's fine structure cycle-to-cycle
-    // even with the edge itself sitting rock-stable — see `Waveform::sample`'s own doc, reported
-    // live comparing a triggered scope trace across frames. `f32`'s ~7 decimal digits aren't enough
-    // headroom once multiplied by a few hundred; `f64`'s ~15-16 are.
     let tone_hz = if let Signal::Tone(_, hz) = signal { hz } else { 0.0 };
-    let phase_inc = std::f64::consts::TAU * tone_hz / rate as f64;
-    let mut phase = 0f64;
     // Highest harmonic to sum, kept a few percent below true Nyquist rather than right up against
     // it — see the file header doc for why band-limiting matters here at all (a naive square/
     // triangle/sawtooth has harmonics to infinity, which would alias back down and contaminate the
     // very spectrum this tool exists to let you check against a known-correct shape).
     let k_max: u32 = if tone_hz > 0.0 { (((rate as f64 * 0.48) / tone_hz).floor().max(1.0)) as u32 } else { 1 };
+    // Precomputed one-period wavetable, not a per-sample phase accumulator: `Waveform::sample`'s
+    // own harmonic sum costs O(k_max) trig calls *per sample* — for a rich signal at a high rate
+    // (a narrow-duty pulse train's k_max can run into the thousands at, say, 384 kHz — 2 trig
+    // calls per harmonic, so ~1.4 *billion* calls/sec at 384 kHz/100 Hz) that's well past what any
+    // single core sustains in real time, reported live as audible breakup specifically on
+    // --pulse/--square/--sawtooth (never --sine, which has no harmonic loop at all) at high rates.
+    // Paying that O(k_max) cost once per *period* instead of once per *sample* removes the problem
+    // at its root rather than just capping k_max and losing legitimate harmonic content.
+    //
+    // The table holds exactly `round(rate/tone_hz)` samples, `theta` spanning exactly one full 2π
+    // cycle across them — that makes it tile with zero discontinuity at the wraparound by
+    // construction, not by luck: sample 0 and the (never-materialized) sample at `table_len` are
+    // the same phase, so looping the index is exactly equivalent to continuing the accumulator.
+    // The one real cost: the actual frequency played becomes `rate / table_len`, not the literal
+    // requested Hz — a sub-Hz rounding (e.g. ~0.002 Hz off at 384 kHz/97 Hz) irrelevant for a test
+    // signal, and no worse than the rounding any sampled representation of a non-integer-period
+    // tone already implied. This also removes the previous f64 phase-accumulator's own reason to
+    // exist (its own per-sample rounding error, amplified by k at the top harmonics, was a real —
+    // if much smaller — Gibbs-ringing drift bug fixed earlier this session): a table built once
+    // and then walked by plain integer index has no accumulated error to drift in the first place.
+    let table_len = if tone_hz > 0.0 { ((rate as f64 / tone_hz as f64).round() as usize).max(1) } else { 1 };
+    let table: Vec<f32> = (0..table_len)
+        .map(|i| match signal {
+            Signal::Tone(wf, _) => wf.sample(std::f64::consts::TAU * (i as f64) / (table_len as f64), k_max),
+            _ => 0.0,
+        })
+        .collect();
+    let mut table_idx: usize = 0;
+
+    // Deliberately after the (potentially slow — see the table's own doc) wavetable build above,
+    // not before: starting the stream first would leave the freshly-opened device buffer starving
+    // while the table computes, an instant underrun/glitch right at startup instead of the
+    // steady-state one this whole precomputation exists to avoid.
+    audio_client.start_stream()?;
     let mut buf: Vec<u8> = Vec::new();
 
     'play: loop {
@@ -378,11 +397,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mono = match signal {
-                Signal::Tone(wf, _) => {
-                    let s = wf.sample(phase, k_max) * gain;
-                    phase += phase_inc;
-                    if phase >= std::f64::consts::TAU {
-                        phase -= std::f64::consts::TAU;
+                Signal::Tone(..) => {
+                    let s = table[table_idx] * gain;
+                    table_idx += 1;
+                    if table_idx >= table_len {
+                        table_idx = 0;
                     }
                     s
                 }
