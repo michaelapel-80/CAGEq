@@ -284,20 +284,31 @@ mod windows_impl {
     // --- stereo vectorscope (loopback X-Y goniometer) ---
     /// Vectorscope emit cadence (60 fps — the front-end phosphor persistence does the smoothing).
     const SCOPE_INTERVAL: Duration = Duration::from_millis(16);
+    /// Safety margin `SCOPE_MAX_POINTS` carries over the *raw* `CAPTURE_RATE_CAP × SCOPE_INTERVAL`
+    /// product — covers the capture loop's own cadence slipping past `SCOPE_INTERVAL` under load
+    /// (see `CAPTURE_RATE_CAP`'s own doc: measured ~1.36x slower than intended in one debug-build
+    /// test), not just raw device throughput at a perfectly-timed 16 ms cadence.
+    const SCOPE_MAX_POINTS_MARGIN: usize = 3;
     /// Max (l, r) pairs sent per emit — the *contiguous tail* of the window, in order and **not**
     /// stride-decimated, so the front-end can connect them into a continuous beam trace. Decimation
     /// would shred the drawn Lissajous figures of oscilloscope-music.
     ///
-    /// Must comfortably cover what a full `SCOPE_INTERVAL` (16 ms) window *actually* generates —
-    /// this is a genuine cap, not just a display-density choice: whatever's generated beyond it is
-    /// silently dropped by `tail_pairs` (only the newest `SCOPE_MAX_POINTS` survive), which
-    /// `TimeScope.tsx`'s ring buffer then splices to the *next* emit as if no time had passed — a
-    /// real discontinuity in an otherwise-continuous stream, not a cosmetic one. "What 16 ms
-    /// generates" turned out not to be simply `rate × 0.016`, though — see `CAPTURE_RATE_CAP`'s own
-    /// doc for the full story (the capture loop's own cadence can slip well past 16 ms under load
-    /// long before any raw device rate gets exotic). 2048 (≈768 pairs at ≤48 kHz) is back to being
-    /// enough now that `run_session` caps the capture request itself at `CAPTURE_RATE_CAP`.
-    const SCOPE_MAX_POINTS: usize = 2048;
+    /// Must comfortably cover what a full `SCOPE_INTERVAL` window *actually* generates — this is a
+    /// genuine cap, not just a display-density choice: whatever's generated beyond it is silently
+    /// dropped by `tail_pairs` (only the newest `SCOPE_MAX_POINTS` survive), which `TimeScope.tsx`'s
+    /// ring buffer then splices to the *next* emit as if no time had passed — a real discontinuity
+    /// in an otherwise-continuous stream, not a cosmetic one (reported live as a *perfectly stable,
+    /// reproducible* non-sine shape on a pure sine input — deterministic because the same phase gets
+    /// dropped every single emit at a fixed cadence/tone-frequency pair, not random glitching; also
+    /// visible on Vectorscope, which reads this identical truncated stream).
+    ///
+    /// **Derived from `CAPTURE_RATE_CAP`, not hand-picked, deliberately**: this used to be a bare
+    /// `2048`, reasoned as "enough now that capture is capped at 96 kHz" — true at the time, but
+    /// nothing *tied* the two constants together, so raising `CAPTURE_RATE_CAP` alone (exactly what
+    /// happened testing whether 384 kHz holds up in a release build) silently reintroduced this
+    /// exact truncation bug. Deriving it here makes that coupling structural instead of a comment
+    /// someone has to remember to keep in sync.
+    const SCOPE_MAX_POINTS: usize = (CAPTURE_RATE_CAP as u128 * SCOPE_INTERVAL.as_millis() / 1000) as usize * SCOPE_MAX_POINTS_MARGIN;
 
     /// A running loopback monitor. Dropping it (or calling [`Monitor::stop`]) ends the thread.
     pub struct Monitor {
