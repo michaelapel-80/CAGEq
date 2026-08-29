@@ -57,7 +57,13 @@ const DEFAULTS: Params = {
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
-const VEL_BUCKETS = 16; // brightness quantisation for velocity glow (batched strokes, not per-segment)
+// Brightness quantisation for velocity glow (batched strokes, not per-segment) — the per-bucket draw
+// loop is the only cost that scales with this (one Path2D + one stroke() call per bucket, gated to
+// the ~60Hz real scope-window rate, not every rAF frame — see the render loop's own doc), so raising
+// it is cheap; the expensive per-sample work (~768 points, biquad undistort) doesn't scale with it at
+// all. Raised from 16 after removing beam blanking's hard cutoff exposed visible banding at the
+// bright/first-draw end, before the phosphor trail's own accumulation across frames smooths it out.
+const VEL_BUCKETS = 64;
 const VEL_FLOOR = 0.05; // dimmest a fast segment goes (keeps sharp transitions faintly visible)
 const VEL_REF_RATE = 48000; // the velocity glow judges beam speed in *time*; the per-sample segment
 //   length is scaled to this rate so a given speed reads the same at 44.1/48/96/192 kHz.
