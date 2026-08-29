@@ -43,7 +43,17 @@ type Params = {
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
-const DEFAULTS: Params = { trailTau: 0.08, tail: 12, glow: 0.32, beam: 1.0, focus: 8, radiusFrac: 0.48, gridAlpha: 0.22, rotate: false, invert: true };
+const DEFAULTS: Params = {
+  trailTau: 0.08,
+  tail: 12,
+  glow: 0.32,
+  beam: 1.0,
+  focus: 8,
+  radiusFrac: 0.48,
+  gridAlpha: 0.22,
+  rotate: false,
+  invert: true,
+};
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
@@ -429,12 +439,15 @@ export function Vectorscope({
         // stroked separately, and round caps at their shared point would overlap and add into a
         // bright dot at every such sample. Flat caps meet at the point instead of stacking.
         ctx.lineCap = "butt";
-        // Beam blanking: brightness ∝ velocity factor, reaching **zero** at the fastest bucket (a
-        // beam moving too fast to expose the phosphor draws nothing). Skipping bucket 0 removes the
-        // long straight lines that high-frequency jumps would otherwise leave — the faint web —
-        // while the slow/dwell buckets keep their brightness. (b0 is blank, so start at 1.)
-        for (let b = 1; b < VEL_BUCKETS; b++) {
-          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * b) / (VEL_BUCKETS - 1)})`;
+        // Brightness ∝ velocity factor, from `glow/VEL_BUCKETS` at the fastest bucket up to the full
+        // `glow` at the slowest — never exactly zero, so the fastest beam movement stays faintly
+        // visible instead of being blanked outright. A hard blanking cutoff (skipping the fastest
+        // bucket(s) entirely) was tried, to fight burn-in under the old 8-bit phosphor accumulator's
+        // decay-stall bug (a fast-beam line that never fully faded) — dropped now that half-float
+        // storage fixed that stall at its source (see phosphor.ts), and with only VEL_BUCKETS (16)
+        // buckets to tune a cutoff across, it wasn't worth keeping as a tunable either.
+        for (let b = 0; b < VEL_BUCKETS; b++) {
+          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * (b + 1)) / VEL_BUCKETS})`;
           ctx.stroke(buckets[b]);
         }
         // Dwell spot: the window's whole beam energy concentrated where it barely moved. refL small,
