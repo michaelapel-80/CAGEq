@@ -159,18 +159,35 @@ export function Vectorscope({
   // genuinely free-form). `min(width,height)` is a defensive floor: the inline wrap should already
   // report a square box via `aspect-ratio:1`, but this stays correct even if that ever drifts.
   const [side, setSide] = useState(215);
+  const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
+  // Pop-out (`fill`) only: cap the canvas backing-store resolution at whatever the pop-out window's
+  // own *actual* default size (760x800 — see App.tsx's `openScopeWindow`) first measures as, rather
+  // than letting it keep growing if the user maximizes or drags the window bigger, e.g. to a 4K
+  // display — CSS still stretches the same backing store to fill a larger box (a bit blurrier at
+  // large sizes), trading that for keeping draw cost bounded regardless of window size. Removing beam
+  // blanking (see git history) draws meaningfully more per frame now — a busy signal at an
+  // unconstrained 4K+ resolution could no longer keep up. The inline (non-`fill`) view is unaffected:
+  // it's already bounded by the app's own fixed layout. Captured from the ResizeObserver's own first
+  // real callback below, NOT derived from `side`'s initial (215) state during the first render — that
+  // fallback is a generic placeholder for every use of this component, nowhere near the pop-out's own
+  // true default box, and locking onto it made the tube blurry even at the pop-out's actual default
+  // size (reported live).
+  const maxFillResRef = useRef<number | null>(null);
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const ro = new ResizeObserver(() => {
       const r = el.getBoundingClientRect();
-      setSide(Math.max(80, Math.floor(Math.min(r.width, r.height))));
+      const s = Math.max(80, Math.floor(Math.min(r.width, r.height)));
+      setSide(s);
+      if (fill && maxFillResRef.current === null) maxFillResRef.current = Math.round(s * dpr);
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
-  const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
-  const res = Math.round(side * dpr); // canvas backing-store resolution
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fill]);
+  const rawRes = Math.round(side * dpr);
+  const res = fill && maxFillResRef.current !== null ? Math.min(rawRes, maxFillResRef.current) : rawRes; // canvas backing-store resolution
 
   // The active EQ cascade (for undistort) + the built inverse cascade and its running state. Rebuilt
   // by the rAF loop when the filters/rate change; state persists across frames.
