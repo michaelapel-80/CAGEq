@@ -34,6 +34,24 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(2);
     };
 
+    // Self-elevate rather than failing with a bare access-denied. The helper is invoked two
+    // ways — by the app via `runas` (already elevated by the time it runs) and by hand from a
+    // console, where nothing has elevated it — and it should behave sensibly in both.
+    //
+    // Deliberately NOT done with a `requireAdministrator` manifest, which is the usual way to
+    // get this: a manifest would force a prompt for `status` too, and status is precisely the
+    // command that has to work without one. Asking at the point of an actual change keeps that
+    // property.
+    if !setup::is_elevated() {
+        return match setup::run_elevated_self(&action) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("failed: {e}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+
     match setup::perform(&action) {
         Ok(()) => {
             println!("done: {}", action.describe());

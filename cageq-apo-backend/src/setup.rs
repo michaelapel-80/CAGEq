@@ -585,6 +585,76 @@ fn take_ownership(key_path: &str) -> Result<(), SetupError> {
 /// ordinary outcome and not something to report as a failure.
 #[cfg(windows)]
 pub fn run_elevated(action: &Action) -> Result<(), SetupError> {
+    elevate(&helper_path()?, action)
+}
+
+/// Re-launch **this** executable elevated for `action` — how the helper self-elevates when
+/// someone runs it by hand from an ordinary prompt.
+///
+/// Split from [`run_elevated`] because the two resolve a different executable: the app
+/// launches the helper beside it, the helper relaunches itself.
+#[cfg(windows)]
+pub fn run_elevated_self(action: &Action) -> Result<(), SetupError> {
+    let me = std::env::current_exe().map_err(|e| SetupError::Win32("current_exe", e))?;
+    elevate(&me, action)
+}
+
+/// Is this process running with administrator rights?
+///
+/// Used to decide whether an action needs a prompt at all. Asked rather than assumed, because
+/// the helper is invoked both ways: already elevated from the app's `runas`, and plainly from
+/// a console where nothing has elevated it.
+#[cfg(windows)]
+pub fn is_elevated() -> bool {
+    type Handle = *mut std::ffi::c_void;
+    const TOKEN_QUERY: u32 = 0x0008;
+    const TOKEN_ELEVATION: i32 = 20;
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn OpenProcessToken(process: Handle, access: u32, token: *mut Handle) -> i32;
+        fn GetTokenInformation(
+            token: Handle,
+            class: i32,
+            info: *mut std::ffi::c_void,
+            len: u32,
+            ret_len: *mut u32,
+        ) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> Handle;
+        fn CloseHandle(h: Handle) -> i32;
+    }
+
+    let mut token: Handle = std::ptr::null_mut();
+    // SAFETY: `token` receives a handle closed below.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return false;
+    }
+    let mut elevated: u32 = 0;
+    let mut len: u32 = 0;
+    // SAFETY: TOKEN_ELEVATION is a single u32.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TOKEN_ELEVATION,
+            (&mut elevated as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+            &mut len,
+        )
+    };
+    unsafe { CloseHandle(token) };
+    ok != 0 && elevated != 0
+}
+
+#[cfg(not(windows))]
+pub fn is_elevated() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn elevate(exe: &std::path::Path, action: &Action) -> Result<(), SetupError> {
     use std::os::windows::ffi::OsStrExt;
 
     type Handle = *mut std::ffi::c_void;
@@ -627,8 +697,7 @@ pub fn run_elevated(action: &Action) -> Result<(), SetupError> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    let helper = helper_path()?;
-    let file: Vec<u16> = helper.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let file: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     // Quoted, because an endpoint GUID is brace-wrapped and the path may contain spaces.
     let params = wide(
         &action
