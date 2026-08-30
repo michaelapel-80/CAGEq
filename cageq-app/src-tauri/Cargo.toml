@@ -26,6 +26,10 @@ cageq-core = { path = "../../cageq-core" }
 # §5.3c post-EQ monitoring: WASAPI loopback capture + LUFS metering (Windows-only, no-op stub
 # elsewhere so the app still builds cross-platform).
 cageq-monitor = { path = "../../cageq-monitor" }
+# CAGEq's own APO backend (filter.md §5.3c). Depended on directly rather than through
+# cageq-core: the core only needs the EqBackend trait, and which backend to construct is an
+# application decision, made in `build_backend`.
+cageq-apo-backend = { path = "../../cageq-apo-backend" }
 
 # §2 single-instance: all devices share one cageq.txt, so a second CAGEq process
 # would race the first on writes. Desktop-only (Cargo needs the real target cfg here;

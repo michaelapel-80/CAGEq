@@ -28,6 +28,16 @@ name = "cageq-apo"
 version = "0.6.0"
 
 [[package]]
+name = "cageq-apo-backend"
+version = "0.6.0"
+dependencies = [
+ "cageq-apo",
+ "cageq-backend",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "cageq-backend"
 version = "0.6.0"
 dependencies = [

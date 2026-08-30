@@ -95,13 +95,26 @@ pub struct ParseError {
 /// this one directory at install time. Per endpoint, because a correction is scoped to a
 /// device, exactly as `cageq.txt`'s `Device:` blocks are.
 pub fn config_path(endpoint_id: &str) -> PathBuf {
-    let root = std::env::var_os("ProgramData")
+    config_path_in(&config_dir(), endpoint_id)
+}
+
+/// The directory corrections live in: `%ProgramData%\CAGEq\apo`.
+pub fn config_dir() -> PathBuf {
+    std::env::var_os("ProgramData")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
-    // The id is a registry-style GUID in braces; keep it verbatim so the filename can be
-    // matched against the endpoint list by eye, but refuse anything with path separators in
-    // it — this string ultimately comes from outside and must not be able to escape.
-    root.join("CAGEq").join("apo").join(format!("{endpoint_id}.cfg"))
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        .join("CAGEq")
+        .join("apo")
+}
+
+/// [`config_path`] against an explicit directory — what makes the app-side backend testable
+/// against a temp dir instead of the machine's real configuration.
+pub fn config_path_in(dir: &Path, endpoint_id: &str) -> PathBuf {
+    // The id is a registry-style GUID in braces; kept verbatim so the filename can be matched
+    // against the endpoint list by eye. Callers must have run it through
+    // `normalize_endpoint_id` or `is_valid_endpoint_id` first — this string ultimately comes
+    // from outside and must not be able to escape the directory.
+    dir.join(format!("{endpoint_id}.cfg"))
 }
 
 /// Is `endpoint_id` a plausible endpoint GUID? Guards [`load`] against a value that could

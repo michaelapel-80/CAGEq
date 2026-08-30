@@ -390,6 +390,12 @@ pub unsafe extern "C" fn cageq_apo_open_channel(
     // A freshly created section reads as `Unrecognised` until CAGEq publishes, so nothing is
     // applied here; `applied_seq` starts at 0 and the first real publish will differ from it.
     apo.applied_seq = 0;
+    if let Some(ch) = apo.channel.as_ref() {
+        // Publish the locked rate before anyone can write: the writer needs it to compute
+        // coefficients, and a correction built for the wrong rate lands at the wrong
+        // frequencies while looking perfectly healthy.
+        control::set_sample_rate(ch.block(), apo.cascade.sample_rate() as u32);
+    }
     match &apo.channel {
         None => 0,
         // Distinguished so the log can show it: audiodg creates and destroys APO instances

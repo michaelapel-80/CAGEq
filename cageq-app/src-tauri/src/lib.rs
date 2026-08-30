@@ -907,18 +907,29 @@ fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
     set_cache_dir_env(&resolve_cache_dir());
     let (source, sidecar) = resolve_sidecar(bundled_sidecar.as_deref());
     let settings = load_settings();
-    // The Equalizer APO backend, which is still the only one that exists (filter.md
-    // §5.3c: CAGEq's own APO is the other, and will be selected here once it lands —
-    // this is the single place a backend is chosen).
+    // The single place a backend is chosen (filter.md §5.3c).
+    //
+    // CAGEq's own APO wins when it is actually attached to an endpoint. That test is
+    // deliberately "is it attached", not "is the DLL present": registering it is an explicit,
+    // elevated install step, so nobody is moved between audio engines by an app update alone
+    // — and the Equalizer APO backend stays the fallback for machines that have not made
+    // that choice.
     let _ = std::fs::create_dir_all(&config_dir);
-    let eq: Arc<dyn EqBackend> = Arc::new(EqApoBackend::new(&config_dir));
+    let eq: Arc<dyn EqBackend> = if cageq_apo_backend::is_installed() {
+        Arc::new(cageq_apo_backend::CageqApoBackend::default())
+    } else {
+        Arc::new(EqApoBackend::new(&config_dir))
+    };
+    // Where the UI says the applied state lives — asked of the backend rather than assumed,
+    // since the two keep their configuration in entirely different places.
+    let reported_dir = eq.location();
     match start_core(Arc::clone(&eq), source, settings.last_hash.as_deref()) {
         Ok(core) => {
             core.set_loudness(settings.loudness); // restore §4.0 settings
             Backend::Ready {
                 core,
                 eq,
-                config_dir: config_dir.display().to_string(),
+                config_dir: reported_dir,
                 config_source,
                 sidecar,
             }

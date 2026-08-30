@@ -38,7 +38,7 @@ use crate::dsp::{Coeffs, MAX_BANDS};
 pub const CONTROL_MAGIC: u32 = 0x4341_4751;
 /// Layout version. A mismatch is refused rather than interpreted: this describes what
 /// someone is listening to, and a half-understood layout is not worth guessing at.
-pub const CONTROL_VERSION: u32 = 2;
+pub const CONTROL_VERSION: u32 = 3;
 
 /// Preamp bounds mirroring [`crate::config`]'s, for the same reason: attenuation is
 /// harmless, gain is a hazard, and the writer is not trusted merely because it is ours.
@@ -109,6 +109,14 @@ pub struct ControlBlock {
     ///
     /// Packed into one atomic so the sequence and its verdict can never be read out of step.
     pub ack: AtomicU64,
+    /// The rate this APO instance locked to, in Hz. Outbound.
+    ///
+    /// The writer computes coefficients, and coefficients depend on the sample rate — so it
+    /// has to know the endpoint's rate, and getting it wrong is not an error but something
+    /// worse: a correction silently applied at the wrong frequencies. The APO is the only
+    /// party that authoritatively knows (it is handed the locked format), so it publishes it
+    /// rather than leaving the writer to guess or to re-derive it through WASAPI.
+    pub sample_rate: AtomicU32,
 }
 
 /// A validated snapshot, ready to hand to the cascade. Fixed-size so taking one allocates
@@ -156,6 +164,23 @@ pub fn sequence(block: &ControlBlock) -> u32 {
 /// nothing on this side ever reads it back.
 pub fn bump_heartbeat(block: &ControlBlock) {
     block.heartbeat.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Publish the rate this APO locked to, so the writer can compute coefficients for it.
+pub fn set_sample_rate(block: &ControlBlock, hz: u32) {
+    block.sample_rate.store(hz, Ordering::Relaxed);
+}
+
+/// The endpoint's sample rate, or `None` if no APO has published one yet.
+///
+/// The writer must not fall back to a guess: coefficients computed for the wrong rate produce
+/// a correction silently applied at the wrong frequencies, which is worse than not applying
+/// one at all because nothing looks broken.
+pub fn sample_rate(block: &ControlBlock) -> Option<u32> {
+    match block.sample_rate.load(Ordering::Relaxed) {
+        0 => None,
+        hz => Some(hz),
+    }
 }
 
 /// Verdicts the APO reports back through [`ControlBlock::ack`].
@@ -308,6 +333,7 @@ mod tests {
             coeffs: [RawCoeffs::default(); MAX_BANDS],
             heartbeat: AtomicU64::new(0),
             ack: AtomicU64::new(0),
+            sample_rate: AtomicU32::new(0),
         }
     }
 

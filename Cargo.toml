@@ -13,6 +13,7 @@
 resolver = "3"
 members = [
     "cageq-apo",
+    "cageq-apo-backend",
     "cageq-backend",
     "cageq-config-writer",
     "cageq-sidecar",

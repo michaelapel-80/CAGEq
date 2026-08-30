@@ -1,0 +1,15 @@
+[package]
+name = "cageq-apo-backend"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+# The neutral domain types and the trait this crate implements.
+cageq-backend = { path = "../cageq-backend" }
+# CAGEq's own APO: the config format it reads, the coefficient math it runs, and the control
+# channel it listens on. Depending on the APO crate directly is what keeps the two halves
+# from drifting — the backend cannot render a config the APO would refuse, or compute
+# coefficients by a different formula, because it calls the same code.
+cageq-apo = { path = "../cageq-apo" }
+sha2 = "0.11.0"
+thiserror = "2.0.18"

@@ -353,9 +353,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cageq-apo"
+version = "0.6.0"
+
+[[package]]
+name = "cageq-apo-backend"
+version = "0.6.0"
+dependencies = [
+ "cageq-apo",
+ "cageq-backend",
+ "sha2 0.11.0",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "cageq-app"
 version = "0.6.0"
 dependencies = [
+ "cageq-apo-backend",
  "cageq-core",
  "cageq-monitor",
  "serde",
