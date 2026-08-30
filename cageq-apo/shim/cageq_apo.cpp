@@ -22,6 +22,10 @@
 
 #include <windows.h>
 #include <unknwn.h>
+// INITGUID must precede mmdeviceapi.h so PKEY_AudioEndpoint_GUID is *defined* here rather
+// than merely declared. Exactly one translation unit may do this; this file is the only one.
+#define INITGUID
+#include <mmdeviceapi.h>
 #include <audioenginebaseapo.h>
 #include <baseaudioprocessingobject.h>
 #include <audioengineextensionapo.h>
@@ -108,31 +112,33 @@ unsigned long long cageq_apo_frames_processed(void* handle);
 float cageq_apo_sample_rate(void* handle);
 bool  cageq_apo_set_bands(void* handle, const CageqBand* bands, unsigned int count);
 bool  cageq_apo_set_preamp_db(void* handle, double db);
+int   cageq_apo_load_config(void* handle, const wchar_t* endpointId, unsigned int len);
 }
 
-// ---------------------------------------------------------------------------
-// Bring-up filter — TEMPORARY SCAFFOLDING, removed in stage C3.
-//
-// Until the shared-memory control channel exists there is no way for CAGEq to tell the APO
-// what to apply, and an APO that correctly applies *nothing* is indistinguishable from one
-// that is not in the audio path at all — the exact confusion that made stage B look passed
-// when it wasn't. So the lock applies one deliberately unmistakable band: if this is
-// audible, the DSP is genuinely running inside audiodg.
-//
-// Set to 0 (and rebuild) for a passthrough build.
-// ---------------------------------------------------------------------------
-#define CAGEQ_APO_BRINGUP 1
+// Return codes from cageq_apo_load_config — must match the CAGEQ_CONFIG_* constants in
+// ../src/lib.rs.
+#define CAGEQ_CONFIG_NONE        0
+#define CAGEQ_CONFIG_APPLIED     1
+#define CAGEQ_CONFIG_BAD_ARGS   (-1)
+#define CAGEQ_CONFIG_REJECTED   (-2)
+#define CAGEQ_CONFIG_UNSUITABLE (-3)
 
-#if CAGEQ_APO_BRINGUP
-// +12 dB at 120 Hz, Q 1.0 — a bass boost nobody can mistake for placebo, and low enough in
-// frequency to be obvious on any speakers including a VM's.
-static const CageqBand kBringUpBands[] = {
-    { 0u, 120.0, 12.0, 1.0 },
-};
-// Headroom for the boost above, so the test signal cannot clip and be mistaken for
-// distortion introduced by the filter.
-static const double kBringUpPreampDb = -12.0;
-#endif
+static const wchar_t* ConfigOutcomeText(int rc)
+{
+    switch (rc)
+    {
+    case CAGEQ_CONFIG_NONE:        return L"none configured for this endpoint";
+    case CAGEQ_CONFIG_APPLIED:     return L"applied";
+    case CAGEQ_CONFIG_BAD_ARGS:    return L"bad arguments";
+    case CAGEQ_CONFIG_REJECTED:    return L"REJECTED (malformed/out of range/unreadable)";
+    case CAGEQ_CONFIG_UNSUITABLE:  return L"unsuitable for this connection (band above Nyquist?)";
+    default:                       return L"unknown";
+    }
+}
+
+// The stage-C2 bring-up filter lived here — a hardcoded +12 dB shelf, so that an APO which
+// correctly applied *nothing* could be told apart from one that was not in the audio path at
+// all. It has served its purpose: the APO now loads a real per-endpoint correction below.
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -206,6 +212,7 @@ public:
         m_pUnkOuter = (pOuter != nullptr)
             ? pOuter
             : reinterpret_cast<IUnknown*>(static_cast<INonDelegatingUnknown*>(this));
+        m_endpointId[0] = L'\0';
         DiagF(L"CageqApo CONSTRUCTED (aggregated=%s, instances now %ld)",
               (pOuter != nullptr) ? L"yes" : L"no", InterlockedIncrement(&g_instCount));
     }
@@ -263,6 +270,28 @@ public:
             DiagF(L"  -> E_INVALIDARG (unexpected init struct size)");
             return E_INVALIDARG;
         }
+
+        // Capture which endpoint we belong to. This is the only place it is offered, and it
+        // is what selects the persistent correction at lock time — a correction is scoped to
+        // a device, so without it the APO has no idea whose EQ to apply.
+        //
+        // Failing to read it is NOT fatal: the APO still initialises and passes audio
+        // through unmodified. Refusing to load over a missing property would take the
+        // endpoint down to achieve nothing.
+        m_endpointId[0] = L'\0';
+        auto* init = reinterpret_cast<APOInitSystemEffects*>(pbyData);
+        if (init->pAPOEndpointProperties != nullptr)
+        {
+            PROPVARIANT var;
+            PropVariantInit(&var);
+            if (SUCCEEDED(init->pAPOEndpointProperties->GetValue(PKEY_AudioEndpoint_GUID, &var))
+                && var.vt == VT_LPWSTR && var.pwszVal != nullptr)
+            {
+                StringCchCopyW(m_endpointId, ARRAYSIZE(m_endpointId), var.pwszVal);
+            }
+            PropVariantClear(&var);
+        }
+        DiagF(L"  endpoint = %s", (m_endpointId[0] != L'\0') ? m_endpointId : L"(unavailable)");
         return S_OK;
     }
 
@@ -362,15 +391,24 @@ public:
             return E_INVALIDARG;
         }
 
-#if CAGEQ_APO_BRINGUP
-        // Applied here, off the real-time thread: set_bands computes coefficients (trig per
-        // band), which has no business running inside the audio callback.
-        const bool bandsOk = cageq_apo_set_bands(
-            m_rust, kBringUpBands, static_cast<unsigned int>(ARRAYSIZE(kBringUpBands)));
-        const bool preampOk = cageq_apo_set_preamp_db(m_rust, kBringUpPreampDb);
-        DiagF(L"  bring-up filter: bands=%s preamp=%s (%.1f dB)",
-              bandsOk ? L"ok" : L"REFUSED", preampOk ? L"ok" : L"REFUSED", kBringUpPreampDb);
-#endif
+        // Load this endpoint's persistent correction. Done here, off the real-time thread:
+        // it touches the disk and computes coefficients, neither of which belongs in the
+        // audio callback.
+        //
+        // Every outcome is survivable by design — no configuration, a rejected file, or a
+        // correction that does not suit this connection all leave the APO running as a clean
+        // passthrough rather than failing the lock. Refusing to lock would silence the
+        // endpoint, which is a far worse answer to "your EQ file has a typo".
+        if (m_endpointId[0] != L'\0')
+        {
+            const int rc = cageq_apo_load_config(
+                m_rust, m_endpointId, static_cast<unsigned int>(wcslen(m_endpointId)));
+            DiagF(L"  config: %s (%d)", ConfigOutcomeText(rc), rc);
+        }
+        else
+        {
+            DiagF(L"  config: skipped, no endpoint id");
+        }
         return S_OK;
     }
 
@@ -453,8 +491,12 @@ private:
     ~CageqApo() { DiagF(L"CageqApo DESTROYED (instances now %ld)", InterlockedDecrement(&g_instCount)); }
 
     long      m_refCount;
-    IUnknown* m_pUnkOuter; // aggregating identity, or ourselves when standalone
-    void*     m_rust;      // opaque handle from cageq_apo_create
+    IUnknown* m_pUnkOuter;      // aggregating identity, or ourselves when standalone
+    void*     m_rust;           // opaque handle from cageq_apo_create
+    /// Endpoint GUID from `Initialize`, selecting which persistent correction to load.
+    /// Fixed buffer: a registry-style GUID is 38 characters, and this saves an allocation
+    /// (and a failure mode) on a path that runs inside audiodg.
+    wchar_t   m_endpointId[64];
 };
 
 // ---------------------------------------------------------------------------

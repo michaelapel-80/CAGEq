@@ -182,6 +182,63 @@ pub unsafe extern "C" fn cageq_apo_set_bands(
     apo.cascade.set_bands(&checked[..n])
 }
 
+/// Outcome of [`cageq_apo_load_config`]. Distinguishes "nothing configured" from "something
+/// configured but unusable", because they mean different things to whoever is listening: the
+/// first is a device CAGEq has never been pointed at, the second is a correction that exists
+/// and is being refused.
+pub const CAGEQ_CONFIG_NONE: i32 = 0;
+pub const CAGEQ_CONFIG_APPLIED: i32 = 1;
+pub const CAGEQ_CONFIG_BAD_ARGS: i32 = -1;
+/// The file exists but was rejected — malformed, out of bounds, oversized, or a reparse
+/// point. The caller keeps whatever was already running.
+pub const CAGEQ_CONFIG_REJECTED: i32 = -2;
+/// Parsed and in range, but not applicable to *this* connection — in practice a band at or
+/// above Nyquist for the rate we locked at (see `dsp::Cascade::set_bands`).
+pub const CAGEQ_CONFIG_UNSUITABLE: i32 = -3;
+
+/// Load and apply this endpoint's persistent configuration (see [`config`]).
+///
+/// The whole reason the APO can work with CAGEq not running. Called at lock time, off the
+/// real-time thread. `endpoint_id` is UTF-16, as Windows hands it to the shim; conversion and
+/// path construction happen here so every rule about what that string may contain lives in
+/// one place with the code that enforces it.
+///
+/// Deliberately returns a *code*, never a message: the file is written by a lower-privileged
+/// account and read by a service one, so nothing derived from its contents may flow back out
+/// (see [`config::load_from`]).
+///
+/// # Safety
+/// `handle` must be live; `endpoint_id` must address at least `len` UTF-16 code units.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cageq_apo_load_config(
+    handle: *mut c_void,
+    endpoint_id: *const u16,
+    len: u32,
+) -> i32 {
+    if handle.is_null() || endpoint_id.is_null() || len == 0 || len > 256 {
+        return CAGEQ_CONFIG_BAD_ARGS;
+    }
+    let apo = unsafe { &mut *(handle as *mut CageqApo) };
+    let wide = unsafe { std::slice::from_raw_parts(endpoint_id, len as usize) };
+    // `from_utf16_lossy`, not a fallible decode: an unpaired surrogate should fail the
+    // *id validation* below (it cannot be a GUID), not produce a distinct error path.
+    let id = String::from_utf16_lossy(wide);
+
+    match config::load(&id) {
+        Ok(None) => CAGEQ_CONFIG_NONE,
+        Ok(Some(cfg)) => {
+            // Bands first: if they are refused the preamp must not be applied either, or the
+            // endpoint would run at a level chosen to compensate for filters that aren't there.
+            if !apo.cascade.set_bands(&cfg.bands) {
+                return CAGEQ_CONFIG_UNSUITABLE;
+            }
+            apo.cascade.set_preamp_db(cfg.preamp_db);
+            CAGEQ_CONFIG_APPLIED
+        }
+        Err(_) => CAGEQ_CONFIG_REJECTED,
+    }
+}
+
 /// Set the preamp in dB (negative attenuates), as EqAPO's `Preamp:` line does. A
 /// non-finite value is ignored rather than turning the whole stream into NaN.
 ///
@@ -311,6 +368,52 @@ mod tests {
 
         // Clearing the bands returns it to a passthrough (preamp still applies).
         assert!(unsafe { cageq_apo_set_bands(h, std::ptr::null(), 0) });
+        unsafe { cageq_apo_destroy(h) };
+    }
+
+    fn utf16(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    /// The load path's argument handling. The file-level behaviour is covered in
+    /// `config::tests`; what matters here is that nothing malformed reaches it and that the
+    /// distinct outcomes stay distinguishable.
+    #[test]
+    fn loading_config_reports_distinct_outcomes() {
+        let h = cageq_apo_create(2, 48_000.0);
+
+        // An endpoint nobody has configured: "nothing here", not a failure.
+        let unconfigured = utf16("{00000000-0000-0000-0000-00000000dead}");
+        assert_eq!(
+            unsafe { cageq_apo_load_config(h, unconfigured.as_ptr(), unconfigured.len() as u32) },
+            CAGEQ_CONFIG_NONE,
+        );
+
+        // Anything that could escape the config directory is refused before it becomes a path.
+        for bad in ["../escape", r"..\escape", "a/b"] {
+            let w = utf16(bad);
+            assert_eq!(
+                unsafe { cageq_apo_load_config(h, w.as_ptr(), w.len() as u32) },
+                CAGEQ_CONFIG_REJECTED,
+                "accepted a traversal-shaped id: {bad}",
+            );
+        }
+
+        // Null / empty / absurd length are argument errors, not file errors.
+        assert_eq!(unsafe { cageq_apo_load_config(h, std::ptr::null(), 4) }, CAGEQ_CONFIG_BAD_ARGS);
+        assert_eq!(
+            unsafe { cageq_apo_load_config(h, unconfigured.as_ptr(), 0) },
+            CAGEQ_CONFIG_BAD_ARGS,
+        );
+        assert_eq!(
+            unsafe { cageq_apo_load_config(h, unconfigured.as_ptr(), 9999) },
+            CAGEQ_CONFIG_BAD_ARGS,
+        );
+        assert_eq!(
+            unsafe { cageq_apo_load_config(std::ptr::null_mut(), unconfigured.as_ptr(), 4) },
+            CAGEQ_CONFIG_BAD_ARGS,
+        );
+
         unsafe { cageq_apo_destroy(h) };
     }
 

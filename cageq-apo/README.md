@@ -120,6 +120,33 @@ index 7 = EFX, 6 = MFX, 5 = SFX — the legacy LFX/GFX slots predate processing 
 Trade-off to carry into the UI, quoting EqAPO's own docs: applications requiring a secure
 audio path may change behaviour or refuse to output audio.
 
+## The correction it applies
+
+Per endpoint, at `%ProgramData%\CAGEq\apo\{endpoint-guid}.cfg`, loaded at `LockForProcess`:
+
+```
+cageq-apo 1
+preamp -9.5
+band PK 105 6.0 0.70
+band HSC 8000 -3.0 0.70
+```
+
+Persistent by design, not fed live: EqualizerAPO reads `config.txt` at load, so a correction
+is active from boot whether or not a GUI is running, and an APO driven only by a live control
+channel would apply EQ *only while CAGEq is open*. Write one with `scripts\write-config.ps1`.
+
+**This file is parsed inside audiodg — a service account — from a path an unelevated user can
+write.** The parser treats it as hostile: reparse points refused (a directory junction needs
+no privilege and could aim it at a file the user cannot read), reads capped at 64 KiB (an
+unbounded read there is a machine-wide audio outage), errors that never echo file content,
+and refuse-don't-clamp bounds on gain, Q, preamp and frequency — the last of which is a
+safety limit as much as a security one, since a filter at or above Nyquist can be unstable
+and an unstable biquad's output grows without bound.
+
+That is defence in depth, not the fence: **the install must ACL that directory** so it is not
+writable by every user on the machine (`write-config.ps1 -Elevated` does this), or one user
+can silently alter another's EQ regardless of how careful the parser is.
+
 ## Files
 
 | Path | |
@@ -130,6 +157,7 @@ audio path may change behaviour or refuse to output audio.
 | `build.bat` | Builds both halves into `build/CAGEqApo.dll` |
 | `scripts/register.ps1` | Register + attach to one endpoint (**VM only**) |
 | `scripts/unregister.ps1` | Detach + unregister, restoring from backup |
+| `scripts/write-config.ps1` | Write a correction for one endpoint; `-Elevated` also locks the directory's ACL |
 | `scripts/sign.ps1` | Self-signed Authenticode, in-box tooling only (**VM only**) |
 
 CLSID `{530052E1-2CD4-400A-AC2B-0D19273AD5B7}` is declared in `shim/cageq_apo.cpp` and
