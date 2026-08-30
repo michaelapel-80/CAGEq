@@ -162,6 +162,25 @@
     "finalWarning": "⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched — a louder slot can just sound \"better\". Press <0>W</0> for Comparison to A/B fairly."
   },
 
+
+  "apoSetup": {
+    "title": "CAGEq audio engine",
+    "intro": "CAGEq can process audio itself instead of going through Equalizer APO. That removes the dependency and makes live filter edits smoother.",
+    "stepRegister": "Register CAGEq's audio effect with Windows",
+    "stepGate": "Allow Windows to load it",
+    "stepAttach": "Attach it to {{device}}",
+    "gateWarning": "This step lets Windows load audio effects that are not signed by Microsoft. Equalizer APO's installer sets the same option. Apps that require a protected audio path (some streaming services) may refuse to play while it is set.",
+    "effectsDisabled": "Windows has audio enhancements switched off for this device, so no effect can run on it. Continuing will switch them back on.",
+    "helperMissing": "cageq-apo-setup.exe is missing from the CAGEq folder, so setup cannot run. Reinstall CAGEq.",
+    "pickDevice": "Choose an output device above to set it up.",
+    "doStep": "Continue",
+    "working": "Working…",
+    "uacHint": "Windows will ask for administrator permission.",
+    "restartNeeded": "Setup is complete. Restart CAGEq to start using its own audio engine.",
+    "active": "CAGEq is processing audio on {{device}} itself. Equalizer APO is not involved.",
+    "detach": "Stop using CAGEq's audio engine on this device",
+    "cancelled": "Cancelled — nothing was changed."
+  },
   "foreignConfig": {
     "notice": "config.txt has {{count}} other active filter line(s) that stack on top of every CAGEq correction.",
     "review": "Review",

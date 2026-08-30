@@ -162,6 +162,25 @@
     "finalWarning": "⚠ Finale Lautstärke: Jeder Slot spielt auf seiner eigenen Maximallautstärke, A/B/Dry sind also nicht lautheitsangeglichen – ein lauterer Slot kann einfach „besser“ klingen. <0>W</0> drücken für Vergleich, um fair A/B zu hören."
   },
 
+
+  "apoSetup": {
+    "title": "CAGEq-Audio-Engine",
+    "intro": "CAGEq kann die Audiobearbeitung selbst übernehmen, statt den Umweg über Equalizer APO zu gehen. Das entfernt die Abhängigkeit und macht Filteränderungen im laufenden Betrieb sauberer.",
+    "stepRegister": "CAGEqs Audioeffekt in Windows registrieren",
+    "stepGate": "Windows das Laden erlauben",
+    "stepAttach": "Mit {{device}} verbinden",
+    "gateWarning": "Dieser Schritt erlaubt Windows, Audioeffekte zu laden, die nicht von Microsoft signiert sind. Der Installer von Equalizer APO setzt dieselbe Option. Anwendungen, die einen geschützten Audiopfad verlangen (manche Streamingdienste), verweigern die Wiedergabe möglicherweise, solange sie gesetzt ist.",
+    "effectsDisabled": "Windows hat die Audioverbesserungen für dieses Gerät abgeschaltet, dadurch kann dort kein Effekt laufen. Beim Fortfahren werden sie wieder eingeschaltet.",
+    "helperMissing": "cageq-apo-setup.exe fehlt im CAGEq-Ordner, die Einrichtung kann nicht ausgeführt werden. Bitte CAGEq neu installieren.",
+    "pickDevice": "Wähle oben ein Ausgabegerät, um es einzurichten.",
+    "doStep": "Weiter",
+    "working": "Wird ausgeführt…",
+    "uacHint": "Windows fragt nach Administratorrechten.",
+    "restartNeeded": "Einrichtung abgeschlossen. Starte CAGEq neu, um die eigene Audio-Engine zu verwenden.",
+    "active": "CAGEq verarbeitet das Audio auf {{device}} selbst. Equalizer APO ist nicht beteiligt.",
+    "detach": "CAGEqs Audio-Engine für dieses Gerät nicht mehr verwenden",
+    "cancelled": "Abgebrochen — es wurde nichts geändert."
+  },
   "foreignConfig": {
     "notice": "config.txt enthält {{count}} weitere aktive Filterzeile(n), die sich über jede CAGEq-Korrektur stapeln.",
     "review": "Prüfen",

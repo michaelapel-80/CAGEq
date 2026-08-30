@@ -16,6 +16,7 @@ import { spectrumStream } from "./streams";
 import { Vectorscope } from "./Vectorscope";
 import { TimeScope } from "./TimeScope";
 import { SpectrumScope } from "./SpectrumScope";
+import ApoSetup from "./ApoSetup";
 import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
@@ -2476,6 +2477,17 @@ function App() {
         </p>
       )}
 
+
+      {/* Setup for CAGEq's own audio engine (filter.md §5.3c). Placed with the device
+          warnings because it is scoped to the selected endpoint — attaching is a per-device
+          choice, and the device is picked directly above. Renders nothing once the engine is
+          set up and running, so it stays out of the way in the steady state. */}
+      {!loading && (
+        <ApoSetup
+          endpointId={selectedDevice?.eqapo_pattern ?? null}
+          endpointName={selectedDevice?.name ?? null}
+        />
+      )}
       {/* Finding #1: passive (never modal) notice when foreign config.txt filters stack on top of
           CAGEq — only once a correction is applied, and dismissable per session. */}
       {!loading && result && foreignConfig && foreignConfig.length > 0 && !foreignDismissed && (

@@ -29,6 +29,10 @@ enum Backend {
         eq: Arc<dyn EqBackend>,
         /// Human-readable location of the applied config, for the status panel.
         config_dir: String,
+        /// Whether the backend chosen at startup is CAGEq's own APO. Recorded where the
+        /// decision is actually made rather than re-derived later by comparing paths, which
+        /// would be one more thing that could disagree with itself.
+        is_apo_backend: bool,
         config_source: String,
         sidecar: String,
     },
@@ -425,6 +429,86 @@ struct DeviceDto {
     eqapo_enabled: bool,
 }
 
+
+// --- APO setup (filter.md §5.3c) ------------------------------------------
+
+/// Setup state for CAGEq's own APO, for the setup panel.
+///
+/// Every field comes from a plain `HKLM` read, so this needs no elevation and can be polled
+/// freely — the UI shows a complete, honest picture and spends a UAC prompt only when the
+/// user actually asks for a change.
+#[derive(serde::Serialize)]
+struct ApoSetupDto {
+    /// Path to the registered `CAGEqApo.dll`, if it is registered at all.
+    registered_dll: Option<String>,
+    /// A registration can point at a deleted file: that looks fine in the registry and fails
+    /// silently at load, so the UI has to tell it apart from "not registered".
+    dll_present: bool,
+    /// `DisableProtectedAudioDG`. Without it the APO cannot load at all.
+    gate_open: bool,
+    /// The machine-wide half is done — what an installer would normally have handled.
+    machine_ready: bool,
+    attached: Vec<String>,
+    /// Endpoints whose effect chain is switched off wholesale, where no APO runs however it
+    /// is attached.
+    effects_disabled: Vec<String>,
+    /// Is this build's own APO the active backend right now? Selection happens at startup, so
+    /// finishing setup does not take effect until CAGEq is restarted — and the UI has to say
+    /// so rather than leaving the user wondering why nothing changed.
+    active_backend_is_apo: bool,
+    /// The one next action for `endpoint`, as a command string, or `null` when it is fully
+    /// set up. Ordered by the backend, not the UI: attaching before the gate is open looks
+    /// like it worked and silently does nothing.
+    next_step: Option<String>,
+    /// What that step will do, in a sentence — shown before the UAC prompt, since Windows'
+    /// own dialog only names the executable.
+    next_step_description: Option<String>,
+    /// Whether the elevated helper is actually installed beside the app. Without it no step
+    /// can be performed, and saying so beats a failure per button press.
+    helper_available: bool,
+}
+
+/// Read the APO setup state. No elevation, no prompt.
+#[tauri::command]
+fn apo_setup_status(endpoint: Option<String>, state: State<Backend>) -> ApoSetupDto {
+    use cageq_apo_backend::setup;
+
+    let s = setup::status();
+    let next = endpoint.as_deref().and_then(|e| s.next_step(e));
+    ApoSetupDto {
+        registered_dll: s.registered_dll.as_ref().map(|p| p.display().to_string()),
+        dll_present: s.dll_present,
+        gate_open: s.gate_open,
+        machine_ready: s.machine_ready(),
+        attached: s.attached.clone(),
+        effects_disabled: s.effects_disabled.clone(),
+        active_backend_is_apo: matches!(state.inner(), Backend::Ready { is_apo_backend: true, .. }),
+        next_step: next.as_ref().map(|a| a.argv().join(" ")),
+        next_step_description: next.as_ref().map(|a| a.describe()),
+        helper_available: setup::helper_path().is_ok(),
+    }
+}
+
+/// Perform one setup action, elevated. Raises exactly one UAC prompt.
+///
+/// `action` is a command string as produced by `next_step` (`"open-gate"`,
+/// `"attach {guid}"`, …), so the frontend never constructs one itself — it echoes back what
+/// the status told it to do.
+#[tauri::command]
+fn apo_setup_run(action: String) -> Result<String, String> {
+    use cageq_apo_backend::setup::{self, Action, SetupError};
+
+    let argv: Vec<String> = action.split_whitespace().map(str::to_string).collect();
+    let Some(action) = Action::from_argv(&argv) else {
+        return Err(format!("not a setup action: {action}"));
+    };
+    match setup::run_elevated(&action) {
+        Ok(text) => Ok(text),
+        // Cancelling the prompt is an ordinary choice, not a failure to report as one.
+        Err(SetupError::Declined) => Ok(String::new()),
+        Err(e) => Err(e.to_string()),
+    }
+}
 /// Active Windows playback devices to scope the EQ to (§3.0). A local registry read,
 /// not a sidecar call — available even if the DSP failed to start.
 #[tauri::command]
@@ -915,7 +999,8 @@ fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
     // — and the Equalizer APO backend stays the fallback for machines that have not made
     // that choice.
     let _ = std::fs::create_dir_all(&config_dir);
-    let eq: Arc<dyn EqBackend> = if cageq_apo_backend::is_installed() {
+    let is_apo_backend = cageq_apo_backend::is_installed();
+    let eq: Arc<dyn EqBackend> = if is_apo_backend {
         Arc::new(cageq_apo_backend::CageqApoBackend::default())
     } else {
         Arc::new(EqApoBackend::new(&config_dir))
@@ -930,6 +1015,7 @@ fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
                 core,
                 eq,
                 config_dir: reported_dir,
+                is_apo_backend,
                 config_source,
                 sidecar,
             }
@@ -1137,6 +1223,8 @@ pub fn run() {
             status,
             list_headphones,
             list_devices,
+            apo_setup_status,
+            apo_setup_run,
             config_foreign_directives,
             disable_foreign_config,
             restore_foreign_config,
