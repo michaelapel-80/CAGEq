@@ -330,7 +330,17 @@ public:
 
     STDMETHOD(UnlockForProcess)() override
     {
-        DiagF(L"UnlockForProcess");
+        // The frame counter is the ONLY positive evidence that this APO actually processed
+        // audio. With an identity passthrough, "it loads, it locks, audio plays" is equally
+        // true of an APO that Windows dropped from the chain entirely — which is exactly how
+        // an earlier bug here went unnoticed and got called a pass. A non-zero count that
+        // scales with playback duration cannot be produced any other way: APOProcess ran, on
+        // our handle, on the real-time thread.
+        //
+        // Read here rather than on the RT path, where logging would be a dropout.
+        DiagF(L"UnlockForProcess: frames processed this lock = %llu",
+              cageq_apo_frames_processed(m_rust));
+
         // Detach BEFORE destroying, not after. The engine is documented not to call
         // APOProcess concurrently with this, but the reversed order leaves a window where
         // m_rust is a dangling pointer that APOProcess's null check would happily accept —
