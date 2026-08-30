@@ -396,15 +396,31 @@ public:
 
     STDMETHOD(CreateInstance)(IUnknown* pOuter, REFIID iid, void** ppv) override
     {
+        // pOuter is the whole question here: if audiodg ever asks to AGGREGATE this APO, the
+        // CLASS_E_NOAGGREGATION below refuses and the object is never constructed — which
+        // from outside looks exactly like the current symptom (DllGetClassObject called
+        // repeatedly, no constructor, no Initialize, no LockForProcess, dead endpoint).
+        // EqualizerAPO carries a full delegating/non-delegating IUnknown pair, which is
+        // strong evidence that aggregation IS used on this path; a comment in this file
+        // previously asserted the opposite without evidence.
+        DiagF(L"ClassFactory::CreateInstance: pOuter=%s iid=%08X-%04X-%04X",
+              (pOuter == nullptr) ? L"NULL (not aggregated)" : L"NON-NULL (AGGREGATION REQUESTED)",
+              iid.Data1, iid.Data2, iid.Data3);
+
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
-        if (pOuter != nullptr) return CLASS_E_NOAGGREGATION;
+        if (pOuter != nullptr)
+        {
+            DiagF(L"  -> CLASS_E_NOAGGREGATION (refusing to be aggregated)");
+            return CLASS_E_NOAGGREGATION;
+        }
 
         CageqApo* apo = new (std::nothrow) CageqApo();
         if (apo == nullptr) return E_OUTOFMEMORY;
 
         HRESULT hr = apo->QueryInterface(iid, ppv);
         apo->Release();
+        DiagF(L"  -> QueryInterface 0x%08X", hr);
         return hr;
     }
 
