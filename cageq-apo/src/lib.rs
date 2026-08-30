@@ -233,10 +233,13 @@ pub unsafe extern "C" fn cageq_apo_load_config(
         Ok(Some(cfg)) => {
             // Bands first: if they are refused the preamp must not be applied either, or the
             // endpoint would run at a level chosen to compensate for filters that aren't there.
-            if !apo.cascade.set_bands(&cfg.bands) {
+            // Preamp first, then bands: the cascade's loudness ceiling is checked against the
+            // *combination*, so applying an attenuating preamp before the boosts it was
+            // calculated to offset is what lets a legitimate correction through. Applying
+            // them the other way round can trip the guard on a chain that is fine as a whole.
+            if !apo.cascade.set_preamp_db(cfg.preamp_db) || !apo.cascade.set_bands(&cfg.bands) {
                 return CAGEQ_CONFIG_UNSUITABLE;
             }
-            apo.cascade.set_preamp_db(cfg.preamp_db);
             CAGEQ_CONFIG_APPLIED
         }
         Err(_) => CAGEQ_CONFIG_REJECTED,
@@ -253,8 +256,9 @@ pub unsafe extern "C" fn cageq_apo_set_preamp_db(handle: *mut c_void, db: f64) -
     if handle.is_null() || !db.is_finite() {
         return false;
     }
-    unsafe { (*(handle as *mut CageqApo)).cascade.set_preamp_db(db) };
-    true
+    // Propagated, not discarded: the cascade also refuses a preamp that would push the
+    // *combined* chain past its safety ceiling, which the caller needs to know about.
+    unsafe { (*(handle as *mut CageqApo)).cascade.set_preamp_db(db) }
 }
 
 /// Destroy an instance from [`cageq_apo_create`]. Null is a no-op.

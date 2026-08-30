@@ -56,9 +56,45 @@ pub struct Coeffs {
     pub a2: f64,
 }
 
+/// One frequency's precomputed `cos`/`sin` terms, so the safety check below costs
+/// arithmetic and no trigonometry. Built once per [`Cascade`], never on the audio path.
+#[derive(Debug, Clone, Copy, Default)]
+struct GridPoint {
+    c1: f64,
+    s1: f64,
+    c2: f64,
+    s2: f64,
+}
+
+/// How many log-spaced frequencies the peak-gain guard samples. Enough to catch a resonant
+/// peak of any Q a real correction uses, cheap enough to run whenever coefficients change.
+const GUARD_POINTS: usize = 64;
+
+/// Absolute ceiling on the cascade's **combined** response, in dB, preamp included.
+///
+/// A hazard limit, not a policy one — CAGEq's own §4.2 headroom logic is far stricter. It
+/// exists because coefficients can arrive from a config file or a control channel written by
+/// a process we do not trust, and "loud enough to hurt" is a property of the whole chain, not
+/// of any single filter: three stable, individually reasonable bands can still stack.
+const MAX_TOTAL_GAIN_DB: f64 = 20.0;
+
 impl Coeffs {
     /// The identity filter — passes its input through untouched.
     pub const PASSTHROUGH: Coeffs = Coeffs { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
+
+    /// `|H|²` at a precomputed grid point.
+    #[inline]
+    fn power_at(&self, g: &GridPoint) -> f64 {
+        let num_re = self.b0 + self.b1 * g.c1 + self.b2 * g.c2;
+        let num_im = -(self.b1 * g.s1 + self.b2 * g.s2);
+        let den_re = 1.0 + self.a1 * g.c1 + self.a2 * g.c2;
+        let den_im = -(self.a1 * g.s1 + self.a2 * g.s2);
+        let den = den_re * den_re + den_im * den_im;
+        if den <= 0.0 {
+            return f64::INFINITY; // a pole exactly on the unit circle
+        }
+        (num_re * num_re + num_im * num_im) / den
+    }
 
     /// `20·log₁₀|H(e^{jω})|` at `freq_hz`. Analytic; used by the tests as the reference the
     /// sample loop is checked against, and cheap enough to be worth keeping for diagnostics.
@@ -168,10 +204,25 @@ pub struct Cascade {
     state: Vec<BiquadState>,
     /// Linear preamp gain (not dB): applied before the cascade, as EqAPO's `Preamp:` is.
     preamp: f64,
+    /// Precomputed trig for the peak-gain guard — see [`Cascade::would_be_too_loud`].
+    grid: Vec<GridPoint>,
 }
 
 impl Cascade {
     pub fn new(channels: usize, sample_rate: f64) -> Cascade {
+        // Log-spaced from 20 Hz to just under Nyquist. Built here, off the audio path, so the
+        // guard never evaluates a transcendental function while audio is running.
+        let lo: f64 = 20.0;
+        let hi = (0.45 * sample_rate).max(lo * 2.0);
+        let grid = (0..GUARD_POINTS)
+            .map(|i| {
+                let t = i as f64 / (GUARD_POINTS - 1) as f64;
+                let f = lo * (hi / lo).powf(t);
+                let w = 2.0 * std::f64::consts::PI * f / sample_rate;
+                GridPoint { c1: w.cos(), s1: w.sin(), c2: (2.0 * w).cos(), s2: (2.0 * w).sin() }
+            })
+            .collect();
+
         Cascade {
             channels,
             sample_rate,
@@ -179,7 +230,35 @@ impl Cascade {
             band_count: 0,
             state: vec![BiquadState::default(); channels * MAX_BANDS],
             preamp: 1.0,
+            grid,
         }
+    }
+
+    /// Would this coefficient set, at this preamp, exceed [`MAX_TOTAL_GAIN_DB`] anywhere?
+    ///
+    /// Checks the **combined** response rather than each filter, because that is the quantity
+    /// that reaches someone's ears: several individually-reasonable stable bands can stack
+    /// into something dangerous, and a stability check alone does not bound loudness at all
+    /// (a perfectly stable biquad can have a `b0` of 1000).
+    ///
+    /// Costs `bands × GUARD_POINTS` multiply-adds and no trigonometry, so it is affordable
+    /// even when run from the audio path on an incoming control-channel update.
+    fn would_be_too_loud(&self, coeffs: &[Coeffs], preamp: f64) -> bool {
+        let preamp_db = 20.0 * preamp.log10();
+        for g in &self.grid {
+            let mut db = preamp_db;
+            for c in coeffs {
+                let p = c.power_at(g);
+                if !p.is_finite() {
+                    return true;
+                }
+                db += 10.0 * p.log10();
+            }
+            if !db.is_finite() || db > MAX_TOTAL_GAIN_DB {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn sample_rate(&self) -> f64 {
@@ -215,21 +294,59 @@ impl Cascade {
         if bands.iter().any(|b| !(b.freq_hz > 0.0 && b.freq_hz < nyquist_limit)) {
             return false;
         }
-        for (slot, band) in self.coeffs.iter_mut().zip(bands) {
+        // Built into a candidate array and checked before anything is committed, so a set
+        // that turns out to be too loud leaves the running correction untouched.
+        let mut candidate = [Coeffs::PASSTHROUGH; MAX_BANDS];
+        for (slot, band) in candidate.iter_mut().zip(bands) {
             *slot = coefficients(band, self.sample_rate);
         }
-        // Newly-unused slots become identity, so a shrinking cascade cannot leave a stale
-        // filter running purely because band_count moved.
-        for slot in self.coeffs[bands.len()..].iter_mut() {
-            *slot = Coeffs::PASSTHROUGH;
+        if self.would_be_too_loud(&candidate[..bands.len()], self.preamp) {
+            return false;
         }
+
+        self.coeffs = candidate;
         self.band_count = bands.len();
         true
     }
 
+    /// Apply a validated control-channel snapshot: coefficients straight through, no
+    /// trigonometry. Returns `false` — changing nothing — if the combination would be too
+    /// loud, which the channel's own per-filter checks cannot determine (they see each
+    /// biquad alone, and stability says nothing about gain).
+    pub fn apply_coeffs(&mut self, coeffs: &[Coeffs], preamp_db: f64) -> bool {
+        if coeffs.len() > MAX_BANDS || !preamp_db.is_finite() {
+            return false;
+        }
+        let preamp = 10.0_f64.powf(preamp_db / 20.0);
+        if !preamp.is_finite() || self.would_be_too_loud(coeffs, preamp) {
+            return false;
+        }
+
+        let mut candidate = [Coeffs::PASSTHROUGH; MAX_BANDS];
+        for (slot, c) in candidate.iter_mut().zip(coeffs) {
+            *slot = *c;
+        }
+        self.coeffs = candidate;
+        self.band_count = coeffs.len();
+        self.preamp = preamp;
+        true
+    }
+
     /// Set the preamp in dB (negative attenuates), matching EqAPO's `Preamp:` line.
-    pub fn set_preamp_db(&mut self, db: f64) {
-        self.preamp = 10.0_f64.powf(db / 20.0);
+    ///
+    /// Returns `false` and changes nothing if the result would exceed the safety ceiling in
+    /// combination with the filters already running — the hazard is the whole chain, so it
+    /// has to be re-checked from whichever end changes.
+    pub fn set_preamp_db(&mut self, db: f64) -> bool {
+        if !db.is_finite() {
+            return false;
+        }
+        let preamp = 10.0_f64.powf(db / 20.0);
+        if !preamp.is_finite() || self.would_be_too_loud(&self.coeffs[..self.band_count], preamp) {
+            return false;
+        }
+        self.preamp = preamp;
+        true
     }
 
     /// Clear every delay register — a genuine cold start. Only for a discontinuity where
@@ -498,6 +615,62 @@ mod tests {
         );
         // And the dropped band really was doing something there, or this proves nothing.
         assert!(expected < 11.0, "sanity: the dropped +12 dB band should have dominated 5 kHz");
+    }
+
+    /// The loudness ceiling, which is about the **combined** chain rather than any one
+    /// filter. Stability says nothing about gain — a perfectly stable biquad can have a `b0`
+    /// of 1000 — and several individually reasonable bands can stack into something
+    /// dangerous, so neither a per-filter check nor a preamp bound is sufficient alone.
+    #[test]
+    fn a_dangerously_loud_chain_is_refused_from_either_end() {
+        let mut c = Cascade::new(2, FS);
+
+        // One absurd band.
+        assert!(!c.set_bands(&[peaking(1000.0, 39.0, 1.0)]), "accepted a ~+39 dB band");
+
+        // Several individually-plausible boosts that stack past the ceiling at one frequency.
+        let stacked: Vec<Band> = (0..6).map(|_| peaking(1000.0, 6.0, 0.7)).collect();
+        assert!(!c.set_bands(&stacked), "accepted six stacked +6 dB bands at one frequency");
+
+        // The same bands spread out, so nothing stacks, are fine.
+        let spread: Vec<Band> =
+            (0..6).map(|i| peaking(100.0 * 2.0_f64.powi(i), 6.0, 2.0)).collect();
+        assert!(c.set_bands(&spread), "refused a realistic spread correction");
+
+        // …and the preamp is re-checked against whatever is already running, since the
+        // hazard is the chain and either end can create it.
+        assert!(c.set_preamp_db(-6.0));
+        assert!(!c.set_preamp_db(60.0), "accepted +60 dB of preamp");
+        assert!(c.set_preamp_db(-12.0), "refused a harmless attenuation");
+    }
+
+    /// A refused set must leave the running correction exactly as it was — the audio does not
+    /// stop while someone edits a file badly.
+    #[test]
+    fn a_refused_loud_set_leaves_the_running_one_intact() {
+        let mut c = Cascade::new(2, FS);
+        assert!(c.set_bands(&[peaking(1000.0, 6.0, 1.4)]));
+        let before = c.response_db(1000.0);
+
+        assert!(!c.set_bands(&[peaking(1000.0, 39.0, 1.0)]));
+        assert_eq!(c.band_count(), 1);
+        assert!((c.response_db(1000.0) - before).abs() < 1e-12);
+    }
+
+    /// The control channel's path into the engine: coefficients applied directly, with the
+    /// same loudness ceiling the band path gets.
+    #[test]
+    fn applying_raw_coefficients_honours_the_same_ceiling() {
+        let mut c = Cascade::new(2, FS);
+        let gentle = coefficients(&peaking(1000.0, 6.0, 1.4), FS);
+        assert!(c.apply_coeffs(&[gentle], -3.0));
+        assert_eq!(c.band_count(), 1);
+
+        // Stable (poles well inside the unit circle) but enormously loud — exactly what a
+        // stability-only check would wave through.
+        let loud = Coeffs { b0: 1000.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
+        assert!(!c.apply_coeffs(&[loud], 0.0), "accepted a stable but +60 dB filter");
+        assert_eq!(c.band_count(), 1, "a refused apply must not disturb what is running");
     }
 
     /// A band at or above Nyquist is refused, and the running cascade is left alone.
