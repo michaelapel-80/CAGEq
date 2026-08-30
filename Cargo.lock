@@ -33,6 +33,7 @@ version = "0.6.0"
 dependencies = [
  "cageq-apo",
  "cageq-backend",
+ "cageq-monitor",
  "sha2",
  "thiserror",
  "winreg",

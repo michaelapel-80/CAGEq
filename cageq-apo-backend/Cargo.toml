@@ -17,3 +17,8 @@ thiserror = "2.0.18"
 # Setup status and the elevated helper both live on the registry.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+
+[dev-dependencies]
+# For the switchtest example only: it drives the loopback recorder. Not a runtime
+# dependency of the backend — the app already owns the monitor.
+cageq-monitor = { path = "../cageq-monitor" }
