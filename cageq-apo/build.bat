@@ -61,5 +61,12 @@ cl /nologo /LD /MT /EHsc /GR- /W4 /O2 /std:c++17 /DUNICODE /D_UNICODE ^
 if errorlevel 1 ( echo [cageq-apo] link failed & exit /b 1 )
 
 echo.
-echo [cageq-apo] built build\CAGEqApo.dll
+REM The channel writer used to verify the control channel on a VM. Static CRT to match the
+REM shim's /MT: a clean test VM has no VC++ redistributable, and an exe that cannot start
+REM there is indistinguishable from a control channel that does not work.
+"%CARGO%" rustc --release --example push -- -C target-feature=+crt-static
+if errorlevel 1 ( echo [cageq-apo] push example failed & exit /b 1 )
+copy /y ..\target\release\examples\push.exe build\push.exe >nul
+
+echo [cageq-apo] built build\CAGEqApo.dll and build\push.exe
 endlocal
