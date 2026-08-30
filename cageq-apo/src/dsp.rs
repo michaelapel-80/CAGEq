@@ -37,7 +37,7 @@ pub enum FilterKind {
     Bandpass,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Band {
     pub kind: FilterKind,
     pub freq_hz: f64,

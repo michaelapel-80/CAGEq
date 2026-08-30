@@ -29,13 +29,19 @@
 //! path is written to have no panicking operations at all (no indexing that can go out of
 //! bounds, no `unwrap`), rather than relying on a catch.
 //!
-//! ## Stage B scope
-//! This is deliberately an **identity passthrough**. Stage B answers one question — does
-//! our APO load into audiodg and pass audio? — and adding DSP before that is answered
-//! would only make a failure harder to localise. The biquad cascade, preamp and shared
-//! memory control channel land in stage C, against a synthetic ground-truth harness rather
-//! than by ear inside audiodg.
+//! ## Layout
+//! * [`dsp`] — the biquad cascade and preamp, verified against a ground-truth harness
+//!   (impulse response → DFT vs. the analytic magnitude) rather than by ear inside audiodg.
+//! * [`config`] — the persistent per-endpoint correction, loaded at lock time so the APO
+//!   keeps working with CAGEq not running, exactly as EqualizerAPO does from `config.txt`.
+//! * this module — the C ABI the shim drives: create/destroy, set bands and preamp, process.
+//!
+//! Still to come (stage C3b): the shared-memory control channel, which layers live edits on
+//! top of the persistent config. It is about *edit latency*, not state-carry — the cascade
+//! carries its delay registers across any coefficient change by construction, so even a
+//! reload from disk is already free of Equalizer APO's cold-start bloom.
 
+pub mod config;
 pub mod dsp;
 
 use std::ffi::c_void;
