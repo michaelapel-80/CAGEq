@@ -93,6 +93,15 @@ const MAX_TOTAL_GAIN_DB: f64 = 20.0;
 /// chasing a moving target, while still being far too short to feel like lag.
 const RAMP_MS: f64 = 8.0;
 
+
+/// How long a crossfade to or from dry takes, in milliseconds.
+///
+/// Longer than [`RAMP_MS`] because it is doing a different job. A coefficient ramp nudges a
+/// filter to a nearby filter; this switches between two *entirely different signals*, and the
+/// only thing keeping that inaudible is that both are continuous and the weighting moves
+/// smoothly. Short enough to still feel instant for A/B listening, which is the whole point of
+/// the control.
+const DRY_FADE_MS: f64 = 15.0;
 impl Coeffs {
     /// Linear interpolation towards `other` by `t` in `[0, 1]`.
     ///
@@ -146,6 +155,12 @@ impl Coeffs {
     }
 }
 
+
+/// dB to a linear gain. One place, so the ramp and the setters cannot disagree about it.
+#[inline]
+fn db_to_gain(db: f64) -> f64 {
+    10.0_f64.powf(db / 20.0)
+}
 /// RBJ cookbook coefficients for one band at `sample_rate`.
 ///
 /// Transcribed from `cageq-core`'s `morph.rs::coefficients` (itself matching AutoEq's
@@ -252,7 +267,39 @@ pub struct Cascade {
     /// the sample loop walks contiguous memory.
     state: Vec<BiquadState>,
     /// Linear preamp gain (not dB): applied before the cascade, as EqAPO's `Preamp:` is.
+    /// During a ramp this moves with the coefficients.
     preamp: f64,
+    /// The preamp ramp's endpoints, in dB.
+    ///
+    /// Interpolated in **dB, not linear gain**: a preamp is a fader, and a fader that moves
+    /// linearly in amplitude spends most of its travel near the loud end. That matters most
+    /// where the change is largest — the safe state is -120 dB, and a linear ramp to it would
+    /// be inaudibly slow at the start and abrupt at the end.
+    preamp_from_db: f64,
+    preamp_to_db: f64,
+    /// Crossfade position between the filtered signal and the untouched input:
+    /// 0 = fully corrected, 1 = fully dry.
+    ///
+    /// **Why a crossfade and not a coefficient ramp.** Going dry removes the whole correction
+    /// at once, and a ramp has to travel through intermediate filters that are nobody's
+    /// intended sound — measured at -40 dB, as bad as an Equalizer APO cold reload and
+    /// audibly far worse than a retune. Fading between two *continuous* signals has no such
+    /// intermediate state: the corrected chain keeps running untouched and only its weight
+    /// moves. Dry costs nothing extra to have available, because it is the input itself.
+    ///
+    /// The chain also keeps processing while dry is active, so it stays warm and switching
+    /// back is just as clean — that is the "keep the other slot warm" idea, in the one case
+    /// where the other slot needs no second chain.
+    dry_mix: f64,
+    dry_from: f64,
+    dry_to: f64,
+    /// Linear gain on the dry path. **Not unity**: CAGEq compares in loudness-matched mode,
+    /// so the Dry slot still carries the base pre-gain (§4.0) — that level match is what makes
+    /// the A/B unbiased, and dropping it here would reintroduce exactly the loudness bias the
+    /// comparison exists to avoid. It is simply a correction with no filters.
+    dry_preamp: f64,
+    dry_fade_left: u32,
+    dry_fade_frames: u32,
     /// Precomputed trig for the peak-gain guard — see [`Cascade::would_be_too_loud`].
     grid: Vec<GridPoint>,
 }
@@ -285,6 +332,14 @@ impl Cascade {
             process_count: 0,
             state: vec![BiquadState::default(); channels * MAX_BANDS],
             preamp: 1.0,
+            preamp_from_db: 0.0,
+            preamp_to_db: 0.0,
+            dry_mix: 0.0,
+            dry_from: 0.0,
+            dry_to: 0.0,
+            dry_preamp: 1.0,
+            dry_fade_left: 0,
+            dry_fade_frames: ((DRY_FADE_MS / 1000.0) * sample_rate).round().max(1.0) as u32,
             grid,
         }
     }
@@ -294,7 +349,11 @@ impl Cascade {
     /// Retargeting mid-ramp is fine and expected — a drag produces a stream of these — because
     /// the new ramp starts from wherever the coefficients have actually reached, not from the
     /// previous target. There is no discontinuity at a retarget.
-    fn start_ramp(&mut self, target: &[Coeffs], new_count: usize) {
+    fn start_ramp(&mut self, target: &[Coeffs], new_count: usize, preamp_db: f64) {
+        // From wherever the preamp has actually reached, not from the previous target, so a
+        // switch that interrupts a ramp still moves continuously.
+        self.preamp_from_db = 20.0 * self.preamp.log10();
+        self.preamp_to_db = preamp_db;
         for i in 0..MAX_BANDS {
             self.target[i] = target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH);
             self.start[i] = self.coeffs[i];
@@ -307,6 +366,49 @@ impl Cascade {
         self.ramp_left = self.ramp_frames;
     }
 
+
+    /// Fade to the untouched input, or back to the correction.
+    ///
+    /// Explicit rather than inferred from "a correction with no filters", because those are
+    /// not the same thing: a preamp-only correction is legitimate (§4 loudness matching) and
+    /// must still be applied, while dry means *nothing at all* — no filters and no preamp.
+    ///
+    /// Retargeting mid-fade continues from where the mix has actually reached, so a fast
+    /// A/B/dry sequence never jumps.
+    pub fn set_dry(&mut self, dry: bool, dry_preamp_db: f64) {
+        let want = if dry { 1.0 } else { 0.0 };
+        if dry {
+            self.dry_preamp = db_to_gain(dry_preamp_db);
+        }
+        if self.dry_to == want && self.dry_fade_left == 0 {
+            return;
+        }
+        self.dry_from = self.dry_mix;
+        self.dry_to = want;
+        self.dry_fade_left = self.dry_fade_frames;
+    }
+
+    /// Is the dry signal currently selected (or being faded to)?
+    pub fn is_dry(&self) -> bool {
+        self.dry_to > 0.5
+    }
+
+    /// Advance the dry crossfade one frame.
+    #[inline]
+    fn advance_dry(&mut self) {
+        self.dry_fade_left -= 1;
+        if self.dry_fade_left == 0 {
+            self.dry_mix = self.dry_to;
+            return;
+        }
+        let t = 1.0 - self.dry_fade_left as f64 / self.dry_fade_frames as f64;
+        // Smoothstep here, unlike the coefficient ramp. The two are shaped by different
+        // constraints: a coefficient ramp is hurt by the higher mid-travel *rate* smoothstep
+        // implies, while a crossfade between two continuous signals is hurt by the *corners* a
+        // straight line leaves at each end, which are themselves broadband.
+        let s = t * t * (3.0 - 2.0 * t);
+        self.dry_mix = self.dry_from + (self.dry_to - self.dry_from) * s;
+    }
     /// Jump straight to the target, abandoning any ramp in progress.
     ///
     /// For configuration applied when there is nothing to protect — the persistent config at
@@ -315,6 +417,9 @@ impl Cascade {
     /// wrong, easing in from a flat response nobody asked for.
     pub fn settle(&mut self) {
         self.coeffs = self.target;
+        self.preamp = db_to_gain(self.preamp_to_db);
+        self.dry_mix = self.dry_to;
+        self.dry_fade_left = 0;
         self.process_count = self.band_count;
         self.ramp_left = 0;
     }
@@ -332,6 +437,7 @@ impl Cascade {
         if self.ramp_left == 0 {
             // Land exactly on the target rather than on an interpolation of it.
             self.coeffs = self.target;
+            self.preamp = db_to_gain(self.preamp_to_db);
             self.process_count = self.band_count;
             return;
         }
@@ -345,6 +451,12 @@ impl Cascade {
         // increment: the shape demands it, and it also means a long series of edits cannot
         // let rounding drift the response away from what was asked for.
         let s = 1.0 - self.ramp_left as f64 / self.ramp_frames as f64;
+        // The preamp travels with the coefficients. Leaving it to jump was a real click: a
+        // switch to Dry drops the whole correction AND returns the preamp to unity at once, so
+        // an instant preamp step made that transition as loud as an Equalizer APO cold reload
+        // (-41 dB) while a plain retune measured -60 dB.
+        self.preamp =
+            db_to_gain(self.preamp_from_db + (self.preamp_to_db - self.preamp_from_db) * s);
         for i in 0..self.process_count {
             // Still a convex combination of two validated coefficient sets, so the stability
             // argument in `Coeffs::lerp` holds for any easing curve within [0, 1].
@@ -422,7 +534,8 @@ impl Cascade {
             return false;
         }
 
-        self.start_ramp(&candidate[..bands.len()], bands.len());
+        // Bands only: the preamp keeps whatever target it already had.
+        self.start_ramp(&candidate[..bands.len()], bands.len(), self.preamp_to_db);
         true
     }
 
@@ -439,8 +552,15 @@ impl Cascade {
             return false;
         }
 
-        self.start_ramp(coeffs, coeffs.len());
-        self.preamp = preamp;
+        // A correction with no filters is exactly what Dry is. Crossfade to it rather than
+        // dismantling the chain: the coefficients and their state keep running, so the
+        // transition has no intermediate filters nobody asked for, and coming back is warm.
+        if coeffs.is_empty() {
+            self.set_dry(true, preamp_db);
+            return true;
+        }
+        self.set_dry(false, 0.0);
+        self.start_ramp(coeffs, coeffs.len(), preamp_db);
         true
     }
 
@@ -457,7 +577,10 @@ impl Cascade {
         if !preamp.is_finite() || self.would_be_too_loud(&self.coeffs[..self.band_count], preamp) {
             return false;
         }
-        self.preamp = preamp;
+        // Ramped, not assigned: a preamp step is a gain discontinuity, which is a click.
+        let target = self.target;
+        let count = self.band_count;
+        self.start_ramp(&target[..count], count, db);
         true
     }
 
@@ -560,14 +683,22 @@ impl Cascade {
             if self.ramp_left > 0 {
                 self.advance_ramp();
             }
+            if self.dry_fade_left > 0 {
+                self.advance_dry();
+            }
             for ch in 0..channels {
                 let i = frame * channels + ch;
-                let mut x = input[i] as f64 * self.preamp;
+                let raw = input[i] as f64;
+                let mut x = raw * self.preamp;
                 let base = ch * MAX_BANDS;
                 for b in 0..self.process_count {
                     x = self.state[base + b].step(&self.coeffs[b], x);
                 }
-                output[i] = x as f32;
+                // The chain runs even when fully dry, so its delay registers stay warm and
+                // coming back is as clean as going. That is the whole cost of the feature: a
+                // multiply-add per sample, and filters that never go cold.
+                let dry = raw * self.dry_preamp;
+                output[i] = (x + (dry - x) * self.dry_mix) as f32;
             }
         }
     }
@@ -1041,6 +1172,169 @@ mod tests {
 
 
 
+
+
+    /// Peak sample-to-sample jump, relative to the largest jump the signal makes on its own —
+    /// **the click metric that matches what is heard**.
+    ///
+    /// The HF-splatter measure above is right for a *retune*, where the artefact is spread
+    /// over the filter's settling time. It badly understates a **step**: a gain discontinuity
+    /// is one sample wide, so integrating it across a 20 ms window dilutes it, and dividing by
+    /// a fundamental whose own level just changed hides it further. That mismatch is why an
+    /// audibly awful dry switch first measured about the same as an Equalizer APO reload.
+    ///
+    /// A discontinuity is exactly a sample-to-sample jump larger than the waveform's own slew,
+    /// so that is what this measures. 1.0 means the signal never jumps by more than it does
+    /// naturally; 10.0 means a step ten times larger than anything the tone itself does.
+    fn worst_jump_ratio(x: &[f32]) -> f64 {
+        let jumps: Vec<f64> =
+            x.windows(2).map(|w| (w[1] - w[0]).abs() as f64).collect();
+        let peak = jumps.iter().copied().fold(0.0f64, f64::max);
+        // The typical slew, taken as the median so one outlier — the click itself — cannot
+        // inflate the very baseline it is being compared against.
+        let mut sorted = jumps.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = sorted[sorted.len() / 2].max(1e-12);
+        peak / median
+    }
+
+
+
+    /// A **preamp change on its own** must not step the signal.
+    ///
+    /// This was a real click, and the likely one behind "switching to dry is very audible":
+    /// the preamp used to be assigned instantly while only the coefficients ramped. Switching
+    /// slots changes the composed preamp (§4.1 loudness match + §4.2 headroom), and on a
+    /// correction with real boosts that difference is easily 10 dB — an instant 10 dB gain
+    /// step is a loud click regardless of what the filters do.
+    ///
+    /// Isolated from any filter change so it measures exactly one thing.
+    #[test]
+    fn a_preamp_change_alone_does_not_step_the_signal() {
+        const WINDOW: usize = 960;
+        let wet: Vec<Coeffs> =
+            realistic_correction(6.0).iter().map(|b| coefficients(b, FS)).collect();
+
+        // Swept across the tone's phase, taking the worst. WINDOW is exactly one period, so
+        // a window starting at sample 0 begins at a ZERO CROSSING — where a gain step produces
+        // no jump at all, because zero times anything is zero. Measuring only there reports
+        // the most forgiving phase there is, and hides the very thing being looked for; a real
+        // switch lands at an arbitrary phase, and near a peak is where a step is loudest.
+        let measure = |instant: bool| -> f64 {
+            let mut worst = 0.0f64;
+            for phase in (0..WINDOW).step_by(WINDOW / 8) {
+                let warm = tone(50.0, 0, WINDOW * 20 + phase, 0.5);
+                let cont = tone(50.0, WINDOW * 20 + phase, WINDOW, 0.5);
+                let mut c = Cascade::new(1, FS);
+                assert!(c.apply_coeffs(&wet, -16.0));
+                c.settle();
+                let mut sink = vec![0.0f32; warm.len()];
+                c.process(&warm, &mut sink, warm.len());
+
+                // Same filters, 10 dB more preamp — the size of a real slot switch.
+                assert!(c.apply_coeffs(&wet, -6.0));
+                if instant {
+                    c.settle(); // what the engine used to do with any preamp change
+                }
+                // The last pre-switch sample is prepended: the step happens AT the boundary, and
+                // a metric that only looks after it cannot see the very discontinuity it is
+                // for. This is what made an instant switch to dry appear clean.
+                let mut out = vec![*sink.last().unwrap()];
+                out.extend(std::iter::repeat(0.0f32).take(WINDOW));
+                c.process(&cont, &mut out[1..], WINDOW);
+                worst = worst.max(worst_jump_ratio(&out));
+            }
+            worst
+        };
+
+        let ramped = measure(false);
+        let stepped = measure(true);
+        eprintln!("preamp +10 dB — ramped {ramped:.1}x, stepped {stepped:.1}x natural slew");
+
+        // An instant 10 dB step really is a discontinuity...
+        assert!(stepped > 5.0, "the stepped case should show a clear jump ({stepped:.1}x)");
+        // ...and ramping must leave nothing worth calling one.
+        // Measured: 16.3x stepped, 2.2x ramped. The residual is the ramp itself changing gain
+        // slightly differently each sample, which is not a discontinuity.
+        assert!(ramped < 3.0, "preamp ramp still steps the signal ({ramped:.1}x)");
+    }
+    /// **Switching to and from dry**, faded against switched instantly.
+    ///
+    /// Measured as a comparison, because the absolute HF number is not meaningful here: a
+    /// 50 Hz tone has a 20 ms period, so *any* change made within one period necessarily puts
+    /// energy at higher frequencies. That is why a retune scores about -60 dB and a dry switch
+    /// cannot — the retune is a small parameter nudge, this replaces the signal. What can be
+    /// asked is whether fading beats switching, and by how much.
+    ///
+    /// The click metric is the one that tracks what is heard: the worst sample-to-sample jump
+    /// against the waveform's own slew. A click *is* a discontinuity.
+    ///
+    /// Dry is loudness-matched, not unity — it keeps the base pre-gain, which is what makes
+    /// the comparison unbiased — so it is modelled as a correction with no filters and a
+    /// preamp of its own, exactly as the core composes it.
+    #[test]
+    fn fading_to_and_from_dry_beats_switching_instantly() {
+        const WINDOW: usize = 960;
+        const BASE_PREGAIN_DB: f64 = -6.0; // §4.0, carried by both slots
+        const WET_PREAMP_DB: f64 = -9.0;   // base + loudness match + headroom
+
+        let wet: Vec<Coeffs> =
+            realistic_correction(6.0).iter().map(|b| coefficients(b, FS)).collect();
+
+        // `instant` mirrors what the engine did before the crossfade existed.
+        // Swept across the tone's phase, taking the worst: WINDOW is exactly one period, so a
+        // window starting at sample 0 begins at a zero crossing, where a level change produces
+        // no jump at all. Measuring only there reports the most forgiving phase there is.
+        let run = |instant: bool, to_dry: bool| -> f64 {
+            let mut worst = 0.0f64;
+            for phase in (0..WINDOW).step_by(WINDOW / 8) {
+            let warm = tone(50.0, 0, WINDOW * 60 + phase, 0.5);
+            let cont = tone(50.0, WINDOW * 60 + phase, WINDOW, 0.5);
+            let mut c = Cascade::new(1, FS);
+            let mut sink = vec![0.0f32; warm.len()];
+            if to_dry {
+                assert!(c.apply_coeffs(&wet, WET_PREAMP_DB));
+            } else {
+                assert!(c.apply_coeffs(&[], BASE_PREGAIN_DB));
+            }
+            c.settle();
+            c.process(&warm, &mut sink, warm.len());
+
+            if to_dry {
+                assert!(c.apply_coeffs(&[], BASE_PREGAIN_DB));
+            } else {
+                assert!(c.apply_coeffs(&wet, WET_PREAMP_DB));
+            }
+            if instant {
+                c.settle();
+            }
+            // The last pre-switch sample is prepended: the step happens AT the boundary, and a
+            // metric that only looks after it cannot see the discontinuity it is for.
+            let mut out = vec![*sink.last().unwrap()];
+            out.extend(std::iter::repeat(0.0f32).take(WINDOW));
+            c.process(&cont, &mut out[1..], WINDOW);
+            worst = worst.max(worst_jump_ratio(&out));
+            }
+            worst
+        };
+
+        let to_faded = run(false, true);
+        let to_instant = run(true, true);
+        let from_faded = run(false, false);
+        let from_instant = run(true, false);
+        eprintln!(
+            "dry jump ratio — to: {to_faded:.1}x faded vs {to_instant:.1}x instant; \
+             from: {from_faded:.1}x faded vs {from_instant:.1}x instant"
+        );
+
+        // A crossfade between two continuous signals must leave no discontinuity worth the
+        // name: nothing much above the tone's own slew.
+        assert!(to_faded < 2.5, "fading TO dry still jumps {to_faded:.1}x");
+        assert!(from_faded < 2.5, "fading FROM dry still jumps {from_faded:.1}x");
+        // And it must be a clear improvement on switching, or the fade is not earning itself.
+        assert!(to_faded < to_instant * 0.6, "fade barely helped going to dry");
+        assert!(from_faded < from_instant * 0.6, "fade barely helped coming from dry");
+    }
     /// What a **drag** actually costs, as opposed to the deliberately large edit measured
     /// above.
     ///
