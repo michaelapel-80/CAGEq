@@ -36,6 +36,8 @@
 //! memory control channel land in stage C, against a synthetic ground-truth harness rather
 //! than by ear inside audiodg.
 
+pub mod dsp;
+
 use std::ffi::c_void;
 
 /// Per-instance state. One of these exists per APO instance (per endpoint, per mode),
