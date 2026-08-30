@@ -31,6 +31,20 @@ if (-not (Test-Path $dll)) { throw "Build first (build.bat) — $dll not found" 
 
 $root = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render'
 
+# Normalise the endpoint id to the braced form the registry actually uses.
+#
+# Necessary because PowerShell parses an UNQUOTED `{6cafe...}` argument as a ScriptBlock and
+# stringifies it WITHOUT the braces — so `-EndpointId {6cafe...}`, copy-pasted straight from
+# the listing above, silently arrives brace-less and matches no key. Accepting both forms is
+# better than demanding quotes for an id this script itself printed with braces.
+if ($EndpointId) {
+    $bare = ($EndpointId -replace '[{}]', '').Trim()
+    if ($bare -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+        throw "Not a GUID: '$EndpointId'. Expected something like {6cafe423-cde5-4ec1-a1e2-e3fcec778349}"
+    }
+    $EndpointId = '{' + $bare + '}'
+}
+
 if (-not $EndpointId) {
     "`n--- Render endpoints ---"
     "Pick a SCRATCH one with fx=True, then: register.ps1 -EndpointId <GUID>`n"

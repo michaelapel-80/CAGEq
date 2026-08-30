@@ -17,6 +17,15 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# Same normalisation as register.ps1 — PowerShell strips the braces off an unquoted {…}
+# argument (it parses it as a ScriptBlock), and the two scripts must agree, since the
+# backup filename is keyed on this value.
+$bare = ($EndpointId -replace '[{}]', '').Trim()
+if ($bare -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+    throw "Not a GUID: '$EndpointId'. Expected something like {6cafe423-cde5-4ec1-a1e2-e3fcec778349}"
+}
+$EndpointId = '{' + $bare + '}'
+
 $clsid = '{530052E1-2CD4-400A-AC2B-0D19273AD5B7}'
 $dll = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\CAGEqApo.dll'
 $fx = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$EndpointId\FxProperties"
