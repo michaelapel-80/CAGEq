@@ -201,6 +201,20 @@ impl Cascade {
         if bands.len() > MAX_BANDS {
             return false;
         }
+        // Nyquist. A centre frequency at or above half the sample rate makes `w0 >= π`,
+        // where the RBJ forms degenerate — the resulting filter is meaningless and can be
+        // unstable, and an unstable biquad's output grows without bound, which reaches
+        // someone's ears before it reaches a debugger. Enforced here because this is the
+        // only place the rate is known: the config parser cannot bound it, since the same
+        // correction is valid at 48 kHz and not at 8 kHz.
+        //
+        // 0.45 rather than 0.5 keeps a margin below the singularity rather than sitting on
+        // it. Refused rather than clamped, so a band never silently lands somewhere the user
+        // did not ask for.
+        let nyquist_limit = 0.45 * self.sample_rate;
+        if bands.iter().any(|b| !(b.freq_hz > 0.0 && b.freq_hz < nyquist_limit)) {
+            return false;
+        }
         for (slot, band) in self.coeffs.iter_mut().zip(bands) {
             *slot = coefficients(band, self.sample_rate);
         }
@@ -484,6 +498,33 @@ mod tests {
         );
         // And the dropped band really was doing something there, or this proves nothing.
         assert!(expected < 11.0, "sanity: the dropped +12 dB band should have dominated 5 kHz");
+    }
+
+    /// A band at or above Nyquist is refused, and the running cascade is left alone.
+    ///
+    /// Not pedantry: at `w0 >= π` the RBJ forms degenerate and the filter can be unstable,
+    /// and an unstable biquad's output grows without bound — which arrives at someone's ears
+    /// long before it arrives in a debugger. The config parser cannot catch this, because
+    /// the same correction is legitimate at 48 kHz and not at 8 kHz.
+    #[test]
+    fn bands_at_or_above_nyquist_are_refused() {
+        let mut c = Cascade::new(2, 48_000.0);
+        assert!(c.set_bands(&[peaking(1000.0, 3.0, 1.0)]));
+        let before = c.response_db(1000.0);
+
+        for f in [24_000.0, 30_000.0, 48_000.0, 21_600.1] {
+            assert!(!c.set_bands(&[peaking(f, 3.0, 1.0)]), "accepted {f} Hz at 48 kHz");
+        }
+        assert_eq!(c.band_count(), 1, "a refused set must not disturb the running one");
+        assert_eq!(c.response_db(1000.0), before);
+
+        // The same band is fine at a rate where it sits comfortably below Nyquist…
+        let mut fast = Cascade::new(2, 96_000.0);
+        assert!(fast.set_bands(&[peaking(24_000.0, 3.0, 1.0)]));
+        // …and a low-rate endpoint rejects what a high-rate one accepts, which is exactly
+        // why this check cannot live in the parser.
+        let mut slow = Cascade::new(2, 8_000.0);
+        assert!(!slow.set_bands(&[peaking(10_000.0, 3.0, 1.0)]));
     }
 
     /// A continuous tone, sample `start..start+n`. Continuing a signal across a retune means

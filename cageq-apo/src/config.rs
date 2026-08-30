@@ -38,6 +38,34 @@ const FORMAT_VERSION: u32 = 1;
 /// First token of the header line.
 const MAGIC: &str = "cageq-apo";
 
+// ---------------------------------------------------------------------------
+// Hard limits — this file is parsed inside audiodg (LocalService, session 0) from bytes an
+// UNELEVATED user can write. Everything below exists because of that asymmetry, not because
+// a well-behaved CAGEq would ever emit such a value.
+// ---------------------------------------------------------------------------
+
+/// Refuse to read more than this. `read_to_string` on an attacker-chosen path is otherwise
+/// an unbounded allocation *inside the audio service*: a 100 GB file in the config directory
+/// would OOM or stall audiodg, taking audio down machine-wide. 64 KiB is orders of magnitude
+/// above any real correction (a 32-band config is well under 2 KiB).
+const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+
+/// Per-band gain bound, dB. Far beyond any correction CAGEq generates; the point is that a
+/// corrupt or hostile file cannot ask for enough gain to be a hearing or speaker hazard.
+const MAX_ABS_GAIN_DB: f64 = 40.0;
+/// Preamp bounds, dB. Asymmetric on purpose: attenuation is harmless, gain is not, and
+/// CAGEq's own preamp is negative in normal operation (§4.1 loudness matching).
+const MIN_PREAMP_DB: f64 = -120.0;
+const MAX_PREAMP_DB: f64 = 12.0;
+/// Q bounds. Very high Q makes a biquad numerically fragile at low centre frequencies;
+/// very low Q is meaningless. Both ends are far outside what a real correction uses.
+const MIN_Q: f64 = 0.05;
+const MAX_Q: f64 = 40.0;
+/// Absolute frequency sanity bound, Hz. The *real* limit is Nyquist, which depends on the
+/// endpoint's rate and is therefore enforced where the rate is known (see
+/// `dsp::Cascade::set_bands`); this only rejects absurd values at parse time.
+const MAX_FREQ_HZ: f64 = 1_000_000.0;
+
 /// A parsed configuration: exactly what to hand the engine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApoConfig {
@@ -100,13 +128,63 @@ pub fn load(endpoint_id: &str) -> Result<Option<ApoConfig>, ParseError> {
 }
 
 /// [`load`] against an explicit path — the testable half.
+///
+/// ## Why this is not just `read_to_string`
+/// We are a service account reading a path an unelevated user can create entries in, so the
+/// open itself is part of the threat model:
+///
+/// * **Reparse points are refused.** A user who can write the config directory can point
+///   `<guid>.cfg` at any file — `C:\Windows\System32\config\SAM`, another user's documents —
+///   and have LocalService open it. Creating a *directory junction* needs no special
+///   privilege, so this is not a theoretical concern. `FILE_FLAG_OPEN_REPARSE_POINT` opens
+///   the link itself rather than following it, and the handle is then re-checked; doing it
+///   on the open handle rather than with a prior `symlink_metadata` closes the TOCTOU window
+///   where the file is swapped between check and open.
+/// * **Reads are capped** at [`MAX_CONFIG_BYTES`] — otherwise an oversized file is an
+///   unbounded allocation inside the audio service.
+/// * **Nothing read here is ever logged or returned.** Even with the above, treat the
+///   content as hostile: [`ParseError`] carries a line number and a fixed reason and never
+///   any bytes from the file, so this can never become an arbitrary-file-read oracle that
+///   reflects privileged content back out.
+///
+/// None of this substitutes for ACLing the config directory at install time so that only
+/// the intended account can write it — it is defence in depth, not the fence.
 pub fn load_from(path: &Path) -> Result<Option<ApoConfig>, ParseError> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => parse(&text).map(Some),
-        // Absent (or unreadable — a permissions slip is not a reason to make noise on the
-        // audio path) is simply "no correction here".
-        Err(_) => Ok(None),
+    use std::io::Read;
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
+
+    // Absent or unreadable is simply "no correction here" — a device CAGEq has never been
+    // pointed at is an ordinary state, and a permissions slip is not a reason to fail a lock.
+    let Ok(file) = opts.open(path) else { return Ok(None) };
+
+    // Race-free: asked of the handle we actually opened, not of the path.
+    match file.metadata() {
+        Ok(md) if md.file_type().is_symlink() => {
+            return Err(ParseError { line: 0, reason: "config path is a reparse point" });
+        }
+        Ok(md) if md.len() > MAX_CONFIG_BYTES => {
+            return Err(ParseError { line: 0, reason: "config file is implausibly large" });
+        }
+        Ok(_) => {}
+        Err(_) => return Ok(None),
+    }
+
+    // Capped regardless of what the metadata claimed — the size can change under us, and a
+    // pipe or device would report 0.
+    let mut text = String::new();
+    if file.take(MAX_CONFIG_BYTES).read_to_string(&mut text).is_err() {
+        // Unreadable or not UTF-8. Deliberately not surfaced as content.
+        return Err(ParseError { line: 0, reason: "config file is unreadable or not UTF-8" });
+    }
+    parse(&text).map(Some)
 }
 
 /// Parse the config format. Pure, so the whole decision table is testable without a file.
@@ -149,6 +227,12 @@ pub fn parse(text: &str) -> Result<ApoConfig, ParseError> {
                     return Err(ParseError { line: no, reason: "duplicate preamp" });
                 }
                 let db = parse_finite(tok.next(), no, "preamp")?;
+                // Refused, not clamped: silently turning a +60 dB request into +12 would
+                // apply a correction nobody asked for. Asymmetric because attenuation is
+                // harmless and gain is a hearing and speaker hazard.
+                if !(MIN_PREAMP_DB..=MAX_PREAMP_DB).contains(&db) {
+                    return Err(ParseError { line: no, reason: "preamp outside the safe range" });
+                }
                 config.preamp_db = db;
                 seen_preamp = true;
             }
@@ -166,13 +250,21 @@ pub fn parse(text: &str) -> Result<ApoConfig, ParseError> {
                 let freq_hz = parse_finite(tok.next(), no, "frequency")?;
                 let gain_db = parse_finite(tok.next(), no, "gain")?;
                 let q = parse_finite(tok.next(), no, "Q")?;
-                // The same limits the FFI enforces: a non-positive frequency or Q yields NaN
-                // coefficients, and NaN in a biquad's delay registers is permanent.
-                if freq_hz <= 0.0 {
-                    return Err(ParseError { line: no, reason: "frequency must be positive" });
+                // Bounded on both sides, not merely positive. A non-positive frequency or Q
+                // yields NaN coefficients (and NaN in a biquad's delay registers is
+                // permanent), while absurdly large values give a numerically fragile or
+                // outright unstable filter — whose output grows without bound, which on
+                // someone's headphones is a safety problem before it is a correctness one.
+                // The real frequency ceiling is Nyquist and is enforced where the sample
+                // rate is known (`dsp::Cascade::set_bands`); this is the absolute sanity gate.
+                if !(freq_hz > 0.0 && freq_hz < MAX_FREQ_HZ) {
+                    return Err(ParseError { line: no, reason: "frequency outside the sane range" });
                 }
-                if q <= 0.0 {
-                    return Err(ParseError { line: no, reason: "Q must be positive" });
+                if !(MIN_Q..=MAX_Q).contains(&q) {
+                    return Err(ParseError { line: no, reason: "Q outside the sane range" });
+                }
+                if gain_db.abs() > MAX_ABS_GAIN_DB {
+                    return Err(ParseError { line: no, reason: "gain outside the safe range" });
                 }
                 config.bands.push(Band { kind, freq_hz, gain_db, q });
             }
@@ -314,6 +406,57 @@ mod tests {
             assert!(!is_valid_endpoint_id(bad), "should refuse {bad:?}");
         }
         assert!(load("../escape").is_err());
+    }
+
+    /// Bounds that exist because this file is written by an unelevated user and parsed by a
+    /// service account. Several are safety limits as much as security ones: an unstable or
+    /// enormously loud filter reaches someone's ears before it reaches a debugger.
+    #[test]
+    fn parameters_outside_the_safe_ranges_are_refused() {
+        let cases: &[(&str, &str)] = &[
+            ("cageq-apo 1\npreamp 40\n", "preamp far above unity"),
+            ("cageq-apo 1\npreamp -200\n", "preamp below the floor"),
+            ("cageq-apo 1\nband PK 100 60 1\n", "gain above the cap"),
+            ("cageq-apo 1\nband PK 100 -60 1\n", "gain below the cap"),
+            ("cageq-apo 1\nband PK 100 1 1e9\n", "absurd Q"),
+            ("cageq-apo 1\nband PK 100 1 0.0001\n", "meaningless Q"),
+            ("cageq-apo 1\nband PK 1e300 1 1\n", "absurd frequency"),
+        ];
+        for (text, why) in cases {
+            assert!(parse(text).is_err(), "should have refused: {why}");
+        }
+        // …while a realistic correction still parses.
+        assert!(parse("cageq-apo 1\npreamp -9.5\nband PK 105 6.0 0.7\n").is_ok());
+    }
+
+    /// An oversized file must not be read into memory: this parse happens inside audiodg, so
+    /// an unbounded allocation there is a machine-wide audio outage, trivially triggered by
+    /// anyone who can write the config directory.
+    #[test]
+    fn an_oversized_config_is_refused_without_being_read() {
+        let path = std::env::temp_dir().join(format!("cageq-apo-huge-{}.cfg", std::process::id()));
+        let mut text = String::from("cageq-apo 1\n");
+        while text.len() as u64 <= MAX_CONFIG_BYTES {
+            text.push_str("# padding padding padding padding padding padding padding\n");
+        }
+        std::fs::write(&path, &text).unwrap();
+
+        let err = load_from(&path).expect_err("oversized config must be refused");
+        assert_eq!(err.reason, "config file is implausibly large");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Errors must never carry bytes from the file. Otherwise, combined with a reparse point
+    /// aimed at a privileged file, this becomes an arbitrary-file-read oracle that reflects
+    /// content back to a caller who could not otherwise read it.
+    #[test]
+    fn errors_never_leak_file_content() {
+        let secret = "cageq-apo 1\nband PK 100 1 1 SUPERSECRETVALUE\n";
+        let err = parse(secret).expect_err("should reject");
+        assert!(!err.reason.contains("SUPERSECRET"), "error leaked file content: {}", err.reason);
+        // `reason` is `&'static str`, so it structurally cannot contain runtime data — this
+        // test guards the property against someone later changing it to a String.
+        let _: &'static str = err.reason;
     }
 
     #[test]
