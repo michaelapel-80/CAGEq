@@ -59,14 +59,37 @@ fn main() {
     };
     let endpoint = &endpoint;
 
-
     // The section only exists while the APO is locked, i.e. while a stream is running on that
-    // endpoint. Absence is the ordinary "nothing playing" state, not a failure.
-    let Some(ch) = ControlChannel::open(endpoint) else {
-        eprintln!("no control channel for {endpoint}.");
-        eprintln!("The APO creates it at LockForProcess — is audio playing on that endpoint,");
-        eprintln!("and is CAGEqApo.dll actually loaded there?");
-        std::process::exit(1);
+    // endpoint. Absence is the ordinary "nothing playing" state, not a failure — but it is a
+    // very different problem from being denied access to a section that IS there, and
+    // collapsing the two into "no channel" made a real VM failure impossible to diagnose.
+    let ch = match ControlChannel::open(endpoint) {
+        Ok(ch) => ch,
+        Err(2) => {
+            // ERROR_FILE_NOT_FOUND
+            eprintln!("No section named CAGEqApo_{endpoint} exists.");
+            eprintln!();
+            eprintln!("The APO creates it at LockForProcess and it dies with its last handle,");
+            eprintln!("so this means no APO instance is currently locked on that endpoint:");
+            eprintln!("  - is audio actually playing on THIS endpoint right now?");
+            eprintln!("  - does the APO log show 'control channel: created/attached'?");
+            eprintln!("  - is the DLL on this machine current? the section name is derived");
+            eprintln!("    from a normalised (lower-cased) GUID, so an older APO build makes");
+            eprintln!("    a differently-named section that will never be found here.");
+            std::process::exit(1);
+        }
+        Err(5) => {
+            // ERROR_ACCESS_DENIED — the section exists, so the access control is the problem.
+            eprintln!("Access denied opening CAGEqApo_{endpoint}.");
+            eprintln!("The section EXISTS, so this is the security descriptor, not the APO.");
+            eprintln!("Expected: authenticated users may read/write, medium integrity label.");
+            eprintln!("Are you running at Low integrity (e.g. from a sandboxed host)?");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Could not open CAGEqApo_{endpoint}: Win32 error {e}.");
+            std::process::exit(1);
+        }
     };
     println!("opened Global\\CAGEqApo_{endpoint}");
 

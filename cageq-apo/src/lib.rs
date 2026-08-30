@@ -373,9 +373,9 @@ pub unsafe extern "C" fn cageq_apo_open_channel(
     handle: *mut c_void,
     endpoint_id: *const u16,
     len: u32,
-) -> bool {
+) -> i32 {
     if handle.is_null() || endpoint_id.is_null() || len == 0 || len > 256 {
-        return false;
+        return 0;
     }
     let apo = unsafe { &mut *(handle as *mut CageqApo) };
     let wide = unsafe { std::slice::from_raw_parts(endpoint_id, len as usize) };
@@ -385,7 +385,14 @@ pub unsafe extern "C" fn cageq_apo_open_channel(
     // A freshly created section reads as `Unrecognised` until CAGEq publishes, so nothing is
     // applied here; `applied_seq` starts at 0 and the first real publish will differ from it.
     apo.applied_seq = 0;
-    apo.channel.is_some()
+    match &apo.channel {
+        None => 0,
+        // Distinguished so the log can show it: audiodg creates and destroys APO instances
+        // freely, and "attached to an existing section" versus "made a new one" is the
+        // difference between instances sharing a channel and each racing to own one.
+        Some(ch) if ch.attached_to_existing() => 2,
+        Some(_) => 1,
+    }
 }
 
 /// Process `frames` of silence, returning `true` while the filter tail is still audible.

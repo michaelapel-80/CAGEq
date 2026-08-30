@@ -114,7 +114,7 @@ float cageq_apo_sample_rate(void* handle);
 bool  cageq_apo_set_bands(void* handle, const CageqBand* bands, unsigned int count);
 bool  cageq_apo_set_preamp_db(void* handle, double db);
 int   cageq_apo_load_config(void* handle, const wchar_t* endpointId, unsigned int len);
-bool  cageq_apo_open_channel(void* handle, const wchar_t* endpointId, unsigned int len);
+int   cageq_apo_open_channel(void* handle, const wchar_t* endpointId, unsigned int len);
 }
 
 // Return codes from cageq_apo_load_config — must match the CAGEQ_CONFIG_* constants in
@@ -410,8 +410,16 @@ public:
             // The live control channel, for edits while this stream is running. Failing to
             // open it costs only low-latency editing — the persistent correction above is
             // already applied — so it is reported and otherwise ignored.
-            const bool channel = cageq_apo_open_channel(m_rust, m_endpointId, idLen);
-            DiagF(L"  control channel: %s", channel ? L"open" : L"unavailable (config only)");
+            // 0 = failed, 1 = created a new section, 2 = attached to one that already
+            // existed. The distinction matters: audiodg creates and destroys APO instances
+            // freely, and a section dies with its last handle — so "created" on an endpoint
+            // that is already playing means an earlier instance let the channel go.
+            const int channel = cageq_apo_open_channel(m_rust, m_endpointId, idLen);
+            const wchar_t* chText = (channel == 1) ? L"created"
+                                  : (channel == 2) ? L"attached to existing"
+                                                   : L"UNAVAILABLE (config only)";
+            DiagF(L"  control channel: %s  [section CAGEqApo_%s in the Global namespace]",
+                  chText, m_endpointId);
         }
         else
         {

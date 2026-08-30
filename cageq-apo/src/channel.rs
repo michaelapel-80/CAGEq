@@ -95,6 +95,7 @@ unsafe extern "system" {
     ) -> Handle;
     fn UnmapViewOfFile(lp_base_address: *const c_void) -> i32;
     fn CloseHandle(h_object: Handle) -> i32;
+    fn GetLastError() -> u32;
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -135,6 +136,8 @@ impl Drop for SecurityDescriptor {
 pub struct ControlChannel {
     handle: Handle,
     view: *mut ControlBlock,
+    /// True when `create` attached to a section that already existed.
+    existed: bool,
 }
 
 // SAFETY: created on the configuration thread (`LockForProcess`) and thereafter read from
@@ -187,6 +190,11 @@ impl ControlChannel {
         if handle.is_null() {
             return None;
         }
+        // Recorded before anything else can clobber it: ERROR_ALREADY_EXISTS here means we
+        // attached to a section another APO instance already made, which is normal (audiodg
+        // builds and tears down instances freely) but very much worth being able to see.
+        const ERROR_ALREADY_EXISTS: u32 = 183;
+        let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
 
         // SAFETY: `handle` is a valid section of at least `size` bytes.
         let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size as usize) };
@@ -199,7 +207,12 @@ impl ControlChannel {
         // `Unrecognised` — deliberately, so an unwritten block is never mistaken for a valid
         // "no filters" instruction. Nothing is initialised here: initialising it would mean
         // this side inventing a state CAGEq never published.
-        Some(ControlChannel { handle, view: view as *mut ControlBlock })
+        Some(ControlChannel { handle, view: view as *mut ControlBlock, existed })
+    }
+
+    /// Did `create` attach to a section that already existed, rather than making a new one?
+    pub fn attached_to_existing(&self) -> bool {
+        self.existed
     }
 
     /// **Open** an existing section — the writer's side, used by CAGEq (and by the `push`
@@ -209,27 +222,32 @@ impl ControlChannel {
     /// is running on that endpoint: the APO creates it at `LockForProcess` and tears it down
     /// at unlock, so the writer must tolerate its absence and retry rather than treat it as
     /// an error.
-    pub fn open(endpoint_id: &str) -> Option<ControlChannel> {
+    /// Returns the Win32 error on failure rather than `None`. The distinction matters more
+    /// than it looks: ERROR_FILE_NOT_FOUND (2) means no APO is locked on that endpoint,
+    /// ERROR_ACCESS_DENIED (5) means the section exists but our access control is wrong.
+    /// Collapsing both into "no channel" made a real VM failure impossible to diagnose.
+    pub fn open(endpoint_id: &str) -> Result<ControlChannel, u32> {
         // Normalised, not merely validated: PowerShell strips the braces off an unquoted
         // {...}, so a bare GUID would build a different section name than the one the APO
         // created from the engine-supplied (always braced) id, and the channel would simply
         // never be found.
-        let endpoint_id = &normalize_endpoint_id(endpoint_id)?;
+        let endpoint_id = &normalize_endpoint_id(endpoint_id).ok_or(0u32)?;
         let name = wide(&format!("Global\\CAGEqApo_{endpoint_id}"));
         let size = std::mem::size_of::<ControlBlock>();
 
         // SAFETY: `name` is NUL-terminated.
         let handle = unsafe { OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, 0, name.as_ptr()) };
         if handle.is_null() {
-            return None;
+            return Err(unsafe { GetLastError() });
         }
         // SAFETY: `handle` is a valid section of at least `size` bytes.
         let view = unsafe { MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size) };
         if view.is_null() {
+            let err = unsafe { GetLastError() };
             unsafe { CloseHandle(handle) };
-            return None;
+            return Err(err);
         }
-        Some(ControlChannel { handle, view: view as *mut ControlBlock })
+        Ok(ControlChannel { handle, view: view as *mut ControlBlock, existed: true })
     }
 
     /// Publish a coefficient set for the APO to pick up. The writer's only mutating entry
