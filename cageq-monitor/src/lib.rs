@@ -775,6 +775,62 @@ mod windows_impl {
         dev.get_id().ok()
     }
 
+
+    /// Minimal 32-bit-float WAV writer, for the loopback recorder below.
+    ///
+    /// Hand-rolled rather than pulling in a crate: it is a 44-byte header and raw samples, and
+    /// this exists to settle arguments about what the audio actually did — a dependency for
+    /// that would be out of proportion.
+    struct WavRecorder {
+        file: std::fs::File,
+        bytes: u32,
+        channels: u16,
+        rate: u32,
+    }
+
+    impl WavRecorder {
+        fn new(path: &std::path::Path, rate: u32, channels: u16) -> std::io::Result<WavRecorder> {
+            use std::io::Write;
+            let mut file = std::fs::File::create(path)?;
+            // Sizes are patched in `finish`; zeros for now.
+            file.write_all(&[0u8; 44])?;
+            Ok(WavRecorder { file, bytes: 0, channels, rate })
+        }
+
+        fn write(&mut self, interleaved: &[f32]) {
+            use std::io::Write;
+            // A recorder that kills the capture thread would be worse than no recorder, so a
+            // write failure is dropped rather than propagated onto the audio path.
+            let mut buf = Vec::with_capacity(interleaved.len() * 4);
+            for s in interleaved {
+                buf.extend_from_slice(&s.to_le_bytes());
+            }
+            if self.file.write_all(&buf).is_ok() {
+                self.bytes = self.bytes.saturating_add(buf.len() as u32);
+            }
+        }
+
+        fn finish(mut self) {
+            use std::io::{Seek, SeekFrom, Write};
+            let block_align = self.channels * 4;
+            let mut h = Vec::with_capacity(44);
+            h.extend_from_slice(b"RIFF");
+            h.extend_from_slice(&(36 + self.bytes).to_le_bytes());
+            h.extend_from_slice(b"WAVEfmt ");
+            h.extend_from_slice(&16u32.to_le_bytes());
+            h.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+            h.extend_from_slice(&self.channels.to_le_bytes());
+            h.extend_from_slice(&self.rate.to_le_bytes());
+            h.extend_from_slice(&(self.rate * block_align as u32).to_le_bytes());
+            h.extend_from_slice(&block_align.to_le_bytes());
+            h.extend_from_slice(&32u16.to_le_bytes()); // bits per sample
+            h.extend_from_slice(b"data");
+            h.extend_from_slice(&self.bytes.to_le_bytes());
+            let _ = self.file.seek(SeekFrom::Start(0));
+            let _ = self.file.write_all(&h);
+            let _ = self.file.flush();
+        }
+    }
     fn capture_loop<F, G, H>(
         endpoint_id: Option<String>,
         stop: &AtomicBool,
@@ -894,6 +950,25 @@ mod windows_impl {
 
         audio_client.start_stream()?;
 
+        // Raw loopback recorder, off unless CAGEQ_RECORD names a file. Captures exactly what
+        // the endpoint produced, post-EQ, sample for sample — the only way to settle what a
+        // transition actually did rather than what a synthetic model says it should have.
+        // Deliberately env-gated: it costs a running app nothing and cannot destabilise the
+        // monitor for anyone not asking for it.
+        let mut recorder = std::env::var_os("CAGEQ_RECORD").and_then(|p| {
+            let path = std::path::PathBuf::from(p);
+            match WavRecorder::new(&path, rate, channels as u16) {
+                Ok(r) => {
+                    eprintln!("[cageq-monitor] recording loopback to {}", path.display());
+                    Some(r)
+                }
+                Err(e) => {
+                    eprintln!("[cageq-monitor] could not record to {}: {e}", path.display());
+                    None
+                }
+            }
+        });
+
         let mut queue: VecDeque<u8> = VecDeque::new();
         let mut frames: Vec<f32> = Vec::new(); // interleaved, reused each read for ebur128
         let mut mono: Vec<f32> = Vec::new(); // per-read mono downmix, fed to the FFT
@@ -962,6 +1037,10 @@ mod windows_impl {
                     scope_lr.push(ch1);
                 }
             }
+            if let Some(r) = recorder.as_mut() {
+                r.write(&frames);
+            }
+
             if !frames.is_empty() && ebu.add_frames_f32(&frames).is_ok() {
                 // This read's true peak (max(sample_peak, true_peak) internally — see
                 // `prev_true_peak`'s own doc), folded into the tick-spanning accumulator above.
@@ -1067,6 +1146,13 @@ mod windows_impl {
             if !got_data {
                 thread::sleep(Duration::from_millis(5));
             }
+        }
+
+        // Patch the WAV header before anything else: a recording whose sizes were never
+        // written back is a file no tool will open, wasting the whole capture.
+        if let Some(r) = recorder.take() {
+            r.finish();
+            eprintln!("[cageq-monitor] recording closed");
         }
 
         let _ = audio_client.stop_stream();
