@@ -277,11 +277,24 @@ pub fn status() -> SetupStatus {
 pub fn perform(action: &Action) -> Result<(), SetupError> {
     match action {
         Action::RegisterServer => regsvr32(false),
-        Action::UnregisterServer => regsvr32(true),
+        Action::UnregisterServer => {
+            // Detach every endpoint FIRST. Unregistering a COM server that endpoints still
+            // point at leaves the machine referencing a CLSID nothing implements: Windows
+            // silently skips it, so audio keeps working, but the registry keeps stale
+            // references to CAGEq forever and the next register looks like it did nothing.
+            // Making the user detach by hand first was busywork for something only this code
+            // knows the full list for.
+            for id in status().attached {
+                detach(&id)?;
+            }
+            regsvr32(true)
+        }
         Action::OpenGate => set_gate(true),
         Action::CloseGate => set_gate(false),
-        Action::Attach(id) => attach(id),
-        Action::Detach(id) => detach(id),
+        // One restart, after the registry work: audiodg only picks up an attachment when the
+        // audio service rebuilds a stream's graph.
+        Action::Attach(id) => attach(id).and_then(|()| restart_audio()),
+        Action::Detach(id) => detach(id).and_then(|()| restart_audio()),
     }
 }
 
@@ -297,30 +310,25 @@ pub fn perform(_action: &Action) -> Result<(), SetupError> {
 fn regsvr32(unregister: bool) -> Result<(), SetupError> {
     use std::process::Command;
 
+    // Audio goes down FIRST, before any file is touched. audiodg maps the APO for as long as
+    // it lives, so replacing a registered DLL while audio runs means fighting a file that is
+    // in use — which is what made updating the APO a dance of detach, unregister, restart and
+    // try again, twice. With the service stopped it is one step, and detaching is not needed
+    // at all to swap the binary.
+    stop_audio()?;
+
     let target = if unregister {
         installed_dll()
     } else {
-        // Copy the shipped DLL into its machine-wide home first, and register THAT — see
-        // `install_dir` for why it cannot be registered where the app happens to be installed.
-        // Re-copied on every register so an app update refreshes it; the registry entry points
-        // at a fixed path, so nothing else has to change.
+        // Copy the shipped DLL into its machine-wide home and register THAT — see
+        // `install_dir` for why it cannot be registered where the app happens to sit.
+        // Re-copied every time, so a register after an app update refreshes it while the
+        // registry entry keeps pointing at one fixed path.
         let source = shipped_dll()?;
         let dest = installed_dll();
         std::fs::create_dir_all(install_dir())
             .map_err(|e| SetupError::Win32("create install directory", e))?;
-        // A running audiodg holds the old DLL open, so an in-place overwrite fails. Renaming
-        // the loaded file out of the way is allowed even while it is mapped, and Windows
-        // cleans the stale copy up on the next reboot.
-        if dest.exists() && std::fs::copy(&source, &dest).is_err() {
-            let parked = dest.with_extension("dll.old");
-            let _ = std::fs::remove_file(&parked);
-            std::fs::rename(&dest, &parked)
-                .map_err(|e| SetupError::Win32("replace the installed DLL", e))?;
-            std::fs::copy(&source, &dest)
-                .map_err(|e| SetupError::Win32("install the DLL", e))?;
-        } else if !dest.exists() {
-            std::fs::copy(&source, &dest).map_err(|e| SetupError::Win32("install the DLL", e))?;
-        }
+        std::fs::copy(&source, &dest).map_err(|e| SetupError::Win32("install the DLL", e))?;
         dest
     };
 
@@ -334,14 +342,17 @@ fn regsvr32(unregister: bool) -> Result<(), SetupError> {
     // failure in a message box, which nobody will see when it runs from an elevated helper.
     let status = cmd.status().map_err(|e| SetupError::Win32("regsvr32", e))?;
     if !status.success() {
+        // Bring audio back even on failure — leaving the machine silent because a
+        // registration did not take is a far worse outcome than the failure itself.
+        let _ = start_audio();
         return Err(SetupError::HelperFailed(status.code().unwrap_or(-1)));
     }
     if unregister {
-        // Leave nothing behind, but do not fail the unregister if the file is still mapped —
-        // the registration is gone, which is what was asked for.
+        // Nothing holds it now, so this simply works; still not fatal if it does not, since
+        // the registration — the thing actually asked for — is already gone.
         let _ = std::fs::remove_file(&target);
     }
-    Ok(())
+    start_audio()
 }
 
 /// The DLL as shipped beside the helper, i.e. inside the application's resources.
@@ -410,7 +421,9 @@ fn attach(endpoint_id: &str) -> Result<(), SetupError> {
     // APO simply never runs.
     let _ = fx.delete_value(FX_DISABLE_SYSFX);
 
-    restart_audio()
+    // No restart here: `perform` does it once, so unregistering several endpoints does not
+    // stop and start the audio service once per endpoint.
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -432,24 +445,40 @@ fn detach(endpoint_id: &str) -> Result<(), SetupError> {
     if fx.get_value::<String, _>(&slot).is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID)) {
         let _ = fx.delete_value(&slot);
     }
-    restart_audio()
+    Ok(())
 }
 
 #[cfg(windows)]
-fn restart_audio() -> Result<(), SetupError> {
+/// Stop the audio service, which takes `audiodg` down with it.
+///
+/// **This is what releases the DLL.** `audiodg` maps an APO for as long as it is alive, so a
+/// registered DLL cannot be replaced while audio is running — the file is in use. Stopping
+/// first is the difference between "replace the DLL" being one step and being a dance of
+/// detach, unregister, restart, retry.
+fn stop_audio() -> Result<(), SetupError> {
     use std::process::Command;
-    // audiodg only loads APOs when the audio service builds a stream's graph, so nothing
-    // takes effect until this happens.
-    let status = Command::new("net")
+    // Failure is not fatal: the service may already be stopped, which is the state we want.
+    let _ = Command::new("net")
         .args(["stop", "audiosrv", "/y"])
         .status()
         .map_err(|e| SetupError::Win32("stop audiosrv", e))?;
-    let _ = status;
+    Ok(())
+}
+
+/// Start the audio service again. APOs are loaded when a stream's graph is built, so nothing
+/// takes effect until this happens *and* something plays.
+fn start_audio() -> Result<(), SetupError> {
+    use std::process::Command;
     Command::new("net")
         .args(["start", "audiosrv"])
         .status()
         .map_err(|e| SetupError::Win32("start audiosrv", e))?;
     Ok(())
+}
+
+fn restart_audio() -> Result<(), SetupError> {
+    stop_audio()?;
+    start_audio()
 }
 
 // ---------------------------------------------------------------------------
