@@ -20,31 +20,41 @@
 use cageq_apo_backend::setup::{self, Action};
 
 fn main() -> std::process::ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
 
-    // Reading needs no rights, so it is worth having here too: when something is wrong, this
-    // is the one command a user can run without a prompt and paste back.
+    // `--log <token>` is added by the parent when it launches us elevated. The token names a
+    // file in OUR temp directory (see `setup::log_path_for`) — the parent never supplies a
+    // path, because letting an unelevated caller choose where an elevated process writes is a
+    // way to turn this helper into an arbitrary-file-write primitive.
+    let log = take_log_token(&mut args).and_then(|t| setup::log_path_for(&t));
+    let mut out = Output::new(log);
+
     if args.first().map(String::as_str) == Some("status") {
-        print_status();
-        return std::process::ExitCode::SUCCESS;
+        print_status(&mut out);
+        return out.finish(std::process::ExitCode::SUCCESS);
     }
 
     let Some(action) = Action::from_argv(&args) else {
-        eprintln!("{}", usage());
-        return std::process::ExitCode::from(2);
+        out.line(&usage());
+        return out.finish(std::process::ExitCode::from(2));
     };
 
     // Self-elevate rather than failing with a bare access-denied. The helper is invoked two
-    // ways — by the app via `runas` (already elevated by the time it runs) and by hand from a
-    // console, where nothing has elevated it — and it should behave sensibly in both.
+    // ways — by the app via `runas` (already elevated) and by hand from a console, where
+    // nothing has elevated it.
     //
-    // Deliberately NOT done with a `requireAdministrator` manifest, which is the usual way to
-    // get this: a manifest would force a prompt for `status` too, and status is precisely the
-    // command that has to work without one. Asking at the point of an actual change keeps that
-    // property.
+    // Deliberately NOT a `requireAdministrator` manifest, which is the usual way: that would
+    // force a UAC prompt for `status` too, and status is exactly the command that must work
+    // without one.
     if !setup::is_elevated() {
         return match setup::run_elevated_self(&action) {
-            Ok(()) => std::process::ExitCode::SUCCESS,
+            // The elevated child could not print to this console — it did not have one — so
+            // relay what it wrote. Without this the whole operation is silent, which reads as
+            // "nothing happened" whether it worked or not.
+            Ok(text) => {
+                print!("{text}");
+                std::process::ExitCode::SUCCESS
+            }
             Err(e) => {
                 eprintln!("failed: {e}");
                 std::process::ExitCode::FAILURE
@@ -54,42 +64,82 @@ fn main() -> std::process::ExitCode {
 
     match setup::perform(&action) {
         Ok(()) => {
-            println!("done: {}", action.describe());
-            // Nothing takes effect until a stream is rebuilt, and the audio service restart
-            // this performs does not itself start one. Saying so prevents the "it did not
-            // work" report that is really "nothing was playing yet".
-            println!("Play audio on the endpoint to let Windows load the effect.");
-            std::process::ExitCode::SUCCESS
+            out.line(&format!("done: {}", action.describe()));
+            // The audio service restart does not itself start a stream, and audiodg only loads
+            // APOs when one is built. Saying so prevents the "it didn't work" report that is
+            // really "nothing was playing yet".
+            out.line("Play audio on the endpoint to let Windows load the effect.");
+            out.finish(std::process::ExitCode::SUCCESS)
         }
         Err(e) => {
-            eprintln!("failed: {e}");
-            std::process::ExitCode::FAILURE
+            out.line(&format!("failed: {e}"));
+            out.finish(std::process::ExitCode::FAILURE)
         }
     }
 }
 
-fn print_status() {
+/// Pull `--log <token>` out of the arguments, leaving the action's own.
+fn take_log_token(args: &mut Vec<String>) -> Option<String> {
+    let at = args.iter().position(|a| a == "--log")?;
+    let token = args.get(at + 1).cloned();
+    args.drain(at..=(at + 1).min(args.len() - 1));
+    token
+}
+
+/// Prints, and also records for the parent when launched elevated.
+struct Output {
+    log: Option<std::path::PathBuf>,
+    buffer: String,
+}
+
+impl Output {
+    fn new(log: Option<std::path::PathBuf>) -> Self {
+        Output { log, buffer: String::new() }
+    }
+
+    fn line(&mut self, s: &str) {
+        println!("{s}");
+        self.buffer.push_str(s);
+        self.buffer.push('\n');
+    }
+
+    /// Flush to the parent's log, if there is one. A failure to write it is deliberately
+    /// ignored: the operation itself already succeeded or failed on its own terms, and losing
+    /// the transcript must not change that verdict.
+    fn finish(self, code: std::process::ExitCode) -> std::process::ExitCode {
+        if let Some(path) = self.log {
+            let _ = std::fs::write(path, self.buffer.as_bytes());
+        }
+        code
+    }
+}
+
+fn print_status(out: &mut Output) {
     let s = setup::status();
     match &s.registered_dll {
-        Some(p) if s.dll_present => println!("effect registered : {}", p.display()),
-        Some(p) => println!("effect registered : {}  [MISSING ON DISK]", p.display()),
-        None => println!("effect registered : no"),
+        Some(p) if s.dll_present => out.line(&format!("effect registered : {}", p.display())),
+        Some(p) => out.line(&format!("effect registered : {}  [MISSING ON DISK]", p.display())),
+        None => out.line("effect registered : no"),
     }
-    println!(
+    out.line(&format!(
         "unsigned effects  : {}",
-        if s.gate_open { "allowed (DisableProtectedAudioDG=1)" } else { "BLOCKED — the effect cannot load" },
-    );
-    println!("machine ready     : {}", if s.machine_ready() { "yes" } else { "no" });
+        if s.gate_open {
+            "allowed (DisableProtectedAudioDG=1)"
+        } else {
+            "BLOCKED - the effect cannot load"
+        },
+    ));
+    out.line(&format!("machine ready     : {}", if s.machine_ready() { "yes" } else { "no" }));
     if s.attached.is_empty() {
-        println!("attached to       : (no endpoints)");
+        out.line("attached to       : (no endpoints)");
     } else {
         for id in &s.attached {
             let note = if s.effects_disabled.contains(id) {
-                "  [effects disabled for this endpoint — it will not run]"
+                "  [effects disabled for this endpoint - it will not run]"
             } else {
                 ""
             };
-            println!("attached to       : {id}{note}");
+            out.line(&format!("attached to       : {id}{note}"));
         }
     }
 }
@@ -103,14 +153,12 @@ fn usage() -> String {
          status              what is set up right now (no elevation needed)\n  \
          register            {}\n  \
          unregister          {}\n  \
-         open-gate           {}\n  \
-         close-gate          {}\n  \
+         open-gate           allow Windows to load effects not signed by Microsoft (machine-wide)\n  \
+         close-gate          restore Windows' effect-signing requirement\n  \
          attach <guid>       attach the effect to one playback endpoint\n  \
          detach <guid>       remove it from one playback endpoint\n\n\
-         Everything except `status` needs administrator rights.",
+         Everything except `status` needs administrator rights, and will ask for them.",
         Action::RegisterServer.describe(),
         Action::UnregisterServer.describe(),
-        "allow Windows to load effects not signed by Microsoft (machine-wide)",
-        "restore Windows' effect-signing requirement",
     )
 }

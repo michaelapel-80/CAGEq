@@ -177,6 +177,10 @@ pub enum SetupError {
     Declined,
     #[error("setup helper exited with code {0}")]
     HelperFailed(i32),
+    /// The helper failed and said why. Carried through so a wizard can show the reason
+    /// rather than an exit code.
+    #[error("{0}")]
+    HelperSaid(String),
     #[error("cageq-apo-setup.exe not found next to the application")]
     HelperMissing,
 }
@@ -584,7 +588,7 @@ fn take_ownership(key_path: &str) -> Result<(), SetupError> {
 /// One UAC prompt per call. [`SetupError::Declined`] when the user cancels it, which is an
 /// ordinary outcome and not something to report as a failure.
 #[cfg(windows)]
-pub fn run_elevated(action: &Action) -> Result<(), SetupError> {
+pub fn run_elevated(action: &Action) -> Result<String, SetupError> {
     elevate(&helper_path()?, action)
 }
 
@@ -594,7 +598,7 @@ pub fn run_elevated(action: &Action) -> Result<(), SetupError> {
 /// Split from [`run_elevated`] because the two resolve a different executable: the app
 /// launches the helper beside it, the helper relaunches itself.
 #[cfg(windows)]
-pub fn run_elevated_self(action: &Action) -> Result<(), SetupError> {
+pub fn run_elevated_self(action: &Action) -> Result<String, SetupError> {
     let me = std::env::current_exe().map_err(|e| SetupError::Win32("current_exe", e))?;
     elevate(&me, action)
 }
@@ -654,7 +658,7 @@ pub fn is_elevated() -> bool {
 }
 
 #[cfg(windows)]
-fn elevate(exe: &std::path::Path, action: &Action) -> Result<(), SetupError> {
+fn elevate(exe: &std::path::Path, action: &Action) -> Result<String, SetupError> {
     use std::os::windows::ffi::OsStrExt;
 
     type Handle = *mut std::ffi::c_void;
@@ -698,15 +702,17 @@ fn elevate(exe: &std::path::Path, action: &Action) -> Result<(), SetupError> {
     }
 
     let file: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    // Quoted, because an endpoint GUID is brace-wrapped and the path may contain spaces.
-    let params = wide(
-        &action
-            .argv()
-            .iter()
-            .map(|a| format!("\"{a}\""))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
+    // The child writes what it would have printed to a file named by this token — an elevated
+    // process launched through ShellExecuteEx has its own console (here, none at all), so its
+    // output cannot reach us any other way.
+    let token = log_token();
+    let log = log_path_for(&token).ok_or(SetupError::HelperMissing)?;
+    let _ = std::fs::remove_file(&log);
+    let mut argv = action.argv();
+    argv.push("--log".into());
+    argv.push(token);
+    // Quoted: an endpoint GUID is brace-wrapped and paths may contain spaces.
+    let params = wide(&argv.iter().map(quoted).collect::<Vec<_>>().join(" "));
     let verb = wide("runas"); // the elevation prompt
 
     let mut info = ShellExecuteInfoW {
@@ -744,14 +750,59 @@ fn elevate(exe: &std::path::Path, action: &Action) -> Result<(), SetupError> {
         GetExitCodeProcess(info.process, &mut code);
         CloseHandle(info.process);
     }
-    if code == 0 { Ok(()) } else { Err(SetupError::HelperFailed(code as i32)) }
+    // Whatever the child printed, so a caller can show the real reason rather than a number.
+    let output = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    if code == 0 {
+        Ok(output)
+    } else if output.trim().is_empty() {
+        Err(SetupError::HelperFailed(code as i32))
+    } else {
+        Err(SetupError::HelperSaid(output.trim().to_string()))
+    }
+}
+
+/// Quote one argument for a `ShellExecuteEx` parameter string.
+fn quoted(a: &String) -> String {
+    format!("\"{a}\"")
 }
 
 #[cfg(not(windows))]
-pub fn run_elevated(_action: &Action) -> Result<(), SetupError> {
+pub fn run_elevated(_action: &Action) -> Result<String, SetupError> {
     Err(SetupError::HelperMissing)
 }
 
+
+/// Where the elevated child writes what it would have printed.
+///
+/// An elevated process launched through `ShellExecuteEx` gets its own console — or, with
+/// `SW_HIDE`, none at all — so its stdout never reaches the caller. Without this a failure
+/// surfaces as a bare exit code, which is no use to a person at a prompt and no use to a
+/// wizard trying to explain what went wrong.
+///
+/// **The child picks the directory, the parent only supplies a token.** That asymmetry is the
+/// point: letting an *unelevated* caller name a path an *elevated* process then writes to is a
+/// classic way to turn a helper into an arbitrary-file-write primitive. The token is validated
+/// as hex and used only as a filename, rooted in the child's own temp directory.
+pub fn log_path_for(token: &str) -> Option<PathBuf> {
+    if token.is_empty()
+        || token.len() > 32
+        || !token.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(std::env::temp_dir().join(format!("cageq-apo-setup-{token}.log")))
+}
+
+/// A token for [`log_path_for`]. Not a secret — it only stops two concurrent runs colliding,
+/// and the security property comes from the validation above, not from unpredictability.
+fn log_token() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(0);
+    format!("{:08x}{:08x}", std::process::id(), nanos & 0xffff_ffff)
+}
 /// Where the helper executable lives: beside the application.
 pub fn helper_path() -> Result<PathBuf, SetupError> {
     let exe = std::env::current_exe().map_err(|e| SetupError::Win32("current_exe", e))?;
@@ -762,6 +813,39 @@ pub fn helper_path() -> Result<PathBuf, SetupError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The log token names a file an ELEVATED process writes, chosen by an UNELEVATED one.
+    /// If the parent could supply a path rather than a token, the helper would become an
+    /// arbitrary-file-write primitive for anything running as the user — so the token is
+    /// validated as hex and only ever used as a filename inside the child's own temp
+    /// directory.
+    #[test]
+    fn the_log_token_cannot_name_a_path() {
+        assert!(log_path_for("a1b2c3d4").is_some());
+
+        for bad in [
+            "",
+            "../../windows/system32/x",
+            r"..\..\evil",
+            "a/b",
+            r"a\b",
+            "C:/x",
+            "has space",
+            "semi;colon",
+            "nothex!",
+            &"f".repeat(33),
+        ] {
+            assert!(log_path_for(bad).is_none(), "accepted token {bad:?}");
+        }
+
+        // Whatever it does accept stays inside temp, under our own name.
+        let p = log_path_for("deadbeef").unwrap();
+        assert_eq!(p.parent(), Some(std::env::temp_dir().as_path()));
+        assert!(
+            p.file_name().unwrap().to_string_lossy().starts_with("cageq-apo-setup-"),
+            "{p:?}",
+        );
+    }
 
     /// The helper runs elevated, so its argument handling is a trust boundary of sorts: it
     /// must round-trip exactly and refuse anything it does not recognise rather than guessing.
