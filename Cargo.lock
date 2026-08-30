@@ -24,6 +24,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cageq-apo"
+version = "0.6.0"
+
+[[package]]
 name = "cageq-backend"
 version = "0.6.0"
 dependencies = [

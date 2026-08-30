@@ -1,0 +1,60 @@
+﻿#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Detach CAGEq's APO from an endpoint and unregister its COM server.
+
+.DESCRIPTION
+    The undo for register.ps1. Restores the endpoint's FxProperties from the backup that
+    script made — byte-for-byte, rather than guessing which slots were originally set.
+
+    Run this before reverting a snapshot too: it is the same procedure a real uninstall
+    will have to perform, so exercising it is part of what stage B is checking. A stuck
+    APO lives in audiodg and means broken audio machine-wide, so the detach path has to
+    be as reliable as the attach path.
+#>
+param(
+    [Parameter(Mandatory = $true)][string]$EndpointId
+)
+$ErrorActionPreference = 'Stop'
+
+$clsid = '{530052E1-2CD4-400A-AC2B-0D19273AD5B7}'
+$dll = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\CAGEqApo.dll'
+$fx = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$EndpointId\FxProperties"
+
+# 1) Detach first, then unregister. This order matters: leaving a CLSID in an endpoint's
+#    effect chain whose COM server no longer resolves is exactly the state that breaks an
+#    endpoint, so the reference goes away before the thing it points at does.
+$backup = Join-Path $PSScriptRoot "fx-backup-$EndpointId.reg"
+if (Test-Path $backup) {
+    & reg import "$backup" 2>&1 | Out-Null
+    "Restored FxProperties from $backup"
+} elseif (Test-Path $fx) {
+    # No backup (registered by hand, or it was deleted): clear our CLSID out of every slot
+    # rather than leaving a dangling reference. Only ours — never touch a vendor's.
+    $p = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
+    $props = Get-ItemProperty $fx
+    '1', '2', '5', '6', '7' | ForEach-Object {
+        $name = "$p,$_"
+        if ($props.$name -and $props.$name -eq $clsid) {
+            Remove-ItemProperty -Path $fx -Name $name -ErrorAction SilentlyContinue
+            "Cleared $name (was ours)"
+        }
+    }
+    "No backup found — cleared only CAGEq's own CLSID, left everything else alone."
+} else {
+    "No FxProperties under $EndpointId — nothing to detach."
+}
+
+# 2) COM server: DllUnregisterServer -> UnregisterAPO + remove the CLSID keys.
+if (Test-Path $dll) {
+    # -Wait/-PassThru for the same reason as register.ps1: regsvr32 is GUI-subsystem, so
+    # `& regsvr32` would not be waited on and its exit code would be meaningless.
+    $rc = Start-Process regsvr32 -ArgumentList '/s', '/u', "`"$dll`"" -Wait -PassThru
+    if ($rc.ExitCode -ne 0) { "WARNING: regsvr32 /u exit $($rc.ExitCode) — check HKLM\SOFTWARE\Classes\CLSID\$clsid" }
+    "COM server unregistered: $clsid"
+} else {
+    "DLL not found ($dll) — skipping regsvr32 /u. Remove HKLM\SOFTWARE\Classes\CLSID\$clsid by hand if it lingers."
+}
+
+Restart-Service audiosrv -Force
+"audiosrv restarted. Play audio to confirm the endpoint works normally again."

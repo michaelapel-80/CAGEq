@@ -12,6 +12,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "cageq-apo",
     "cageq-backend",
     "cageq-config-writer",
     "cageq-sidecar",

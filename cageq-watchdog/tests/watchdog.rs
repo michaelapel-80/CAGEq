@@ -100,6 +100,27 @@ impl SafeStateSpy {
 }
 
 /// Small deadlines/backoffs so a run is ms, not the 5s/2s/15s + 2/5/10s defaults.
+/// Wait until the supervisor has actually *completed a recovery* — tripped, then come back
+/// up — or `timeout` elapses. Returns the health observed at the end.
+///
+/// Deliberately not `wait_until(|h| matches!(h, Health::Running))`, which several of these
+/// tests used to use: `Running` is also the **starting** state, so that predicate can be
+/// satisfied before the trip has even been observed, letting the test pass without the
+/// thing it is testing having happened. It showed up as a rare flake under the CPU
+/// contention of a full-workspace `cargo test` (the monitor thread hadn't run yet when
+/// `call` returned its deadline error). `recoveries()` only advances after a real
+/// trip-and-respawn, so it cannot be satisfied by the initial state.
+fn wait_for_recovery(sup: &Supervisor, timeout: Duration) -> Health {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if sup.recoveries() >= 1 && matches!(sup.health(), Health::Running) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    sup.health()
+}
+
 fn fast_cfg() -> WatchdogConfig {
     WatchdogConfig {
         idle_interval: Duration::from_millis(300),
@@ -133,7 +154,7 @@ fn crash_trips_then_auto_recovers() {
 
     // A crash: the call fails, the watchdog silences the pipeline, then restarts.
     let _ = sup.call("exit", json!({ "code": 1 }));
-    let h = sup.wait_until(|h| matches!(h, Health::Running), Duration::from_secs(3));
+    let h = wait_for_recovery(&sup, Duration::from_secs(3));
     assert!(matches!(h, Health::Running), "should auto-recover to Running, got {h:?}");
     assert!(sup.recoveries() >= 1);
     assert!(safe.reached(), "safe state must have been reached on the trip");
@@ -151,7 +172,7 @@ fn hang_is_killed_and_recovers_without_waiting_it_out() {
     // Sleeps 5 s, but busy_response is 200 ms: the monitor must *kill* the hung
     // child (cross-thread) and recover long before 5 s would pass.
     let _ = sup.call("sleep_ms", json!({ "ms": 5000 }));
-    let h = sup.wait_until(|h| matches!(h, Health::Running), Duration::from_secs(3));
+    let h = wait_for_recovery(&sup, Duration::from_secs(3));
 
     assert!(matches!(h, Health::Running), "should recover after killing the hang, got {h:?}");
     assert!(start.elapsed() < Duration::from_secs(4), "recovered without waiting out the 5 s hang");

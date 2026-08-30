@@ -1,0 +1,16 @@
+[package]
+name = "cageq-apo"
+version.workspace = true
+edition = "2024"
+
+# A static library the C++ shim links into `CAGEqApo.dll` — see `shim/cageq_apo.cpp` and
+# this crate's own docs for why the COM/audiodg half is C++ at all (short version: the
+# only thing that reliably survives audiodg's load handshake is the SDK's
+# `CBaseAudioProcessingObject`, a C++ class Rust cannot inherit from).
+#
+# `staticlib`, not `cdylib`: one DLL to sign, register and deploy rather than two, and no
+# cross-DLL boundary on the real-time path.
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
