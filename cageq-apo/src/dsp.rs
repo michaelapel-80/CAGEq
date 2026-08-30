@@ -1040,6 +1040,55 @@ mod tests {
     }
 
 
+
+    /// What a **drag** actually costs, as opposed to the deliberately large edit measured
+    /// above.
+    ///
+    /// The 6 dB single-band jump in the previous test is close to a worst case for an in-stage
+    /// edit. A tone drag emits updates at roughly 60 Hz, so sweeping a band 12 dB over a second
+    /// moves it about 0.2 dB per update; even a fast drag stays well under 1 dB. Since the
+    /// artefact scales with how far the coefficients travel, the realistic figure is far below
+    /// the headline one — which is why in-stage editing needs no mechanism beyond this ramp,
+    /// and why crossfaded filter instances are reserved for the A/B slot switch, where the
+    /// whole correction changes at once.
+    #[test]
+    fn a_drag_sized_edit_is_far_below_the_headline_figure() {
+        const WINDOW: usize = 960;
+        const BIN: usize = 1;
+        const HF_FROM: usize = 20;
+
+        let warm = tone(50.0, 0, WINDOW * 60, 0.5);
+        let cont = tone(50.0, WINDOW * 60, WINDOW, 0.5);
+
+        // One update's worth of a brisk drag, and the large edit for comparison.
+        let mut measure = |delta_db: f64| {
+            let mut c = Cascade::new(1, FS);
+            assert!(c.set_bands(&realistic_correction(3.0)));
+            c.settle();
+            let mut sink = vec![0.0f32; warm.len()];
+            c.process(&warm, &mut sink, warm.len());
+
+            assert!(c.set_bands(&realistic_correction(3.0 + delta_db)));
+            let mut out = vec![0.0f32; WINDOW];
+            c.process(&cont, &mut out, WINDOW);
+            hf_splatter_db(&out, HF_FROM, BIN)
+        };
+
+        let drag_db = measure(0.2);
+        let brisk_db = measure(1.0);
+        let large_db = measure(6.0);
+        eprintln!(
+            "HF splatter by edit size: 0.2 dB -> {drag_db:.1} dB, \
+             1 dB -> {brisk_db:.1} dB, 6 dB -> {large_db:.1} dB"
+        );
+
+        // The artefact must shrink with the edit, not sit at a floor — otherwise a drag would
+        // cost the same as a jump and the "small edits are cheap" reasoning would not hold.
+        assert!(drag_db < brisk_db, "a smaller edit should splatter less");
+        assert!(brisk_db < large_db, "a smaller edit should splatter less");
+        // A drag increment should be inaudible by any reasonable standard.
+        assert!(drag_db < -80.0, "a drag increment splattered at {drag_db:.1} dB");
+    }
     /// The ramp's own invariants, independent of how it sounds.
     ///
     /// The stability one matters most: interpolating IIR coefficients is generally unsafe,
@@ -1147,9 +1196,15 @@ mod tests {
     /// ways. A **smoothstep** ramp measured *worse* than linear (-57 vs -60), which says the
     /// residual is dominated by the *rate* at which coefficients move — smoothstep's midpoint
     /// slope is 1.5x linear's — and not by the corners at each end, which was the reason for
-    /// trying it. Longer ramps did not improve on 8 ms monotonically either. Anything further
-    /// likely needs a different mechanism (crossfading two filter instances) rather than a
-    /// better easing curve.
+    /// trying it. Longer ramps did not improve on 8 ms monotonically either.
+    ///
+    /// **Chasing this number further would be misdirected work.** The 6 dB single-band jump
+    /// here is near a worst case for an in-stage edit; the artefact scales with how far the
+    /// coefficients travel, and a real drag increment measures about -89 dB (see
+    /// `a_drag_sized_edit_is_far_below_the_headline_figure`). The case that genuinely needs
+    /// perfection is the A/B slot switch, where the whole correction changes at once — and
+    /// that is handled by a different mechanism entirely: two filter instances running in
+    /// parallel with the inactive slot kept warm, crossfaded on switch (filter.md §5.3c).
     #[test]
     fn retuning_live_does_not_splatter_the_spectrum_the_way_a_cold_restart_does() {
         // One period, so 50 Hz is bin 1 exactly and the window is dominated by the transition
