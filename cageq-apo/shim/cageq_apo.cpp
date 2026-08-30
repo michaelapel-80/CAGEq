@@ -235,12 +235,38 @@ public:
         UINT32 u32NumOutputConnections, APO_CONNECTION_DESCRIPTOR** ppOutputConnections) override
     {
         DiagF(L"LockForProcess: in=%u out=%u", u32NumInputConnections, u32NumOutputConnections);
-        if (u32NumInputConnections > 0 && ppInputConnections != nullptr)
-            DiagFormat(L"conn in  ", ppInputConnections[0]->pFormat);
-        if (u32NumOutputConnections > 0 && ppOutputConnections != nullptr)
-            DiagFormat(L"conn out ", ppOutputConnections[0]->pFormat);
+        if (u32NumInputConnections < 1 || u32NumOutputConnections < 1 ||
+            ppInputConnections == nullptr || ppOutputConnections == nullptr)
+        {
+            return APOERR_NUM_CONNECTIONS_INVALID;
+        }
+        DiagFormat(L"conn in  ", ppInputConnections[0]->pFormat);
+        DiagFormat(L"conn out ", ppOutputConnections[0]->pFormat);
 
-        HRESULT hr = CBaseAudioProcessingObject::LockForProcess(
+        // Read the format from the CONNECTION DESCRIPTOR, not from the base class's
+        // GetSamplesPerFrame().
+        //
+        // This is the fix for a bug that made the APO load but never process: the base only
+        // caches `m_u32SamplesPerFrame` when `APO_FLAG_SAMPLESPERFRAME_MUST_MATCH` is
+        // declared (see baseaudioprocessingobject.h's own comment on that member), and we
+        // deliberately do not declare it. So GetSamplesPerFrame() returned 0, the Rust
+        // engine refused to be created, LockForProcess failed — and Windows quietly dropped
+        // us from the chain and played the audio unprocessed. Audible success, total
+        // functional failure, no error anywhere.
+        //
+        // The descriptor is authoritative and unconditional, and is what EqualizerAPO reads
+        // for the same purpose. `GetFramesPerSecond()` happened to work (we DO declare
+        // FRAMESPERSECOND_MUST_MATCH) but is read from the same place now, so the two
+        // cannot disagree.
+        UNCOMPRESSEDAUDIOFORMAT inFormat = {};
+        HRESULT hr = ppInputConnections[0]->pFormat->GetUncompressedAudioFormat(&inFormat);
+        if (FAILED(hr))
+        {
+            DiagF(L"  -> GetUncompressedAudioFormat FAILED 0x%08X", hr);
+            return hr;
+        }
+
+        hr = CBaseAudioProcessingObject::LockForProcess(
             u32NumInputConnections, ppInputConnections, u32NumOutputConnections, ppOutputConnections);
         if (FAILED(hr))
         {
@@ -248,12 +274,8 @@ public:
             return hr;
         }
 
-        // These are what the Rust engine is configured from, so log them even on success:
-        // a zero here would mean the base did not cache the value (it only guarantees to
-        // when the matching APO_FLAG_*_MUST_MATCH is declared), which would look like a
-        // format rejection further down.
-        const UINT32 channels = GetSamplesPerFrame();
-        const FLOAT32 rate = GetFramesPerSecond();
+        const UINT32 channels = inFormat.dwSamplesPerFrame;
+        const FLOAT32 rate = inFormat.fFramesPerSecond;
         DiagF(L"  base ok; channels=%u rate=%.1f", channels, rate);
 
         m_rust = cageq_apo_create(channels, rate);
