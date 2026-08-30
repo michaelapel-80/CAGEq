@@ -1260,6 +1260,44 @@ mod tests {
     }
 
 
+
+    /// Mirrors a reported case exactly: stereo, 48 kHz, 21 bands at -7.7 dB switching to
+    /// 0 bands at -9.0 dB. Prints the samples straddling the switch so a "sharp edge on the
+    /// scope" can be confirmed or ruled out directly rather than inferred from a metric.
+    #[test]
+    fn dry_switch_waveform_stereo_21_bands() {
+        let bands: Vec<Band> = (0..21)
+            .map(|i| peaking(40.0 * 1.35_f64.powi(i), if i % 2 == 0 { 4.0 } else { -3.0 }, 1.4))
+            .collect();
+        let wet: Vec<Coeffs> = bands.iter().map(|b| coefficients(b, FS)).collect();
+
+        let mut c = Cascade::new(2, FS);
+        assert!(c.apply_coeffs(&wet, -7.7), "21-band correction should be accepted");
+        c.settle();
+
+        // Warm up, switching at the tone's peak (quarter period in) — the worst phase.
+        let n = 960 * 40 + 240;
+        let mono = tone(50.0, 0, n, 0.5);
+        let stereo: Vec<f32> = mono.iter().flat_map(|&s| [s, s]).collect();
+        let mut sink = vec![0.0f32; stereo.len()];
+        c.process(&stereo, &mut sink, n);
+
+        assert!(c.apply_coeffs(&[], -9.0), "dry should be accepted");
+        let cont_mono = tone(50.0, n, 64, 0.5);
+        let cont: Vec<f32> = cont_mono.iter().flat_map(|&s| [s, s]).collect();
+        let mut out = vec![0.0f32; cont.len()];
+        c.process(&cont, &mut out, 64);
+
+        let last_wet = sink[sink.len() - 2];
+        eprint!("last wet {last_wet:+.5} | first dry samples:");
+        for s in out.iter().step_by(2).take(10) {
+            eprint!(" {s:+.5}");
+        }
+        eprintln!();
+        let step = (out[0] - last_wet).abs();
+        let natural = (out[2] - out[0]).abs().max(1e-9);
+        eprintln!("  boundary step {step:.5} vs per-sample {natural:.5} = {:.1}x", step / natural);
+    }
     /// Diagnostic: the strongest non-fundamental bins through a dry switch, so a reported
     /// spectrum can be compared against what the engine actually produces.
     #[test]
@@ -1285,6 +1323,13 @@ mod tests {
             .map(|k| (k as f64 * FS / N as f64, 10.0 * (bin_energy(&out, k) / fund).log10()))
             .collect();
         peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        // The two frequencies reported from the VM, so the engine can be compared directly
+        // against what a spectrum display shows there.
+        for hz in [144.0f64, 177.0] {
+            let k = (hz * N as f64 / FS).round() as usize;
+            let db = 10.0 * (bin_energy(&out, k) / fund).log10();
+            eprintln!("  reported {hz:.0} Hz: engine puts {db:.1} dB there");
+        }
         eprintln!("strongest non-fundamental bins (re 50 Hz):");
         for (hz, db) in peaks.iter().take(6) {
             eprintln!("    {hz:6.1} Hz  {db:6.1} dB");
