@@ -102,15 +102,15 @@ impl CageqApo {
 
         if let control::ReadOutcome::Updated(seq) = control::try_read(block, &mut self.snapshot) {
             let snap = self.snapshot;
-            if self.cascade.apply_coeffs(&snap.coeffs[..snap.band_count], snap.preamp_db) {
-                self.applied_seq = seq;
-            } else {
-                // Structurally valid but too loud for the combined chain. Remember the
-                // sequence anyway: it will not become acceptable by being re-examined every
-                // buffer, and re-checking it forever would put the guard's cost on the audio
-                // path in perpetuity.
-                self.applied_seq = seq;
-            }
+            let ok = self.cascade.apply_coeffs(&snap.coeffs[..snap.band_count], snap.preamp_db);
+            // Either way the sequence counts as seen: a set that is too loud will not become
+            // acceptable by being re-examined every buffer, and re-checking it forever would
+            // put the loudness guard on the audio path in perpetuity.
+            self.applied_seq = seq;
+            // Reported back so the writer knows what actually happened. It cannot work this
+            // out for itself: the ceiling applies to the combined chain, so a filter that is
+            // individually stable and in range can still be declined here.
+            control::set_ack(block, seq, if ok { control::ACK_APPLIED } else { control::ACK_TOO_LOUD });
         }
         // Torn / unrecognised / rejected: leave `applied_seq` alone so the next buffer looks
         // again. A torn read in particular is expected and resolves on its own.

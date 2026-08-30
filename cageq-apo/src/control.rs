@@ -38,7 +38,7 @@ use crate::dsp::{Coeffs, MAX_BANDS};
 pub const CONTROL_MAGIC: u32 = 0x4341_4751;
 /// Layout version. A mismatch is refused rather than interpreted: this describes what
 /// someone is listening to, and a half-understood layout is not worth guessing at.
-pub const CONTROL_VERSION: u32 = 1;
+pub const CONTROL_VERSION: u32 = 2;
 
 /// Preamp bounds mirroring [`crate::config`]'s, for the same reason: attenuation is
 /// harmless, gain is a hazard, and the writer is not trusted merely because it is ours.
@@ -98,6 +98,17 @@ pub struct ControlBlock {
     /// Incremented by the APO so the app can see it is alive and being processed. Purely
     /// outbound; the reader never trusts it.
     pub heartbeat: AtomicU64,
+    /// What the APO did with the most recent update it looked at: `seq << 32 | code`.
+    ///
+    /// Outbound, like the heartbeat. It exists because the writer cannot predict the
+    /// answer: `publish` only checks what a writer can know — finite, stable, in range — but
+    /// the loudness ceiling is a property of the *combined* chain and is enforced in the
+    /// engine. A +39 dB filter is perfectly stable, so it publishes happily and is then
+    /// declined, and without this the writer would report success for a correction that
+    /// never took effect.
+    ///
+    /// Packed into one atomic so the sequence and its verdict can never be read out of step.
+    pub ack: AtomicU64,
 }
 
 /// A validated snapshot, ready to hand to the cascade. Fixed-size so taking one allocates
@@ -145,6 +156,27 @@ pub fn sequence(block: &ControlBlock) -> u32 {
 /// nothing on this side ever reads it back.
 pub fn bump_heartbeat(block: &ControlBlock) {
     block.heartbeat.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Verdicts the APO reports back through [`ControlBlock::ack`].
+pub const ACK_APPLIED: u32 = 0;
+/// Structurally valid, but the combined chain would exceed the engine's loudness ceiling.
+/// The correction was NOT applied; whatever was running still is.
+pub const ACK_TOO_LOUD: u32 = 1;
+
+/// Record what the APO did with update `seq`. Outbound only, and a single relaxed store —
+/// it runs on the real-time thread and nothing here is ordered against anything else.
+pub fn set_ack(block: &ControlBlock, seq: u32, code: u32) {
+    block.ack.store(((seq as u64) << 32) | code as u64, Ordering::Relaxed);
+}
+
+/// Read back the APO's verdict as `(seq, code)`.
+///
+/// The writer compares `seq` against its own publish: an older `seq` simply means the APO has
+/// not looked yet, which during normal operation lasts less than one buffer.
+pub fn ack(block: &ControlBlock) -> (u32, u32) {
+    let packed = block.ack.load(Ordering::Relaxed);
+    ((packed >> 32) as u32, packed as u32)
 }
 
 /// Take a consistent snapshot, if there is one.
@@ -241,6 +273,31 @@ mod tests {
     use super::*;
 
     /// A block in the state a freshly-created mapping would be: all zeroes.
+
+    /// The verdict channel. A writer cannot predict whether an update will be applied: it can
+    /// check stability, finiteness and range, but the loudness ceiling is a property of the
+    /// combined chain and lives in the engine — so a stable, in-range +39 dB filter publishes
+    /// happily and is then declined. Without this the writer reports success for a correction
+    /// that never took effect, which is exactly what the VM run showed.
+    #[test]
+    fn the_apo_can_report_a_verdict_the_writer_could_not_predict() {
+        let mut b = zeroed();
+        assert!(publish(&mut b, -6.0, &[stable()]));
+        let seq = sequence(&b);
+
+        // Nothing has looked at it yet: the ack still refers to an older sequence.
+        assert_ne!(ack(&b).0, seq, "an unexamined update must not read as acknowledged");
+
+        set_ack(&b, seq, ACK_APPLIED);
+        assert_eq!(ack(&b), (seq, ACK_APPLIED));
+
+        // A later update declined by the engine.
+        assert!(publish(&mut b, -6.0, &[stable(), stable()]));
+        let seq2 = sequence(&b);
+        set_ack(&b, seq2, ACK_TOO_LOUD);
+        assert_eq!(ack(&b), (seq2, ACK_TOO_LOUD));
+        assert_ne!(seq, seq2, "each publish must be separately acknowledgeable");
+    }
     fn zeroed() -> ControlBlock {
         ControlBlock {
             magic: 0,
@@ -250,6 +307,7 @@ mod tests {
             preamp_db: 0.0,
             coeffs: [RawCoeffs::default(); MAX_BANDS],
             heartbeat: AtomicU64::new(0),
+            ack: AtomicU64::new(0),
         }
     }
 

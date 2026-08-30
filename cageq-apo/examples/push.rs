@@ -147,13 +147,43 @@ fn main() {
             }
         }
     }
-
     if ch.publish(preamp_db, &coeffs) {
         println!("published: preamp {preamp_db:.1} dB, {} band(s) @ {ASSUMED_RATE} Hz", coeffs.len());
-        println!("(the APO applies it on its next buffer — no restart, no file, no reload)");
+
+        // Wait for the APO's verdict rather than assuming success. `publish` only checks what
+        // a writer can know — finite, stable, in range — while the loudness ceiling applies to
+        // the COMBINED chain and is enforced in the engine. A +39 dB filter is perfectly
+        // stable, so it publishes happily and is then declined; without this the tool would
+        // report success for a correction that never took effect.
+        let published = control::sequence(ch.block());
+        let mut verdict = None;
+        for _ in 0..100 {
+            let (seq, code) = control::ack(ch.block());
+            if seq == published {
+                verdict = Some(code);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        match verdict {
+            Some(control::ACK_APPLIED) => {
+                println!("APPLIED — the APO took it on its next buffer, no restart or reload.");
+            }
+            Some(control::ACK_TOO_LOUD) => {
+                eprintln!("REFUSED by the engine: the combined chain exceeds the loudness");
+                eprintln!("ceiling (+20 dB anywhere). Individually stable filters still stack.");
+                eprintln!("The previous correction is still running — nothing was disturbed.");
+                std::process::exit(1);
+            }
+            Some(other) => eprintln!("APO reported an unknown verdict ({other})."),
+            None => {
+                // No verdict means nothing is consuming the block.
+                println!("(no verdict — is audio actually playing? the APO acks on its next buffer)");
+            }
+        }
     } else {
-        // publish() applies the same checks the reader would, so this is the writer being told
-        // about something the APO would have refused anyway.
+        // publish() applies the checks a WRITER can make — stability, finiteness, range —
+        // so this is the writer catching what the APO would also have refused.
         eprintln!("REFUSED — unstable, non-finite, too many bands, or preamp out of range.");
         std::process::exit(1);
     }
