@@ -880,4 +880,128 @@ mod tests {
         // between two indistinguishable things and proves nothing.
         assert!(cold_dev > 0.01, "cold restart produced no transient to improve on ({cold_dev:.5})");
     }
+
+
+    /// Energy in one DFT bin (both ± frequencies), by Parseval: `sum x² == (1/N) sum |X_k|²`,
+    /// so one real-signal bin carries `2|X_k|²/N`.
+    fn bin_energy(x: &[f32], bin: usize) -> f64 {
+        let n = x.len();
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (i, &s) in x.iter().enumerate() {
+            let w = 2.0 * std::f64::consts::PI * bin as f64 * i as f64 / n as f64;
+            re += s as f64 * w.cos();
+            im -= s as f64 * w.sin();
+        }
+        2.0 * (re * re + im * im) / n as f64
+    }
+
+    /// Energy at and above `from_bin`, in dB relative to the fundamental — **the click metric**.
+    ///
+    /// A stable linear filter fed a pure tone emits a pure tone: it cannot create energy at
+    /// other frequencies. So on a 50 Hz sine, anything at kilohertz is not filtering — it is a
+    /// discontinuity, which is what a click *is* and what shows up in an FFT of a retune.
+    ///
+    /// The high bins are summed directly. Deriving them as `total - low` is far cheaper and
+    /// completely wrong: essentially all the energy is at low frequencies, so the subtraction
+    /// is catastrophic cancellation and reports noise (it produced a "floor" louder than the
+    /// signals it was supposed to bound, which is how the mistake surfaced).
+    fn hf_splatter_db(x: &[f32], from_bin: usize, fundamental_bin: usize) -> f64 {
+        let hf: f64 = (from_bin..x.len() / 2).map(|k| bin_energy(x, k)).sum();
+        10.0 * (hf.max(1e-300) / bin_energy(x, fundamental_bin)).log10()
+    }
+
+    /// A correction of the shape CAGEq actually produces — several bands across the range,
+    /// including a low, resonant one whose ring-out is long enough to be heard.
+    fn realistic_correction(low_gain_db: f64) -> Vec<Band> {
+        vec![
+            peaking(50.0, low_gain_db, 3.0),
+            peaking(160.0, -4.0, 1.2),
+            peaking(900.0, 2.5, 1.8),
+            peaking(3500.0, -5.0, 2.2),
+            peaking(9000.0, 3.0, 1.0),
+        ]
+    }
+
+    /// **The measurement the whole project rests on** (filter.md §5.3c), done numerically
+    /// rather than by ear — and measuring the artefact people actually hear.
+    ///
+    /// A 50 Hz sine through a realistic multi-band correction, one band retuned mid-stream
+    /// (what a tone drag does), with the window starting exactly at the retune. The metric is
+    /// energy at 1 kHz and above, where a linear filter on a 50 Hz tone can legitimately put
+    /// nothing at all.
+    ///
+    /// Three metrics were tried before this one, and the two failures are worth recording
+    /// because both looked reasonable and both reported "no difference" (~2 dB):
+    /// * **total non-fundamental energy** — dominated by the *legitimate* settling to a new
+    ///   gain, which a 3 dB → 9 dB edit is supposed to produce;
+    /// * **deviation from the settled target** — same flaw: the slow low-frequency settle
+    ///   swamps the step.
+    ///
+    /// Energy is not audibility. The click is a *discontinuity*, discontinuities are
+    /// broadband, and a metric that integrates a large benign transient with a small
+    /// broadband one cannot see it.
+    ///
+    /// ## What it measures, as of this commit
+    /// | | HF splatter (>=1 kHz, re 50 Hz) |
+    /// |---|---|
+    /// | never retuned (floor) | -150 dB |
+    /// | **state carried** | **-54 dB** |
+    /// | cold restart (an EqAPO config reload) | -41 dB |
+    ///
+    /// So state-carry is ~12 dB cleaner — a real, repeatable improvement, and the thing that
+    /// makes live editing usable. It is **not** artefact-free, and should not be described as
+    /// such: switching IIR coefficients mid-stream steps the output even with the delay
+    /// registers intact, because the same state through different coefficients gives a
+    /// different sample. Removing that residual is what coefficient ramping (stage C4, where
+    /// §5.3a's morph moves into the APO) is for, and this number is the baseline it has to beat.
+    #[test]
+    fn retuning_live_does_not_splatter_the_spectrum_the_way_a_cold_restart_does() {
+        // One period, so 50 Hz is bin 1 exactly and the window is dominated by the transition
+        // rather than by seconds of steady tone diluting it.
+        const WINDOW: usize = 960;
+        const BIN: usize = 1;      // 50 Hz
+        const HF_FROM: usize = 20; // 1 kHz, at 50 Hz per bin
+        let before = realistic_correction(3.0);
+        let after = realistic_correction(9.0);
+
+        let warm = tone(50.0, 0, WINDOW * 60, 0.5);
+        let cont = tone(50.0, WINDOW * 60, WINDOW, 0.5); // phase-continuous
+
+        let mut carried = Cascade::new(1, FS);
+        let mut cold = Cascade::new(1, FS);
+        let mut untouched = Cascade::new(1, FS);
+        let mut sink = vec![0.0f32; warm.len()];
+        for c in [&mut carried, &mut cold, &mut untouched] {
+            assert!(c.set_bands(&before));
+            c.process(&warm, &mut sink, warm.len());
+        }
+
+        carried.set_bands(&after); // state persists — what this APO does
+        cold.set_bands(&after);
+        cold.reset_state(); // what a config reload does to the WHOLE chain
+        // `untouched` is never retuned: the measurement's own noise floor.
+
+        let (mut a, mut b, mut u) =
+            (vec![0.0f32; WINDOW], vec![0.0f32; WINDOW], vec![0.0f32; WINDOW]);
+        carried.process(&cont, &mut a, WINDOW);
+        cold.process(&cont, &mut b, WINDOW);
+        untouched.process(&cont, &mut u, WINDOW);
+
+        let carried_db = hf_splatter_db(&a, HF_FROM, BIN);
+        let cold_db = hf_splatter_db(&b, HF_FROM, BIN);
+        let floor_db = hf_splatter_db(&u, HF_FROM, BIN);
+        eprintln!(
+            "HF splatter (>=1 kHz, re 50 Hz): carried {carried_db:.1} dB, \
+             cold {cold_db:.1} dB, floor {floor_db:.1} dB"
+        );
+
+        assert!(cold_db > floor_db + 20.0, "cold restart produced no measurable click");
+        // Measured: carried -53.7 dB, cold -41.3 dB, floor -150.0 dB. The 8 dB threshold
+        // sits under the ~12 dB actually observed, leaving room for build-to-build drift.
+        assert!(
+            carried_db < cold_db - 8.0,
+            "state-carry should be measurably quieter than a cold restart: \
+             carried {carried_db:.1} dB vs cold {cold_db:.1} dB",
+        );
+    }
 }
