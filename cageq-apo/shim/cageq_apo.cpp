@@ -142,7 +142,7 @@ class CageqApo final : public CBaseAudioProcessingObject, public IAudioSystemEff
 public:
     CageqApo() : CBaseAudioProcessingObject(g_regProperties), m_refCount(1), m_rust(nullptr)
     {
-        InterlockedIncrement(&g_instCount);
+        DiagF(L"CageqApo CONSTRUCTED (instances now %ld)", InterlockedIncrement(&g_instCount));
     }
 
     // IUnknown. Implemented by hand because CBaseAudioProcessingObject deliberately does
@@ -294,9 +294,25 @@ public:
     STDMETHOD(UnlockForProcess)() override
     {
         DiagF(L"UnlockForProcess");
-        cageq_apo_destroy(m_rust);
+        // Detach BEFORE destroying, not after. The engine is documented not to call
+        // APOProcess concurrently with this, but the reversed order leaves a window where
+        // m_rust is a dangling pointer that APOProcess's null check would happily accept —
+        // a use-after-free on the real-time thread of the whole machine's audio. Cheap to
+        // order correctly; catastrophic and near-undebuggable if the assumption ever fails.
+        void* rust = m_rust;
         m_rust = nullptr;
+        cageq_apo_destroy(rust);
         return CBaseAudioProcessingObject::UnlockForProcess();
+    }
+
+    // Overridden only to log — the base's implementation is what we want (zero added
+    // latency). Worth seeing, because it is called during stream setup and an error here
+    // can fail the whole stream before format negotiation is ever reached.
+    STDMETHOD(GetLatency)(HNSTIME* pTime) override
+    {
+        HRESULT hr = CBaseAudioProcessingObject::GetLatency(pTime);
+        DiagF(L"GetLatency -> 0x%08X (%lld)", hr, (pTime != nullptr) ? *pTime : -1);
+        return hr;
     }
 
     // IAudioProcessingObjectRT — the real-time callback. Nothing here may allocate, lock
@@ -341,7 +357,7 @@ public:
     #pragma AVRT_CODE_END
 
 private:
-    ~CageqApo() { InterlockedDecrement(&g_instCount); }
+    ~CageqApo() { DiagF(L"CageqApo DESTROYED (instances now %ld)", InterlockedDecrement(&g_instCount)); }
 
     long  m_refCount;
     void* m_rust; // opaque handle from cageq_apo_create
@@ -424,7 +440,17 @@ STDAPI DllCanUnloadNow()
 
 STDAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void** ppv)
 {
-    if (clsid != CLSID_CageqApo) return CLASS_E_CLASSNOTAVAILABLE;
+    // Logged because it is the FIRST thing that happens if the engine is trying to use us at
+    // all. Silence here on a format change means the rejection is upstream of this APO
+    // entirely — we were never consulted — which is a very different bug from us saying no.
+    DiagF(L"DllGetClassObject: clsid=%08X-%04X-%04X requested",
+          clsid.Data1, clsid.Data2, clsid.Data3);
+
+    if (clsid != CLSID_CageqApo)
+    {
+        DiagF(L"  -> CLASS_E_CLASSNOTAVAILABLE (not our CLSID)");
+        return CLASS_E_CLASSNOTAVAILABLE;
+    }
 
     CageqApoFactory* factory = new (std::nothrow) CageqApoFactory();
     if (factory == nullptr) return E_OUTOFMEMORY;
