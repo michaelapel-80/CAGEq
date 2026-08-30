@@ -64,15 +64,43 @@ On the VM, elevated:
 | Result | Meaning |
 |---|---|
 | Loaded **and** audio still plays | **Stage B passes** — it loads and passes audio through |
-| Not loaded | Run `scripts\sign.ps1`, re-register. Then try `-Slot LFX`. Then check Event Viewer → System |
+| Not loaded | Check `DisableProtectedAudioDG=1` first (see below) — that is the gate. Then try `-Slot LFX`, then Event Viewer → System |
 | Loaded but silence | It loads but the RT path or format negotiation is wrong — the more informative failure |
 
 5. Soak ~10 minutes: start/stop playback, change the endpoint's sample format, switch the
    default device. Watch for glitches, audiodg CPU spikes, crashes.
 6. `scripts\unregister.ps1 -EndpointId <GUID>`, then revert the snapshot.
 
-Record two things, because stage D has to ship them: **whether signing was needed**, and
-**whether `DisableProtectedAudioDG=1` was needed**.
+**Status: stage B passed on the VM, 2026-08-30.** `CAGEqApo.dll` loads into audiodg and
+audio keeps playing through it (EFX slot).
+
+## The load gate — signing is NOT it
+
+Measured, rather than assumed:
+
+| | Result |
+|---|---|
+| `DisableProtectedAudioDG` = 0 / unset, unsigned | does **not** load |
+| `DisableProtectedAudioDG` = 0 / unset, self-signed | does **not** load |
+| `DisableProtectedAudioDG` = 1, unsigned | **loads** |
+
+Windows' APO signature check is not satisfiable with a self-signed certificate, and that
+registry key disables the check outright. So the deployment requirement is one machine-wide
+DWORD, set once at install time (needs admin):
+
+```
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio
+    DisableProtectedAudioDG (DWORD) = 1
+```
+
+**This is exactly what Equalizer APO's own installer does** (`Setup/Setup.nsi:279`, removed
+again on uninstall at `:332`; its `Wiki/Developer.txt` states the purpose outright). CAGEq
+currently *depends* on EqualizerAPO, so every existing CAGEq user already has this key set —
+switching to CAGEq's own APO asks nothing new of them, and the shipped `EqualizerAPO.dll` is
+itself unsigned.
+
+Trade-off to carry into the UI, quoting EqAPO's own docs: applications requiring a secure
+audio path may change behaviour or refuse to output audio.
 
 ## Files
 

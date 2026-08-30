@@ -61,6 +61,27 @@ if (-not $EndpointId) {
 $fx = "$root\$EndpointId\FxProperties"
 if (-not (Test-Path $fx)) { throw "No FxProperties under $EndpointId (pick one listed with fx=True)" }
 
+# The actual load gate, verified on the VM 2026-08-30: without this key an APO must pass
+# Windows' APO signature check, which a self-signed certificate does NOT satisfy (tested:
+# unsigned and self-signed both fail to load). With it set, unsigned loads fine.
+# Equalizer APO's own installer sets exactly this (Setup/Setup.nsi:279) and its docs say so
+# outright — so CAGEq's APO is in the same deployment position as the incumbent, not a worse
+# one. Warned about rather than set here: it is a machine-wide change that belongs to an
+# installer, not to a test script.
+$audioKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio'
+$dg = (Get-ItemProperty $audioKey -Name DisableProtectedAudioDG -ErrorAction SilentlyContinue).DisableProtectedAudioDG
+if ($dg -ne 1) {
+    Write-Warning @"
+DisableProtectedAudioDG is $(if ($null -eq $dg) { 'NOT SET' } else { $dg }) — the APO will almost certainly NOT load.
+Windows' APO signature check rejects unsigned AND self-signed DLLs; this key disables it.
+To proceed on this VM:
+  New-ItemProperty -Path '$audioKey' -Name DisableProtectedAudioDG -PropertyType DWord -Value 1 -Force
+  Restart-Service audiosrv -Force
+(Equalizer APO's installer sets the same value. Note the documented trade-off: apps
+requiring a secure audio path may change behaviour or refuse to output audio.)
+"@
+}
+
 # 1) COM server: DllRegisterServer -> RegisterAPO + HKLM\SOFTWARE\Classes\CLSID\{..}\InprocServer32.
 #
 # Start-Process -Wait, not `& regsvr32`: regsvr32 is a GUI-subsystem binary, so PowerShell
@@ -99,6 +120,6 @@ audiosrv restarted. To check whether it loaded:
      Loaded + audio still audible = stage B passes (it loads AND passes audio through).
   3. Silence, or the endpoint stops working -> unregister.ps1 -EndpointId $EndpointId
 
-If it does NOT load: run sign.ps1, then re-run this. Then try -Slot LFX. Then check
-Event Viewer -> Windows Logs -> System for audio errors.
+If it does NOT load: check DisableProtectedAudioDG=1 first (see the warning above) — that
+is the gate, NOT signing. Then try -Slot LFX. Then Event Viewer -> Windows Logs -> System.
 "@

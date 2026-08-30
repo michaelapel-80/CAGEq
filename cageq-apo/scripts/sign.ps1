@@ -1,24 +1,26 @@
 ﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Self-sign CAGEqApo.dll with a locally-trusted Authenticode certificate.
+    Self-sign CAGEqApo.dll. RETAINED AS A NEGATIVE RESULT — this does not make it load.
 
 .DESCRIPTION
-    ⚠ VM ONLY — this installs a self-signed CA into the machine's Root and TrustedPublisher
-    stores. That is a real trust decision; do not run it on a machine you care about.
+    ⚠ VM ONLY — installs a self-signed CA into the machine's Root and TrustedPublisher
+    stores. A real trust decision; do not run it on a machine you care about.
 
-    Only needed if the DLL does not load unsigned. The earlier spike established that an
-    APO is user-mode, so this is **Authenticode**, self-serviceable and free — NOT the
-    kernel driver signing wall (WHQL/attestation via Partner Center + an EV certificate).
-    That distinction is the whole reason Path A is viable for a non-commercial project.
+    MEASURED ON THE VM, 2026-08-30 — signing is NOT the gate:
 
-    Deliberately uses only in-box tooling (New-SelfSignedCertificate + Set-AuthenticodeSignature
-    + certutil), so it runs on a bare Windows VM with no SDK or signtool installed.
+      DisableProtectedAudioDG = 0/unset : does NOT load, unsigned OR self-signed
+      DisableProtectedAudioDG = 1       : loads unsigned
 
-    Note that loading an unsigned/self-signed APO may also need
-    HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio!DisableProtectedAudioDG = 1.
-    That key governs DRM coexistence, not basic loading — try without it first, and record
-    which combination actually worked, because that answer is what stage D has to ship.
+    So Windows' APO signature check is not satisfiable by a self-signed certificate (it
+    wants a Microsoft-rooted chain, which is not self-serviceable), and the registry key —
+    which disables that check outright — is what actually decides it. Equalizer APO's own
+    installer sets the same key (Setup/Setup.nsi:279) and its Developer.txt says so
+    explicitly, so this is the incumbent's deployment model, not a CAGEq compromise.
+
+    Kept rather than deleted so the negative result stays reproducible: if a future Windows
+    build changes APO signing policy, re-running this is how you would find out. It has no
+    role in normal bring-up — use the registry key.
 #>
 $ErrorActionPreference = 'Stop'
 
