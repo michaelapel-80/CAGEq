@@ -108,6 +108,7 @@ extern "C" {
 void* cageq_apo_create(unsigned int channels, float sampleRate);
 void  cageq_apo_destroy(void* handle);
 void  cageq_apo_process(void* handle, const float* input, float* output, unsigned int frames);
+bool  cageq_apo_process_silence(void* handle, float* output, unsigned int frames);
 unsigned long long cageq_apo_frames_processed(void* handle);
 float cageq_apo_sample_rate(void* handle);
 bool  cageq_apo_set_bands(void* handle, const CageqBand* bands, unsigned int count);
@@ -471,13 +472,26 @@ public:
             break;
 
         case BUFFER_SILENT:
-            // Pass silence through as silence. Some drivers treat BUFFER_SILENT as
-            // meaningful, and a stage-B identity APO has no reason to manufacture signal
-            // where the engine promised none. (Once real filters exist, a decaying tail
-            // means this can no longer be a pure passthrough — stage C's problem.)
+        {
+            // Silence is PROCESSED, not skipped. The source has nothing to say, but a filter
+            // holding energy does — cutting straight to silence truncates the ring-out, which
+            // is exactly the kind of discontinuity this APO exists to remove, and it would
+            // also freeze the delay registers so stale energy fires when audio resumes.
+            //
+            // The input buffer is deliberately not touched: its contents are undefined under
+            // BUFFER_SILENT, and with APO_FLAG_INPLACE it may be the output buffer. The
+            // engine feeds itself zeros instead.
+            //
+            // While a tail remains the buffer really does carry audio, so it is reported
+            // BUFFER_VALID; once the tail has decayed the output is exact zeros and
+            // BUFFER_SILENT resumes, so the engine's power optimisation is only suspended for
+            // as long as there is genuinely something to hear.
+            const bool tail = cageq_apo_process_silence(
+                m_rust, reinterpret_cast<float*>(out->pBuffer), in->u32ValidFrameCount);
             out->u32ValidFrameCount = in->u32ValidFrameCount;
-            out->u32BufferFlags = BUFFER_SILENT;
+            out->u32BufferFlags = tail ? BUFFER_VALID : BUFFER_SILENT;
             break;
+        }
 
         default:
             out->u32ValidFrameCount = 0;

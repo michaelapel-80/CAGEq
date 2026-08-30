@@ -368,6 +368,61 @@ impl Cascade {
         filters + 20.0 * self.preamp.log10()
     }
 
+    /// Below this peak sample magnitude the filter tail is treated as finished.
+    ///
+    /// Two orders of magnitude under a 24-bit LSB (~6e-8), so truncating there is inaudible
+    /// by construction, while being far above the denormal range so the comparison itself is
+    /// cheap.
+    const SILENCE_EPS: f32 = 1e-9;
+
+    /// Run `frames` of digital silence through the cascade, returning whether the output
+    /// still carries an audible tail.
+    ///
+    /// The audio engine hands us `BUFFER_SILENT` when the source has nothing to say, but a
+    /// filter with energy in its delay registers does: cutting straight to silence truncates
+    /// the ring-out, which is a discontinuity — precisely the kind of artefact this APO
+    /// exists to remove. So silence is *processed*, not skipped, and the caller emits the
+    /// tail until it has genuinely decayed.
+    ///
+    /// Once it has, the delay registers are zeroed outright. That is not just tidiness: an
+    /// IIR tail decays asymptotically into denormal floats, and denormal arithmetic carries a
+    /// large penalty on x86 — a filter left ringing at 1e-30 forever would quietly tax the
+    /// real-time thread for as long as the stream stays open.
+    pub fn process_silence(&mut self, output: &mut [f32], frames: usize) -> bool {
+        let channels = self.channels;
+        let count = frames * channels;
+        debug_assert!(output.len() >= count);
+
+        let mut peak = 0.0f32;
+        for frame in 0..frames {
+            for ch in 0..channels {
+                let base = ch * MAX_BANDS;
+                // Silence in — the preamp scales zero to zero, so it is simply skipped.
+                let mut x = 0.0f64;
+                for b in 0..self.band_count {
+                    x = self.state[base + b].step(&self.coeffs[b], x);
+                }
+                let y = x as f32;
+                output[frame * channels + ch] = y;
+                let mag = y.abs();
+                if mag > peak {
+                    peak = mag;
+                }
+            }
+        }
+
+        if peak <= Self::SILENCE_EPS {
+            // Finished ringing. Clear the registers so the next stretch of silence costs
+            // nothing and no denormals accumulate.
+            self.reset_state();
+            for s in output[..count].iter_mut() {
+                *s = 0.0;
+            }
+            return false;
+        }
+        true
+    }
+
     /// Process `frames` × `channels` interleaved samples, `input` → `output`.
     ///
     /// **Real-time**: no allocation, no locking, no branching on anything but the band
@@ -615,6 +670,64 @@ mod tests {
         );
         // And the dropped band really was doing something there, or this proves nothing.
         assert!(expected < 11.0, "sanity: the dropped +12 dB band should have dominated 5 kHz");
+    }
+
+    /// Silence must be *processed*, not skipped: a filter holding energy still has a tail,
+    /// and cutting it off is the discontinuity this APO exists to avoid. The tail must also
+    /// actually end, and end in exact zeros — an IIR ring-out decays asymptotically into
+    /// denormals, which are slow enough to matter on a real-time thread.
+    #[test]
+    fn silence_rings_out_and_then_genuinely_stops() {
+        let mut c = Cascade::new(2, FS);
+        c.set_bands(&[peaking(100.0, 6.0, 4.0)]); // high-Q, so a long tail
+
+        // Excite it with a tone, then stop feeding it.
+        let drive = tone(100.0, 0, 2000, 0.5);
+        let mut sink = vec![0.0f32; 2000 * 2];
+        let stereo: Vec<f32> = drive.iter().flat_map(|&s| [s, s]).collect();
+        c.process(&stereo, &mut sink, 2000);
+
+        // The first silent buffer must carry the tail, not instant silence.
+        let mut out = vec![0.0f32; 256 * 2];
+        assert!(c.process_silence(&mut out, 256), "tail was truncated at the first silent buffer");
+        assert!(out.iter().any(|s| s.abs() > 1e-6), "reported a tail but emitted nothing");
+
+        // And it must terminate in bounded time rather than ringing forever in denormals.
+        let mut buffers = 1;
+        while c.process_silence(&mut out, 256) {
+            buffers += 1;
+            assert!(buffers < 2000, "tail never decayed below the silence threshold");
+        }
+
+        // Once finished, the output is exact zeros and the state is genuinely cleared — so
+        // the next stretch of silence is free and nothing stale fires when audio resumes.
+        assert!(out.iter().all(|&s| s == 0.0), "final silent buffer was not exactly zero");
+        assert!(!c.process_silence(&mut out, 256), "settled cascade claimed a tail");
+    }
+
+    /// State left over from a truncated tail would fire as a transient when audio resumes.
+    /// After silence has settled, the cascade must behave exactly like a fresh one.
+    #[test]
+    fn audio_resuming_after_settled_silence_starts_clean() {
+        let bands = [peaking(100.0, 6.0, 4.0)];
+        let resume = tone(440.0, 0, 64, 0.25);
+        let stereo: Vec<f32> = resume.iter().flat_map(|&s| [s, s]).collect();
+
+        let mut used = Cascade::new(2, FS);
+        used.set_bands(&bands);
+        let drive: Vec<f32> = tone(100.0, 0, 2000, 0.5).iter().flat_map(|&s| [s, s]).collect();
+        let mut sink = vec![0.0f32; 2000 * 2];
+        used.process(&drive, &mut sink, 2000);
+        let mut quiet = vec![0.0f32; 256 * 2];
+        while used.process_silence(&mut quiet, 256) {}
+
+        let mut fresh = Cascade::new(2, FS);
+        fresh.set_bands(&bands);
+
+        let (mut a, mut b) = (vec![0.0f32; 64 * 2], vec![0.0f32; 64 * 2]);
+        used.process(&stereo, &mut a, 64);
+        fresh.process(&stereo, &mut b, 64);
+        assert_eq!(a, b, "settled silence left state that coloured the resumed audio");
     }
 
     /// The loudness ceiling, which is about the **combined** chain rather than any one

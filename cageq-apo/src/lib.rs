@@ -309,6 +309,35 @@ pub unsafe extern "C" fn cageq_apo_process(
     apo.frames_processed = apo.frames_processed.wrapping_add(frames as u64);
 }
 
+/// Process `frames` of silence, returning `true` while the filter tail is still audible.
+///
+/// The engine signals `BUFFER_SILENT` when the source has nothing to say, but a filter
+/// holding energy does: skipping it truncates the ring-out (a click — the artefact class this
+/// APO exists to remove) and freezes the delay registers so stale energy fires when audio
+/// resumes. So silence is processed, and the caller keeps emitting until this returns
+/// `false`, at which point the output is exact zeros and the state has been cleared.
+///
+/// **Runs on the real-time thread** — same contract as [`cageq_apo_process`].
+///
+/// # Safety
+/// `handle` must be live; `output` must address at least `frames * channels` `f32`s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cageq_apo_process_silence(
+    handle: *mut c_void,
+    output: *mut f32,
+    frames: u32,
+) -> bool {
+    if handle.is_null() || output.is_null() {
+        return false;
+    }
+    let apo = unsafe { &mut *(handle as *mut CageqApo) };
+    let count = (frames as usize).saturating_mul(apo.channels as usize);
+    let dst = unsafe { std::slice::from_raw_parts_mut(output, count) };
+    let tail = apo.cascade.process_silence(dst, frames as usize);
+    apo.frames_processed = apo.frames_processed.wrapping_add(frames as u64);
+    tail
+}
+
 /// Frames processed since creation — the bring-up liveness probe (see
 /// [`CageqApo::frames_processed`]). Zero for a null handle.
 ///
