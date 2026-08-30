@@ -10,7 +10,12 @@ edition = "2024"
 #
 # `staticlib`, not `cdylib`: one DLL to sign, register and deploy rather than two, and no
 # cross-DLL boundary on the real-time path.
+# `rlib` alongside `staticlib`: the staticlib is what the shim links into CAGEqApo.dll, but
+# other Rust code needs to depend on this crate too — the app-side backend, to render config
+# files and compute the coefficients it pushes down the control channel, and the example
+# writer used to exercise that channel. A staticlib-only crate produces no rlib and cannot be
+# depended on at all.
 [lib]
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]

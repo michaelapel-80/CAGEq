@@ -43,6 +43,8 @@ type Handle = *mut c_void;
 
 const PAGE_READWRITE: u32 = 0x04;
 const FILE_MAP_ALL_ACCESS: u32 = 0x000F_001F;
+const FILE_MAP_WRITE: u32 = 0x0002;
+const FILE_MAP_READ: u32 = 0x0004;
 const SDDL_REVISION_1: u32 = 1;
 
 /// See the module doc. `GA` = generic all, `GRGW` = generic read + write, `SY` = SYSTEM,
@@ -86,6 +88,11 @@ unsafe extern "system" {
         dw_file_offset_low: u32,
         dw_number_of_bytes_to_map: usize,
     ) -> *mut c_void;
+    fn OpenFileMappingW(
+        dw_desired_access: u32,
+        b_inherit_handle: i32,
+        lp_name: *const u16,
+    ) -> Handle;
     fn UnmapViewOfFile(lp_base_address: *const c_void) -> i32;
     fn CloseHandle(h_object: Handle) -> i32;
 }
@@ -191,6 +198,54 @@ impl ControlChannel {
         // "no filters" instruction. Nothing is initialised here: initialising it would mean
         // this side inventing a state CAGEq never published.
         Some(ControlChannel { handle, view: view as *mut ControlBlock })
+    }
+
+    /// **Open** an existing section — the writer's side, used by CAGEq (and by the `push`
+    /// example that exercises this on a VM).
+    ///
+    /// `None` when the section does not exist, which is the ordinary case whenever no stream
+    /// is running on that endpoint: the APO creates it at `LockForProcess` and tears it down
+    /// at unlock, so the writer must tolerate its absence and retry rather than treat it as
+    /// an error.
+    pub fn open(endpoint_id: &str) -> Option<ControlChannel> {
+        if !is_valid_endpoint_id(endpoint_id) {
+            return None;
+        }
+        let name = wide(&format!("Global\\CAGEqApo_{endpoint_id}"));
+        let size = std::mem::size_of::<ControlBlock>();
+
+        // SAFETY: `name` is NUL-terminated.
+        let handle = unsafe { OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, 0, name.as_ptr()) };
+        if handle.is_null() {
+            return None;
+        }
+        // SAFETY: `handle` is a valid section of at least `size` bytes.
+        let view = unsafe { MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size) };
+        if view.is_null() {
+            unsafe { CloseHandle(handle) };
+            return None;
+        }
+        Some(ControlChannel { handle, view: view as *mut ControlBlock })
+    }
+
+    /// Publish a coefficient set for the APO to pick up. The writer's only mutating entry
+    /// point — deliberately not a `&mut ControlBlock` accessor, so nothing outside this
+    /// module can write the block without going through the seqlock.
+    ///
+    /// Returns `false` without publishing if the set would be refused on the reading side
+    /// (see [`crate::control::publish`]), so a writer bug surfaces here rather than as an
+    /// update that silently never applies.
+    pub fn publish(&self, preamp_db: f64, coeffs: &[crate::control::RawCoeffs]) -> bool {
+        // SAFETY: the view is ours and correctly sized; `control::publish` is the only writer
+        // and orders its stores so a concurrent reader sees a consistent block or none.
+        let block = unsafe { &mut *self.view };
+        crate::control::publish(block, preamp_db, coeffs)
+    }
+
+    /// The APO's heartbeat counter, so a writer can tell whether audio is actually being
+    /// processed through this endpoint.
+    pub fn heartbeat(&self) -> u64 {
+        self.block().heartbeat.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The mapped block.
