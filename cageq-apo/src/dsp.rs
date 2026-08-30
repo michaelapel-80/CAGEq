@@ -1061,7 +1061,7 @@ mod tests {
         let cont = tone(50.0, WINDOW * 60, WINDOW, 0.5);
 
         // One update's worth of a brisk drag, and the large edit for comparison.
-        let mut measure = |delta_db: f64| {
+        let measure = |delta_db: f64| {
             let mut c = Cascade::new(1, FS);
             assert!(c.set_bands(&realistic_correction(3.0)));
             c.settle();
