@@ -1,0 +1,13 @@
+[package]
+name = "cageq-backend"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0.18"
+
+# Endpoint enumeration reads the MMDevices registry branch (§3.0). Windows-only;
+# elsewhere it compiles to an empty-list fallback so the crate still builds/tests.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

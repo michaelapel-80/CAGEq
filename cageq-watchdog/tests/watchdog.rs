@@ -2,15 +2,14 @@
 //! (via cageq-sidecar) with small deadlines/backoffs, provokes a fault, and asserts
 //! on the health state machine and the on-disk safe state.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use cageq_sidecar::{Sidecar, SidecarError};
-use cageq_watchdog::{Health, Supervisor, SupervisorError, WatchdogConfig};
+use cageq_watchdog::{Health, SafeState, Supervisor, SupervisorError, WatchdogConfig};
 use serde_json::json;
 
 // --- test rig -------------------------------------------------------------
@@ -73,21 +72,30 @@ fn counting_spawner(ok: impl Fn(usize) -> bool + Send + 'static) -> impl Fn() ->
     }
 }
 
-struct TempDir(PathBuf);
-impl TempDir {
-    fn new(tag: &str) -> Self {
-        let p = std::env::temp_dir().join(format!("cageq-wd-{}-{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&p);
-        fs::create_dir_all(&p).unwrap();
-        TempDir(p)
+/// Stands in for an EQ backend's safe state, recording whether the supervisor reached it.
+///
+/// The watchdog knows only the [`SafeState`] callback (see its own doc) — it has no idea
+/// whether reaching silence means writing a −120 dB `cageq.txt` or raising a bypass flag
+/// in an APO's control block. A counter is therefore the honest probe here; these tests
+/// used to assert on `cageq.txt` containing `Preamp: -120.0 dB`, which coupled them to
+/// one particular backend's file format for no reason.
+#[derive(Clone)]
+struct SafeStateSpy(Arc<AtomicUsize>);
+
+impl SafeStateSpy {
+    fn new() -> Self {
+        SafeStateSpy(Arc::new(AtomicUsize::new(0)))
     }
-    fn cageq_txt(&self) -> PathBuf {
-        self.0.join("cageq.txt")
+    /// The callback handed to [`Supervisor::start`].
+    fn callback(&self) -> SafeState {
+        let hits = Arc::clone(&self.0);
+        Arc::new(move || {
+            hits.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
     }
-}
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+    fn reached(&self) -> bool {
+        self.0.load(Ordering::SeqCst) > 0
     }
 }
 
@@ -102,16 +110,12 @@ fn fast_cfg() -> WatchdogConfig {
     }
 }
 
-fn wrote_safe_state(path: &Path) -> bool {
-    fs::read_to_string(path).map(|s| s.contains("Preamp: -120.0 dB")).unwrap_or(false)
-}
-
 // --- tests ----------------------------------------------------------------
 
 #[test]
 fn healthy_sidecar_never_trips() {
-    let tmp = TempDir::new("healthy");
-    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), tmp.cageq_txt()).unwrap();
+    let safe = SafeStateSpy::new();
+    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), safe.callback()).unwrap();
 
     let v = sup.call("calculate_filters", json!({ "device": "DAC" })).expect("call ok");
     assert_eq!(v["device"], "DAC");
@@ -119,20 +123,20 @@ fn healthy_sidecar_never_trips() {
     std::thread::sleep(Duration::from_millis(1000)); // several idle heartbeats
     assert_eq!(sup.health(), Health::Running);
     assert_eq!(sup.recoveries(), 0);
-    assert!(!tmp.cageq_txt().exists(), "no safe state should have been written");
+    assert!(!safe.reached(), "no safe state should have been reached");
 }
 
 #[test]
 fn crash_trips_then_auto_recovers() {
-    let tmp = TempDir::new("crash");
-    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), tmp.cageq_txt()).unwrap();
+    let safe = SafeStateSpy::new();
+    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), safe.callback()).unwrap();
 
-    // A crash: the call fails, the watchdog writes silence, then restarts.
+    // A crash: the call fails, the watchdog silences the pipeline, then restarts.
     let _ = sup.call("exit", json!({ "code": 1 }));
     let h = sup.wait_until(|h| matches!(h, Health::Running), Duration::from_secs(3));
     assert!(matches!(h, Health::Running), "should auto-recover to Running, got {h:?}");
     assert!(sup.recoveries() >= 1);
-    assert!(wrote_safe_state(&tmp.cageq_txt()), "safe state must have been written on the trip");
+    assert!(safe.reached(), "safe state must have been reached on the trip");
 
     // The fresh sidecar serves calls again.
     let v = sup.call("calculate_filters", json!({ "device": "DAC2" })).unwrap();
@@ -141,8 +145,7 @@ fn crash_trips_then_auto_recovers() {
 
 #[test]
 fn hang_is_killed_and_recovers_without_waiting_it_out() {
-    let tmp = TempDir::new("hang");
-    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), tmp.cageq_txt()).unwrap();
+    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), SafeStateSpy::new().callback()).unwrap();
 
     let start = Instant::now();
     // Sleeps 5 s, but busy_response is 200 ms: the monitor must *kill* the hung
@@ -158,7 +161,7 @@ fn hang_is_killed_and_recovers_without_waiting_it_out() {
 
 #[test]
 fn idle_crash_is_detected_event_based() {
-    let tmp = TempDir::new("idlecrash");
+    let safe = SafeStateSpy::new();
     // Long idle_interval so the driver stays blocked in recv when the process dies:
     // only the event-based exit waiter can notice it promptly. Long backoff so
     // recovery doesn't race the assertion.
@@ -169,26 +172,26 @@ fn idle_crash_is_detected_event_based() {
         tick: Duration::from_millis(40),
         restart_backoffs: vec![Duration::from_secs(30)],
     };
-    let sup = Supervisor::start(healthy_spawner(), cfg, tmp.cageq_txt()).unwrap();
+    let sup = Supervisor::start(healthy_spawner(), cfg, safe.callback()).unwrap();
 
     // Replies immediately, then the process crashes ~300 ms later while we're idle.
     sup.call("die_after_ms", json!({ "ms": 300, "code": 1 })).expect("schedule ok");
 
-    // The safe state must appear well before the 10 s idle heartbeat would fire —
+    // The safe state must be reached well before the 10 s idle heartbeat would fire —
     // that is only possible via the OS-handle waiter.
     let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && !wrote_safe_state(&tmp.cageq_txt()) {
+    while Instant::now() < deadline && !safe.reached() {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(wrote_safe_state(&tmp.cageq_txt()), "idle crash should mute promptly via the exit waiter");
+    assert!(safe.reached(), "idle crash should mute promptly via the exit waiter");
     assert!(matches!(sup.health(), Health::Recovering { .. } | Health::Terminal { .. }));
 }
 
 #[test]
 fn persistent_restart_failure_goes_terminal() {
-    let tmp = TempDir::new("terminal");
     // Only the initial spawn (index 0) works; every restart attempt fails.
-    let sup = Supervisor::start(counting_spawner(|i| i == 0), fast_cfg(), tmp.cageq_txt()).unwrap();
+    let sup =
+        Supervisor::start(counting_spawner(|i| i == 0), fast_cfg(), SafeStateSpy::new().callback()).unwrap();
 
     let _ = sup.call("exit", json!({ "code": 1 }));
     let h = sup.wait_until(|h| matches!(h, Health::Terminal { .. }), Duration::from_secs(3));
@@ -203,10 +206,14 @@ fn persistent_restart_failure_goes_terminal() {
 
 #[test]
 fn manual_retry_recovers_from_terminal() {
-    let tmp = TempDir::new("manual");
     // ok on the initial spawn (0) and the manual attempt (4); the 3 automatic
     // attempts (1,2,3) fail, so we reach Terminal first.
-    let sup = Supervisor::start(counting_spawner(|i| i == 0 || i >= 4), fast_cfg(), tmp.cageq_txt()).unwrap();
+    let sup = Supervisor::start(
+        counting_spawner(|i| i == 0 || i >= 4),
+        fast_cfg(),
+        SafeStateSpy::new().callback(),
+    )
+    .unwrap();
 
     let _ = sup.call("exit", json!({ "code": 1 }));
     let h = sup.wait_until(|h| matches!(h, Health::Terminal { .. }), Duration::from_secs(3));

@@ -1,4 +1,18 @@
-//! Equalizer APO config writer — two-file `Include` architecture (filter.md §3.0/§7.4).
+//! **The Equalizer APO backend** — [`EqApoBackend`], an implementation of
+//! `cageq_backend::EqBackend` over EqAPO's two-file `Include` architecture
+//! (filter.md §3.0/§7.4).
+//!
+//! Since CAGEq gained a second backend (its own APO — filter.md §5.3c), this crate is no
+//! longer "the config writer" but "one of two ways to apply filters". The neutral domain
+//! types it speaks (`Filter`, `DeviceConfig`, `AudioDevice`, `StartupDecision`) live in
+//! `cageq-backend` and are re-exported below for convenience; everything EqAPO-specific
+//! — the `PK`/`LSC`/`HSC` tokens, the `cageq.txt` rendering, the `config.txt` splice, the
+//! ≥15 ms write spacing this backend declares — stays here, where it belongs.
+//!
+//! This backend is **permanently supported but feature-frozen**: existing EqualizerAPO
+//! users keep a working app indefinitely, but capabilities that need an in-process engine
+//! (live coefficient push, arbitrary-length transitions with carried filter state) are
+//! declared `false` in [`EqBackend::capabilities`] rather than emulated here.
 //!
 //! Verified against how the reference tool (AQUA) and EqAPO itself work:
 //!   * CAGEq writes all its filters into its **own** file, `cageq.txt`, and puts a
@@ -35,9 +49,15 @@ use std::fmt::Write as _; // brings write!/writeln! for String targets into scop
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+// The domain types this backend renders, and the trait it implements. Re-exported at the
+// bottom of this section so existing callers (and the integration tests) keep importing
+// `Filter`/`DeviceConfig`/… from here unchanged.
+use cageq_backend::{BackendError, Capabilities, EqBackend};
+pub use cageq_backend::{AudioDevice, DeviceConfig, Filter, FilterType, StartupDecision};
 
 // Line ending CAGEq emits. EqAPO parses LF fine (it strips a trailing \r itself).
 const NL: &str = "\n";
@@ -55,45 +75,19 @@ pub const CAGEQ_FILENAME: &str = "cageq.txt";
 // Data model
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FilterType {
-    Peaking,   // PK
-    LowShelf,  // LSC
-    HighShelf, // HSC
-    Bandpass,  // BP — no gain (unity-peak); used only by the §5.2 "isolate" audition
-}
-
-impl FilterType {
-    /// EqAPO's token for this filter type. VERIFIED against AutoEq's own
-    /// EqualizerAPO exporter (`frequency_response.py::write_eqapo_parametric_eq`,
-    /// `types = {Peaking: 'PK', LowShelf: 'LSC', HighShelf: 'HSC'}`): `LSC`/`HSC`
-    /// are the center-frequency shelves taking an Fc/Gain/Q triple (the RBJ-biquad-
-    /// with-Q form AutoEq emits), not `LS`/`HS` or the slope-based `LSC x dB`.
-    fn eqapo_token(self) -> &'static str {
-        match self {
-            FilterType::Peaking => "PK",
-            FilterType::LowShelf => "LSC",
-            FilterType::HighShelf => "HSC",
-            FilterType::Bandpass => "BP",
-        }
+/// EqAPO's token for a filter type — this backend's wire format, which is exactly why it
+/// lives here and not on the neutral [`FilterType`]. VERIFIED against AutoEq's own
+/// EqualizerAPO exporter (`frequency_response.py::write_eqapo_parametric_eq`,
+/// `types = {Peaking: 'PK', LowShelf: 'LSC', HighShelf: 'HSC'}`): `LSC`/`HSC` are the
+/// center-frequency shelves taking an Fc/Gain/Q triple (the RBJ-biquad-with-Q form AutoEq
+/// emits), not `LS`/`HS` or the slope-based `LSC x dB`.
+fn eqapo_token(kind: FilterType) -> &'static str {
+    match kind {
+        FilterType::Peaking => "PK",
+        FilterType::LowShelf => "LSC",
+        FilterType::HighShelf => "HSC",
+        FilterType::Bandpass => "BP",
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Filter {
-    pub kind: FilterType,
-    pub freq_hz: f64,
-    pub gain_db: f64,
-    pub q: f64,
-}
-
-/// One device's managed configuration — becomes one `Device:` block in cageq.txt.
-/// Deserializable so the sidecar's `calculate_filters` reply maps straight onto it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceConfig {
-    pub device: String,
-    pub preamp_db: f64,
-    pub filters: Vec<Filter>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -126,26 +120,126 @@ pub enum BlockState {
     },
 }
 
-/// The verdict of the startup integrity check (§3.0) — how far to trust the
-/// resume state remembered in settings.json.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartupDecision {
-    /// No cageq.txt yet (or one without a hash header). Start clean.
-    FirstRun,
-    /// cageq.txt is byte-identical to what CAGEq last wrote (hash matches
-    /// settings.json). The remembered resume state is trustworthy.
-    ResumeTrusted,
-    /// cageq.txt is CAGEq's hardcoded safe-state config (§7.2): the safety shutdown
-    /// was still active at the last exit/crash. Offer to restore the last state.
-    SafeStateStillActive,
-    /// cageq.txt differs from what CAGEq last wrote and isn't the safe-state config —
-    /// changed by the user or another tool. Surface a neutral notice; don't keep
-    /// asserting a specific preset/slot is active (fail-early).
-    ExternallyModified,
+// ---------------------------------------------------------------------------
+// The backend
+// ---------------------------------------------------------------------------
+
+/// EqAPO's two APO CLSIDs (braces stripped, upper-case) as they appear as REG_SZ GUID
+/// values under an endpoint's `FxProperties` — pre-mix `{EACD2258-…}` / post-mix
+/// `{EC1CC9CE-…}`, verified against a live install. Their presence is how
+/// [`EqBackend::drives_endpoint`] knows EqAPO will actually process this endpoint.
+const EQAPO_APO_CLSIDS: [&str; 2] =
+    ["EACD2258-FCAC-4FF4-B36D-419E924A6D79", "EC1CC9CE-FAED-4822-828A-82A81A6F018F"];
+
+/// EqAPO does not reset its crossfade progress counter when a reload lands while a
+/// transition is still running (FilterEngine.cpp:258-261) — the in-flight counter gets
+/// applied to the new curve, audible as a jump. So consecutive writes must be spaced at
+/// least this far apart (filter.md §5.3). Declared as a capability rather than enforced
+/// here: it's the *orchestrator* that paces writes, and the other backend has no such wall.
+const EQAPO_MIN_WRITE_SPACING: Duration = Duration::from_millis(15);
+
+/// Is Equalizer APO's APO attached to this endpoint, i.e. will it actually process audio
+/// there (§3.0)? A `Device:`-scoped config for an endpoint this returns `false` for is
+/// inert — the UI warns and points at EqAPO's DeviceSelector instead of applying something
+/// that silently does nothing.
+///
+/// Free function as well as an [`EqBackend::drives_endpoint`] impl because the answer
+/// depends only on the registry, not on any config directory: the device picker needs it
+/// even when CAGEq failed to start and has no live backend to ask.
+pub fn eqapo_drives_endpoint(device_id: &str) -> bool {
+    cageq_backend::endpoint_has_apo(device_id, &EQAPO_APO_CLSIDS)
+}
+
+/// Applies filters by writing Equalizer APO's config files. Holds the config directory
+/// (where `config.txt` lives); everything else is derived from it.
+#[derive(Debug, Clone)]
+pub struct EqApoBackend {
+    config_dir: PathBuf,
+}
+
+impl EqApoBackend {
+    /// Target `config_dir` — EqAPO's config directory, normally from
+    /// [`detect_eqapo_config_dir`]. Not validated here: the desktop app deliberately
+    /// falls back to a dev temp dir on a machine without EqAPO so the rest of the app
+    /// still runs, and says so in the UI.
+    pub fn new(config_dir: impl Into<PathBuf>) -> Self {
+        EqApoBackend { config_dir: config_dir.into() }
+    }
+
+    /// EqAPO's config directory.
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
+    }
+
+    /// The managed file this backend owns and rewrites.
+    pub fn cageq_path(&self) -> PathBuf {
+        self.config_dir.join(CAGEQ_FILENAME)
+    }
+
+    /// EqAPO's own config file, which CAGEq only ever adds one `Include:` line to.
+    fn config_txt(&self) -> PathBuf {
+        self.config_dir.join("config.txt")
+    }
+}
+
+impl EqBackend for EqApoBackend {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            min_write_spacing: EQAPO_MIN_WRITE_SPACING,
+            // EqAPO's only transition is a fixed ~10 ms crossfade from a *cold* cascade,
+            // so a longer, smoother tonal move (§5.3a) has to be built by the core out of
+            // many spaced writes. Nothing this backend can do about that from outside.
+            owns_transitions: false,
+            // config.txt is shared with EqAPO itself and any other tool writing to it.
+            manages_foreign_config: true,
+        }
+    }
+
+    fn apply(&self, configs: &[DeviceConfig]) -> Result<String, BackendError> {
+        apply(&self.config_dir, configs).map_err(BackendError::backend)
+    }
+
+    fn write_safe_state(&self) -> Result<(), BackendError> {
+        write_safe_state(&self.cageq_path()).map_err(BackendError::backend)
+    }
+
+    fn startup_decision(&self, expected_hash: Option<&str>) -> Result<StartupDecision, BackendError> {
+        let state = read_cageq_state(&self.cageq_path()).map_err(BackendError::backend)?;
+        Ok(decide_startup(&state, expected_hash))
+    }
+
+    fn drives_endpoint(&self, device_id: &str) -> bool {
+        eqapo_drives_endpoint(device_id)
+    }
+
+    fn location(&self) -> String {
+        self.cageq_path().display().to_string()
+    }
+
+    fn applied_text(&self) -> Option<String> {
+        // Deliberately re-read from disk rather than returning what was rendered: this is
+        // the UI's end-to-end proof that the write actually landed, so it has to observe
+        // the file, not our intention. Absent/unreadable reads as an empty preview.
+        Some(fs::read_to_string(self.cageq_path()).unwrap_or_default())
+    }
+
+    fn foreign_directives(&self) -> Result<Vec<String>, BackendError> {
+        foreign_config_directives(&self.config_txt()).map_err(BackendError::backend)
+    }
+
+    fn disable_foreign_config(&self) -> Result<bool, BackendError> {
+        disable_foreign_config(&self.config_txt()).map_err(BackendError::backend)
+    }
+
+    fn restore_foreign_config(&self) -> Result<bool, BackendError> {
+        restore_foreign_config(&self.config_txt()).map_err(BackendError::backend)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Public API — the free functions [`EqApoBackend`] is a thin shell over. Kept public
+// because they are pure-ish, individually testable, and the integration tests drive
+// them directly against a temp directory.
 // ---------------------------------------------------------------------------
 
 /// Apply `configs` to Equalizer APO: ensure config.txt includes cageq.txt, then
@@ -388,108 +482,6 @@ fn eqapo_config_dir_from_registry() -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
-// Windows playback-device detection (§3.0)
-// ---------------------------------------------------------------------------
-
-/// A Windows audio playback (render) endpoint the user can scope the EQ to (§3.0).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AudioDevice {
-    /// The endpoint GUID (registry subkey name), a stable unique id.
-    pub id: String,
-    /// Human-readable name for the UI, e.g. "Lautsprecher (SPL Phonitor One)".
-    pub name: String,
-    /// The string to write on the `Device:` line. This is the endpoint **GUID** (same as
-    /// [`id`](Self::id)), not the name: EqAPO's match string includes the GUID, and matching by it
-    /// is exact (one device) and ASCII — the name route mojibake'd non-ASCII device names into
-    /// cageq.txt (the registry read is UTF-16, not the file's encoding) and word-matched fuzzily.
-    pub eqapo_pattern: String,
-    /// Whether Equalizer APO's APO is actually installed on this endpoint (§3.0). When
-    /// `false`, a `Device:`-scoped config for it is inert — the UI warns and points at
-    /// EqAPO's DeviceSelector instead of writing something that silently does nothing.
-    pub eqapo_enabled: bool,
-}
-
-/// Enumerate active Windows playback (render) endpoints (§3.0), for the device
-/// picker. Read-only registry access; returns an empty list on non-Windows, when the
-/// key is unreadable, or when nothing is active. Order follows the registry.
-pub fn list_render_devices() -> Vec<AudioDevice> {
-    render_devices_from_registry()
-}
-
-#[cfg(windows)]
-fn render_devices_from_registry() -> Vec<AudioDevice> {
-    use winreg::RegKey;
-    use winreg::enums::HKEY_LOCAL_MACHINE;
-
-    // Endpoint property keys (PROPERTYKEY "{fmtid},pid" as stored under Properties):
-    //   DeviceDesc            -> EqAPO's "connection name" (e.g. "Lautsprecher"/"Speakers")
-    //   DeviceInterface name  -> EqAPO's "device name"     (e.g. "SPL Phonitor One")
-    const DEVICE_DESC: &str = "{a45c254e-df1c-4efd-8020-67d146a850e0},2";
-    const INTERFACE_NAME: &str = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6";
-    const DEVICE_STATE_ACTIVE: u32 = 0x1;
-
-    let render = match RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render")
-    {
-        Ok(k) => k,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut devices = Vec::new();
-    for guid in render.enum_keys().flatten() {
-        let Ok(endpoint) = render.open_subkey(&guid) else { continue };
-        // Only active (plugged-in, enabled, present) endpoints.
-        if endpoint.get_value::<u32, _>("DeviceState").ok() != Some(DEVICE_STATE_ACTIVE) {
-            continue;
-        }
-        let props = match endpoint.open_subkey("Properties") {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let desc = props.get_value::<String, _>(DEVICE_DESC).ok();
-        let iface = props.get_value::<String, _>(INTERFACE_NAME).ok();
-        let name = match (desc, iface) {
-            (Some(d), Some(i)) => format!("{d} ({i})"),
-            (Some(d), None) => d,
-            (None, Some(i)) => i,
-            (None, None) => guid.clone(),
-        };
-        let eqapo_enabled = endpoint_has_eqapo_apo(&endpoint);
-        // Scope the `Device:` line by the endpoint GUID (in EqAPO's match string, exact + ASCII),
-        // not the (possibly non-ASCII, fuzzily-matched) name.
-        devices.push(AudioDevice { id: guid.clone(), name, eqapo_pattern: guid, eqapo_enabled });
-    }
-    devices
-}
-
-/// Is Equalizer APO's APO installed on this endpoint? EqAPO inserts one of its APO
-/// CLSIDs into the endpoint's `FxProperties` effect chain (pre-mix `{EACD2258-…}` /
-/// post-mix `{EC1CC9CE-…}`, verified against a live install). We scan every value
-/// rather than hard-coding the slot indices, so all install variants (normal /
-/// troubleshooting / install-as-LFX) register as enabled.
-#[cfg(windows)]
-fn endpoint_has_eqapo_apo(endpoint: &winreg::RegKey) -> bool {
-    use winreg::types::FromRegValue;
-
-    // EqAPO's two APO CLSIDs (braces stripped, upper-case) as they appear as REG_SZ
-    // GUID values under FxProperties.
-    const EQAPO_APO_CLSIDS: [&str; 2] =
-        ["EACD2258-FCAC-4FF4-B36D-419E924A6D79", "EC1CC9CE-FAED-4822-828A-82A81A6F018F"];
-
-    let Ok(fx) = endpoint.open_subkey("FxProperties") else { return false };
-    fx.enum_values().flatten().any(|(_, val)| {
-        let Ok(s) = String::from_reg_value(&val) else { return false };
-        let s = s.to_ascii_uppercase();
-        EQAPO_APO_CLSIDS.iter().any(|clsid| s.contains(clsid))
-    })
-}
-
-#[cfg(not(windows))]
-fn render_devices_from_registry() -> Vec<AudioDevice> {
-    Vec::new()
-}
-
-// ---------------------------------------------------------------------------
 // Pure helpers — rendering cageq.txt
 // ---------------------------------------------------------------------------
 
@@ -517,7 +509,7 @@ fn render_device_block(cfg: &DeviceConfig) -> String {
                 s,
                 "Filter {}: ON {} Fc {:.0} Hz Gain {:.1} dB Q {:.2}{NL}",
                 i + 1,
-                f.kind.eqapo_token(),
+                eqapo_token(f.kind),
                 f.freq_hz,
                 f.gain_db,
                 f.q,
@@ -896,12 +888,25 @@ mod tests {
     }
 
     #[test]
-    fn list_render_devices_honours_its_contract() {
-        // Environment-dependent. Contract: never panics; every entry carries a non-empty id, and
-        // the Device:-line pattern is that GUID (exact, ASCII match — not the fuzzy/non-ASCII name).
-        for d in list_render_devices() {
-            assert!(!d.id.is_empty(), "device id should be non-empty");
-            assert_eq!(d.eqapo_pattern, d.id);
+    fn drives_endpoint_is_read_only_and_total() {
+        // Environment-dependent (EqAPO may or may not be attached to anything), so we can
+        // only pin the contract: it never panics, whatever endpoint id it is handed —
+        // including one that cannot exist, since the picker's list can go stale between
+        // enumeration and probe. Read-only — no writes.
+        let backend = EqApoBackend::new(std::env::temp_dir());
+        for d in cageq_backend::list_render_devices() {
+            let _ = backend.drives_endpoint(&d.id);
         }
+        assert!(!backend.drives_endpoint("{not-a-real-endpoint}"));
+    }
+
+    #[test]
+    fn capabilities_report_eqapos_real_constraints() {
+        // These three are the whole reason the backend seam exists — if any flips, the
+        // orchestrator would silently start pacing writes or transitions wrongly.
+        let caps = EqApoBackend::new(std::env::temp_dir()).capabilities();
+        assert_eq!(caps.min_write_spacing, EQAPO_MIN_WRITE_SPACING, "§5.3 reload spacing");
+        assert!(!caps.owns_transitions, "EqAPO's crossfade is cold + fixed-length; the core morphs");
+        assert!(caps.manages_foreign_config, "config.txt is shared with other tools");
     }
 }

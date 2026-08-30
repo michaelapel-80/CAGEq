@@ -40,15 +40,24 @@
 //! Cross-thread kill (the thing that makes hung-sidecar recovery possible) comes
 //! from [`cageq_sidecar::Killer`], backed by `shared_child`.
 
-use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use cageq_config_writer::write_safe_state;
 use cageq_sidecar::{Sidecar, SidecarError};
 use serde_json::Value;
+
+/// How the supervisor puts the audio pipeline into CAGEq's safe state (§7.1/7.2) on a
+/// fault. A callback, not a file path, so this crate stays ignorant of *which* EQ backend
+/// is in use — writing a −120 dB `cageq.txt` and raising a bypass flag in a shared-memory
+/// control block are the same event from here, and the watchdog has no business knowing
+/// the difference. The `String` is the failure reason, surfaced verbatim as
+/// [`TripReason::SafeStateWriteFailed`].
+///
+/// Must be independent of the Python sidecar (that's the thing that just failed) and as
+/// close to infallible as the backend can manage.
+pub type SafeState = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Configuration, health, outcomes
@@ -162,7 +171,7 @@ struct Shared {
     /// under and only trips if it still matches — so a waiter for a replaced process
     /// can't cause a spurious trip.
     generation: u64,
-    safe_state_path: PathBuf,
+    safe_state: SafeState,
     shutdown: bool,
     manual_retry: bool,
     recoveries: u32,
@@ -175,11 +184,11 @@ impl Shared {
         if !matches!(self.health, Health::Running) {
             return;
         }
-        // If we can't even write silence, that supersedes the original reason and is
+        // If we can't even reach silence, that supersedes the original reason and is
         // non-recoverable.
-        let reason = match write_safe_state(&self.safe_state_path) {
+        let reason = match (self.safe_state)() {
             Ok(()) => reason,
-            Err(e) => TripReason::SafeStateWriteFailed(e.to_string()),
+            Err(e) => TripReason::SafeStateWriteFailed(e),
         };
         self.in_flight = None;
         self.health = if reason.recoverable() {
@@ -219,7 +228,7 @@ impl Supervisor {
     /// Start supervising. `spawn_fn` produces a fresh [`Sidecar`] on demand — used
     /// once now and again on every restart, so it must capture whatever it needs
     /// (interpreter path, script path). Fails only if the *first* spawn fails.
-    pub fn start<F>(spawn_fn: F, cfg: WatchdogConfig, safe_state_path: impl Into<PathBuf>) -> Result<Self, SidecarError>
+    pub fn start<F>(spawn_fn: F, cfg: WatchdogConfig, safe_state: SafeState) -> Result<Self, SidecarError>
     where
         F: Fn() -> Result<Sidecar, SidecarError> + Send + 'static,
     {
@@ -229,7 +238,7 @@ impl Supervisor {
             in_flight: None,
             killer: None,
             generation: 0,
-            safe_state_path: safe_state_path.into(),
+            safe_state,
             shutdown: false,
             manual_retry: false,
             recoveries: 0,
@@ -634,10 +643,4 @@ fn classify<T>(r: &Result<T, SidecarError>) -> Outcome {
         Err(SidecarError::Remote { .. }) => Outcome::Ok, // answered, just said no
         Err(_) => Outcome::Failed,                       // Io/Json/Protocol: transport broke
     }
-}
-
-/// The cageq.txt path convention, for callers wiring the supervisor to a real EqAPO
-/// config directory.
-pub fn safe_state_path_in(config_dir: &Path) -> PathBuf {
-    config_dir.join(cageq_config_writer::CAGEQ_FILENAME)
 }

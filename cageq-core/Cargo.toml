@@ -4,7 +4,10 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-# The orchestrator ties all three building blocks together.
+# The orchestrator ties the building blocks together. It drives EQ through the
+# `cageq-backend` trait, not a concrete backend — `cageq-config-writer` (the Equalizer
+# APO one) is still depended on only to re-export its constructor for the app layer.
+cageq-backend = { path = "../cageq-backend" }
 cageq-config-writer = { path = "../cageq-config-writer" }
 cageq-sidecar = { path = "../cageq-sidecar" }
 cageq-watchdog = { path = "../cageq-watchdog" }

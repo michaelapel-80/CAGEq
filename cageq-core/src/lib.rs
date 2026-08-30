@@ -3,19 +3,28 @@
 //!
 //!   * owns the DSP sidecar through the fail-safe [`Supervisor`] (watchdog),
 //!   * turns a user request into filters by asking the sidecar to
-//!     `calculate_filters`, then writes them to EqAPO via the config-writer,
+//!     `calculate_filters`, then applies them through the [`EqBackend`],
 //!   * holds the A/B/Dry comparison slots (§5.2): each fit is cached, so switching
-//!     which one is active is a pure re-write (no re-fit) — the loudness match (§4.1)
+//!     which one is active is a pure re-apply (no re-fit) — the loudness match (§4.1)
 //!     keeps them level-matched so switching compares timbre, not level,
-//!   * after a watchdog recovery, re-writes the active slot so EqAPO leaves the safe
-//!     state (the "auto-leave" §7.2 leaves to this layer),
+//!   * after a watchdog recovery, re-applies the active slot so the pipeline leaves the
+//!     safe state (the "auto-leave" §7.2 leaves to this layer),
 //!   * runs the §3.0 startup-integrity check.
 //!
 //! The sidecar's `calculate_filters` reply carries the fitted filters plus two
 //! curve-derived quantities (§4.1 loudness target, §4.2 curve peak); the core
-//! composes the final `Preamp:` from them and the user's §4.0 base pre-gain, then
-//! builds the config-writer's [`DeviceConfig`]. The DSP reports physics; the core
-//! owns the preamp/clipping policy.
+//! composes the final preamp from them and the user's §4.0 base pre-gain, then
+//! builds a [`DeviceConfig`]. The DSP reports physics; the core owns the
+//! preamp/clipping policy.
+//!
+//! ## Backends
+//! Nothing here knows how filters actually reach the audio pipeline — that is
+//! [`EqBackend`]'s job (filter.md §5.3c). CAGEq ships two: Equalizer APO (rewrite a
+//! config file, its directory watcher reloads) and, in progress, its own in-process APO
+//! (push coefficients over shared memory). They differ enough that the core adapts to
+//! [`Capabilities`] rather than assuming one model — most visibly in how fast it may
+//! apply consecutively (`min_write_spacing`) and whether it must emulate a tonal morph
+//! out of intermediate frames at all (`owns_transitions`).
 //!
 //! ## Threads
 //! One background **reconciler** thread watches the supervisor's recovery counter;
@@ -25,9 +34,8 @@
 //! `Supervisor` is shared as `Arc<Supervisor>` (its `call`/`health`/`recoveries`
 //! all take `&self`), so caller and reconciler can both drive it; the driver
 //! serialises the actual requests, and an `apply_lock` serialises calc+write so the
-//! two never interleave a write to cageq.txt.
+//! two never interleave an apply to the backend.
 
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -35,7 +43,6 @@ use std::time::{Duration, Instant};
 
 mod morph;
 
-use cageq_config_writer::{self as cw, WriteError};
 use cageq_watchdog::{Supervisor, SupervisorError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -43,10 +50,14 @@ use serde_json::{Map, Value};
 // Re-export the domain types through cageq-core so the app/UI layer depends only on
 // this facade, not each building-block crate. Several are also used internally below
 // (the `pub use` both re-exports and brings them into scope here).
-pub use cageq_config_writer::{
-    AudioDevice, DeviceConfig, Filter, FilterType, StartupDecision, detect_eqapo_config_dir,
-    disable_foreign_config, foreign_config_directives, list_render_devices, restore_foreign_config,
+pub use cageq_backend::{
+    AudioDevice, BackendError, Capabilities, DeviceConfig, EqBackend, Filter, FilterType,
+    StartupDecision, list_render_devices,
 };
+// The Equalizer APO backend specifically — the app still needs its constructor and its
+// config-directory detection to build one. Everything else about it reaches the core
+// through the trait above.
+pub use cageq_config_writer::{EqApoBackend, detect_eqapo_config_dir, eqapo_drives_endpoint};
 pub use cageq_sidecar::{Sidecar, SidecarError};
 pub use cageq_watchdog::{Health, WatchdogConfig};
 
@@ -225,8 +236,11 @@ pub enum CoreError {
     Spawn(#[from] SidecarError),
     #[error("sidecar/watchdog error: {0}")]
     Supervisor(#[from] SupervisorError),
+    /// The EQ backend could not apply what was asked. Message unchanged from when this
+    /// wrapped the config-writer directly: `BackendError` is `#[error(transparent)]` over
+    /// the backend's own error, so EqAPO's specific diagnostics still read identically.
     #[error("config write error: {0}")]
-    Write(#[from] WriteError),
+    Write(#[from] BackendError),
     #[error("could not (de)serialize a DSP message: {0}")]
     Json(#[from] serde_json::Error),
     #[error("the Dry slot is a fixed reference and cannot be applied to")]
@@ -245,13 +259,13 @@ const RAMP_RATE_DB_PER_SEC: f64 = 6.0;
 /// consecutive-write debounce (§5.3) is respected.
 const RAMP_STEP: Duration = Duration::from_millis(25);
 
-/// filter.md §5.3 hard rule: EqAPO does **not** reset its crossfade progress counter
-/// when a reload lands while a transition is still running (FilterEngine.cpp:258-261) —
-/// the in-flight counter gets applied to the new curve, which is audible as a jump. So
-/// consecutive writes must be spaced at least this far apart. Enforced here (server
-/// side) rather than trusting callers: live editing (tone drags, auto-apply) would
-/// otherwise fire writes far faster than this.
-const MIN_WRITE_SPACING: Duration = Duration::from_millis(15);
+// The old `MIN_WRITE_SPACING` constant lived here as a hard-coded 15 ms, which was a
+// property of *Equalizer APO* (it does not reset its crossfade progress counter when a
+// reload lands mid-transition) rather than of CAGEq. It now comes from the backend as
+// `Capabilities::min_write_spacing` — an in-process APO has no reload to collide with and
+// reports zero. Enforced here (server side) rather than trusting callers either way: live
+// editing (tone drags, auto-apply) would otherwise fire writes far faster than any
+// backend's limit.
 
 /// §5.3a tonal-morph rate. Deliberately *not* §7.5's 6 dB/s: that figure is a
 /// hearing-protection envelope on absolute level, whereas a morph is level-neutral by
@@ -319,15 +333,20 @@ impl SlotStore {
 
 /// State shared with the reconciler thread.
 struct Inner {
-    config_dir: PathBuf,
+    /// Where filters actually get applied (filter.md §5.3c). The core is written against
+    /// the trait, never a concrete backend, so the same orchestration drives Equalizer
+    /// APO's file-reload model and CAGEq's own in-process APO — see
+    /// [`cageq_backend::Capabilities`] for the differences it has to adapt to.
+    backend: Arc<dyn EqBackend>,
     /// Serialises a calc+write so a user apply and a recovery re-apply never
-    /// interleave their writes to cageq.txt.
+    /// interleave their writes to the backend.
     apply_lock: Mutex<()>,
     /// The A/B/Dry comparison slots and which is active (filter.md §5.2).
     slots: Mutex<SlotStore>,
     applied_count: AtomicU32,
     shutdown: AtomicBool,
-    /// When the last cageq.txt write happened, for the §5.3 ≥15 ms spacing rule.
+    /// When the last write happened, for the backend's own write-spacing rule
+    /// ([`cageq_backend::Capabilities::min_write_spacing`]).
     last_write: Mutex<Instant>,
     startup: StartupDecision,
     /// §4.0 loudness settings (base pre-gain + mode) applied to every composed preamp.
@@ -353,12 +372,13 @@ pub struct Core {
 }
 
 impl Core {
-    /// Start the core over EqAPO's `config_dir`. `spawn_fn` produces DSP sidecars
-    /// (used by the watchdog for the initial spawn and every restart). `expected_hash`
-    /// is the cageq.txt hash settings.json remembered, or `None` on a clean install —
-    /// it drives the startup-integrity verdict ([`Core::startup_decision`]).
+    /// Start the core over `backend` — whatever actually applies filters (Equalizer APO's
+    /// config files, or CAGEq's own APO). `spawn_fn` produces DSP sidecars (used by the
+    /// watchdog for the initial spawn and every restart). `expected_hash` is the hash
+    /// settings.json remembered for the applied state, or `None` on a clean install — it
+    /// drives the startup-integrity verdict ([`Core::startup_decision`]).
     pub fn start<F>(
-        config_dir: impl Into<PathBuf>,
+        backend: Arc<dyn EqBackend>,
         spawn_fn: F,
         watchdog: WatchdogConfig,
         expected_hash: Option<&str>,
@@ -366,22 +386,27 @@ impl Core {
     where
         F: Fn() -> Result<Sidecar, SidecarError> + Send + 'static,
     {
-        let config_dir = config_dir.into();
-        let cageq_path = config_dir.join(cw::CAGEQ_FILENAME);
+        // §3.0: is what we remember still what's actually applied?
+        let startup = backend.startup_decision(expected_hash)?;
 
-        // §3.0: is what we remember still what's on disk?
-        let state = cw::read_cageq_state(&cageq_path)?;
-        let startup = cw::decide_startup(&state, expected_hash);
+        // The watchdog reaches the safe state (§7.1/7.2) through this closure rather than
+        // a file path, so it stays agnostic to the backend — see `cageq_watchdog::SafeState`.
+        let safe_state: cageq_watchdog::SafeState = {
+            let backend = Arc::clone(&backend);
+            Arc::new(move || backend.write_safe_state().map_err(|e| e.to_string()))
+        };
 
         let poll = watchdog.tick;
-        let supervisor = Arc::new(Supervisor::start(spawn_fn, watchdog, cageq_path)?);
+        let supervisor = Arc::new(Supervisor::start(spawn_fn, watchdog, safe_state)?);
+        let min_write_spacing = backend.capabilities().min_write_spacing;
         let inner = Arc::new(Inner {
-            config_dir,
+            backend,
             apply_lock: Mutex::new(()),
             slots: Mutex::new(SlotStore { a: None, b: None, device: None, active: Slot::A }),
             applied_count: AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
-            last_write: Mutex::new(Instant::now() - MIN_WRITE_SPACING),
+            // Back-date so the first write is never delayed by the spacing rule.
+            last_write: Mutex::new(Instant::now() - min_write_spacing),
             startup,
             loudness: Mutex::new(LoudnessSettings::default()),
             last_written: Mutex::new(None),
@@ -676,14 +701,16 @@ fn claim_write(inner: &Inner) -> u32 {
     inner.morph_gen.fetch_add(1, Ordering::SeqCst) + 1
 }
 
-/// Block until at least [`MIN_WRITE_SPACING`] has passed since the previous write
-/// (§5.3). Only the *write* is delayed, never the calculation — callers already did
-/// their work. Cheap no-op for ordinary, human-paced changes.
+/// Block until the backend's own [`Capabilities::min_write_spacing`] has passed since the
+/// previous write. Only the *write* is delayed, never the calculation — callers already
+/// did their work. Cheap no-op for ordinary, human-paced changes, and a true no-op on a
+/// backend that reports zero (nothing to collide with).
 fn space_out_write(inner: &Inner) {
+    let spacing = inner.backend.capabilities().min_write_spacing;
     let mut last = inner.last_write.lock().unwrap();
     let since = last.elapsed();
-    if since < MIN_WRITE_SPACING {
-        thread::sleep(MIN_WRITE_SPACING - since);
+    if since < spacing {
+        thread::sleep(spacing - since);
     }
     *last = Instant::now();
 }
@@ -695,7 +722,7 @@ fn current_effective(inner: &Inner) -> Result<CalcResult, CoreError> {
 }
 
 /// Write `effective`'s filters at an explicit `preamp_db`. Assumes `apply_lock` held.
-/// The single place a config reaches disk.
+/// The single place a config reaches the backend.
 fn write_effective(
     inner: &Inner,
     effective: CalcResult,
@@ -704,8 +731,8 @@ fn write_effective(
 ) -> Result<Applied, CoreError> {
     let device_config =
         DeviceConfig { device: effective.device.clone(), preamp_db, filters: effective.filters.clone() };
-    space_out_write(inner); // §5.3: never land a reload inside EqAPO's running crossfade
-    let hash = cw::apply(&inner.config_dir, std::slice::from_ref(&device_config))?;
+    space_out_write(inner); // §5.3: honour whatever cadence this backend can take
+    let hash = inner.backend.apply(std::slice::from_ref(&device_config))?;
     inner.applied_count.fetch_add(1, Ordering::SeqCst);
     let applied = Applied {
         hash,
@@ -769,7 +796,14 @@ fn morph_to_active(supervisor: &Supervisor, inner: &Inner, ticket: u32) -> Resul
         reference_curve: Vec::new(),
     });
 
-    let frames = if can_morph { morph_frames(morph::tonal_distance_db(&from.filters, &to.filters)) } else { 0 };
+    // A backend that owns its transitions (an in-process APO ramps coefficients with the
+    // filter state carried) must NOT be fed intermediate frames: it would be re-targeted
+    // mid-ramp on every one, and the result would be worse than the single write it can
+    // interpolate from itself. Emulating a morph out of many spaced writes is purely a
+    // workaround for EqAPO's fixed, cold ~10 ms crossfade (§5.3a).
+    let emulate_morph = can_morph && !inner.backend.capabilities().owns_transitions;
+    let frames =
+        if emulate_morph { morph_frames(morph::tonal_distance_db(&from.filters, &to.filters)) } else { 0 };
 
     if frames > 0 {
         // Our own §4.1 model and the sidecar's agree in form but not to the last
@@ -873,10 +907,9 @@ fn reconcile_loop(supervisor: Arc<Supervisor>, inner: Arc<Inner>, poll: Duration
     }
 }
 
-/// The cageq.txt path inside an EqAPO config directory.
-pub fn cageq_path_in(config_dir: &Path) -> PathBuf {
-    config_dir.join(cw::CAGEQ_FILENAME)
-}
+// `cageq_path_in` lived here — an EqAPO path convention exposed by the backend-neutral
+// orchestrator, and unused by anything even before that became wrong. It is now
+// `EqApoBackend::cageq_path`, on the backend that actually owns that file.
 
 #[cfg(test)]
 mod tests {

@@ -3,18 +3,27 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cageq_config_writer::{self as cw, BlockState, StartupDecision};
 use cageq_core::{
-    CalcRequest, Core, CoreError, CurvePoint, DEFAULT_BASE_PREGAIN_DB, Filter, FilterType,
-    LoudnessMode, LoudnessSettings, Slot,
+    CalcRequest, Core, CoreError, CurvePoint, DEFAULT_BASE_PREGAIN_DB, EqApoBackend, EqBackend,
+    Filter, FilterType, LoudnessMode, LoudnessSettings, Slot,
 };
 use cageq_sidecar::{Sidecar, SidecarError};
 use cageq_watchdog::{Health, WatchdogConfig};
 use serde_json::json;
 
 // --- rig ------------------------------------------------------------------
+
+/// The Equalizer APO backend over a temp directory standing in for its config dir.
+/// These are deliberately end-to-end against the *real* file-writing backend — the
+/// assertions below read the cageq.txt it produces — rather than a mock: the point of
+/// this suite is that the orchestrator and a real backend agree.
+fn eqapo(dir: &std::path::Path) -> Arc<dyn EqBackend> {
+    Arc::new(EqApoBackend::new(dir))
+}
 
 fn stub_script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -96,7 +105,7 @@ fn fast_cfg() -> WatchdogConfig {
 #[test]
 fn slots_switch_by_rewrite_without_refitting() {
     let tmp = TempDir::new("slots");
-    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
     // Populate A and B with distinct device names (the stub echoes device).
     core.apply_to_slot(Slot::A, CalcRequest::for_device("Device A")).expect("apply A");
@@ -123,7 +132,7 @@ fn slots_switch_by_rewrite_without_refitting() {
         Err(CoreError::DryNotEditable)
     ));
     let empty = TempDir::new("empty");
-    let fresh = Core::start(empty.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let fresh = Core::start(eqapo(empty.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
     assert!(matches!(fresh.activate_slot(Slot::B), Err(CoreError::EmptySlot(Slot::B))));
 }
 
@@ -134,7 +143,7 @@ fn slots_switch_by_rewrite_without_refitting() {
 #[test]
 fn seeded_slot_writes_without_a_sidecar_fit() {
     let tmp = TempDir::new("seed");
-    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
     let filters = vec![
         Filter { kind: FilterType::LowShelf, freq_hz: 105.0, gain_db: 4.0, q: 0.7 },
@@ -181,7 +190,7 @@ fn seeded_slot_writes_without_a_sidecar_fit() {
 #[test]
 fn large_tonal_changes_morph_across_several_writes() {
     let tmp = TempDir::new("morph");
-    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
     let with_custom = |bands: serde_json::Value| {
         let mut req = CalcRequest::for_device("DAC");
@@ -231,7 +240,7 @@ fn large_tonal_changes_morph_across_several_writes() {
 #[test]
 fn copy_slot_duplicates_a_fit_and_activates_the_target() {
     let tmp = TempDir::new("copy");
-    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
     core.apply_to_slot(Slot::A, CalcRequest::for_device("Device A")).expect("apply A");
 
@@ -247,7 +256,7 @@ fn copy_slot_duplicates_a_fit_and_activates_the_target() {
 
     // Copying from an empty slot errors; Dry can't take part.
     let fresh = TempDir::new("copy-empty");
-    let c2 = Core::start(fresh.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let c2 = Core::start(eqapo(fresh.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
     assert!(matches!(c2.copy_slot(Slot::A, Slot::B), Err(CoreError::EmptySlot(Slot::A))));
     assert!(matches!(core.copy_slot(Slot::A, Slot::Dry), Err(CoreError::DryNotEditable)));
 }
@@ -255,7 +264,7 @@ fn copy_slot_duplicates_a_fit_and_activates_the_target() {
 #[test]
 fn loudness_increase_ramps_but_decrease_is_direct() {
     let tmp = TempDir::new("ramp");
-    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
     // Small base pre-gain so the Comparison->Final increase is a quick ~1 dB ramp.
     core.set_loudness(LoudnessSettings { base_pregain_db: -1.0, mode: LoudnessMode::Comparison });
@@ -284,7 +293,7 @@ fn loudness_increase_ramps_but_decrease_is_direct() {
 #[test]
 fn base_pregain_edit_in_comparison_is_direct_not_ramped() {
     let tmp = TempDir::new("pregain");
-    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
     core.set_loudness(LoudnessSettings { base_pregain_db: -12.0, mode: LoudnessMode::Comparison });
     core.apply(CalcRequest::for_device("DAC")).expect("apply"); // stub is flat -> preamp -12.0
@@ -304,7 +313,7 @@ fn base_pregain_edit_in_comparison_is_direct_not_ramped() {
 #[test]
 fn apply_calculates_and_writes_config() {
     let tmp = TempDir::new("apply");
-    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
     let applied = core.apply(CalcRequest::for_device("USB DAC")).expect("apply ok");
     assert_eq!(applied.device, "USB DAC");
@@ -333,7 +342,7 @@ fn apply_calculates_and_writes_config() {
 #[test]
 fn recovery_reapplies_last_config_and_leaves_safe_state() {
     let tmp = TempDir::new("reapply");
-    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
     core.apply(CalcRequest::for_device("DAC")).unwrap();
     assert_eq!(core.applied_count(), 1);
@@ -359,7 +368,7 @@ fn recovery_reapplies_last_config_and_leaves_safe_state() {
 #[test]
 fn startup_is_first_run_on_a_clean_dir() {
     let tmp = TempDir::new("firstrun");
-    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
     assert_eq!(core.startup_decision(), StartupDecision::FirstRun);
 }
 
@@ -369,11 +378,11 @@ fn startup_trusts_a_matching_remembered_hash() {
 
     // Session 1: apply, remember the hash, shut down (cageq.txt persists on disk).
     let hash = {
-        let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), None).unwrap();
+        let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
         core.apply(CalcRequest::for_device("DAC")).unwrap().hash
     };
 
     // Session 2: start again with that remembered hash -> the resume state is trusted.
-    let core = Core::start(tmp.dir(), healthy_spawner(), fast_cfg(), Some(&hash)).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), Some(&hash)).unwrap();
     assert_eq!(core.startup_decision(), StartupDecision::ResumeTrusted);
 }

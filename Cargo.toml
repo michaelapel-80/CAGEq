@@ -1,12 +1,18 @@
 # Cargo workspace root. Introduced when the project grew past one crate:
-#   * cageq-config-writer — renders EqAPO config + startup integrity (the leaf)
-#   * cageq-sidecar       — manages the Python DSP sidecar over stdio (this hop up)
+#   * cageq-backend       — the EqBackend trait + neutral domain types (the new leaf)
+#   * cageq-config-writer — the Equalizer APO backend: renders its config + integrity
+#   * cageq-sidecar       — manages the Python DSP sidecar over stdio
 # A workspace gives one shared target/ dir and a single Cargo.lock, and lets the
-# crates depend on each other later (the sidecar's result will map onto the
-# writer's DeviceConfig).
+# crates depend on each other (the sidecar's result maps onto the backend's
+# DeviceConfig).
+#
+# `cageq-backend` exists because CAGEq is moving off Equalizer APO onto its own APO
+# (filter.md §5.3c) while keeping the EqAPO path working permanently — so the
+# orchestrator talks to a trait, not to a file writer. See that crate's own docs.
 [workspace]
 resolver = "3"
 members = [
+    "cageq-backend",
     "cageq-config-writer",
     "cageq-sidecar",
     "cageq-watchdog",

@@ -4,10 +4,10 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-# First cross-crate wiring in the workspace: the watchdog drives the sidecar and,
-# on a fault, writes the safe state through the config-writer — independently of
-# Python (filter.md §7.1).
+# The watchdog drives the sidecar and, on a fault, puts the audio pipeline into the
+# safe state independently of Python (filter.md §7.1). It reaches that safe state
+# through a caller-supplied `SafeState` callback rather than a backend dependency, so
+# it stays agnostic to which EQ backend is in use — see that type's own doc.
 cageq-sidecar = { path = "../cageq-sidecar" }
-cageq-config-writer = { path = "../cageq-config-writer" }
 serde_json = "1.0"
 thiserror = "2.0"

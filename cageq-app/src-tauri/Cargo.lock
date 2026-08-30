@@ -367,9 +367,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cageq-backend"
+version = "0.6.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.19",
+ "winreg",
+]
+
+[[package]]
 name = "cageq-config-writer"
 version = "0.6.0"
 dependencies = [
+ "cageq-backend",
  "serde",
  "sha2 0.11.0",
  "thiserror 2.0.19",
@@ -380,6 +390,7 @@ dependencies = [
 name = "cageq-core"
 version = "0.6.0"
 dependencies = [
+ "cageq-backend",
  "cageq-config-writer",
  "cageq-sidecar",
  "cageq-watchdog",
@@ -412,7 +423,6 @@ dependencies = [
 name = "cageq-watchdog"
 version = "0.6.0"
 dependencies = [
- "cageq-config-writer",
  "cageq-sidecar",
  "serde_json",
  "thiserror 2.0.19",

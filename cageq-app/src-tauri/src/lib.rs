@@ -3,19 +3,35 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use cageq_core::{
-    Applied, AudioDevice, CalcRequest, Core, CoreError, CurvePoint, DEFAULT_BASE_PREGAIN_DB, Filter,
-    Health, LoudnessSettings, Sidecar, Slot, WatchdogConfig, detect_eqapo_config_dir,
-    list_render_devices,
+    Applied, AudioDevice, CalcRequest, Core, CoreError, CurvePoint, DEFAULT_BASE_PREGAIN_DB,
+    EqApoBackend, EqBackend, Filter, Health, LoudnessSettings, Sidecar, Slot, WatchdogConfig,
+    detect_eqapo_config_dir, list_render_devices,
 };
 use serde_json::{json, Map, Value};
 use tauri::State;
 
-/// Backend held in Tauri managed state. `Ready` on a successful start; `Failed`
+/// App state held in Tauri managed state. `Ready` on a successful start; `Failed`
 /// keeps the init error string so commands can report it instead of the app being
 /// silently dead (e.g. if no Python/sidecar is found).
+///
+/// (Named before CAGEq had a real *EQ* backend abstraction; the `eq` field below is that
+/// — this enum is the app's own start-up state, not a backend.)
 enum Backend {
-    Ready { core: Core, config_dir: PathBuf, config_source: String, sidecar: String },
+    Ready {
+        core: Core,
+        /// The EQ backend the core drives (filter.md §5.3c). Held here as well so
+        /// backend-scoped commands — the foreign-config trio, the applied-config preview
+        /// — can reach it without going through `Core`, which has no business proxying
+        /// them. Same `Arc` the core holds.
+        eq: Arc<dyn EqBackend>,
+        /// Human-readable location of the applied config, for the status panel.
+        config_dir: String,
+        config_source: String,
+        sidecar: String,
+    },
     Failed(String),
 }
 
@@ -201,7 +217,7 @@ fn apply(
 ) -> Result<ApplyResult, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, config_dir, .. } => {
+        Backend::Ready { core, eq, .. } => {
             let mut inputs = Map::new();
             inputs.insert("headphone".into(), Value::String(headphone.clone()));
             if let Some(t) = &target {
@@ -216,7 +232,7 @@ fn apply(
             let applied = core.apply_to_slot(slot, CalcRequest { device, inputs }).map_err(|e| e.to_string())?;
             // Remember what was applied so the pickers pre-fill on the next launch.
             update_settings(|s| s.selection = Selection { headphone: Some(headphone), target });
-            Ok(apply_result(applied, config_dir))
+            Ok(apply_result(applied, eq))
         }
     }
 }
@@ -308,9 +324,9 @@ fn warm_fit(device: String, headphone: String, target: Option<String>, state: St
 fn activate_slot(slot: Slot, state: State<Backend>) -> Result<ApplyResult, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, config_dir, .. } => {
+        Backend::Ready { core, eq, .. } => {
             let applied = core.activate_slot(slot).map_err(|e| e.to_string())?;
-            Ok(apply_result(applied, config_dir))
+            Ok(apply_result(applied, eq))
         }
     }
 }
@@ -321,9 +337,9 @@ fn activate_slot(slot: Slot, state: State<Backend>) -> Result<ApplyResult, Strin
 fn isolate(freq_hz: f64, q: f64, state: State<Backend>) -> Result<ApplyResult, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, config_dir, .. } => {
+        Backend::Ready { core, eq, .. } => {
             let applied = core.apply_isolate(freq_hz, q).map_err(|e| e.to_string())?;
-            Ok(apply_result(applied, config_dir))
+            Ok(apply_result(applied, eq))
         }
     }
 }
@@ -334,9 +350,9 @@ fn isolate(freq_hz: f64, q: f64, state: State<Backend>) -> Result<ApplyResult, S
 fn copy_slot(from: Slot, to: Slot, state: State<Backend>) -> Result<ApplyResult, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, config_dir, .. } => {
+        Backend::Ready { core, eq, .. } => {
             let applied = core.copy_slot(from, to).map_err(|e| e.to_string())?;
-            Ok(apply_result(applied, config_dir))
+            Ok(apply_result(applied, eq))
         }
     }
 }
@@ -354,18 +370,19 @@ fn set_device(device: String, state: State<Backend>) -> Result<(), String> {
     }
 }
 
-/// Build the UI-facing result from an [`Applied`], reading back the exact cageq.txt
-/// that was written (the end-to-end proof). Shared by every write path. Persists the
-/// hash so the next startup's §3.0 integrity check has something to compare against.
-fn apply_result(applied: Applied, config_dir: &Path) -> ApplyResult {
+/// Build the UI-facing result from an [`Applied`], reading the applied config back out of
+/// the backend (for EqAPO, the exact cageq.txt that was written — the end-to-end proof).
+/// Shared by every write path. Persists the hash so the next startup's §3.0 integrity
+/// check has something to compare against.
+fn apply_result(applied: Applied, eq: &Arc<dyn EqBackend>) -> ApplyResult {
     update_settings(|s| s.last_hash = Some(applied.hash.clone()));
-    let cageq_path = config_dir.join("cageq.txt");
-    let cageq_text = std::fs::read_to_string(&cageq_path).unwrap_or_default();
     ApplyResult {
         hash: applied.hash,
         device: applied.device,
-        cageq_path: cageq_path.display().to_string(),
-        cageq_text,
+        cageq_path: eq.location(),
+        // A backend with no textual form (an in-process APO holds coefficients, not a
+        // document) reports `None`; the preview is simply empty there.
+        cageq_text: eq.applied_text().unwrap_or_default(),
         preamp_db: applied.preamp_db,
         clipping_warning: applied.clipping_warning,
         filters: applied.filters,
@@ -386,11 +403,46 @@ fn list_headphones(state: State<Backend>) -> Result<Value, String> {
     }
 }
 
+/// One playback endpoint as the UI sees it.
+///
+/// Assembled here rather than returned straight from the enumerator because whether the
+/// EQ can actually run on an endpoint is a question *about the active backend*
+/// ([`EqBackend::drives_endpoint`]), not a property of the device — the same endpoint can
+/// be driven by one backend and not another. [`AudioDevice`] therefore carries only what
+/// the audio system itself knows (id, name), and this joins it to the backend's answer.
+///
+/// Field names are EqAPO-flavoured for now because the frontend has always used them; they
+/// generalise when the backend picker lands and the UI has two backends to talk about.
+#[derive(serde::Serialize)]
+struct DeviceDto {
+    id: String,
+    name: String,
+    /// What a `DeviceConfig` addresses this endpoint by — the GUID, i.e. the same value as
+    /// `id`. Kept as its own field because the frontend sends *this* back to `set_device`.
+    eqapo_pattern: String,
+    /// Whether the active backend actually processes audio on this endpoint. `false` means
+    /// a config scoped to it would be inert, and the UI says so.
+    eqapo_enabled: bool,
+}
+
 /// Active Windows playback devices to scope the EQ to (§3.0). A local registry read,
 /// not a sidecar call — available even if the DSP failed to start.
 #[tauri::command]
-fn list_devices() -> Vec<AudioDevice> {
+fn list_devices(state: State<Backend>) -> Vec<DeviceDto> {
     list_render_devices()
+        .into_iter()
+        .map(|AudioDevice { id, name }| {
+            let enabled = match state.inner() {
+                Backend::Ready { eq, .. } => eq.drives_endpoint(&id),
+                // No live backend to ask, but the picker still wants a truthful answer:
+                // EqAPO is attached (or not) to an endpoint independently of whether CAGEq
+                // managed to start, so probe it directly rather than reporting a flat
+                // `false` that would blame the device for the app's own failure.
+                Backend::Failed(_) => cageq_core::eqapo_drives_endpoint(&id),
+            };
+            DeviceDto { eqapo_pattern: id.clone(), id, name, eqapo_enabled: enabled }
+        })
+        .collect()
 }
 
 /// Active directives in EqAPO's config.txt outside CAGEq's own include block — the foreign
@@ -400,9 +452,11 @@ fn list_devices() -> Vec<AudioDevice> {
 fn config_foreign_directives(state: State<Backend>) -> Result<Vec<String>, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { config_dir, .. } => {
-            cageq_core::foreign_config_directives(&config_dir.join("config.txt")).map_err(|e| e.to_string())
-        }
+        // Capability-gated (see `Capabilities::manages_foreign_config`): a backend with no
+        // shared config file has no foreign directives to report, which is "nothing here",
+        // not an error the UI should surface.
+        Backend::Ready { eq, .. } if !eq.capabilities().manages_foreign_config => Ok(Vec::new()),
+        Backend::Ready { eq, .. } => eq.foreign_directives().map_err(|e| e.to_string()),
     }
 }
 
@@ -412,9 +466,9 @@ fn config_foreign_directives(state: State<Backend>) -> Result<Vec<String>, Strin
 fn disable_foreign_config(state: State<Backend>) -> Result<bool, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { config_dir, .. } => {
-            cageq_core::disable_foreign_config(&config_dir.join("config.txt")).map_err(|e| e.to_string())
-        }
+        // Nothing to disable on a backend with no shared config file — `false` = unchanged.
+        Backend::Ready { eq, .. } if !eq.capabilities().manages_foreign_config => Ok(false),
+        Backend::Ready { eq, .. } => eq.disable_foreign_config().map_err(|e| e.to_string()),
     }
 }
 
@@ -423,9 +477,8 @@ fn disable_foreign_config(state: State<Backend>) -> Result<bool, String> {
 fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { config_dir, .. } => {
-            cageq_core::restore_foreign_config(&config_dir.join("config.txt")).map_err(|e| e.to_string())
-        }
+        Backend::Ready { eq, .. } if !eq.capabilities().manages_foreign_config => Ok(false),
+        Backend::Ready { eq, .. } => eq.restore_foreign_config().map_err(|e| e.to_string()),
     }
 }
 
@@ -651,7 +704,7 @@ struct LoudnessUpdate {
 fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<LoudnessUpdate, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, config_dir, .. } => {
+        Backend::Ready { core, eq, .. } => {
             let base = if settings.base_pregain_db.is_finite() {
                 settings.base_pregain_db.clamp(-40.0, 0.0)
             } else {
@@ -661,7 +714,7 @@ fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<Lou
             update_settings(|s| s.loudness = settings); // persist without wiping the selection
             // update_loudness sets the settings and pushes them live — ramping a volume
             // increase (§7.5), or writing directly for a decrease. Blocks for the ramp.
-            let applied = core.update_loudness(settings).and_then(|r| r.ok()).map(|a| apply_result(a, config_dir));
+            let applied = core.update_loudness(settings).and_then(|r| r.ok()).map(|a| apply_result(a, eq));
             Ok(LoudnessUpdate { settings, applied })
         }
     }
@@ -704,14 +757,14 @@ fn status(state: State<Backend>) -> Status {
             config_source: "-".into(),
             sidecar: "-".into(),
         },
-        Backend::Ready { core, config_dir, config_source, sidecar } => {
+        Backend::Ready { core, config_dir, config_source, sidecar, .. } => {
             let health = core.health();
             Status {
                 startup: format!("{:?}", core.startup_decision()),
                 health_kind: health_kind(&health).into(),
                 health: format!("{health:?}"),
                 recoveries: core.recoveries(),
-                config_dir: config_dir.display().to_string(),
+                config_dir: config_dir.clone(),
                 config_source: config_source.clone(),
                 sidecar: sidecar.clone(),
             }
@@ -854,26 +907,36 @@ fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
     set_cache_dir_env(&resolve_cache_dir());
     let (source, sidecar) = resolve_sidecar(bundled_sidecar.as_deref());
     let settings = load_settings();
-    match start_core(&config_dir, source, settings.last_hash.as_deref()) {
+    // The Equalizer APO backend, which is still the only one that exists (filter.md
+    // §5.3c: CAGEq's own APO is the other, and will be selected here once it lands —
+    // this is the single place a backend is chosen).
+    let _ = std::fs::create_dir_all(&config_dir);
+    let eq: Arc<dyn EqBackend> = Arc::new(EqApoBackend::new(&config_dir));
+    match start_core(Arc::clone(&eq), source, settings.last_hash.as_deref()) {
         Ok(core) => {
             core.set_loudness(settings.loudness); // restore §4.0 settings
-            Backend::Ready { core, config_dir, config_source, sidecar }
+            Backend::Ready {
+                core,
+                eq,
+                config_dir: config_dir.display().to_string(),
+                config_source,
+                sidecar,
+            }
         }
         Err(e) => Backend::Failed(format!("backend init failed: {e}")),
     }
 }
 
 fn start_core(
-    config_dir: &Path,
+    eq: Arc<dyn EqBackend>,
     source: SidecarSource,
     expected_hash: Option<&str>,
 ) -> Result<Core, CoreError> {
-    let _ = std::fs::create_dir_all(config_dir);
     let spawn_fn = move || match &source {
         SidecarSource::Frozen(exe) => Sidecar::spawn_program(exe),
         SidecarSource::Python { python, script } => Sidecar::spawn(python, script),
     };
-    Core::start(config_dir, spawn_fn, watchdog_cfg(), expected_hash)
+    Core::start(eq, spawn_fn, watchdog_cfg(), expected_hash)
 }
 
 /// Lenient timeouts: the real DSP sidecar spends a few seconds importing
