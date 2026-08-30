@@ -38,7 +38,7 @@ use crate::dsp::{Coeffs, MAX_BANDS};
 pub const CONTROL_MAGIC: u32 = 0x4341_4751;
 /// Layout version. A mismatch is refused rather than interpreted: this describes what
 /// someone is listening to, and a half-understood layout is not worth guessing at.
-pub const CONTROL_VERSION: u32 = 3;
+pub const CONTROL_VERSION: u32 = 4;
 
 /// Preamp bounds mirroring [`crate::config`]'s, for the same reason: attenuation is
 /// harmless, gain is a hazard, and the writer is not trusted merely because it is ours.
@@ -117,6 +117,14 @@ pub struct ControlBlock {
     /// party that authoritatively knows (it is handed the locked format), so it publishes it
     /// rather than leaving the writer to guess or to re-derive it through WASAPI.
     pub sample_rate: AtomicU32,
+    /// Unix time the loaded DLL was compiled. Outbound.
+    ///
+    /// Answers "is audiodg running the build I just made?", which is otherwise unanswerable
+    /// from outside: the registered DLL lives in %ProgramFiles% and is only refreshed by
+    /// `cageq-apo-setup register`, so a freshly built DLL sitting in a working folder is not
+    /// the one being loaded. Mistaking one for the other has twice sent a hunt for DSP bugs
+    /// that were already fixed.
+    pub build_stamp: AtomicU64,
 }
 
 /// A validated snapshot, ready to hand to the cascade. Fixed-size so taking one allocates
@@ -166,6 +174,22 @@ pub fn bump_heartbeat(block: &ControlBlock) {
     block.heartbeat.fetch_add(1, Ordering::Relaxed);
 }
 
+
+/// When the running APO was built (Unix seconds), and the constant it reports.
+pub const BUILD_STAMP: &str = env!("CAGEQ_APO_BUILD");
+
+/// Publish the build stamp so a writer can tell which DLL is actually loaded.
+pub fn set_build_stamp(block: &ControlBlock) {
+    block.build_stamp.store(BUILD_STAMP.parse().unwrap_or(0), Ordering::Relaxed);
+}
+
+/// The loaded APO's build time, or `None` if it published none.
+pub fn build_stamp(block: &ControlBlock) -> Option<u64> {
+    match block.build_stamp.load(Ordering::Relaxed) {
+        0 => None,
+        v => Some(v),
+    }
+}
 /// Publish the rate this APO locked to, so the writer can compute coefficients for it.
 pub fn set_sample_rate(block: &ControlBlock, hz: u32) {
     block.sample_rate.store(hz, Ordering::Relaxed);
@@ -334,6 +358,7 @@ mod tests {
             heartbeat: AtomicU64::new(0),
             ack: AtomicU64::new(0),
             sample_rate: AtomicU32::new(0),
+            build_stamp: AtomicU64::new(0),
         }
     }
 

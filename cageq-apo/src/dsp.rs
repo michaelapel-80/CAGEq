@@ -1258,6 +1258,85 @@ mod tests {
         // slightly differently each sample, which is not a discontinuity.
         assert!(ramped < 3.0, "preamp ramp still steps the signal ({ramped:.1}x)");
     }
+
+
+    /// Diagnostic: the strongest non-fundamental bins through a dry switch, so a reported
+    /// spectrum can be compared against what the engine actually produces.
+    #[test]
+    fn dry_switch_spectrum() {
+        const N: usize = 960 * 8;      // 8 periods at 50 Hz -> 6.25 Hz resolution
+        let wet: Vec<Coeffs> =
+            realistic_correction(6.0).iter().map(|b| coefficients(b, FS)).collect();
+        let warm = tone(50.0, 0, 960 * 60 + 240, 0.5);   // switch near the tone's peak
+        let cont = tone(50.0, 960 * 60 + 240, N, 0.5);
+
+        let mut c = Cascade::new(1, FS);
+        assert!(c.apply_coeffs(&wet, -9.0));
+        c.settle();
+        let mut sink = vec![0.0f32; warm.len()];
+        c.process(&warm, &mut sink, warm.len());
+        assert!(c.apply_coeffs(&[], -6.0));
+        let mut out = vec![0.0f32; N];
+        c.process(&cont, &mut out, N);
+
+        let fund = bin_energy(&out, 8); // 50 Hz
+        let mut peaks: Vec<(f64, f64)> = (2..64)
+            .filter(|k| *k != 8)
+            .map(|k| (k as f64 * FS / N as f64, 10.0 * (bin_energy(&out, k) / fund).log10()))
+            .collect();
+        peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        eprintln!("strongest non-fundamental bins (re 50 Hz):");
+        for (hz, db) in peaks.iter().take(6) {
+            eprintln!("    {hz:6.1} Hz  {db:6.1} dB");
+        }
+    }
+    /// Does the crossfade itself bloom? Measures the output envelope through the fade.
+    ///
+    /// A crossfade mixes two signals with **different phase responses**, so mid-fade they
+    /// partly cancel or reinforce. Both endpoints are correct, yet the level can dip or swell
+    /// on the way — which is heard as a bloom even though nothing clicked. If that is real, it
+    /// is inherent to mixing signals, and two parallel A/B chains would do exactly the same.
+    #[test]
+    fn does_the_dry_crossfade_swell() {
+        const WINDOW: usize = 960 * 3;
+        let wet: Vec<Coeffs> =
+            realistic_correction(6.0).iter().map(|b| coefficients(b, FS)).collect();
+        let warm = tone(50.0, 0, 960 * 60, 0.5);
+        let cont = tone(50.0, 960 * 60, WINDOW, 0.5);
+
+        let mut c = Cascade::new(1, FS);
+        assert!(c.apply_coeffs(&wet, -9.0));
+        c.settle();
+        let mut sink = vec![0.0f32; warm.len()];
+        c.process(&warm, &mut sink, warm.len());
+        // Level before the switch, over a whole period.
+        let before = rms(&sink[sink.len() - 960..]);
+
+        assert!(c.apply_coeffs(&[], -6.0));
+        let mut out = vec![0.0f32; WINDOW];
+        c.process(&cont, &mut out, WINDOW);
+        let after = rms(&out[WINDOW - 960..]);
+
+        // Envelope through the fade, one period at a time (50 Hz: a period IS the resolution).
+        let mut worst_excursion = 0.0f64;
+        let mut trace = Vec::new();
+        for blk in out.chunks(240).take(12) {
+            let r = rms(blk);
+            trace.push(format!("{:.4}", r));
+            // How far outside the two endpoints does it stray?
+            let lo = before.min(after);
+            let hi = before.max(after);
+            let out_by = if r < lo { lo - r } else if r > hi { r - hi } else { 0.0 };
+            worst_excursion = worst_excursion.max(out_by / hi);
+        }
+        eprintln!("envelope before {before:.4} -> after {after:.4}");
+        eprintln!("  through fade: {}", trace.join(" "));
+        eprintln!("  worst excursion outside the endpoints: {:.1}%", worst_excursion * 100.0);
+    }
+
+    fn rms(x: &[f32]) -> f64 {
+        (x.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / x.len() as f64).sqrt()
+    }
     /// **Switching to and from dry**, faded against switched instantly.
     ///
     /// Measured as a comparison, because the absolute HF number is not meaningful here: a

@@ -395,6 +395,7 @@ pub unsafe extern "C" fn cageq_apo_open_channel(
         // coefficients, and a correction built for the wrong rate lands at the wrong
         // frequencies while looking perfectly healthy.
         control::set_sample_rate(ch.block(), apo.cascade.sample_rate() as u32);
+        control::set_build_stamp(ch.block());
     }
     match &apo.channel {
         None => 0,

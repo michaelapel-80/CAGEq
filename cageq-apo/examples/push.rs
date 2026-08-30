@@ -92,6 +92,20 @@ fn main() {
         }
     };
     println!("opened Global\\CAGEqApo_{endpoint}");
+    // Which DLL is actually loaded. The registered copy lives in %ProgramFiles% and is only
+    // refreshed by `cageq-apo-setup register`, so a freshly built DLL in a working folder is
+    // NOT the one audiodg loads — a distinction that has twice sent a hunt for DSP bugs that
+    // were already fixed.
+    match cageq_apo::control::build_stamp(ch.block()) {
+        Some(stamp) => {
+            let age = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs().saturating_sub(stamp))
+                .unwrap_or(0);
+            println!("loaded APO was built {} min ago (stamp {stamp})", age / 60);
+        }
+        None => println!("loaded APO published no build stamp — it predates this check"),
+    }
 
     if args.get(1).map(String::as_str) == Some("--watch") {
         // Two things worth seeing: that the APO is processing (heartbeat advancing), and what

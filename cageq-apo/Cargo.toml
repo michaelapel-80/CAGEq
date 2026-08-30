@@ -2,6 +2,7 @@
 name = "cageq-apo"
 version.workspace = true
 edition = "2024"
+build = "build.rs"
 
 # A static library the C++ shim links into `CAGEqApo.dll` — see `shim/cageq_apo.cpp` and
 # this crate's own docs for why the COM/audiodg half is C++ at all (short version: the
