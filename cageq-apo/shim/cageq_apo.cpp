@@ -25,6 +25,67 @@
 #include <audioenginebaseapo.h>
 #include <baseaudioprocessingobject.h>
 #include <audioengineextensionapo.h>
+#include <stdio.h>
+#include <stdarg.h>
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+//
+// Format negotiation is the one part of an APO that fails *silently* — Windows just
+// reports "format not supported" and gives up, with nothing in the event log naming which
+// call refused. So the negotiation path logs what it was asked and what it answered.
+//
+// Writes to %TEMP%\CAGEqApo.log. Inside audiodg that resolves under LocalService's own
+// profile, which is where Equalizer APO's own logger writes from the same process — i.e. a
+// path proven writable in this exact security context.
+//
+// NEVER called from APOProcess: that is the real-time thread, where file I/O would be a
+// dropout for the whole machine. Config/negotiation calls are not real-time.
+// ---------------------------------------------------------------------------
+#define CAGEQ_APO_DIAG 1
+
+#if CAGEQ_APO_DIAG
+static void DiagF(_In_z_ _Printf_format_string_ const wchar_t* fmt, ...)
+{
+    wchar_t path[MAX_PATH];
+    if (GetTempPathW(ARRAYSIZE(path), path) == 0) return;
+    if (FAILED(StringCchCatW(path, ARRAYSIZE(path), L"CAGEqApo.log"))) return;
+
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, path, L"at, ccs=UTF-8") != 0 || fp == nullptr) return;
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fwprintf(fp, L"[%02u:%02u:%02u.%03u pid=%lu] ", st.wHour, st.wMinute, st.wSecond,
+             st.wMilliseconds, GetCurrentProcessId());
+
+    va_list va;
+    va_start(va, fmt);
+    vfwprintf(fp, fmt, va);
+    va_end(va);
+
+    fwprintf(fp, L"\n");
+    fclose(fp);
+}
+
+/// Describe an IAudioMediaType. The five fields that decide whether an APO accepts a
+/// format, so a rejection can be read off the log rather than guessed at.
+static void DiagFormat(const wchar_t* label, IAudioMediaType* type)
+{
+    if (type == nullptr) { DiagF(L"    %s = (null)", label); return; }
+
+    UNCOMPRESSEDAUDIOFORMAT f = {};
+    HRESULT hr = type->GetUncompressedAudioFormat(&f);
+    if (FAILED(hr)) { DiagF(L"    %s = GetUncompressedAudioFormat failed 0x%08X", label, hr); return; }
+
+    DiagF(L"    %s = subtype:%08X ch:%u container:%uB validBits:%u rate:%.1f mask:%08X",
+          label, f.guidFormatType.Data1, f.dwSamplesPerFrame, f.dwBytesPerSampleContainer,
+          f.dwValidBitsPerSample, f.fFramesPerSecond, f.dwChannelMask);
+}
+#else
+#define DiagF(...)        ((void)0)
+#define DiagFormat(a, b)  ((void)0)
+#endif
 
 // ---------------------------------------------------------------------------
 // The Rust core (../src/lib.rs), linked in statically.
@@ -118,10 +179,52 @@ public:
     // of the earlier spike's silent rejection.
     STDMETHOD(Initialize)(UINT32 cbDataSize, BYTE* pbyData) override
     {
+        // Log the sizes before judging: Windows can hand a v1/v2/v3 init struct depending on
+        // which IAudioSystemEffects interface the APO advertises, and rejecting the wrong one
+        // is invisible from outside.
+        DiagF(L"Initialize: cbDataSize=%u (v1=%zu)", cbDataSize, sizeof(APOInitSystemEffects));
+
         if (pbyData == nullptr && cbDataSize != 0) return E_INVALIDARG;
         if (pbyData != nullptr && cbDataSize == 0) return E_POINTER;
-        if (cbDataSize != sizeof(APOInitSystemEffects)) return E_INVALIDARG;
+        if (cbDataSize != sizeof(APOInitSystemEffects)) {
+            DiagF(L"  -> E_INVALIDARG (unexpected init struct size)");
+            return E_INVALIDARG;
+        }
         return S_OK;
+    }
+
+    // Format negotiation. Both are pure delegation to the base class — overridden ONLY so the
+    // question and the answer end up in the log; remove once negotiation is understood.
+    STDMETHOD(IsInputFormatSupported)(IAudioMediaType* pOutputFormat,
+                                      IAudioMediaType* pRequestedInputFormat,
+                                      IAudioMediaType** ppSupportedInputFormat) override
+    {
+        DiagF(L"IsInputFormatSupported");
+        DiagFormat(L"output   ", pOutputFormat);
+        DiagFormat(L"requested", pRequestedInputFormat);
+
+        HRESULT hr = CBaseAudioProcessingObject::IsInputFormatSupported(
+            pOutputFormat, pRequestedInputFormat, ppSupportedInputFormat);
+
+        DiagF(L"  -> 0x%08X%s", hr, (hr == S_FALSE) ? L" (S_FALSE = rejected, suggesting another)" : L"");
+        if (hr == S_FALSE && ppSupportedInputFormat != nullptr) DiagFormat(L"suggested", *ppSupportedInputFormat);
+        return hr;
+    }
+
+    STDMETHOD(IsOutputFormatSupported)(IAudioMediaType* pInputFormat,
+                                       IAudioMediaType* pRequestedOutputFormat,
+                                       IAudioMediaType** ppSupportedOutputFormat) override
+    {
+        DiagF(L"IsOutputFormatSupported");
+        DiagFormat(L"input    ", pInputFormat);
+        DiagFormat(L"requested", pRequestedOutputFormat);
+
+        HRESULT hr = CBaseAudioProcessingObject::IsOutputFormatSupported(
+            pInputFormat, pRequestedOutputFormat, ppSupportedOutputFormat);
+
+        DiagF(L"  -> 0x%08X%s", hr, (hr == S_FALSE) ? L" (S_FALSE = rejected, suggesting another)" : L"");
+        if (hr == S_FALSE && ppSupportedOutputFormat != nullptr) DiagFormat(L"suggested", *ppSupportedOutputFormat);
+        return hr;
     }
 
     // IAudioProcessingObjectConfiguration. Let the base validate and cache the connection
@@ -131,13 +234,32 @@ public:
         UINT32 u32NumInputConnections, APO_CONNECTION_DESCRIPTOR** ppInputConnections,
         UINT32 u32NumOutputConnections, APO_CONNECTION_DESCRIPTOR** ppOutputConnections) override
     {
+        DiagF(L"LockForProcess: in=%u out=%u", u32NumInputConnections, u32NumOutputConnections);
+        if (u32NumInputConnections > 0 && ppInputConnections != nullptr)
+            DiagFormat(L"conn in  ", ppInputConnections[0]->pFormat);
+        if (u32NumOutputConnections > 0 && ppOutputConnections != nullptr)
+            DiagFormat(L"conn out ", ppOutputConnections[0]->pFormat);
+
         HRESULT hr = CBaseAudioProcessingObject::LockForProcess(
             u32NumInputConnections, ppInputConnections, u32NumOutputConnections, ppOutputConnections);
-        if (FAILED(hr)) return hr;
+        if (FAILED(hr))
+        {
+            DiagF(L"  -> base LockForProcess FAILED 0x%08X", hr);
+            return hr;
+        }
 
-        m_rust = cageq_apo_create(GetSamplesPerFrame(), GetFramesPerSecond());
+        // These are what the Rust engine is configured from, so log them even on success:
+        // a zero here would mean the base did not cache the value (it only guarantees to
+        // when the matching APO_FLAG_*_MUST_MATCH is declared), which would look like a
+        // format rejection further down.
+        const UINT32 channels = GetSamplesPerFrame();
+        const FLOAT32 rate = GetFramesPerSecond();
+        DiagF(L"  base ok; channels=%u rate=%.1f", channels, rate);
+
+        m_rust = cageq_apo_create(channels, rate);
         if (m_rust == nullptr)
         {
+            DiagF(L"  -> cageq_apo_create REFUSED channels=%u rate=%.1f", channels, rate);
             // Refuse the lock rather than run mis-configured: Windows then drops this APO
             // cleanly and the endpoint keeps working, which is the failure mode to want
             // when the alternative lives on the RT thread of the whole machine's audio.
@@ -149,6 +271,7 @@ public:
 
     STDMETHOD(UnlockForProcess)() override
     {
+        DiagF(L"UnlockForProcess");
         cageq_apo_destroy(m_rust);
         m_rust = nullptr;
         return CBaseAudioProcessingObject::UnlockForProcess();
