@@ -94,18 +94,36 @@ if ($rc.ExitCode -ne 0) {
 "COM server registered: $clsid"
 "  -> $dll"
 
-# 2) Back the endpoint's effect chain up BEFORE touching it, so unregister can restore it
-#    byte-for-byte rather than guessing what was there.
-$backup = Join-Path $PSScriptRoot "fx-backup-$EndpointId.reg"
-& reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$EndpointId\FxProperties" "$backup" /y | Out-Null
-"Backed up FxProperties -> $backup"
+# 2) Back the effect slots up BEFORE touching them.
+#
+# Recorded as a plain slot=value list, NOT via `reg export`/`reg import`: importing needs to
+# open the key for full access and MMDevices is TrustedInstaller-owned, so the import fails
+# ("Fehler beim Zugriff auf die Registrierung") even though setting individual values through
+# the provider works fine. Restoring the same way we wrote is symmetric and uses only APIs
+# proven to work on this key. A .reg export is still taken alongside, purely as a
+# human-readable artifact for manual recovery.
+$p = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
+$slots = '1', '2', '5', '6', '7'
+$backup = Join-Path $PSScriptRoot "fx-backup-$EndpointId.txt"
+
+$existing = Get-ItemProperty $fx
+$lines = foreach ($s in $slots) {
+    $name = "$p,$s"
+    $val = if ($null -ne $existing.$name) { $existing.$name } else { '<absent>' }
+    "$s=$val"
+}
+Set-Content -Path $backup -Value $lines -Encoding UTF8
+"Backed up effect slots -> $backup"
+$lines | ForEach-Object { "    $_" }
+
+& reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$EndpointId\FxProperties" `
+    (Join-Path $PSScriptRoot "fx-backup-$EndpointId.reg") /y 2>&1 | Out-Null
 
 # 3) Attach. Effect-slot property GUID; index picks the slot.
-$p = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
 $idx = @{ LFX = '1'; GFX = '2'; SFX = '5'; MFX = '6'; EFX = '7' }[$Slot]
 
 # Clear the other CLSID slots so a previous attempt can't linger and confuse the result.
-'1', '2', '5', '6', '7' | Where-Object { $_ -ne $idx } | ForEach-Object {
+$slots | Where-Object { $_ -ne $idx } | ForEach-Object {
     Remove-ItemProperty -Path $fx -Name "$p,$_" -ErrorAction SilentlyContinue
 }
 New-ItemProperty -Path $fx -Name "$p,$idx" -Value $clsid -PropertyType String -Force | Out-Null

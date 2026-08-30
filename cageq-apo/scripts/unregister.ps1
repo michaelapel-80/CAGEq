@@ -33,25 +33,46 @@ $fx = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$E
 # 1) Detach first, then unregister. This order matters: leaving a CLSID in an endpoint's
 #    effect chain whose COM server no longer resolves is exactly the state that breaks an
 #    endpoint, so the reference goes away before the thing it points at does.
-$backup = Join-Path $PSScriptRoot "fx-backup-$EndpointId.reg"
-if (Test-Path $backup) {
-    & reg import "$backup" 2>&1 | Out-Null
-    "Restored FxProperties from $backup"
-} elseif (Test-Path $fx) {
+$p = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
+$slots = '1', '2', '5', '6', '7'
+$backup = Join-Path $PSScriptRoot "fx-backup-$EndpointId.txt"
+
+if (-not (Test-Path $fx)) {
+    "No FxProperties under $EndpointId — nothing to detach."
+}
+elseif (Test-Path $backup) {
+    # Restore value-by-value through the registry provider — deliberately NOT `reg import`,
+    # which needs full access to a TrustedInstaller-owned key and fails there even though
+    # per-value writes succeed. This mirrors exactly how register.ps1 wrote them.
+    $saved = @{}
+    foreach ($line in Get-Content $backup) {
+        if ($line -match '^(\d+)=(.*)$') { $saved[$Matches[1]] = $Matches[2] }
+    }
+    foreach ($s in $slots) {
+        $name = "$p,$s"
+        $want = $saved[$s]
+        if ($null -eq $want) { continue }   # slot wasn't recorded; leave it alone
+        if ($want -eq '<absent>') {
+            Remove-ItemProperty -Path $fx -Name $name -ErrorAction SilentlyContinue
+        } else {
+            New-ItemProperty -Path $fx -Name $name -Value $want -PropertyType String -Force | Out-Null
+        }
+    }
+    "Restored effect slots from $backup"
+    Get-Content $backup | ForEach-Object { "    $_" }
+}
+else {
     # No backup (registered by hand, or it was deleted): clear our CLSID out of every slot
     # rather than leaving a dangling reference. Only ours — never touch a vendor's.
-    $p = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
     $props = Get-ItemProperty $fx
-    '1', '2', '5', '6', '7' | ForEach-Object {
-        $name = "$p,$_"
-        if ($props.$name -and $props.$name -eq $clsid) {
+    foreach ($s in $slots) {
+        $name = "$p,$s"
+        if ($props.$name -eq $clsid) {
             Remove-ItemProperty -Path $fx -Name $name -ErrorAction SilentlyContinue
             "Cleared $name (was ours)"
         }
     }
     "No backup found — cleared only CAGEq's own CLSID, left everything else alone."
-} else {
-    "No FxProperties under $EndpointId — nothing to detach."
 }
 
 # 2) COM server: DllUnregisterServer -> UnregisterAPO + remove the CLSID keys.

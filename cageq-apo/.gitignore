@@ -3,4 +3,5 @@ build/
 
 # Endpoint effect-chain backups written by scripts/register.ps1. Machine-specific, and
 # they encode a real endpoint GUID; unregister.ps1 consumes them locally.
+scripts/fx-backup-*.txt
 scripts/fx-backup-*.reg
