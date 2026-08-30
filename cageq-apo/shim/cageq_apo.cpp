@@ -137,23 +137,60 @@ static const CRegAPOProperties<1> g_regProperties(
 // The APO
 // ---------------------------------------------------------------------------
 
-class CageqApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects
+/// The object's *own* IUnknown, kept separate from the one its interfaces expose.
+///
+/// COM aggregation splits IUnknown in two: the interfaces an aggregated object hands out
+/// must forward AddRef/Release/QueryInterface to the **outer** object, so the whole
+/// aggregate looks like one COM identity — but something still has to control this
+/// object's own lifetime, and that is this. Deliberately laid out QI/AddRef/Release in the
+/// same slots as IUnknown, so a pointer to it can be reinterpret_cast to IUnknown* (the
+/// standard trick, and what EqualizerAPO does).
+class INonDelegatingUnknown
 {
 public:
-    CageqApo() : CBaseAudioProcessingObject(g_regProperties), m_refCount(1), m_rust(nullptr)
+    virtual HRESULT __stdcall NonDelegatingQueryInterface(REFIID iid, void** ppv) = 0;
+    virtual ULONG   __stdcall NonDelegatingAddRef() = 0;
+    virtual ULONG   __stdcall NonDelegatingRelease() = 0;
+};
+
+class CageqApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects, public INonDelegatingUnknown
+{
+public:
+    /// `pOuter` is the aggregating object, or null when created standalone. **audiodg does
+    /// aggregate system-effects APOs** — measured on the VM: `CreateInstance` arrives with a
+    /// non-null outer and `IID_IUnknown`, and an earlier version of this file refused it with
+    /// CLASS_E_NOAGGREGATION on the assumption that aggregation never happened. The APO was
+    /// then simply never constructed: no Initialize, no LockForProcess, a dead endpoint, and
+    /// nothing in any log but a retry loop. That assumption is why EqualizerAPO carries this
+    /// same delegating/non-delegating machinery.
+    explicit CageqApo(IUnknown* pOuter)
+        : CBaseAudioProcessingObject(g_regProperties), m_refCount(1), m_rust(nullptr)
     {
-        DiagF(L"CageqApo CONSTRUCTED (instances now %ld)", InterlockedIncrement(&g_instCount));
+        // Standalone: delegate to ourselves, so the delegating methods below need no branch.
+        m_pUnkOuter = (pOuter != nullptr)
+            ? pOuter
+            : reinterpret_cast<IUnknown*>(static_cast<INonDelegatingUnknown*>(this));
+        DiagF(L"CageqApo CONSTRUCTED (aggregated=%s, instances now %ld)",
+              (pOuter != nullptr) ? L"yes" : L"no", InterlockedIncrement(&g_instCount));
     }
 
-    // IUnknown. Implemented by hand because CBaseAudioProcessingObject deliberately does
-    // not: it is `__declspec(novtable)` and leaves lifetime to the subclass. No
-    // aggregation support — audiodg does not aggregate system-effects APOs, and the
-    // delegating/non-delegating pair EqualizerAPO carries exists only for its child-APO
-    // chaining, which CAGEq's APO replaces rather than reimplements.
-    STDMETHOD(QueryInterface)(REFIID iid, void** ppv) override
+    // --- Delegating IUnknown: what every interface on this object exposes. Forwards to the
+    // aggregate's identity (or to ourselves when standalone).
+    STDMETHOD(QueryInterface)(REFIID iid, void** ppv) override { return m_pUnkOuter->QueryInterface(iid, ppv); }
+    STDMETHOD_(ULONG, AddRef)() override { return m_pUnkOuter->AddRef(); }
+    STDMETHOD_(ULONG, Release)() override { return m_pUnkOuter->Release(); }
+
+    // --- Non-delegating IUnknown: this object's real identity and lifetime.
+    // Implemented by hand because CBaseAudioProcessingObject deliberately does not: it is
+    // `__declspec(novtable)` and leaves lifetime to the subclass.
+    STDMETHOD(NonDelegatingQueryInterface)(REFIID iid, void** ppv) override
     {
         if (!ppv) return E_POINTER;
-        if (iid == __uuidof(IUnknown))                            *ppv = static_cast<IUnknown*>(static_cast<IAudioProcessingObject*>(this));
+
+        // IID_IUnknown must yield the NON-delegating unknown: that is the pointer the
+        // aggregator holds to control our lifetime, and handing back a delegating one here
+        // would make us forward our own lifetime to the outer object — an immediate cycle.
+        if (iid == __uuidof(IUnknown))                                 *ppv = static_cast<INonDelegatingUnknown*>(this);
         else if (iid == __uuidof(IAudioProcessingObject))              *ppv = static_cast<IAudioProcessingObject*>(this);
         else if (iid == __uuidof(IAudioProcessingObjectRT))            *ppv = static_cast<IAudioProcessingObjectRT*>(this);
         else if (iid == __uuidof(IAudioProcessingObjectConfiguration)) *ppv = static_cast<IAudioProcessingObjectConfiguration*>(this);
@@ -164,12 +201,12 @@ public:
         return S_OK;
     }
 
-    STDMETHOD_(ULONG, AddRef)() override { return InterlockedIncrement(&m_refCount); }
+    STDMETHOD_(ULONG, NonDelegatingAddRef)() override { return InterlockedIncrement(&m_refCount); }
 
-    STDMETHOD_(ULONG, Release)() override
+    STDMETHOD_(ULONG, NonDelegatingRelease)() override
     {
         ULONG n = InterlockedDecrement(&m_refCount);
-        if (n == 0) delete this;
+        if (n == 0) { delete this; return 0; }
         return n;
     }
 
@@ -359,8 +396,9 @@ public:
 private:
     ~CageqApo() { DiagF(L"CageqApo DESTROYED (instances now %ld)", InterlockedDecrement(&g_instCount)); }
 
-    long  m_refCount;
-    void* m_rust; // opaque handle from cageq_apo_create
+    long      m_refCount;
+    IUnknown* m_pUnkOuter; // aggregating identity, or ourselves when standalone
+    void*     m_rust;      // opaque handle from cageq_apo_create
 };
 
 // ---------------------------------------------------------------------------
@@ -404,23 +442,30 @@ public:
         // strong evidence that aggregation IS used on this path; a comment in this file
         // previously asserted the opposite without evidence.
         DiagF(L"ClassFactory::CreateInstance: pOuter=%s iid=%08X-%04X-%04X",
-              (pOuter == nullptr) ? L"NULL (not aggregated)" : L"NON-NULL (AGGREGATION REQUESTED)",
+              (pOuter == nullptr) ? L"NULL (standalone)" : L"NON-NULL (aggregated)",
               iid.Data1, iid.Data2, iid.Data3);
 
         if (!ppv) return E_POINTER;
         *ppv = nullptr;
-        if (pOuter != nullptr)
+
+        // COM's rule for aggregation: an aggregated object may only be asked for
+        // IID_IUnknown at creation, because the aggregator wants the non-delegating unknown
+        // and nothing else. Any other interface comes later, through that pointer.
+        if (pOuter != nullptr && iid != __uuidof(IUnknown))
         {
-            DiagF(L"  -> CLASS_E_NOAGGREGATION (refusing to be aggregated)");
-            return CLASS_E_NOAGGREGATION;
+            DiagF(L"  -> E_NOINTERFACE (aggregation may only request IID_IUnknown)");
+            return E_NOINTERFACE;
         }
 
-        CageqApo* apo = new (std::nothrow) CageqApo();
+        CageqApo* apo = new (std::nothrow) CageqApo(pOuter);
         if (apo == nullptr) return E_OUTOFMEMORY;
 
-        HRESULT hr = apo->QueryInterface(iid, ppv);
-        apo->Release();
-        DiagF(L"  -> QueryInterface 0x%08X", hr);
+        // Non-delegating throughout: the object is born with one non-delegating reference,
+        // so it must be queried and released the same way — going through the delegating
+        // pair here would hand our lifetime to the outer object before it even holds us.
+        HRESULT hr = apo->NonDelegatingQueryInterface(iid, ppv);
+        apo->NonDelegatingRelease();
+        DiagF(L"  -> 0x%08X", hr);
         return hr;
     }
 
