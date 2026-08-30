@@ -99,6 +99,24 @@ currently *depends* on EqualizerAPO, so every existing CAGEq user already has th
 switching to CAGEq's own APO asks nothing new of them, and the shipped `EqualizerAPO.dll` is
 itself unsigned.
 
+## Attaching to an endpoint takes three values, not one
+
+Found the hard way — on a clean machine the APO simply never loaded, with no error anywhere,
+until Equalizer APO had been installed once. Per endpoint, in
+`…\MMDevices\Audio\Render\{id}\FxProperties`:
+
+| Value | Type | Why |
+|---|---|---|
+| `{d04e05a6-…},7` | `REG_SZ` = our CLSID | which APO occupies the EFX slot |
+| `{d3993a3f-…},7` | `REG_MULTI_SZ` = `{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}` | **which processing modes it supports — Windows will not load an APO in a slot that doesn't declare them** |
+| `{1da5d803-…},5` | absent | `PKEY_AudioEndpoint_Disable_SysFx`; if set, the whole effect chain is bypassed |
+
+The processing-modes value is the one that bites: EqAPO's installer writes it only
+`if (!exists)`, so once it had run, our CLSID silently inherited its declaration. On a clean
+machine there is nothing to inherit and the APO is skipped in silence. Stage D's installer
+must write all three itself. (`{C18E2F7E-…}` is `AUDIO_SIGNALPROCESSINGMODE_DEFAULT`; slot
+index 7 = EFX, 6 = MFX, 5 = SFX — the legacy LFX/GFX slots predate processing modes.)
+
 Trade-off to carry into the UI, quoting EqAPO's own docs: applications requiring a secure
 audio path may change behaviour or refuse to output audio.
 

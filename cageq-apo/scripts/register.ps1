@@ -102,16 +102,30 @@ if ($rc.ExitCode -ne 0) {
 # the provider works fine. Restoring the same way we wrote is symmetric and uses only APIs
 # proven to work on this key. A .reg export is still taken alongside, purely as a
 # human-readable artifact for manual recovery.
-$p = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
+$p = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'            # effect CLSID, per slot
+$pm = '{d3993a3f-99c2-4402-b5ec-a92a0367664b}'           # supported processing modes, per slot
+$enh = '{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5'        # PKEY_AudioEndpoint_Disable_SysFx
+$modeDefault = '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'  # AUDIO_SIGNALPROCESSINGMODE_DEFAULT
 $slots = '1', '2', '5', '6', '7'
+$modeSlots = '5', '6', '7'   # LFX/GFX are legacy and predate processing modes
 $backup = Join-Path $PSScriptRoot "fx-backup-$EndpointId.txt"
 
 $existing = Get-ItemProperty $fx
-$lines = foreach ($s in $slots) {
-    $name = "$p,$s"
-    $val = if ($null -ne $existing.$name) { $existing.$name } else { '<absent>' }
-    "$s=$val"
+$lines = @()
+foreach ($s in $slots) {
+    $v = $existing."$p,$s"
+    if ($null -eq $v) { $v = '<absent>' }
+    $lines += "fx$s=$v"
 }
+foreach ($s in $modeSlots) {
+    $v = $existing."$pm,$s"
+    if ($null -eq $v) { $v = '<absent>' } else { $v = ($v -join ';') }
+    $lines += "pm$s=$v"
+}
+$v = $existing.$enh
+if ($null -eq $v) { $v = '<absent>' }
+$lines += "enh=$v"
+
 Set-Content -Path $backup -Value $lines -Encoding UTF8
 "Backed up effect slots -> $backup"
 $lines | ForEach-Object { "    $_" }
@@ -128,6 +142,31 @@ $slots | Where-Object { $_ -ne $idx } | ForEach-Object {
 }
 New-ItemProperty -Path $fx -Name "$p,$idx" -Value $clsid -PropertyType String -Force | Out-Null
 "Set  $p,$idx = $clsid   (slot $Slot)"
+
+# Declare which processing modes this slot's APO supports.
+#
+# THIS IS REQUIRED, and its absence is why the DLL previously loaded only after Equalizer
+# APO had been installed once: modern Windows will not load an APO in a slot that does not
+# declare its processing modes, and EqAPO's installer writes this value `if (!exists)` —
+# so our CLSID was silently inheriting EqAPO's. On a clean machine there is nothing to
+# inherit and the APO is simply skipped, with no error anywhere.
+if ($modeSlots -contains $idx) {
+    $pmName = "$pm,$idx"
+    if ($null -eq (Get-ItemProperty $fx).$pmName) {
+        New-ItemProperty -Path $fx -Name $pmName -Value @($modeDefault) -PropertyType MultiString -Force | Out-Null
+        "Set  $pmName = $modeDefault   (processing modes)"
+    } else {
+        "Kept $pmName (already declared)"
+    }
+}
+
+# Force-enable enhancements: with PKEY_AudioEndpoint_Disable_SysFx set, Windows bypasses
+# the endpoint's whole effect chain, so no APO runs at all. EqAPO deletes this for the same
+# reason; the original value is recorded in the backup above and restored on unregister.
+if ($null -ne (Get-ItemProperty $fx).$enh) {
+    Remove-ItemProperty -Path $fx -Name $enh -ErrorAction SilentlyContinue
+    "Cleared $enh (enhancements were disabled for this endpoint)"
+}
 
 Restart-Service audiosrv -Force
 @"

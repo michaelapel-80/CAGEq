@@ -33,8 +33,11 @@ $fx = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$E
 # 1) Detach first, then unregister. This order matters: leaving a CLSID in an endpoint's
 #    effect chain whose COM server no longer resolves is exactly the state that breaks an
 #    endpoint, so the reference goes away before the thing it points at does.
-$p = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
+$p = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'      # effect CLSID, per slot
+$pm = '{d3993a3f-99c2-4402-b5ec-a92a0367664b}'     # supported processing modes, per slot
+$enh = '{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5'  # PKEY_AudioEndpoint_Disable_SysFx
 $slots = '1', '2', '5', '6', '7'
+$modeSlots = '5', '6', '7'
 $backup = Join-Path $PSScriptRoot "fx-backup-$EndpointId.txt"
 
 if (-not (Test-Path $fx)) {
@@ -46,18 +49,44 @@ elseif (Test-Path $backup) {
     # per-value writes succeed. This mirrors exactly how register.ps1 wrote them.
     $saved = @{}
     foreach ($line in Get-Content $backup) {
-        if ($line -match '^(\d+)=(.*)$') { $saved[$Matches[1]] = $Matches[2] }
+        if ($line -match '^([A-Za-z]+\d*)=(.*)$') { $saved[$Matches[1]] = $Matches[2] }
     }
+
+    # Effect CLSID per slot.
     foreach ($s in $slots) {
-        $name = "$p,$s"
-        $want = $saved[$s]
-        if ($null -eq $want) { continue }   # slot wasn't recorded; leave it alone
+        $want = $saved["fx$s"]
+        if ($null -eq $want) { continue }   # not recorded; leave it alone
         if ($want -eq '<absent>') {
-            Remove-ItemProperty -Path $fx -Name $name -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $fx -Name "$p,$s" -ErrorAction SilentlyContinue
         } else {
-            New-ItemProperty -Path $fx -Name $name -Value $want -PropertyType String -Force | Out-Null
+            New-ItemProperty -Path $fx -Name "$p,$s" -Value $want -PropertyType String -Force | Out-Null
         }
     }
+
+    # Processing modes per slot (REG_MULTI_SZ, stored ';'-joined in the backup). Restored
+    # rather than left behind: register.ps1 may have created it on an endpoint that never
+    # had one, and leaving a modes declaration for a slot with no APO is not the state we
+    # found the machine in.
+    foreach ($s in $modeSlots) {
+        $want = $saved["pm$s"]
+        if ($null -eq $want) { continue }
+        if ($want -eq '<absent>') {
+            Remove-ItemProperty -Path $fx -Name "$pm,$s" -ErrorAction SilentlyContinue
+        } else {
+            New-ItemProperty -Path $fx -Name "$pm,$s" -Value ($want -split ';') -PropertyType MultiString -Force | Out-Null
+        }
+    }
+
+    # PKEY_AudioEndpoint_Disable_SysFx — put the user's "disable enhancements" choice back.
+    $want = $saved['enh']
+    if ($null -ne $want) {
+        if ($want -eq '<absent>') {
+            Remove-ItemProperty -Path $fx -Name $enh -ErrorAction SilentlyContinue
+        } else {
+            New-ItemProperty -Path $fx -Name $enh -Value ([int]$want) -PropertyType DWord -Force | Out-Null
+        }
+    }
+
     "Restored effect slots from $backup"
     Get-Content $backup | ForEach-Object { "    $_" }
 }
