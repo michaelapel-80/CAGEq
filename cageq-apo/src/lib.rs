@@ -47,15 +47,54 @@ use std::ffi::c_void;
 /// but not a format, and the shim guarantees these stay in step by tearing the instance
 /// down and rebuilding it whenever the connection format changes.
 pub struct CageqApo {
-    /// Samples per frame (2 for stereo). The engine is channel-count-agnostic; the value
-    /// is kept for stage C's per-channel filter state and for validation here.
+    /// The filter engine (see [`dsp`]). Owns the coefficients, the per-channel delay
+    /// registers and the preamp; all of its storage is allocated here, at lock time, so the
+    /// real-time path never does.
+    cascade: dsp::Cascade,
+    /// Samples per frame (2 for stereo) — kept alongside the cascade because the RT path
+    /// needs it to size each buffer, and reading it back through the cascade would be an
+    /// indirection for nothing.
     channels: u32,
-    /// Locked sample rate, in Hz. Stage C derives biquad coefficients from it.
-    sample_rate: f32,
-    /// Frames processed since creation. Not used for DSP — it is the liveness signal the
-    /// stage-B bring-up reads to prove the RT callback is genuinely running (the spike's
-    /// "heartbeat"), and the cheapest possible thing to compute on the RT path.
+    /// Frames processed since creation. Not used for DSP — it is the liveness signal that
+    /// proves the RT callback is genuinely running, which is what settled stage B after
+    /// "it loads and audio still plays" turned out to be true of a completely dead APO.
     frames_processed: u64,
+}
+
+/// One filter band across the C ABI. Mirrors [`dsp::Band`] with `kind` as a plain integer,
+/// so the C++ shim (and, from stage C3, the shared-memory control block) can describe a
+/// correction without either side owning the other's type.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CageqBand {
+    /// 0 = peaking, 1 = low shelf, 2 = high shelf, 3 = band-pass. Anything else is rejected
+    /// rather than guessed at — see [`cageq_apo_set_bands`].
+    pub kind: u32,
+    pub freq_hz: f64,
+    pub gain_db: f64,
+    pub q: f64,
+}
+
+impl CageqBand {
+    fn to_band(self) -> Option<dsp::Band> {
+        let kind = match self.kind {
+            0 => dsp::FilterKind::Peaking,
+            1 => dsp::FilterKind::LowShelf,
+            2 => dsp::FilterKind::HighShelf,
+            3 => dsp::FilterKind::Bandpass,
+            _ => return None,
+        };
+        // A band with a non-finite or nonsensical parameter would produce NaN coefficients,
+        // and NaN in a biquad's delay registers is permanent: it poisons every subsequent
+        // sample until the state is reset. Refuse it at the boundary instead.
+        if !(self.freq_hz.is_finite() && self.freq_hz > 0.0)
+            || !self.gain_db.is_finite()
+            || !(self.q.is_finite() && self.q > 0.0)
+        {
+            return None;
+        }
+        Some(dsp::Band { kind, freq_hz: self.freq_hz, gain_db: self.gain_db, q: self.q })
+    }
 }
 
 /// Create an instance for a connection locked at `channels` × `sample_rate`.
@@ -75,8 +114,80 @@ pub extern "C" fn cageq_apo_create(channels: u32, sample_rate: f32) -> *mut c_vo
     if channels == 0 || channels > 32 || !(sample_rate.is_finite() && sample_rate > 0.0) {
         return std::ptr::null_mut();
     }
-    let apo = Box::new(CageqApo { channels, sample_rate, frames_processed: 0 });
+    let apo = Box::new(CageqApo {
+        cascade: dsp::Cascade::new(channels as usize, sample_rate as f64),
+        channels,
+        frames_processed: 0,
+    });
     Box::into_raw(apo) as *mut c_void
+}
+
+/// Replace the filter set. Returns `false` and changes nothing if any band is malformed or
+/// there are more than [`dsp::MAX_BANDS`] — a correction that silently lost or corrupted a
+/// band would be worse than one that visibly failed to apply.
+///
+/// **Filter state is deliberately preserved**, which is the entire point of this APO: a
+/// retuned band inherits its predecessor's delay registers, so a live edit produces a small
+/// decaying discontinuity rather than Equalizer APO's cold-start bloom (filter.md §5.3c).
+///
+/// Computes coefficients (trig, per band), so it is not free. Call it from the
+/// configuration path, not from inside the audio callback.
+///
+/// # Safety
+/// `handle` must be live; `bands` must address at least `count` [`CageqBand`]s (or `count`
+/// may be 0, in which case `bands` is ignored and the cascade becomes a passthrough).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cageq_apo_set_bands(
+    handle: *mut c_void,
+    bands: *const CageqBand,
+    count: u32,
+) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+    let apo = unsafe { &mut *(handle as *mut CageqApo) };
+
+    let n = count as usize;
+    if n > dsp::MAX_BANDS {
+        return false;
+    }
+    if n == 0 {
+        return apo.cascade.set_bands(&[]);
+    }
+    if bands.is_null() {
+        return false;
+    }
+
+    // Validate every band BEFORE touching the running cascade, so a bad one at the end
+    // cannot leave a half-applied correction playing.
+    let raw = unsafe { std::slice::from_raw_parts(bands, n) };
+    let mut checked = [dsp::Band {
+        kind: dsp::FilterKind::Peaking,
+        freq_hz: 1000.0,
+        gain_db: 0.0,
+        q: 1.0,
+    }; dsp::MAX_BANDS];
+    for (slot, band) in checked.iter_mut().zip(raw) {
+        match band.to_band() {
+            Some(b) => *slot = b,
+            None => return false,
+        }
+    }
+    apo.cascade.set_bands(&checked[..n])
+}
+
+/// Set the preamp in dB (negative attenuates), as EqAPO's `Preamp:` line does. A
+/// non-finite value is ignored rather than turning the whole stream into NaN.
+///
+/// # Safety
+/// `handle` must be live or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cageq_apo_set_preamp_db(handle: *mut c_void, db: f64) -> bool {
+    if handle.is_null() || !db.is_finite() {
+        return false;
+    }
+    unsafe { (*(handle as *mut CageqApo)).cascade.set_preamp_db(db) };
+    true
 }
 
 /// Destroy an instance from [`cageq_apo_create`]. Null is a no-op.
@@ -114,11 +225,15 @@ pub unsafe extern "C" fn cageq_apo_process(
     let apo = unsafe { &mut *(handle as *mut CageqApo) };
     let count = (frames as usize).saturating_mul(apo.channels as usize);
 
-    // Stage B: identity. Written as an explicit copy rather than skipped entirely so the
-    // RT path, the pointer handling and the aliasing case are all genuinely exercised —
-    // "it loads but we never touched the buffer" would prove much less. `copy` (memmove
-    // semantics) rather than `copy_nonoverlapping` precisely because of APO_FLAG_INPLACE.
-    unsafe { std::ptr::copy(input, output, count) };
+    // `input` and `output` may be the same buffer (APO_FLAG_INPLACE), so these are built as
+    // separate slices over possibly-identical memory. That would be aliasing UB for two
+    // Rust references, which is why `process` takes `&[f32]`/`&mut [f32]` that are only
+    // ever indexed at the same position — each sample is read before its own slot is
+    // written, and nothing looks ahead. Constructing them here (rather than passing raw
+    // pointers down) keeps every bounds-relevant fact in one place.
+    let src = unsafe { std::slice::from_raw_parts(input, count) };
+    let dst = unsafe { std::slice::from_raw_parts_mut(output, count) };
+    apo.cascade.process(src, dst, frames as usize);
 
     apo.frames_processed = apo.frames_processed.wrapping_add(frames as u64);
 }
@@ -146,7 +261,7 @@ pub unsafe extern "C" fn cageq_apo_sample_rate(handle: *mut c_void) -> f32 {
     if handle.is_null() {
         return 0.0;
     }
-    unsafe { (*(handle as *mut CageqApo)).sample_rate }
+    unsafe { (*(handle as *mut CageqApo)).cascade.sample_rate() as f32 }
 }
 
 #[cfg(test)]
@@ -160,12 +275,69 @@ mod tests {
         assert!(!h.is_null());
         assert_eq!(unsafe { cageq_apo_sample_rate(h) }, 48_000.0);
 
+        // No bands and no preamp yet: still exact identity, which matters because it is the
+        // state the APO holds between locking and CAGEq pushing a correction.
         let input: Vec<f32> = (0..8).map(|i| i as f32 * 0.125).collect();
         let mut output = vec![0.0f32; 8];
         unsafe { cageq_apo_process(h, input.as_ptr(), output.as_mut_ptr(), 4) };
-        assert_eq!(output, input, "stage B is an identity passthrough");
+        assert_eq!(output, input, "an unconfigured cascade must pass through bit-exact");
         assert_eq!(unsafe { cageq_apo_frames_processed(h) }, 4);
 
+        unsafe { cageq_apo_destroy(h) };
+    }
+
+    /// The configuration surface the C++ shim (and, from C3, the control channel) drives.
+    #[test]
+    fn bands_and_preamp_reach_the_engine() {
+        let h = cageq_apo_create(2, 48_000.0);
+        let bands = [
+            CageqBand { kind: 0, freq_hz: 1000.0, gain_db: 6.0, q: 1.4 },
+            CageqBand { kind: 1, freq_hz: 105.0, gain_db: -3.0, q: 0.7 },
+        ];
+        assert!(unsafe { cageq_apo_set_bands(h, bands.as_ptr(), 2) });
+        assert!(unsafe { cageq_apo_set_preamp_db(h, -6.0) });
+
+        // A signal now actually changes, i.e. the cascade is in the path.
+        let input: Vec<f32> = (0..64).map(|i| ((i as f64 * 0.2).sin() * 0.5) as f32).collect();
+        let mut output = vec![0.0f32; 64];
+        unsafe { cageq_apo_process(h, input.as_ptr(), output.as_mut_ptr(), 32) };
+        assert!(output.iter().zip(&input).any(|(o, i)| (o - i).abs() > 1e-6), "EQ had no effect");
+
+        // Clearing the bands returns it to a passthrough (preamp still applies).
+        assert!(unsafe { cageq_apo_set_bands(h, std::ptr::null(), 0) });
+        unsafe { cageq_apo_destroy(h) };
+    }
+
+    /// Malformed input must be refused at the boundary, leaving the running correction
+    /// alone. NaN matters more than it looks: a NaN in a biquad's delay registers is
+    /// permanent — it poisons every later sample until the state is reset.
+    #[test]
+    fn malformed_bands_are_refused_whole() {
+        let h = cageq_apo_create(2, 48_000.0);
+        let good = CageqBand { kind: 0, freq_hz: 1000.0, gain_db: 6.0, q: 1.4 };
+        assert!(unsafe { cageq_apo_set_bands(h, &good, 1) });
+
+        for bad in [
+            CageqBand { kind: 9, freq_hz: 1000.0, gain_db: 0.0, q: 1.0 },       // unknown kind
+            CageqBand { kind: 0, freq_hz: f64::NAN, gain_db: 0.0, q: 1.0 },     // NaN frequency
+            CageqBand { kind: 0, freq_hz: 0.0, gain_db: 0.0, q: 1.0 },          // DC
+            CageqBand { kind: 0, freq_hz: 1000.0, gain_db: f64::INFINITY, q: 1.0 },
+            CageqBand { kind: 0, freq_hz: 1000.0, gain_db: 0.0, q: 0.0 },       // zero Q
+        ] {
+            // Second in the list, so a naive implementation would already have applied the
+            // first before noticing.
+            let pair = [good, bad];
+            assert!(!unsafe { cageq_apo_set_bands(h, pair.as_ptr(), 2) }, "accepted {bad:?}");
+        }
+
+        assert!(!unsafe { cageq_apo_set_preamp_db(h, f64::NAN) });
+        assert!(!unsafe { cageq_apo_set_bands(h, std::ptr::null(), 3) }, "null with count>0");
+
+        // Still exactly the one good band, and still producing finite audio.
+        let input = vec![0.25f32; 32];
+        let mut output = vec![0.0f32; 32];
+        unsafe { cageq_apo_process(h, input.as_ptr(), output.as_mut_ptr(), 16) };
+        assert!(output.iter().all(|v| v.is_finite()), "engine was poisoned by a rejected band");
         unsafe { cageq_apo_destroy(h) };
     }
 

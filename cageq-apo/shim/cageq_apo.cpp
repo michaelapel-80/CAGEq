@@ -90,13 +90,49 @@ static void DiagFormat(const wchar_t* label, IAudioMediaType* type)
 // ---------------------------------------------------------------------------
 // The Rust core (../src/lib.rs), linked in statically.
 // ---------------------------------------------------------------------------
+// Must match `#[repr(C)] CageqBand` in ../src/lib.rs — same field order, same types.
+// kind: 0 = peaking, 1 = low shelf, 2 = high shelf, 3 = band-pass.
+struct CageqBand
+{
+    unsigned int kind;
+    double freq_hz;
+    double gain_db;
+    double q;
+};
+
 extern "C" {
 void* cageq_apo_create(unsigned int channels, float sampleRate);
 void  cageq_apo_destroy(void* handle);
 void  cageq_apo_process(void* handle, const float* input, float* output, unsigned int frames);
 unsigned long long cageq_apo_frames_processed(void* handle);
 float cageq_apo_sample_rate(void* handle);
+bool  cageq_apo_set_bands(void* handle, const CageqBand* bands, unsigned int count);
+bool  cageq_apo_set_preamp_db(void* handle, double db);
 }
+
+// ---------------------------------------------------------------------------
+// Bring-up filter — TEMPORARY SCAFFOLDING, removed in stage C3.
+//
+// Until the shared-memory control channel exists there is no way for CAGEq to tell the APO
+// what to apply, and an APO that correctly applies *nothing* is indistinguishable from one
+// that is not in the audio path at all — the exact confusion that made stage B look passed
+// when it wasn't. So the lock applies one deliberately unmistakable band: if this is
+// audible, the DSP is genuinely running inside audiodg.
+//
+// Set to 0 (and rebuild) for a passthrough build.
+// ---------------------------------------------------------------------------
+#define CAGEQ_APO_BRINGUP 1
+
+#if CAGEQ_APO_BRINGUP
+// +12 dB at 120 Hz, Q 1.0 — a bass boost nobody can mistake for placebo, and low enough in
+// frequency to be obvious on any speakers including a VM's.
+static const CageqBand kBringUpBands[] = {
+    { 0u, 120.0, 12.0, 1.0 },
+};
+// Headroom for the boost above, so the test signal cannot clip and be mistaken for
+// distortion introduced by the filter.
+static const double kBringUpPreampDb = -12.0;
+#endif
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -325,6 +361,16 @@ public:
             CBaseAudioProcessingObject::UnlockForProcess();
             return E_INVALIDARG;
         }
+
+#if CAGEQ_APO_BRINGUP
+        // Applied here, off the real-time thread: set_bands computes coefficients (trig per
+        // band), which has no business running inside the audio callback.
+        const bool bandsOk = cageq_apo_set_bands(
+            m_rust, kBringUpBands, static_cast<unsigned int>(ARRAYSIZE(kBringUpBands)));
+        const bool preampOk = cageq_apo_set_preamp_db(m_rust, kBringUpPreampDb);
+        DiagF(L"  bring-up filter: bands=%s preamp=%s (%.1f dB)",
+              bandsOk ? L"ok" : L"REFUSED", preampOk ? L"ok" : L"REFUSED", kBringUpPreampDb);
+#endif
         return S_OK;
     }
 
