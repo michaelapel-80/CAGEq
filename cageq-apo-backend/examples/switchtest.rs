@@ -31,10 +31,29 @@ fn main() {
     let out = args.get(1).cloned().unwrap_or_else(|| "switch.wav".into());
     let seg: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(600);
 
-    let Ok(ch) = ControlChannel::open(&endpoint) else {
-        eprintln!("no control channel for {endpoint} — is audio playing on it?");
-        std::process::exit(1);
+    // Report the actual error rather than a guess. ERROR_FILE_NOT_FOUND (2) means no APO is
+    // locked on that endpoint; ERROR_ACCESS_DENIED (5) means the section is there but this
+    // process cannot reach it — completely different problems, and collapsing them into "no
+    // channel" is a mistake this codebase has already made once.
+    let ch = match ControlChannel::open(&endpoint) {
+        Ok(ch) => ch,
+        Err(2) => {
+            eprintln!("no section CAGEqApo_{endpoint} exists.");
+            eprintln!("The APO creates it at LockForProcess, so this means no APO instance is");
+            eprintln!("locked on that endpoint — is audio playing on THIS device right now?");
+            std::process::exit(1);
+        }
+        Err(5) => {
+            eprintln!("access denied opening CAGEqApo_{endpoint} — the section EXISTS.");
+            eprintln!("Same user as whatever else can reach it? Integrity level too low?");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("could not open CAGEqApo_{endpoint}: Win32 error {e}");
+            std::process::exit(1);
+        }
     };
+    println!("opened CAGEqApo_{endpoint}");
 
     // Capture what is running now, so it can be put back afterwards. Without this the test
     // would leave the endpoint dry, which is a rude thing for a diagnostic to do.
