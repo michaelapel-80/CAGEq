@@ -189,6 +189,12 @@ pub fn load_from(path: &Path) -> Result<Option<ApoConfig>, ParseError> {
 
 /// Parse the config format. Pure, so the whole decision table is testable without a file.
 pub fn parse(text: &str) -> Result<ApoConfig, ParseError> {
+    // A leading UTF-8 BOM is stripped rather than treated as part of the first token.
+    // Windows produces these constantly — Notepad writes one, and PowerShell 5.1's
+    // `Set-Content -Encoding UTF8` always does — so a config format that rejected them would
+    // be perpetually, confusingly broken for anyone who hand-edited their correction.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+
     let mut config = ApoConfig::default();
     let mut seen_header = false;
     let mut seen_preamp = false;
@@ -312,6 +318,18 @@ mod tests {
     use super::*;
 
     const GOOD: &str = "cageq-apo 1\npreamp -6.5\nband PK 105 3.0 0.7\nband HSC 8000 -2.4 1.4\n";
+
+    /// A UTF-8 BOM must not break the header. Windows writes these routinely — Notepad does,
+    /// and PowerShell 5.1's `Set-Content -Encoding UTF8` always does — so rejecting them made
+    /// every script-written correction fail with a header error pointing nowhere near the
+    /// real cause. This is exactly how the first VM run of the config path failed.
+    #[test]
+    fn a_utf8_bom_does_not_break_the_header() {
+        let c = parse("\u{feff}cageq-apo 1\npreamp -12\nband PK 120 12 1.0\n")
+            .expect("a BOM-prefixed config must parse");
+        assert_eq!(c.preamp_db, -12.0);
+        assert_eq!(c.bands.len(), 1);
+    }
 
     #[test]
     fn parses_a_well_formed_config() {

@@ -77,7 +77,11 @@ foreach ($b in $Bands) {
 }
 
 $path = Join-Path $dir "$EndpointId.cfg"
-Set-Content -Path $path -Value $lines -Encoding UTF8
+# Written as UTF-8 WITHOUT a BOM. PowerShell 5.1's `Set-Content -Encoding UTF8` emits one
+# (EF BB BF), which would otherwise be read as part of the first token — the APO's parser
+# now strips a leading BOM anyway, but there is no reason to write a byte the format does
+# not want. UTF8Encoding($false) is the no-BOM constructor.
+[IO.File]::WriteAllText($path, (($lines -join "`r`n") + "`r`n"), (New-Object System.Text.UTF8Encoding $false))
 "Wrote $path"
 $lines | ForEach-Object { "    $_" }
 "`nRestart audio (or replug/reselect the device) so the APO re-locks and reloads:"
