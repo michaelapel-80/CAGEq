@@ -289,6 +289,11 @@ pub unsafe extern "C" fn cageq_apo_load_config(
             if !apo.cascade.set_preamp_db(cfg.preamp_db) || !apo.cascade.set_bands(&cfg.bands) {
                 return CAGEQ_CONFIG_UNSUITABLE;
             }
+            // Applied instantly, not ramped. This runs at lock, before a single frame has been
+            // processed: there is no filter state to protect, and easing in from a flat
+            // response would only make the first milliseconds of the stream deliberately
+            // wrong. Ramping is for edits to audio that is already playing.
+            apo.cascade.settle();
             CAGEQ_CONFIG_APPLIED
         }
         Err(_) => CAGEQ_CONFIG_REJECTED,

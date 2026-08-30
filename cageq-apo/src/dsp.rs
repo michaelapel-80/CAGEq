@@ -78,7 +78,41 @@ const GUARD_POINTS: usize = 64;
 /// of any single filter: three stable, individually reasonable bands can still stack.
 const MAX_TOTAL_GAIN_DB: f64 = 20.0;
 
+/// How long coefficients take to travel to a new value, in milliseconds (filter.md §5.3c,
+/// stage C4).
+///
+/// Carrying delay-register state across a coefficient change removes most of a retune's
+/// artefact but not all of it: the same state through *different* coefficients yields a
+/// different sample, so an instant switch still steps the output. Measured at −54 dB of
+/// broadband splatter against a −41 dB cold restart. Moving the coefficients gradually turns
+/// that one step into many small ones, and a ramp's spectrum rolls off far faster than a
+/// step's.
+///
+/// 8 ms is chosen against how updates actually arrive: a live tone drag produces them at
+/// roughly 60 Hz (~17 ms apart), so the ramp finishes between edits instead of permanently
+/// chasing a moving target, while still being far too short to feel like lag.
+const RAMP_MS: f64 = 8.0;
+
 impl Coeffs {
+    /// Linear interpolation towards `other` by `t` in `[0, 1]`.
+    ///
+    /// **Stability is preserved for free, and not by luck.** A biquad is stable exactly when
+    /// `|a2| < 1` and `|a1| < 1 + a2` — the interior of a triangle in the `(a1, a2)` plane,
+    /// which is *convex*. Every point on a straight line between two stable coefficient sets
+    /// is therefore also stable, so a linear ramp between two validated filters cannot pass
+    /// through an unstable one on the way. That is the property that makes interpolating IIR
+    /// coefficients safe here, where in general it is not.
+    #[inline]
+    fn lerp(&self, other: &Coeffs, t: f64) -> Coeffs {
+        Coeffs {
+            b0: self.b0 + (other.b0 - self.b0) * t,
+            b1: self.b1 + (other.b1 - self.b1) * t,
+            b2: self.b2 + (other.b2 - self.b2) * t,
+            a1: self.a1 + (other.a1 - self.a1) * t,
+            a2: self.a2 + (other.a2 - self.a2) * t,
+        }
+    }
+
     /// The identity filter — passes its input through untouched.
     pub const PASSTHROUGH: Coeffs = Coeffs { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
 
@@ -196,9 +230,24 @@ impl BiquadState {
 pub struct Cascade {
     channels: usize,
     sample_rate: f64,
-    /// Active coefficients, `[0..band_count]`.
+    /// Coefficients actually in use this sample. During a ramp these are somewhere between
+    /// the previous set and [`Cascade::target`].
     coeffs: [Coeffs; MAX_BANDS],
+    /// Where the coefficients are heading. Equal to `coeffs` whenever no ramp is running.
+    target: [Coeffs; MAX_BANDS],
+    /// Where the ramp started, so each frame can be interpolated from the endpoints rather
+    /// than accumulated — see [`Cascade::advance_ramp`].
+    start: [Coeffs; MAX_BANDS],
+    /// Frames left in the current ramp; 0 means the coefficients are settled.
+    ramp_left: u32,
+    /// Ramp length in frames, derived from the sample rate — see [`RAMP_MS`].
+    ramp_frames: u32,
+    /// Bands the target uses. Becomes `process_count` once a ramp completes.
     band_count: usize,
+    /// Bands the sample loop actually walks. During a ramp this is the larger of the old and
+    /// new counts, so a band being removed can fade to identity rather than vanish — which
+    /// would be exactly the discontinuity the ramp exists to avoid.
+    process_count: usize,
     /// Delay registers, indexed `[channel * MAX_BANDS + band]` — flat rather than nested so
     /// the sample loop walks contiguous memory.
     state: Vec<BiquadState>,
@@ -227,10 +276,79 @@ impl Cascade {
             channels,
             sample_rate,
             coeffs: [Coeffs::PASSTHROUGH; MAX_BANDS],
+            target: [Coeffs::PASSTHROUGH; MAX_BANDS],
+            start: [Coeffs::PASSTHROUGH; MAX_BANDS],
+            ramp_left: 0,
+            // At least one frame, so a pathologically low rate cannot divide by zero.
+            ramp_frames: ((RAMP_MS / 1000.0) * sample_rate).round().max(1.0) as u32,
             band_count: 0,
+            process_count: 0,
             state: vec![BiquadState::default(); channels * MAX_BANDS],
             preamp: 1.0,
             grid,
+        }
+    }
+
+    /// Begin moving the coefficients towards `target`, over [`RAMP_MS`].
+    ///
+    /// Retargeting mid-ramp is fine and expected — a drag produces a stream of these — because
+    /// the new ramp starts from wherever the coefficients have actually reached, not from the
+    /// previous target. There is no discontinuity at a retarget.
+    fn start_ramp(&mut self, target: &[Coeffs], new_count: usize) {
+        for i in 0..MAX_BANDS {
+            self.target[i] = target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH);
+            self.start[i] = self.coeffs[i];
+        }
+        // Keep walking the wider of the two sets until the ramp lands: a band that is going
+        // away has to fade to identity, and dropping it immediately would reintroduce exactly
+        // the step this is here to remove.
+        self.process_count = self.process_count.max(new_count);
+        self.band_count = new_count;
+        self.ramp_left = self.ramp_frames;
+    }
+
+    /// Jump straight to the target, abandoning any ramp in progress.
+    ///
+    /// For configuration applied when there is nothing to protect — the persistent config at
+    /// `LockForProcess`, before a single frame has been processed. Ramping there would be
+    /// worse than useless: it would make the first few milliseconds of the stream deliberately
+    /// wrong, easing in from a flat response nobody asked for.
+    pub fn settle(&mut self) {
+        self.coeffs = self.target;
+        self.process_count = self.band_count;
+        self.ramp_left = 0;
+    }
+
+    /// Is a coefficient ramp currently running?
+    pub fn is_ramping(&self) -> bool {
+        self.ramp_left > 0
+    }
+
+    /// Advance one frame along the ramp. Called once per frame, not per sample: every channel
+    /// shares one set of coefficients.
+    #[inline]
+    fn advance_ramp(&mut self) {
+        self.ramp_left -= 1;
+        if self.ramp_left == 0 {
+            // Land exactly on the target rather than on an interpolation of it.
+            self.coeffs = self.target;
+            self.process_count = self.band_count;
+            return;
+        }
+        // Smoothstep, not a straight line. A linear ramp has *corners*: the coefficients'
+        // rate of change jumps from zero to constant at the start and back to zero at the
+        // end, and a discontinuous derivative is itself broadband — the very thing being
+        // removed, reintroduced twice at a smaller scale. `3t² − 2t³` leaves with zero slope
+        // and arrives with zero slope, so the whole transition is smooth.
+        //
+        // Interpolating from the stored endpoints rather than accumulating a per-frame
+        // increment: the shape demands it, and it also means a long series of edits cannot
+        // let rounding drift the response away from what was asked for.
+        let s = 1.0 - self.ramp_left as f64 / self.ramp_frames as f64;
+        for i in 0..self.process_count {
+            // Still a convex combination of two validated coefficient sets, so the stability
+            // argument in `Coeffs::lerp` holds for any easing curve within [0, 1].
+            self.coeffs[i] = self.start[i].lerp(&self.target[i], s);
         }
     }
 
@@ -304,8 +422,7 @@ impl Cascade {
             return false;
         }
 
-        self.coeffs = candidate;
-        self.band_count = bands.len();
+        self.start_ramp(&candidate[..bands.len()], bands.len());
         true
     }
 
@@ -322,12 +439,7 @@ impl Cascade {
             return false;
         }
 
-        let mut candidate = [Coeffs::PASSTHROUGH; MAX_BANDS];
-        for (slot, c) in candidate.iter_mut().zip(coeffs) {
-            *slot = *c;
-        }
-        self.coeffs = candidate;
-        self.band_count = coeffs.len();
+        self.start_ramp(coeffs, coeffs.len());
         self.preamp = preamp;
         true
     }
@@ -360,8 +472,11 @@ impl Cascade {
     /// The cascade's total predicted response in dB at `freq_hz` — biquads multiply, so dB
     /// add. Includes the preamp. This is what the UI's curve should equal; exposed so a test
     /// (or a future self-check) can compare the two without re-deriving the math.
+    /// Reports the **target** response, not whatever a ramp has reached this instant: callers
+    /// are asking what this cascade is configured to do, and an answer that changed sample by
+    /// sample during an 8 ms ramp would be useless to every one of them.
     pub fn response_db(&self, freq_hz: f64) -> f64 {
-        let filters: f64 = self.coeffs[..self.band_count]
+        let filters: f64 = self.target[..self.band_count]
             .iter()
             .map(|c| c.response_db(freq_hz, self.sample_rate))
             .sum();
@@ -395,11 +510,16 @@ impl Cascade {
 
         let mut peak = 0.0f32;
         for frame in 0..frames {
+            // Ramped through silence too, so an edit made during a pause has finished by the
+            // time audio returns rather than resuming as an audible jump.
+            if self.ramp_left > 0 {
+                self.advance_ramp();
+            }
             for ch in 0..channels {
                 let base = ch * MAX_BANDS;
                 // Silence in — the preamp scales zero to zero, so it is simply skipped.
                 let mut x = 0.0f64;
-                for b in 0..self.band_count {
+                for b in 0..self.process_count {
                     x = self.state[base + b].step(&self.coeffs[b], x);
                 }
                 let y = x as f32;
@@ -435,11 +555,16 @@ impl Cascade {
         debug_assert!(input.len() >= count && output.len() >= count);
 
         for frame in 0..frames {
+            // Once per frame, before the channels: they share one coefficient set, and moving
+            // it between channels of the same frame would put them fractionally out of step.
+            if self.ramp_left > 0 {
+                self.advance_ramp();
+            }
             for ch in 0..channels {
                 let i = frame * channels + ch;
                 let mut x = input[i] as f64 * self.preamp;
                 let base = ch * MAX_BANDS;
-                for b in 0..self.band_count {
+                for b in 0..self.process_count {
                     x = self.state[base + b].step(&self.coeffs[b], x);
                 }
                 output[i] = x as f32;
@@ -472,6 +597,9 @@ mod tests {
     fn measured_db(cascade: &mut Cascade, freq_hz: f64) -> f64 {
         const N: usize = 1 << 15;
         let channels = cascade.channels;
+        // Measure the configured filter, not a ramp in progress: these tests ask "what does
+        // this cascade do", which is a question about its destination.
+        cascade.settle();
         cascade.reset_state();
 
         let mut input = vec![0.0f32; channels];
@@ -723,6 +851,7 @@ mod tests {
 
         let mut fresh = Cascade::new(2, FS);
         fresh.set_bands(&bands);
+        fresh.settle(); // no ramp: this is the "what should it sound like" reference
 
         let (mut a, mut b) = (vec![0.0f32; 64 * 2], vec![0.0f32; 64 * 2]);
         used.process(&stereo, &mut a, 64);
@@ -910,6 +1039,67 @@ mod tests {
         10.0 * (hf.max(1e-300) / bin_energy(x, fundamental_bin)).log10()
     }
 
+
+    /// The ramp's own invariants, independent of how it sounds.
+    ///
+    /// The stability one matters most: interpolating IIR coefficients is generally unsafe,
+    /// and is safe here only because the stable region — `|a2| < 1`, `|a1| < 1 + a2` — is a
+    /// *triangle*, hence convex, so every point between two stable sets is stable. This walks
+    /// the whole ramp and checks it, because that argument is the only thing standing between
+    /// a live edit and an unstable filter in someone's ears.
+    #[test]
+    fn a_ramp_stays_stable_and_lands_exactly_on_target() {
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&realistic_correction(3.0)));
+        c.settle();
+        assert!(!c.is_ramping());
+
+        let target = realistic_correction(9.0);
+        assert!(c.set_bands(&target));
+        assert!(c.is_ramping(), "a live edit should ramp");
+
+        // Walk the ramp one frame at a time, checking every intermediate coefficient set.
+        let mut out = [0.0f32; 1];
+        let mut frames = 0;
+        while c.is_ramping() {
+            c.process(&[0.1], &mut out, 1);
+            frames += 1;
+            for k in &c.coeffs[..c.process_count] {
+                assert!(k.a2.abs() < 1.0 && k.a1.abs() < 1.0 + k.a2, "unstable mid-ramp: {k:?}");
+                assert!(k.b0.is_finite() && k.a1.is_finite(), "non-finite mid-ramp: {k:?}");
+            }
+            assert!(frames < 10_000, "ramp never finished");
+        }
+
+        // ~8 ms at 48 kHz, and it must land exactly on the target rather than near it — a long
+        // series of edits must not let rounding drift the response away from what was asked.
+        assert!((frames as f64 - 0.008 * FS).abs() < 4.0, "ramp was {frames} frames");
+        for (got, want) in c.coeffs.iter().zip(c.target.iter()) {
+            assert_eq!(got.b0, want.b0);
+            assert_eq!(got.a2, want.a2);
+        }
+    }
+
+    /// Retargeting mid-ramp — what a drag produces — must start from where the coefficients
+    /// actually are, not jump to the abandoned target first.
+    #[test]
+    fn retargeting_mid_ramp_does_not_jump() {
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&realistic_correction(0.0)));
+        c.settle();
+
+        let mut out = [0.0f32; 1];
+        assert!(c.set_bands(&realistic_correction(12.0)));
+        for _ in 0..50 {
+            c.process(&[0.1], &mut out, 1);
+        }
+        let midway = c.coeffs[0];
+
+        // A new target arrives before the first ramp finished.
+        assert!(c.set_bands(&realistic_correction(6.0)));
+        assert_eq!(c.coeffs[0].b0, midway.b0, "retarget must not move the coefficients itself");
+        assert!(c.is_ramping());
+    }
     /// A correction of the shape CAGEq actually produces — several bands across the range,
     /// including a low, resonant one whose ring-out is long enough to be heard.
     fn realistic_correction(low_gain_db: f64) -> Vec<Band> {
@@ -945,15 +1135,21 @@ mod tests {
     /// | | HF splatter (>=1 kHz, re 50 Hz) |
     /// |---|---|
     /// | never retuned (floor) | -150 dB |
-    /// | **state carried** | **-54 dB** |
-    /// | cold restart (an EqAPO config reload) | -41 dB |
+    /// | **state carried + coefficients ramped** (C4, current) | **-60 dB** |
+    /// | state carried, coefficients switched instantly (C3) | -54 dB |
+    /// | cold restart — an EqAPO config reload | -41 dB |
     ///
-    /// So state-carry is ~12 dB cleaner — a real, repeatable improvement, and the thing that
-    /// makes live editing usable. It is **not** artefact-free, and should not be described as
-    /// such: switching IIR coefficients mid-stream steps the output even with the delay
-    /// registers intact, because the same state through different coefficients gives a
-    /// different sample. Removing that residual is what coefficient ramping (stage C4, where
-    /// §5.3a's morph moves into the APO) is for, and this number is the baseline it has to beat.
+    /// So carrying state is worth ~12 dB and ramping a further ~6, for ~19 dB total against a
+    /// reload. The two are measured side by side deliberately: it would be easy to credit the
+    /// whole improvement to whichever was implemented most recently.
+    ///
+    /// Ramping is the smaller effect, and two attempts to enlarge it failed in instructive
+    /// ways. A **smoothstep** ramp measured *worse* than linear (-57 vs -60), which says the
+    /// residual is dominated by the *rate* at which coefficients move — smoothstep's midpoint
+    /// slope is 1.5x linear's — and not by the corners at each end, which was the reason for
+    /// trying it. Longer ramps did not improve on 8 ms monotonically either. Anything further
+    /// likely needs a different mechanism (crossfading two filter instances) rather than a
+    /// better easing curve.
     #[test]
     fn retuning_live_does_not_splatter_the_spectrum_the_way_a_cold_restart_does() {
         // One period, so 50 Hz is bin 1 exactly and the window is dominated by the transition
@@ -967,41 +1163,52 @@ mod tests {
         let warm = tone(50.0, 0, WINDOW * 60, 0.5);
         let cont = tone(50.0, WINDOW * 60, WINDOW, 0.5); // phase-continuous
 
-        let mut carried = Cascade::new(1, FS);
+        let mut ramped = Cascade::new(1, FS);
+        let mut instant = Cascade::new(1, FS);
         let mut cold = Cascade::new(1, FS);
         let mut untouched = Cascade::new(1, FS);
         let mut sink = vec![0.0f32; warm.len()];
-        for c in [&mut carried, &mut cold, &mut untouched] {
+        for c in [&mut ramped, &mut instant, &mut cold, &mut untouched] {
             assert!(c.set_bands(&before));
+            c.settle();
             c.process(&warm, &mut sink, warm.len());
         }
 
-        carried.set_bands(&after); // state persists — what this APO does
+        ramped.set_bands(&after);  // state carried AND coefficients ramped — stage C4
+        instant.set_bands(&after);
+        instant.settle();          // state carried, coefficients switched instantly — stage C3
         cold.set_bands(&after);
-        cold.reset_state(); // what a config reload does to the WHOLE chain
+        cold.settle();
+        cold.reset_state();        // what a config reload does to the WHOLE chain
         // `untouched` is never retuned: the measurement's own noise floor.
 
-        let (mut a, mut b, mut u) =
-            (vec![0.0f32; WINDOW], vec![0.0f32; WINDOW], vec![0.0f32; WINDOW]);
-        carried.process(&cont, &mut a, WINDOW);
+        let mk = || vec![0.0f32; WINDOW];
+        let (mut a, mut i2, mut b, mut u) = (mk(), mk(), mk(), mk());
+        ramped.process(&cont, &mut a, WINDOW);
+        instant.process(&cont, &mut i2, WINDOW);
         cold.process(&cont, &mut b, WINDOW);
         untouched.process(&cont, &mut u, WINDOW);
 
-        let carried_db = hf_splatter_db(&a, HF_FROM, BIN);
+        let ramped_db = hf_splatter_db(&a, HF_FROM, BIN);
+        let instant_db = hf_splatter_db(&i2, HF_FROM, BIN);
         let cold_db = hf_splatter_db(&b, HF_FROM, BIN);
         let floor_db = hf_splatter_db(&u, HF_FROM, BIN);
         eprintln!(
-            "HF splatter (>=1 kHz, re 50 Hz): carried {carried_db:.1} dB, \
-             cold {cold_db:.1} dB, floor {floor_db:.1} dB"
+            "HF splatter (>=1 kHz, re 50 Hz): ramped {ramped_db:.1} dB, \
+             instant {instant_db:.1} dB, cold {cold_db:.1} dB, floor {floor_db:.1} dB"
         );
 
         assert!(cold_db > floor_db + 20.0, "cold restart produced no measurable click");
-        // Measured: carried -53.7 dB, cold -41.3 dB, floor -150.0 dB. The 8 dB threshold
-        // sits under the ~12 dB actually observed, leaving room for build-to-build drift.
+        // Carrying delay-register state must beat a cold restart...
         assert!(
-            carried_db < cold_db - 8.0,
-            "state-carry should be measurably quieter than a cold restart: \
-             carried {carried_db:.1} dB vs cold {cold_db:.1} dB",
+            instant_db < cold_db - 8.0,
+            "state-carry should beat a cold restart: instant {instant_db:.1} vs cold {cold_db:.1}",
+        );
+        // ...and ramping the coefficients must beat switching them instantly. This is C4's
+        // whole contribution, and it is the smaller of the two effects.
+        assert!(
+            ramped_db < instant_db - 3.0,
+            "ramping should beat an instant switch: ramped {ramped_db:.1} vs instant {instant_db:.1}",
         );
     }
 }
