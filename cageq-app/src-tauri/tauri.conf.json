@@ -29,7 +29,8 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "sidecar/cageq-sidecar": "sidecar"
+      "sidecar/cageq-sidecar": "sidecar",
+      "apo": "apo"
     },
     "icon": [
       "icons/32x32.png",

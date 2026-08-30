@@ -432,6 +432,33 @@ struct DeviceDto {
 
 // --- APO setup (filter.md §5.3c) ------------------------------------------
 
+
+/// The elevated setup helper, as bundled in the app's resources.
+///
+/// Resolved from the resource directory rather than beside the executable, because that is
+/// where Tauri puts it — and in dev there is no bundle at all, so it falls back to the build
+/// output. `None` means setup cannot run, which the panel reports up front instead of letting
+/// every button fail.
+fn apo_helper_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    use tauri::Manager;
+    let bundled = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|r| r.join("apo").join("cageq-apo-setup.exe"))
+        .filter(|p| p.exists());
+    bundled.or_else(|| {
+        // Dev: whatever `cargo build` last produced, so the panel is usable from `tauri dev`
+        // without staging a bundle first.
+        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("release")
+            .join("cageq-apo-setup.exe");
+        dev.exists().then_some(dev)
+    })
+}
 /// Setup state for CAGEq's own APO, for the setup panel.
 ///
 /// Every field comes from a plain `HKLM` read, so this needs no elevation and can be polled
@@ -470,7 +497,11 @@ struct ApoSetupDto {
 
 /// Read the APO setup state. No elevation, no prompt.
 #[tauri::command]
-fn apo_setup_status(endpoint: Option<String>, state: State<Backend>) -> ApoSetupDto {
+fn apo_setup_status(
+    app: tauri::AppHandle,
+    endpoint: Option<String>,
+    state: State<Backend>,
+) -> ApoSetupDto {
     use cageq_apo_backend::setup;
 
     let s = setup::status();
@@ -485,7 +516,7 @@ fn apo_setup_status(endpoint: Option<String>, state: State<Backend>) -> ApoSetup
         active_backend_is_apo: matches!(state.inner(), Backend::Ready { is_apo_backend: true, .. }),
         next_step: next.as_ref().map(|a| a.argv().join(" ")),
         next_step_description: next.as_ref().map(|a| a.describe()),
-        helper_available: setup::helper_path().is_ok(),
+        helper_available: apo_helper_path(&app).is_some(),
     }
 }
 
@@ -495,14 +526,17 @@ fn apo_setup_status(endpoint: Option<String>, state: State<Backend>) -> ApoSetup
 /// `"attach {guid}"`, …), so the frontend never constructs one itself — it echoes back what
 /// the status told it to do.
 #[tauri::command]
-fn apo_setup_run(action: String) -> Result<String, String> {
+fn apo_setup_run(app: tauri::AppHandle, action: String) -> Result<String, String> {
     use cageq_apo_backend::setup::{self, Action, SetupError};
 
     let argv: Vec<String> = action.split_whitespace().map(str::to_string).collect();
     let Some(action) = Action::from_argv(&argv) else {
         return Err(format!("not a setup action: {action}"));
     };
-    match setup::run_elevated(&action) {
+    let Some(helper) = apo_helper_path(&app) else {
+        return Err("cageq-apo-setup.exe is missing from this installation".into());
+    };
+    match setup::run_elevated_at(&helper, &action) {
         Ok(text) => Ok(text),
         // Cancelling the prompt is an ordinary choice, not a failure to report as one.
         Err(SetupError::Declined) => Ok(String::new()),

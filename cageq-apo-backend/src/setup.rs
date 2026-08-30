@@ -46,6 +46,35 @@ const MODE_DEFAULT: &str = "{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}";
 /// The slot to attach in, as an index into the per-slot property names above.
 const EFX_SLOT: &str = "7";
 
+
+/// Where the APO DLL is installed, machine-wide: `%ProgramFiles%\CAGEq`.
+///
+/// **Not** the application's own directory, for two independent reasons — either alone would
+/// be enough:
+///
+/// * `audiodg` runs as **LocalService**, and Tauri's default NSIS install is **per-user**
+///   into `%LOCALAPPDATA%`. A service account cannot read another account's profile, so a DLL
+///   left in the app folder would simply never load — and audiodg reports nothing when it
+///   skips an APO, so the failure would be silent.
+/// * A DLL loaded into a service process **must not be writable by unprivileged users**.
+///   Anywhere the user can write is somewhere an attacker running as that user can swap the
+///   DLL that audiodg then loads, which turns a convenience into privilege escalation.
+///   `%ProgramFiles%` is administrator-write, everyone-read by default, which is exactly the
+///   shape required.
+///
+/// Copying it out also decouples the APO from the app's install location, so updating or
+/// moving CAGEq cannot leave a registration pointing at a file that is no longer there.
+pub fn install_dir() -> PathBuf {
+    std::env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+        .join("CAGEq")
+}
+
+/// The installed DLL's path — what gets registered, and what `status()` reports.
+pub fn installed_dll() -> PathBuf {
+    install_dir().join("CAGEqApo.dll")
+}
 /// Everything the UI needs to describe the current setup, all of it readable unelevated.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SetupStatus {
@@ -265,32 +294,62 @@ pub fn perform(_action: &Action) -> Result<(), SetupError> {
 }
 
 #[cfg(windows)]
-fn dll_path() -> Result<PathBuf, SetupError> {
-    // Next to the helper: they ship together, so this needs no configuration and cannot
-    // point at a stale copy somewhere else on the machine.
-    let exe = std::env::current_exe().map_err(|e| SetupError::Win32("current_exe", e))?;
-    let dll = exe.with_file_name("CAGEqApo.dll");
-    if dll.exists() { Ok(dll) } else { Err(SetupError::DllMissing) }
-}
-
-#[cfg(windows)]
 fn regsvr32(unregister: bool) -> Result<(), SetupError> {
     use std::process::Command;
-    let dll = dll_path()?;
+
+    let target = if unregister {
+        installed_dll()
+    } else {
+        // Copy the shipped DLL into its machine-wide home first, and register THAT — see
+        // `install_dir` for why it cannot be registered where the app happens to be installed.
+        // Re-copied on every register so an app update refreshes it; the registry entry points
+        // at a fixed path, so nothing else has to change.
+        let source = shipped_dll()?;
+        let dest = installed_dll();
+        std::fs::create_dir_all(install_dir())
+            .map_err(|e| SetupError::Win32("create install directory", e))?;
+        // A running audiodg holds the old DLL open, so an in-place overwrite fails. Renaming
+        // the loaded file out of the way is allowed even while it is mapped, and Windows
+        // cleans the stale copy up on the next reboot.
+        if dest.exists() && std::fs::copy(&source, &dest).is_err() {
+            let parked = dest.with_extension("dll.old");
+            let _ = std::fs::remove_file(&parked);
+            std::fs::rename(&dest, &parked)
+                .map_err(|e| SetupError::Win32("replace the installed DLL", e))?;
+            std::fs::copy(&source, &dest)
+                .map_err(|e| SetupError::Win32("install the DLL", e))?;
+        } else if !dest.exists() {
+            std::fs::copy(&source, &dest).map_err(|e| SetupError::Win32("install the DLL", e))?;
+        }
+        dest
+    };
+
     let mut cmd = Command::new("regsvr32");
     cmd.arg("/s");
     if unregister {
         cmd.arg("/u");
     }
-    cmd.arg(&dll);
-    // `/s` and an explicit status check: regsvr32 is a GUI-subsystem binary that reports
-    // failure in a message box nobody will see when it is run from an elevated helper.
+    cmd.arg(&target);
+    // `/s` plus an explicit status check: regsvr32 is a GUI-subsystem binary and reports
+    // failure in a message box, which nobody will see when it runs from an elevated helper.
     let status = cmd.status().map_err(|e| SetupError::Win32("regsvr32", e))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(SetupError::HelperFailed(status.code().unwrap_or(-1)))
+    if !status.success() {
+        return Err(SetupError::HelperFailed(status.code().unwrap_or(-1)));
     }
+    if unregister {
+        // Leave nothing behind, but do not fail the unregister if the file is still mapped —
+        // the registration is gone, which is what was asked for.
+        let _ = std::fs::remove_file(&target);
+    }
+    Ok(())
+}
+
+/// The DLL as shipped beside the helper, i.e. inside the application's resources.
+#[cfg(windows)]
+fn shipped_dll() -> Result<PathBuf, SetupError> {
+    let exe = std::env::current_exe().map_err(|e| SetupError::Win32("current_exe", e))?;
+    let dll = exe.with_file_name("CAGEqApo.dll");
+    if dll.exists() { Ok(dll) } else { Err(SetupError::DllMissing) }
 }
 
 #[cfg(windows)]
@@ -589,7 +648,7 @@ fn take_ownership(key_path: &str) -> Result<(), SetupError> {
 /// ordinary outcome and not something to report as a failure.
 #[cfg(windows)]
 pub fn run_elevated(action: &Action) -> Result<String, SetupError> {
-    elevate(&helper_path()?, action)
+    run_elevated_at(&helper_path()?, action)
 }
 
 /// Re-launch **this** executable elevated for `action` — how the helper self-elevates when
@@ -600,7 +659,7 @@ pub fn run_elevated(action: &Action) -> Result<String, SetupError> {
 #[cfg(windows)]
 pub fn run_elevated_self(action: &Action) -> Result<String, SetupError> {
     let me = std::env::current_exe().map_err(|e| SetupError::Win32("current_exe", e))?;
-    elevate(&me, action)
+    run_elevated_at(&me, action)
 }
 
 /// Is this process running with administrator rights?
@@ -658,7 +717,7 @@ pub fn is_elevated() -> bool {
 }
 
 #[cfg(windows)]
-fn elevate(exe: &std::path::Path, action: &Action) -> Result<String, SetupError> {
+pub fn run_elevated_at(exe: &std::path::Path, action: &Action) -> Result<String, SetupError> {
     use std::os::windows::ffi::OsStrExt;
 
     type Handle = *mut std::ffi::c_void;

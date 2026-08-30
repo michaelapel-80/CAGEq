@@ -9,3 +9,7 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# Staged APO artifacts for bundling — built by cageq-app/scripts/build-apo.ps1, same as the
+# frozen sidecar. Build outputs, not sources.
+cageq-app/src-tauri/apo/
