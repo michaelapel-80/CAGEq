@@ -44,6 +44,7 @@
 //! Still to come: the shared-memory plumbing for [`control`] (creating the `Global\` section
 //! with a DACL and mandatory label that let exactly the right process write to it).
 
+pub mod channel;
 pub mod config;
 pub mod control;
 pub mod dsp;
@@ -69,6 +70,51 @@ pub struct CageqApo {
     /// proves the RT callback is genuinely running, which is what settled stage B after
     /// "it loads and audio still plays" turned out to be true of a completely dead APO.
     frames_processed: u64,
+    /// The live control channel, when one could be created. `None` simply means no live
+    /// edits: the persistent configuration still applies, so this is never fatal.
+    channel: Option<channel::ControlChannel>,
+    /// Sequence number of the last update actually applied, so an unchanged block costs one
+    /// atomic load per buffer instead of a full read and validation.
+    applied_seq: u32,
+    /// Scratch for [`control::try_read`], preallocated because taking a snapshot happens on
+    /// the real-time thread and must not allocate.
+    snapshot: control::Snapshot,
+}
+
+impl CageqApo {
+    /// Apply whatever the control channel has published, if it is new and valid.
+    ///
+    /// **Runs on the real-time thread**, at the top of every buffer. Steady state is a single
+    /// atomic load; the copy, validation and coefficient swap happen only on a buffer where
+    /// something was actually published. Every rejection path leaves the running correction
+    /// in force — a bad or half-written update must never interrupt audio.
+    #[inline]
+    fn poll_channel(&mut self) {
+        let Some(ch) = self.channel.as_ref() else { return };
+        let block = ch.block();
+
+        control::bump_heartbeat(block);
+
+        // The cheap path, taken on essentially every buffer.
+        if control::sequence(block) == self.applied_seq {
+            return;
+        }
+
+        if let control::ReadOutcome::Updated(seq) = control::try_read(block, &mut self.snapshot) {
+            let snap = self.snapshot;
+            if self.cascade.apply_coeffs(&snap.coeffs[..snap.band_count], snap.preamp_db) {
+                self.applied_seq = seq;
+            } else {
+                // Structurally valid but too loud for the combined chain. Remember the
+                // sequence anyway: it will not become acceptable by being re-examined every
+                // buffer, and re-checking it forever would put the guard's cost on the audio
+                // path in perpetuity.
+                self.applied_seq = seq;
+            }
+        }
+        // Torn / unrecognised / rejected: leave `applied_seq` alone so the next buffer looks
+        // again. A torn read in particular is expected and resolves on its own.
+    }
 }
 
 /// One filter band across the C ABI. Mirrors [`dsp::Band`] with `kind` as a plain integer,
@@ -128,6 +174,9 @@ pub extern "C" fn cageq_apo_create(channels: u32, sample_rate: f32) -> *mut c_vo
         cascade: dsp::Cascade::new(channels as usize, sample_rate as f64),
         channels,
         frames_processed: 0,
+        channel: None,
+        applied_seq: 0,
+        snapshot: control::Snapshot::default(),
     });
     Box::into_raw(apo) as *mut c_void
 }
@@ -294,6 +343,7 @@ pub unsafe extern "C" fn cageq_apo_process(
         return;
     }
     let apo = unsafe { &mut *(handle as *mut CageqApo) };
+    apo.poll_channel();
     let count = (frames as usize).saturating_mul(apo.channels as usize);
 
     // `input` and `output` may be the same buffer (APO_FLAG_INPLACE), so these are built as
@@ -307,6 +357,35 @@ pub unsafe extern "C" fn cageq_apo_process(
     apo.cascade.process(src, dst, frames as usize);
 
     apo.frames_processed = apo.frames_processed.wrapping_add(frames as u64);
+}
+
+/// Open this endpoint's live control channel, so CAGEq can push coefficients without a disk
+/// round trip (see [`channel`]).
+///
+/// Returns `false` if no channel could be created, which is **not** an error worth failing a
+/// lock over: the persistent configuration is already applied, and the only thing lost is
+/// low-latency editing. Called at lock time, off the real-time thread.
+///
+/// # Safety
+/// `handle` must be live; `endpoint_id` must address at least `len` UTF-16 code units.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cageq_apo_open_channel(
+    handle: *mut c_void,
+    endpoint_id: *const u16,
+    len: u32,
+) -> bool {
+    if handle.is_null() || endpoint_id.is_null() || len == 0 || len > 256 {
+        return false;
+    }
+    let apo = unsafe { &mut *(handle as *mut CageqApo) };
+    let wide = unsafe { std::slice::from_raw_parts(endpoint_id, len as usize) };
+    let id = String::from_utf16_lossy(wide);
+
+    apo.channel = channel::ControlChannel::create(&id);
+    // A freshly created section reads as `Unrecognised` until CAGEq publishes, so nothing is
+    // applied here; `applied_seq` starts at 0 and the first real publish will differ from it.
+    apo.applied_seq = 0;
+    apo.channel.is_some()
 }
 
 /// Process `frames` of silence, returning `true` while the filter tail is still audible.
@@ -331,6 +410,9 @@ pub unsafe extern "C" fn cageq_apo_process_silence(
         return false;
     }
     let apo = unsafe { &mut *(handle as *mut CageqApo) };
+    // Polled here too: an edit made while the source is silent must take effect, or the first
+    // audio after a pause would arrive with a stale correction.
+    apo.poll_channel();
     let count = (frames as usize).saturating_mul(apo.channels as usize);
     let dst = unsafe { std::slice::from_raw_parts_mut(output, count) };
     let tail = apo.cascade.process_silence(dst, frames as usize);

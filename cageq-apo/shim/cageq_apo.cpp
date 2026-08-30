@@ -114,6 +114,7 @@ float cageq_apo_sample_rate(void* handle);
 bool  cageq_apo_set_bands(void* handle, const CageqBand* bands, unsigned int count);
 bool  cageq_apo_set_preamp_db(void* handle, double db);
 int   cageq_apo_load_config(void* handle, const wchar_t* endpointId, unsigned int len);
+bool  cageq_apo_open_channel(void* handle, const wchar_t* endpointId, unsigned int len);
 }
 
 // Return codes from cageq_apo_load_config — must match the CAGEQ_CONFIG_* constants in
@@ -402,9 +403,15 @@ public:
         // endpoint, which is a far worse answer to "your EQ file has a typo".
         if (m_endpointId[0] != L'\0')
         {
-            const int rc = cageq_apo_load_config(
-                m_rust, m_endpointId, static_cast<unsigned int>(wcslen(m_endpointId)));
+            const unsigned int idLen = static_cast<unsigned int>(wcslen(m_endpointId));
+            const int rc = cageq_apo_load_config(m_rust, m_endpointId, idLen);
             DiagF(L"  config: %s (%d)", ConfigOutcomeText(rc), rc);
+
+            // The live control channel, for edits while this stream is running. Failing to
+            // open it costs only low-latency editing — the persistent correction above is
+            // already applied — so it is reported and otherwise ignored.
+            const bool channel = cageq_apo_open_channel(m_rust, m_endpointId, idLen);
+            DiagF(L"  control channel: %s", channel ? L"open" : L"unavailable (config only)");
         }
         else
         {

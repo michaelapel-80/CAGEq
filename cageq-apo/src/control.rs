@@ -132,6 +132,21 @@ pub enum ReadOutcome {
     Rejected,
 }
 
+/// The block's current sequence number, as one atomic load.
+///
+/// Lets the audio path skip [`try_read`] entirely when nothing has been published since it
+/// last looked — which is almost every buffer. Steady-state cost of having a control channel
+/// at all is therefore one load, not a scan and validation of every band.
+pub fn sequence(block: &ControlBlock) -> u32 {
+    block.seq.load(Ordering::Acquire)
+}
+
+/// Record that the APO is alive and processing, for the writer's benefit. Purely outbound;
+/// nothing on this side ever reads it back.
+pub fn bump_heartbeat(block: &ControlBlock) {
+    block.heartbeat.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Take a consistent snapshot, if there is one.
 ///
 /// **Runs on the real-time thread**: bounded work, no allocation, no locking, and it never
