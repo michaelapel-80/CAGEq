@@ -115,6 +115,33 @@ pub fn is_valid_endpoint_id(endpoint_id: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() || matches!(c, '{' | '}' | '-'))
 }
 
+/// Canonicalise an endpoint id to the braced form Windows uses.
+///
+/// Exists because **PowerShell strips the braces off an unquoted `{...}`** — it parses as a
+/// ScriptBlock — so a GUID typed at a prompt arrives here bare. The APO gets its id from the
+/// audio engine, which always brace-wraps it, so an unnormalised writer would compute a
+/// different section name and simply never find the channel. That failure looks identical to
+/// "the APO isn't running", which is a genuinely expensive thing to debug.
+///
+/// `None` if the input is not a GUID at all, which lets a caller say so plainly instead of
+/// reporting a missing channel.
+pub fn normalize_endpoint_id(id: &str) -> Option<String> {
+    let bare = id.trim().trim_start_matches('{').trim_end_matches('}');
+    // 8-4-4-4-12 hex, the registry GUID shape.
+    let groups = [8usize, 4, 4, 4, 12];
+    let mut parts = bare.split('-');
+    for want in groups {
+        let part = parts.next()?;
+        if part.len() != want || !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{{{}}}", bare.to_ascii_lowercase()))
+}
+
 /// Read and parse an endpoint's configuration.
 ///
 /// `Ok(None)` means "no configuration for this endpoint", which is a normal state (a device
@@ -318,6 +345,39 @@ mod tests {
     use super::*;
 
     const GOOD: &str = "cageq-apo 1\npreamp -6.5\nband PK 105 3.0 0.7\nband HSC 8000 -2.4 1.4\n";
+
+    /// PowerShell strips the braces off an unquoted `{...}`, so a GUID typed at a prompt
+    /// arrives bare — while the APO's own id comes from the audio engine already braced. Both
+    /// must name the same section, or the writer silently never finds the channel and the
+    /// failure looks exactly like "the APO isn't running". That is how the first VM attempt
+    /// at the control channel failed.
+    #[test]
+    fn bare_and_braced_guids_normalise_to_the_same_id() {
+        let braced = "{6cafe423-cde5-4ec1-a1e2-e3fcec778349}";
+        let bare = "6cafe423-cde5-4ec1-a1e2-e3fcec778349";
+        assert_eq!(normalize_endpoint_id(bare), normalize_endpoint_id(braced));
+        assert_eq!(normalize_endpoint_id(braced).as_deref(), Some(braced));
+        // Case is normalised too, so two spellings of one endpoint cannot become two sections.
+        assert_eq!(normalize_endpoint_id("{6CAFE423-CDE5-4EC1-A1E2-E3FCEC778349}").as_deref(), Some(braced));
+    }
+
+    /// Things that are not GUIDs must be rejected as such, so a caller can say "that is not an
+    /// endpoint" rather than "no channel" — the mis-parsed command line that produced
+    /// `-encodedCommand` was reported as a missing channel, which blamed the wrong component.
+    #[test]
+    fn non_guids_are_refused_rather_than_normalised() {
+        for bad in [
+            "-encodedCommand",
+            "",
+            "{}",
+            "6cafe423-cde5-4ec1-a1e2",                    // too few groups
+            "6cafe423-cde5-4ec1-a1e2-e3fcec778349-extra", // too many
+            "6cafe42z-cde5-4ec1-a1e2-e3fcec778349",       // not hex
+            "../escape",
+        ] {
+            assert!(normalize_endpoint_id(bad).is_none(), "accepted {bad:?}");
+        }
+    }
 
     /// A UTF-8 BOM must not break the header. Windows writes these routinely — Notepad does,
     /// and PowerShell 5.1's `Set-Content -Encoding UTF8` always does — so rejecting them made

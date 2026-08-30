@@ -36,7 +36,7 @@
 
 use std::ffi::c_void;
 
-use crate::config::is_valid_endpoint_id;
+use crate::config::normalize_endpoint_id;
 use crate::control::ControlBlock;
 
 type Handle = *mut c_void;
@@ -156,9 +156,11 @@ impl ControlChannel {
     /// should happen. (The security descriptor is only applied at creation, but see the
     /// module doc on why a standard user cannot get there first.)
     pub fn create(endpoint_id: &str) -> Option<ControlChannel> {
-        if !is_valid_endpoint_id(endpoint_id) {
-            return None;
-        }
+        // Normalised, not merely validated: PowerShell strips the braces off an unquoted
+        // {...}, so a bare GUID would build a different section name than the one the APO
+        // created from the engine-supplied (always braced) id, and the channel would simply
+        // never be found.
+        let endpoint_id = &normalize_endpoint_id(endpoint_id)?;
         let sd = SecurityDescriptor::from_sddl(CHANNEL_SDDL)?;
         let sa = SecurityAttributes {
             n_length: std::mem::size_of::<SecurityAttributes>() as u32,
@@ -208,9 +210,11 @@ impl ControlChannel {
     /// at unlock, so the writer must tolerate its absence and retry rather than treat it as
     /// an error.
     pub fn open(endpoint_id: &str) -> Option<ControlChannel> {
-        if !is_valid_endpoint_id(endpoint_id) {
-            return None;
-        }
+        // Normalised, not merely validated: PowerShell strips the braces off an unquoted
+        // {...}, so a bare GUID would build a different section name than the one the APO
+        // created from the engine-supplied (always braced) id, and the channel would simply
+        // never be found.
+        let endpoint_id = &normalize_endpoint_id(endpoint_id)?;
         let name = wide(&format!("Global\\CAGEqApo_{endpoint_id}"));
         let size = std::mem::size_of::<ControlBlock>();
 

@@ -7,8 +7,11 @@
 //! own idea of the struct layout would prove something else.
 //!
 //! ```text
-//! push.exe {6cafe423-...} -6.0 PK:120:12:1.0 HSC:8000:-3:0.7
-//! push.exe {6cafe423-...} --watch          # just report heartbeat + what is published
+//! .\push.exe '{6cafe423-...}' -6.0 PK:120:12:1.0 HSC:8000:-3:0.7
+//! .\push.exe '{6cafe423-...}' --watch    # just report heartbeat + what is published
+//!
+//! QUOTE the GUID: PowerShell parses an unquoted {...} as a ScriptBlock and strips the
+//! braces, which used to yield a section name that never matched the APO's.
 //! ```
 //!
 //! Run it as an ordinary user — that is the case being tested. Needing elevation would mean
@@ -43,7 +46,19 @@ fn main() {
         eprintln!("       push <endpoint-guid> --watch");
         std::process::exit(2);
     }
-    let endpoint = &args[0];
+    // Normalise before anything else, and complain specifically. PowerShell parses an
+    // unquoted {...} as a ScriptBlock and strips the braces, so the GUID often arrives bare;
+    // worse, a mis-parsed command line can deliver something that is not a GUID at all. Both
+    // used to surface as "no control channel", which points the blame squarely at the APO.
+    let Some(endpoint) = cageq_apo::config::normalize_endpoint_id(&args[0]) else {
+        eprintln!("{:?} is not an endpoint GUID.", args[0]);
+        eprintln!();
+        eprintln!("QUOTE the GUID — PowerShell treats an unquoted {{...}} as a script block:");
+        eprintln!("    .\\push.exe '{{6cafe423-cde5-4ec1-a1e2-e3fcec778349}}' --watch");
+        std::process::exit(2);
+    };
+    let endpoint = &endpoint;
+
 
     // The section only exists while the APO is locked, i.e. while a stream is running on that
     // endpoint. Absence is the ordinary "nothing playing" state, not a failure.
