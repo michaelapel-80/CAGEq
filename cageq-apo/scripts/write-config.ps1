@@ -37,20 +37,33 @@ $dir = Join-Path $env:ProgramData 'CAGEq\apo'
 if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 
 if ($Elevated) {
-    # Administrators + SYSTEM full control, everyone else read-only. audiodg runs as
-    # LocalService and only needs to read; whoever configures CAGEq needs write, which an
-    # installer should grant to that specific account rather than to Users at large.
+    # Identities are given as SIDs, never as names: account names are LOCALIZED, so
+    # 'BUILTIN\Administrators' and 'NT AUTHORITY\SYSTEM' do not resolve on a German (or any
+    # non-English) Windows and AddAccessRule fails with "some or all identity references
+    # could not be translated". SIDs are invariant.
+    $SYSTEM = [System.Security.Principal.SecurityIdentifier]'S-1-5-18'
+    $ADMINS = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-544'
+    $AUTHED = [System.Security.Principal.SecurityIdentifier]'S-1-5-11'   # Authenticated Users
+
+    # Authenticated Users get Modify, not read-only: CAGEq runs UNELEVATED and has to write
+    # this file. Read-only here would lock out the very app the directory exists for.
+    #
+    # It also matches the control channel's access policy deliberately. The channel already
+    # lets authenticated users push arbitrary (validated) coefficients live, so restricting
+    # the file more tightly would be a strong lock on one door and an open window beside it.
+    # What this DOES buy is dropping ProgramData's inherited rules, so the directory is not
+    # writable by anonymous or by whatever a parent ACL happens to permit.
     $acl = Get-Acl $dir
-    $acl.SetAccessRuleProtection($true, $false)   # drop inherited, possibly-permissive rules
+    $acl.SetAccessRuleProtection($true, $false)   # stop inheriting, keep nothing
     $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
-    foreach ($who in 'BUILTIN\Administrators', 'NT AUTHORITY\SYSTEM') {
+    foreach ($sid in $SYSTEM, $ADMINS) {
         $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $who, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+            $sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
     }
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-        'BUILTIN\Users', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        $AUTHED, 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
     Set-Acl -Path $dir -AclObject $acl
-    "Locked down $dir (Administrators/SYSTEM write, Users read)"
+    "Locked down $dir (SYSTEM/Administrators full, Authenticated Users modify, no inheritance)"
 }
 
 # Validate before writing: the APO refuses a malformed file wholesale, and finding that out
