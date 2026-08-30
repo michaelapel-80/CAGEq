@@ -498,3 +498,5 @@ pub fn is_installed() -> bool {
         .iter()
         .any(|d| cageq_backend::endpoint_has_apo(&d.id, &[CAGEQ_APO_CLSID]))
 }
+
+pub mod setup;

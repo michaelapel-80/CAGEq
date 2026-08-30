@@ -35,6 +35,7 @@ dependencies = [
  "cageq-backend",
  "sha2",
  "thiserror",
+ "winreg",
 ]
 
 [[package]]

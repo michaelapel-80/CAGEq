@@ -13,3 +13,7 @@ cageq-backend = { path = "../cageq-backend" }
 cageq-apo = { path = "../cageq-apo" }
 sha2 = "0.11.0"
 thiserror = "2.0.18"
+
+# Setup status and the elevated helper both live on the registry.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
