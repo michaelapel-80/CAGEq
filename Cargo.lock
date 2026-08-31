@@ -53,6 +53,7 @@ name = "cageq-config-writer"
 version = "0.6.0"
 dependencies = [
  "cageq-backend",
+ "cageq-monitor",
  "serde",
  "sha2",
  "thiserror",

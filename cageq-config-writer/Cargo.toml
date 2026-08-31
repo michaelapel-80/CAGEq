@@ -15,3 +15,8 @@ thiserror = "2.0.18"
 # Windows-only; on other platforms detection compiles to a None fallback.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+
+[dev-dependencies]
+# For the eqapotest example only: it drives the loopback recorder to capture what
+# Equalizer APO does on a switch, for comparison against our own APO.
+cageq-monitor = { path = "../cageq-monitor" }
