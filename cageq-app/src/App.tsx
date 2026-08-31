@@ -2366,11 +2366,13 @@ function App() {
                 </span>
               ) : (
                 <>
+                  {/* Whether a filter actually reaches this device is the Engine button's job to
+                      show (it's colored red when nothing is attached) — this list stays plain
+                      names so picking a long-unused device doesn't widen the row and wrap it. */}
                   <select id="device-select" value={deviceId} onChange={(e) => changeDevice(e.currentTarget.value)}>
                     {devices.map((d) => (
                       <option key={d.id} value={d.id}>
                         {d.name}
-                        {d.eqapo_enabled ? "" : tr("header.apoNotInstalledOption")}
                       </option>
                     ))}
                   </select>

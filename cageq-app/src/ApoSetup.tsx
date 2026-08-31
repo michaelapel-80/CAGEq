@@ -142,8 +142,15 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
 
   return (
     <>
-      <button type="button" className="dev-settings" onClick={() => setOpen(true)} title={triggerTitle} aria-label={triggerTitle}>
-        <span className="apo-gear" data-state={engineState} aria-hidden>
+      <button
+        type="button"
+        className="dev-settings engine-trigger"
+        data-state={engineState}
+        onClick={() => setOpen(true)}
+        title={triggerTitle}
+        aria-label={triggerTitle}
+      >
+        <span className="apo-gear" aria-hidden>
           ⚙
         </span>{" "}
         {t("apoSetup.triggerLabel")}

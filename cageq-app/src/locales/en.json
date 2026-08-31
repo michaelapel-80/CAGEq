@@ -20,7 +20,6 @@
     "noDevice": "no active playback device",
     "noDeviceTitle": "No active Windows playback endpoint — connect or enable your output device. A configured EqAPO device that's disconnected won't appear here, and there's nothing for the EQ to apply to.",
     "searchPlaceholder": "Search {{count}} models…",
-    "apoNotInstalledOption": " — ⚠ Equalizer APO not installed",
     "measurementTitle": "Measurement source / rig",
     "pickModel": "— pick a model —",
     "measBy": "by {{source}}",

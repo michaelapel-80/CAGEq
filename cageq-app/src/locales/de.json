@@ -20,7 +20,6 @@
     "noDevice": "kein aktives Wiedergabegerät",
     "noDeviceTitle": "Kein aktives Windows-Wiedergabegerät — verbinde oder aktiviere dein Ausgabegerät. Ein konfiguriertes, aber getrenntes EqAPO-Gerät erscheint hier nicht, und der EQ hat nichts, worauf er wirken kann.",
     "searchPlaceholder": "{{count}} Modelle suchen…",
-    "apoNotInstalledOption": " — ⚠ Equalizer APO nicht installiert",
     "measurementTitle": "Messquelle / Rig",
     "pickModel": "— Modell wählen —",
     "measBy": "von {{source}}",

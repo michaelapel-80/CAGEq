@@ -224,20 +224,28 @@ select:disabled {
 /* Same chrome as .dev-settings, but color-coded by which backend is actually processing audio
    right now, so the answer to "is this thing on?" is visible without opening the dialog:
    brand orange = CAGEq's own engine, blue (the app's existing accent) = Equalizer APO doing
-   its normal job, red = something needs attention before CAGEq's engine can take over. */
+   its normal job. "attention" (nothing attached, or attached but silently not running) gets
+   the same amber-warning-chip treatment as .dev-none, on the whole button rather than just
+   the icon — that's the one state actually worth being hard to miss. */
 .apo-gear {
   font-size: 0.95em;
   opacity: 0.85;
   line-height: 1;
 }
-.apo-gear[data-state="apo"] {
+.engine-trigger[data-state="apo"] .apo-gear {
   color: #f4b73f;
 }
-.apo-gear[data-state="eqapo"] {
+.engine-trigger[data-state="eqapo"] .apo-gear {
   color: var(--accent);
 }
-.apo-gear[data-state="attention"] {
+.engine-trigger[data-state="attention"] {
   color: #c0392b;
+  background: color-mix(in srgb, #c0392b 12%, transparent);
+  border: 1px solid color-mix(in srgb, #c0392b 45%, transparent);
+  border-radius: 5px;
+}
+.engine-trigger[data-state="attention"] .apo-gear {
+  color: inherit;
 }
 /* Language picker + theme toggle sit together at the header's right edge. */
 .lang-select {
