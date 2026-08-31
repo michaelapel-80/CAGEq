@@ -180,10 +180,10 @@
     "doStep": "Weiter",
     "working": "Wird ausgeführt…",
     "uacHint": "Windows fragt nach Administratorrechten.",
-    "restartNeeded": "Einrichtung abgeschlossen. Starte CAGEq neu, um die eigene Audio-Engine zu verwenden.",
     "active": "CAGEq verarbeitet das Audio auf {{device}} selbst. Equalizer APO ist nicht beteiligt.",
     "detach": "CAGEqs Audio-Engine für dieses Gerät nicht mehr verwenden",
-    "cancelled": "Abgebrochen — es wurde nichts geändert."
+    "cancelled": "Abgebrochen — es wurde nichts geändert.",
+    "detailsSummary": "Details"
   },
   "foreignConfig": {
     "notice": "config.txt enthält {{count}} weitere aktive Filterzeile(n), die sich über jede CAGEq-Korrektur stapeln.",

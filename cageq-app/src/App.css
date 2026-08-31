@@ -2072,15 +2072,63 @@ select:disabled {
   margin: 0.5em 0 0;
   opacity: 0.8;
 }
-.panel .warn {
+.panel .warn,
+.apo-modal .warn {
   color: #b8860b;
   font-size: 0.9em;
 }
-.panel .ok {
+.panel .ok,
+.apo-modal .ok {
   font-size: 0.9em;
 }
-.panel .hint {
+.panel .hint,
+.apo-modal .hint {
   font-size: 0.8em;
   opacity: 0.7;
   margin: 0.3em 0 0;
+}
+
+/* --- APO engine dialog: a stable card so the action button at the bottom stays in the same
+   place across setup's steps, instead of the card resizing and recentring under it. ------ */
+.apo-modal {
+  display: flex;
+  flex-direction: column;
+  min-height: 18em;
+  max-width: 30em;
+}
+.apo-modal-body {
+  flex: 1;
+}
+.apo-modal-actions {
+  margin-top: 0.8em;
+}
+.apo-modal-uachint {
+  text-align: right;
+}
+.setup-details {
+  margin-top: 0.5em;
+}
+.setup-details summary {
+  cursor: pointer;
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+/* A shortcut, not a step in the wizard — plain text rather than button chrome so it never
+   competes with the action row above it. */
+.apo-modal-footer-link {
+  display: block;
+  margin-top: 1em;
+  padding-top: 0.6em;
+  border-top: 1px solid var(--border);
+  background: none;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  font-size: 0.8em;
+  opacity: 0.7;
+  text-align: left;
+  cursor: pointer;
+}
+.apo-modal-footer-link:hover {
+  opacity: 1;
 }

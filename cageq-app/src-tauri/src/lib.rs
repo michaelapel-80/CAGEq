@@ -6,9 +6,10 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use cageq_core::{
-    Applied, AudioDevice, CalcRequest, Core, CoreError, CurvePoint, DEFAULT_BASE_PREGAIN_DB,
-    EqApoBackend, EqBackend, Filter, Health, LoudnessSettings, Sidecar, Slot, WatchdogConfig,
-    detect_eqapo_config_dir, list_render_devices,
+    Applied, AudioDevice, BackendError, CalcRequest, Capabilities, Core, CoreError, CurvePoint,
+    DEFAULT_BASE_PREGAIN_DB, DeviceConfig, EqApoBackend, EqBackend, Filter, Health,
+    LoudnessSettings, Sidecar, Slot, StartupDecision, WatchdogConfig, detect_eqapo_config_dir,
+    list_render_devices,
 };
 use serde_json::{json, Map, Value};
 use tauri::State;
@@ -29,10 +30,10 @@ enum Backend {
         eq: Arc<dyn EqBackend>,
         /// Human-readable location of the applied config, for the status panel.
         config_dir: String,
-        /// Whether the backend chosen at startup is CAGEq's own APO. Recorded where the
-        /// decision is actually made rather than re-derived later by comparing paths, which
-        /// would be one more thing that could disagree with itself.
-        is_apo_backend: bool,
+        /// A second handle onto the same object `eq` points at, typed concretely so
+        /// `apo_setup_status` can swap which backend it delegates to (see
+        /// [`SwitchableBackend`]) — `dyn EqBackend` alone has no such operation.
+        switch: Arc<SwitchableBackend>,
         config_source: String,
         sidecar: String,
     },
@@ -479,9 +480,9 @@ struct ApoSetupDto {
     /// Endpoints whose effect chain is switched off wholesale, where no APO runs however it
     /// is attached.
     effects_disabled: Vec<String>,
-    /// Is this build's own APO the active backend right now? Selection happens at startup, so
-    /// finishing setup does not take effect until CAGEq is restarted — and the UI has to say
-    /// so rather than leaving the user wondering why nothing changed.
+    /// Is CAGEq's own APO the active backend right now? Reconciled against reality on every
+    /// call (see `reconcile_backend`), so finishing setup — or detaching — takes effect the
+    /// next time anything asks, with no restart in between.
     active_backend_is_apo: bool,
     /// The one next action for `endpoint`, as a command string, or `null` when it is fully
     /// set up. Ordered by the backend, not the UI: attaching before the gate is open looks
@@ -506,6 +507,14 @@ fn apo_setup_status(
 
     let s = setup::status();
     let next = endpoint.as_deref().and_then(|e| s.next_step(e));
+    // Reconciling here rather than caching a startup snapshot is what lets finishing setup
+    // (or detaching) take effect immediately — see `reconcile_backend`.
+    let active_backend_is_apo = if let Backend::Ready { switch, core, .. } = state.inner() {
+        reconcile_backend(switch, core);
+        switch.current().capabilities().owns_transitions
+    } else {
+        false
+    };
     ApoSetupDto {
         registered_dll: s.registered_dll.as_ref().map(|p| p.display().to_string()),
         dll_present: s.dll_present,
@@ -513,7 +522,7 @@ fn apo_setup_status(
         machine_ready: s.machine_ready(),
         attached: s.attached.clone(),
         effects_disabled: s.effects_disabled.clone(),
-        active_backend_is_apo: matches!(state.inner(), Backend::Ready { is_apo_backend: true, .. }),
+        active_backend_is_apo,
         next_step: next.as_ref().map(|a| a.argv().join(" ")),
         next_step_description: next.as_ref().map(|a| a.describe()),
         helper_available: apo_helper_path(&app).is_some(),
@@ -1016,6 +1025,106 @@ enum SidecarSource {
     Python { python: PathBuf, script: PathBuf },
 }
 
+/// Lets which backend is actually driving audio change without restarting the app.
+///
+/// `Core` and every backend-scoped command hold one `Arc<dyn EqBackend>` for the process's
+/// whole lifetime — this is that object. Every trait method just forwards to whatever
+/// concrete backend is currently behind the mutex; only [`Self::replace`] ever changes what
+/// that is. Nothing downstream (the reconciler thread, the watchdog's safe-state closure, the
+/// foreign-config commands) needs to know a swap can happen at all.
+///
+/// The backend was originally chosen once at startup and never revisited — reasonable until
+/// there was a way to change the choice *from inside a running app* (the setup wizard). A
+/// full app restart to pick that up would work too, but nothing about the DSP fitting, the
+/// sidecar process, or the UI's slot/curve state actually depends on which backend is behind
+/// this trait object, so restarting the whole app to change only that would be throwing away
+/// more than the swap actually touches.
+struct SwitchableBackend(std::sync::Mutex<Arc<dyn EqBackend>>);
+
+impl SwitchableBackend {
+    fn new(initial: Arc<dyn EqBackend>) -> Self {
+        Self(std::sync::Mutex::new(initial))
+    }
+
+    fn current(&self) -> Arc<dyn EqBackend> {
+        Arc::clone(&self.0.lock().unwrap())
+    }
+
+    fn replace(&self, new: Arc<dyn EqBackend>) {
+        *self.0.lock().unwrap() = new;
+    }
+}
+
+impl EqBackend for SwitchableBackend {
+    fn capabilities(&self) -> Capabilities {
+        self.current().capabilities()
+    }
+    fn apply(&self, configs: &[DeviceConfig]) -> Result<String, BackendError> {
+        self.current().apply(configs)
+    }
+    fn write_safe_state(&self) -> Result<(), BackendError> {
+        self.current().write_safe_state()
+    }
+    fn startup_decision(&self, expected_hash: Option<&str>) -> Result<StartupDecision, BackendError> {
+        self.current().startup_decision(expected_hash)
+    }
+    fn drives_endpoint(&self, device_id: &str) -> bool {
+        self.current().drives_endpoint(device_id)
+    }
+    fn location(&self) -> String {
+        self.current().location()
+    }
+    fn applied_text(&self) -> Option<String> {
+        self.current().applied_text()
+    }
+    fn foreign_directives(&self) -> Result<Vec<String>, BackendError> {
+        self.current().foreign_directives()
+    }
+    fn disable_foreign_config(&self) -> Result<bool, BackendError> {
+        self.current().disable_foreign_config()
+    }
+    fn restore_foreign_config(&self) -> Result<bool, BackendError> {
+        self.current().restore_foreign_config()
+    }
+}
+
+/// Build the concrete backend setup should currently be pointing at — CAGEq's own APO if it is
+/// actually attached to an endpoint (deliberately "is it attached", not "is the DLL present":
+/// registering it is an explicit, elevated install step, so nobody is moved between audio
+/// engines by an app update alone), the Equalizer APO backend otherwise.
+fn choose_backend(config_dir: &Path) -> Arc<dyn EqBackend> {
+    if cageq_apo_backend::is_installed() {
+        Arc::new(cageq_apo_backend::CageqApoBackend::default())
+    } else {
+        Arc::new(EqApoBackend::new(config_dir))
+    }
+}
+
+/// Keep the live backend in sync with reality (filter.md §5.3c). What setup *should* have
+/// chosen can change without this process hearing about it directly — the in-app wizard runs
+/// the elevated helper as a separate process, and the standalone cageq-apo-setup.exe can be
+/// run outside the app entirely. Rather than have either of those somehow notify a running
+/// CAGEq, this just re-checks on every status poll and swaps in place if reality disagrees,
+/// which is also why the setup DTO never actually needed a "restart to take effect" state.
+///
+/// `owns_transitions` (true only for the in-process APO, see [`Capabilities`]) doubles as the
+/// backend-identity check here — the trait is about behaviour, not identity, but the two have
+/// coincided since there have only ever been two backends and this is exactly the property the
+/// UI already treats as synonymous with "is CAGEq's own APO".
+fn reconcile_backend(switch: &SwitchableBackend, core: &Core) {
+    let should_be_apo = cageq_apo_backend::is_installed();
+    let is_apo = switch.current().capabilities().owns_transitions;
+    if should_be_apo == is_apo {
+        return;
+    }
+    // Resolved fresh rather than reusing `Backend::Ready.config_dir`: that field is whatever
+    // the *previous* backend reported for `location()`, which for CAGEq's own APO isn't a
+    // filesystem path at all — not something to feed back into `EqApoBackend::new`.
+    let (config_dir, _) = resolve_config_dir();
+    switch.replace(choose_backend(&config_dir));
+    let _ = core.reapply(); // push whatever's already active through the newly-loaded backend
+}
+
 /// `bundled_sidecar` is the frozen sidecar exe inside the app's resources (release), or
 /// `None` in dev.
 fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
@@ -1025,20 +1134,11 @@ fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
     set_cache_dir_env(&resolve_cache_dir());
     let (source, sidecar) = resolve_sidecar(bundled_sidecar.as_deref());
     let settings = load_settings();
-    // The single place a backend is chosen (filter.md §5.3c).
-    //
-    // CAGEq's own APO wins when it is actually attached to an endpoint. That test is
-    // deliberately "is it attached", not "is the DLL present": registering it is an explicit,
-    // elevated install step, so nobody is moved between audio engines by an app update alone
-    // — and the Equalizer APO backend stays the fallback for machines that have not made
-    // that choice.
     let _ = std::fs::create_dir_all(&config_dir);
-    let is_apo_backend = cageq_apo_backend::is_installed();
-    let eq: Arc<dyn EqBackend> = if is_apo_backend {
-        Arc::new(cageq_apo_backend::CageqApoBackend::default())
-    } else {
-        Arc::new(EqApoBackend::new(&config_dir))
-    };
+    // The single place a backend is chosen (filter.md §5.3c) — wrapped so setup can change
+    // that choice later without restarting (see `SwitchableBackend`).
+    let switch = Arc::new(SwitchableBackend::new(choose_backend(&config_dir)));
+    let eq: Arc<dyn EqBackend> = switch.clone();
     // Where the UI says the applied state lives — asked of the backend rather than assumed,
     // since the two keep their configuration in entirely different places.
     let reported_dir = eq.location();
@@ -1049,7 +1149,7 @@ fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
                 core,
                 eq,
                 config_dir: reported_dir,
-                is_apo_backend,
+                switch,
                 config_source,
                 sidecar,
             }
@@ -1321,9 +1421,10 @@ mod tests {
     fn dev_backend_applies_end_to_end() {
         let dir = std::env::temp_dir().join(format!("cageq-app-it-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
 
         let (source, _) = resolve_sidecar(None);
-        let core = start_core(&dir, source, None).expect("core should start");
+        let core = start_core(Arc::new(EqApoBackend::new(&dir)), source, None).expect("core should start");
         let request = CalcRequest { device: "Test DAC".into(), inputs: demo_inputs() };
         let applied = core.apply(request).expect("apply should compute + write");
 
@@ -1353,7 +1454,8 @@ mod tests {
         }
         let dir = std::env::temp_dir().join(format!("cageq-app-cat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let core = start_core(&dir, source, None).expect("core should start");
+        let _ = std::fs::create_dir_all(&dir);
+        let core = start_core(Arc::new(EqApoBackend::new(&dir)), source, None).expect("core should start");
 
         let list = match core.request("list_headphones", json!({})) {
             Ok(v) => v,
@@ -1389,8 +1491,9 @@ mod tests {
     fn loudness_mode_changes_the_written_preamp_on_reapply() {
         let dir = std::env::temp_dir().join(format!("cageq-app-loud-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
         let (source, _) = resolve_sidecar(None);
-        let core = start_core(&dir, source, None).expect("core should start");
+        let core = start_core(Arc::new(EqApoBackend::new(&dir)), source, None).expect("core should start");
 
         // Default (Comparison, -9 dB base pre-gain).
         core.apply(CalcRequest { device: "Dev".into(), inputs: demo_inputs() }).expect("apply");

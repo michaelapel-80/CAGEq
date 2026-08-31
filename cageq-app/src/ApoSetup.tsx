@@ -15,7 +15,9 @@ import { invoke } from "@tauri-apps/api/core";
  * The dialog's own rule from the backend is unchanged: **there is exactly one next step at a
  * time, and its order matters.** Attaching a device while Windows still refuses unsigned
  * effects looks like it succeeded and silently does nothing — so it never offers a list of
- * buttons to pick from, it asks the backend what comes next (`next_step`) and shows that.
+ * buttons to pick from, it asks the backend what comes next (`next_step`) and shows that one
+ * action in a fixed spot at the bottom of the card, so clicking through several steps in a
+ * row doesn't mean chasing a button around the screen as the card reflows.
  */
 export type ApoSetupStatus = {
   registered_dll: string | null;
@@ -79,10 +81,9 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
 
   const attached = status !== null && status.attached.includes(endpointId);
   const inert = status !== null && status.effects_disabled.includes(endpointId);
-  // Setup is complete but the app is still running the other backend: selection happens once
-  // at startup, so nothing changes until CAGEq restarts. Saying so explicitly is the
-  // difference between "finished" and a user wondering why it made no difference.
-  const needsRestart = status !== null && attached && !inert && !status.active_backend_is_apo;
+  // `active_backend_is_apo` is reconciled against reality on every status read (the backend
+  // can now swap live — see `reconcile_backend` on the Rust side), so this flips true right
+  // after attaching, on the very next poll. No "restart to take effect" state exists anymore.
   const settled = status !== null && attached && !inert && status.active_backend_is_apo;
   // Why the trigger looks the way it does — which backend is actually processing audio right
   // now, or why neither is: attached-but-inert, attached while the unsigned-effects gate is
@@ -112,22 +113,16 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
       // One UAC prompt happens inside this call. Cancelling it comes back as an empty
       // string rather than an error, because declining is a choice, not a failure.
       const text = await invoke<string>("apo_setup_run", { action });
-      setMessage(text.trim() === "" ? t("apoSetup.cancelled") : text.trim());
+      // The checklist below already shows success (a step ticks off) — the helper's own raw
+      // output is for troubleshooting, not something a first-time user needs thrown at them,
+      // so it's tucked behind a closed <details> rather than always on screen.
+      setMessage(text.trim() === "" ? null : text.trim());
       await refresh();
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
     }
-  }
-
-  function feedback() {
-    return (
-      <>
-        {error !== null && <p className="warn">{error}</p>}
-        {message !== null && <pre className="setup-output">{message}</pre>}
-      </>
-    );
   }
 
   const triggerTitle = t(
@@ -169,7 +164,7 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
             zIndex: 10,
           }}
         >
-          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "34em" }}>
+          <div className="modal-card apo-modal" onClick={(e) => e.stopPropagation()}>
             <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
               <h2 style={{ marginTop: 0 }}>{t("apoSetup.title")}</h2>
               <button type="button" onClick={() => setOpen(false)} aria-label={t("dialog.cancel")}>
@@ -177,66 +172,72 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
               </button>
             </div>
 
-            <button
-              type="button"
-              className="dev-settings"
-              onClick={onOpenOutputSettings}
-              title={t("header.soundSettings")}
-            >
-              <span className="dev-gear" aria-hidden>
-                ⚙
-              </span>{" "}
-              {sampleRate != null ? fmtRate(sampleRate) : t("header.soundSettings")}
-            </button>
-
-            {status === null ? (
-              <p>{t("apoSetup.loading")}</p>
-            ) : settled ? (
-              <>
+            {/* Everything that describes *why* things are the way they are. Never a button
+                here — see the fixed action slot below, always in the same place. */}
+            <div className="apo-modal-body">
+              {status === null ? (
+                <p>{t("apoSetup.loading")}</p>
+              ) : settled ? (
                 <p className="ok">{t("apoSetup.active", { device: endpointName ?? "" })}</p>
+              ) : (
+                <>
+                  <p>{t("apoSetup.intro")}</p>
+
+                  {/* Equalizer APO not being attached either means no filter from either engine
+                      is currently applied — worth calling out here since the checklist below
+                      only tracks CAGEq's own steps and wouldn't otherwise surface that. */}
+                  {engineReason === "unattached" && <p className="warn">{t("apoSetup.neitherAttached")}</p>}
+
+                  <ul className="setup-steps">
+                    <Step done={status.registered_dll !== null && status.dll_present} label={t("apoSetup.stepRegister")} />
+                    <Step done={status.gate_open} label={t("apoSetup.stepGate")} />
+                    <Step done={attached && !inert} label={t("apoSetup.stepAttach", { device: endpointName ?? "" })} />
+                  </ul>
+
+                  {/* The gate reduces a machine-wide security mitigation, so it gets its own
+                      explanation rather than being folded into a general "set up" button. The
+                      Equalizer APO context makes this a known trade, not something CAGEq invented. */}
+                  {status.next_step === "open-gate" && <p className="warn">{t("apoSetup.gateWarning")}</p>}
+
+                  {inert && <p className="warn">{t("apoSetup.effectsDisabled")}</p>}
+
+                  {!status.helper_available && <p className="warn">{t("apoSetup.helperMissing")}</p>}
+
+                  {status.next_step !== null && <p className="hint">{status.next_step_description}</p>}
+                </>
+              )}
+
+              {error !== null && <p className="warn">{error}</p>}
+              {message !== null && (
+                <details className="setup-details">
+                  <summary>{t("apoSetup.detailsSummary")}</summary>
+                  <pre className="setup-output">{message}</pre>
+                </details>
+              )}
+            </div>
+
+            {/* The one thing to click, always in the same place regardless of which step this
+                is — the whole point of pinning it here rather than wherever the text above
+                happens to end. */}
+            <div className="row apo-modal-actions" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
+              {status !== null && settled && (
                 <button type="button" disabled={busy} onClick={() => void run(`detach ${endpointId}`)}>
                   {t("apoSetup.detach")}
                 </button>
-              </>
-            ) : (
-              <>
-                <p>{t("apoSetup.intro")}</p>
+              )}
+              {status !== null && !settled && status.next_step !== null && (
+                <button type="button" disabled={busy || !status.helper_available} onClick={() => void run(status.next_step!)}>
+                  {busy ? t("apoSetup.working") : t("apoSetup.doStep")}
+                </button>
+              )}
+            </div>
+            {status !== null && !settled && status.next_step !== null && <p className="hint apo-modal-uachint">{t("apoSetup.uacHint")}</p>}
 
-                {/* Equalizer APO not being attached either means no filter from either engine
-                    is currently applied — worth calling out here since the checklist below
-                    only tracks CAGEq's own steps and wouldn't otherwise surface that. */}
-                {engineReason === "unattached" && <p className="warn">{t("apoSetup.neitherAttached")}</p>}
-
-                <ul className="setup-steps">
-                  <Step done={status.registered_dll !== null && status.dll_present} label={t("apoSetup.stepRegister")} />
-                  <Step done={status.gate_open} label={t("apoSetup.stepGate")} />
-                  <Step done={attached && !inert} label={t("apoSetup.stepAttach", { device: endpointName ?? "" })} />
-                </ul>
-
-                {/* The gate reduces a machine-wide security mitigation, so it gets its own
-                    explanation rather than being folded into a general "set up" button. The
-                    Equalizer APO context makes this a known trade, not something CAGEq invented. */}
-                {status.next_step === "open-gate" && <p className="warn">{t("apoSetup.gateWarning")}</p>}
-
-                {inert && <p className="warn">{t("apoSetup.effectsDisabled")}</p>}
-
-                {!status.helper_available && <p className="warn">{t("apoSetup.helperMissing")}</p>}
-
-                {needsRestart ? (
-                  <p className="ok">{t("apoSetup.restartNeeded")}</p>
-                ) : status.next_step !== null ? (
-                  <>
-                    <p>{status.next_step_description}</p>
-                    <button type="button" disabled={busy || !status.helper_available} onClick={() => void run(status.next_step!)}>
-                      {busy ? t("apoSetup.working") : t("apoSetup.doStep")}
-                    </button>
-                    <p className="hint">{t("apoSetup.uacHint")}</p>
-                  </>
-                ) : null}
-              </>
-            )}
-
-            {feedback()}
+            {/* A shortcut, not part of the setup flow — kept visually secondary so it never
+                competes with the action above for attention. */}
+            <button type="button" className="apo-modal-footer-link" onClick={onOpenOutputSettings} title={t("header.soundSettings")}>
+              ⚙ {sampleRate != null ? fmtRate(sampleRate) : t("header.soundSettings")}
+            </button>
           </div>
         </div>
       )}
