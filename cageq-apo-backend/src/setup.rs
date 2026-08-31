@@ -671,6 +671,7 @@ fn start_audio() -> Result<(), SetupError> {
 /// the point of a reset is to work when the state is already wrong, and a reset that only
 /// undoes what it expected to find is no use precisely when it is needed.
 #[cfg(windows)]
+#[cfg(windows)]
 fn reset() -> Result<(), SetupError> {
     use winreg::RegKey;
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
@@ -679,54 +680,82 @@ fn reset() -> Result<(), SetupError> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let mut cleared = 0usize;
     let mut restored = 0usize;
+    // Every failure is collected rather than swallowed. An earlier version skipped an endpoint
+    // it could not open and deleted values with the result ignored, so "reset" reported success
+    // while leaving the machine exactly as it was — which is the one outcome a reset must never
+    // produce silently.
+    let mut problems: Vec<String> = Vec::new();
 
     for d in cageq_backend::list_render_devices() {
         let path = format!(r"{RENDER_KEY}\{}\FxProperties", d.id);
-        // Ownership may already be ours from a previous attach, but not necessarily — and a
-        // reset has to work on an endpoint it never successfully attached to.
-        let _ = take_ownership(&path);
-        let Ok(fx) = hklm.open_subkey_with_flags(&path, KEY_SET_VALUE) else { continue };
+        // Ownership may already be ours, but a reset has to work on an endpoint it never
+        // successfully attached to.
+        if let Err(e) = take_ownership(&path) {
+            problems.push(format!("{}: could not take ownership: {e}", d.name));
+            continue;
+        }
+        let fx = match hklm.open_subkey_with_flags(&path, KEY_SET_VALUE) {
+            Ok(fx) => fx,
+            Err(e) => {
+                problems.push(format!("{}: could not open FxProperties for writing: {e}", d.name));
+                continue;
+            }
+        };
 
         for slot in ALL_SLOTS {
             let name = format!("{FX_CLSID_PROP},{slot}");
-            if fx
+            let is_ours = fx
                 .get_value::<String, _>(&name)
-                .is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID))
-            {
-                let _ = fx.delete_value(&name);
-                cleared += 1;
+                .is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID));
+            if !is_ours {
+                continue;
+            }
+            match fx.delete_value(&name) {
+                Ok(()) => cleared += 1,
+                Err(e) => problems.push(format!("{}: slot {slot} would not clear: {e}", d.name)),
             }
         }
+
         if let Some(record) = displaced_effect(&d.id) {
             for entry in record.split(',') {
                 let Some((s, clsid)) = entry.split_once('=') else { continue };
                 if !ALL_SLOTS.contains(&s) || clsid.trim().is_empty() {
                     continue;
                 }
-                if fx
-                    .set_value(format!("{FX_CLSID_PROP},{s}"), &clsid.trim().to_string())
-                    .is_ok()
-                {
-                    restored += 1;
+                match fx.set_value(format!("{FX_CLSID_PROP},{s}"), &clsid.trim().to_string()) {
+                    Ok(()) => restored += 1,
+                    Err(e) => problems.push(format!("{}: could not restore slot {s}: {e}", d.name)),
                 }
             }
             forget_displaced(&d.id);
         }
     }
 
-    // Unregister and remove the installed file. Both are best-effort: a reset that stops at
-    // the first thing already gone would leave the rest behind.
+    // Best-effort, but reported: a reset that stops at the first thing already gone would
+    // leave the rest behind.
     let installed = installed_dll();
     if installed.exists() {
         let _ = std::process::Command::new("regsvr32")
             .args(["/s", "/u"])
             .arg(&installed)
             .status();
-        let _ = std::fs::remove_file(&installed);
+        if let Err(e) = std::fs::remove_file(&installed) {
+            problems.push(format!("could not delete {}: {e}", installed.display()));
+        }
     }
     start_audio()?;
 
-    eprintln!("cleared {cleared} slot(s), restored {restored} displaced effect(s)");
+    if !problems.is_empty() {
+        // Every detail goes into the ERROR, not to stdout. When the helper self-elevates it
+        // has no console, and only text carried back through the log reaches the caller —
+        // printing the problems would discard exactly the information needed.
+        return Err(SetupError::HelperSaid(format!(
+            "reset incomplete - cleared {cleared} slot(s), restored {restored}, but:
+  {}",
+            problems.join("
+  "),
+        )));
+    }
     Ok(())
 }
 #[cfg(windows)]
