@@ -414,7 +414,8 @@ impl Cascade {
 
 
     /// Override the crossfade length. **Tests only** — the fade is matched to EqualizerAPO's
-    /// measured 15 ms and is not a runtime knob; this exists so the relationship between fade
+    /// own 10 ms (`DRY_FADE_MS`, read from its source, not the 15 ms a measurement first
+    /// suggested) and is not a runtime knob; this exists so the relationship between fade
     /// length and sideband spread can be measured rather than argued about.
     #[cfg(test)]
     pub fn set_fade_frames_for_test(&mut self, frames: u32) {
@@ -500,15 +501,16 @@ impl Cascade {
             self.process_count = self.band_count;
             return;
         }
-        // Smoothstep, not a straight line. A linear ramp has *corners*: the coefficients'
-        // rate of change jumps from zero to constant at the start and back to zero at the
-        // end, and a discontinuous derivative is itself broadband — the very thing being
-        // removed, reintroduced twice at a smaller scale. `3t² − 2t³` leaves with zero slope
-        // and arrives with zero slope, so the whole transition is smooth.
+        // Plain linear, not smoothstep — smoothstep was tried (a linear ramp's corners, where
+        // the rate of change jumps from zero to constant and back, seemed like an obvious
+        // thing to smooth away) and measured *worse* (-57 dB vs linear's -60, see
+        // `retuning_live_does_not_splatter_the_spectrum_the_way_a_cold_restart_does`): the
+        // residual here is dominated by the *rate* coefficients move at, not by the corners,
+        // and smoothstep's midpoint slope is 1.5x linear's.
         //
         // Interpolating from the stored endpoints rather than accumulating a per-frame
-        // increment: the shape demands it, and it also means a long series of edits cannot
-        // let rounding drift the response away from what was asked for.
+        // increment: it means a long series of edits cannot let rounding drift the response
+        // away from what was asked for.
         let s = 1.0 - self.ramp_left as f64 / self.ramp_frames as f64;
         // The preamp travels with the coefficients. Leaving it to jump was a real click: a
         // switch to Dry drops the whole correction AND returns the preamp to unity at once, so
@@ -1497,8 +1499,9 @@ mod tests {
     /// A crossfade is an amplitude modulation, so it produces sidebands whose width scales as
     /// 1/duration. That is what a spectrum display shows during a switch, and it is a
     /// different quantity from the phase-cancellation sag measured elsewhere (0.05 dB, and
-    /// irrelevant here). Recorded evidence: EqAPO at 15 ms puts -83 dB at 200 Hz, ours at 8 ms
-    /// put -58 dB — 25 dB worse, purely from being quicker.
+    /// irrelevant here). Recorded evidence: EqAPO — its real 10 ms transition, the "15 ms"
+    /// only ever being `wavscan`'s misread of it (see `DRY_FADE_MS`) — puts -83 dB at 200 Hz,
+    /// ours at 8 ms put -58 dB — 25 dB worse, purely from being quicker.
     #[test]
     fn shorter_fades_spread_further_up_the_spectrum() {
         const N: usize = 8192;
@@ -1968,10 +1971,13 @@ mod tests {
     /// **Chasing this number further would be misdirected work.** The 6 dB single-band jump
     /// here is near a worst case for an in-stage edit; the artefact scales with how far the
     /// coefficients travel, and a real drag increment measures about -89 dB (see
-    /// `a_drag_sized_edit_is_far_below_the_headline_figure`). The case that genuinely needs
-    /// perfection is the A/B slot switch, where the whole correction changes at once — and
-    /// that is handled by a different mechanism entirely: two filter instances running in
-    /// parallel with the inactive slot kept warm, crossfaded on switch (filter.md §5.3c).
+    /// `a_drag_sized_edit_is_far_below_the_headline_figure`). The case that looked like it
+    /// needed something better — the A/B slot switch, where the whole correction changes at
+    /// once — was measured against a separate parallel-warm-chains mechanism built for
+    /// exactly that (two filter instances, inactive one kept warm, crossfaded on switch) and
+    /// found no clearly better: the artefact already scales with the size of the change, so a
+    /// large A/B jump is masked by the real tonal difference the same way a large edit is.
+    /// That mechanism was removed; A/B switches use this same coefficient ramp.
     #[test]
     fn retuning_live_does_not_splatter_the_spectrum_the_way_a_cold_restart_does() {
         // One period, so 50 Hz is bin 1 exactly and the window is dominated by the transition
