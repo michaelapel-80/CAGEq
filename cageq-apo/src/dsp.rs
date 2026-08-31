@@ -440,26 +440,26 @@ impl Cascade {
             return;
         }
         let t = 1.0 - self.dry_fade_left as f64 / self.dry_fade_frames as f64;
-        // Quintic (`6t^5 - 15t^4 + 10t^3`): continuous first AND second derivative, so only
-        // the third derivative has a corner. Chosen over a straight line by measurement
-        // (`curve_choice_and_dry_switch_spectral_spread`), comparing a spectrum analysis
-        // identical to the one `wavscan` runs on real recordings:
+        // Linear — tried and reverted from quintic, and the reversal is the useful part.
         //
-        //             linear     quintic    EqAPO (recorded)
-        //     200 Hz  -65.2 dB   -75.3 dB   -83.5 dB
-        //     300 Hz  -77.2 dB   -96.9 dB   -96.4 dB   (ties)
-        //     500 Hz  -87.1 dB  -115.7 dB  -109.8 dB   (beats it)
+        // A spectrum analysis said quintic was cleaner: continuous 1st/2nd derivatives push
+        // the far sidebands 20-30 dB below linear's, matching or beating Equalizer APO at
+        // 300 Hz and 500 Hz (see the CURVE_CHOICE test and git history). BY EAR, on the same
+        // 50 Hz stress test, quintic was reported as clickier and EqAPO as cleaner-SOUNDING
+        // despite EqAPO's recorded spectrum showing more visible sidelobes.
         //
-        // A linear ramp's envelope has a discontinuous first derivative — a corner at each
-        // end — and that corner is itself broadband; each additional continuous derivative
-        // order buys roughly another octave of far-field rolloff. Costs nothing in return: the
-        // worst sample-to-sample jump is 1.7x the tone's own slew for every curve tested,
-        // identical to linear.
+        // The reconciliation: quintic's endpoints have zero velocity, so to cover the same
+        // amplitude change in the same time it must move FASTER through the middle — its peak
+        // rate of change is 1.875x linear's (smoothstep: 1.5x; already the reason smoothstep
+        // lost to linear for the coefficient ramp, RAMP_MS, below). A brief, sharp momentary
+        // flick in the middle of the fade reads as a click to the ear even while total spread
+        // energy, integrated over the whole window, measures lower. Perceived abruptness
+        // tracks PEAK RATE, not far-field spectral content — the same conclusion RAMP_MS
+        // reached, which the initial quintic change wrongly assumed did not transfer here.
         //
-        // This does NOT reuse RAMP_MS's finding that smoothstep measured *worse* than linear
-        // for the COEFFICIENT ramp — that was interpolating IIR coefficients, where the cost is
-        // the filter's instantaneous response changing at a different rate, not a sideband
-        // question. Mixing two full signals is a different mechanism.
+        // Equalizer APO uses linear. Matched rather than re-litigated: a spectral metric that
+        // disagrees with a direct A/B listening comparison is measuring the wrong thing, and
+        // there is no basis left to prefer a curve EqAPO itself does not use.
         #[cfg(test)]
         let s = match self.dry_curve_for_test {
             DryCurve::Linear => t,
@@ -468,7 +468,7 @@ impl Cascade {
             DryCurve::Quintic => t * t * t * (t * (t * 6.0 - 15.0) + 10.0),
         };
         #[cfg(not(test))]
-        let s = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+        let s = t;
         self.dry_mix = self.dry_from + (self.dry_to - self.dry_from) * s;
     }
 
@@ -1578,19 +1578,24 @@ mod tests {
     ///
     /// Recorded evidence puts the engine's dry transition 15-25 dB above Equalizer APO's at
     /// 200-300 Hz even with the fade length matched (`enginedump`, `f76060a`). Duration alone
-    /// does not explain it (`shorter_fades_spread_further_up_the_spectrum`, above). The
-    /// remaining candidate is the envelope SHAPE: a linear ramp has a discontinuous first
-    /// derivative — a corner at each end — and a corner is itself a broadband event, the same
-    /// reasoning that made a linear coefficient ramp beat an instant switch. A curve with a
-    /// continuous derivative (smoothstep) or a continuous second derivative (quintic) should
-    /// fall off faster in frequency.
+    /// does not explain it (`shorter_fades_spread_further_up_the_spectrum`, above). This test
+    /// measures whether the envelope SHAPE does, by DFT.
     ///
-    /// This does NOT reuse `RAMP_MS`'s finding that smoothstep measured *worse* than linear —
-    /// that was interpolating IIR COEFFICIENTS, where the audible cost is the filter's
-    /// instantaneous response changing at a different rate, not a sideband question. Mixing
-    /// two full signals is a different mechanism, tested here on its own terms with the same
-    /// Hann-windowed DFT `wavscan` uses on the real recordings, so the numbers are the same
-    /// kind of number.
+    /// **It said yes; a listening comparison said no, and the listening comparison wins.**
+    /// Quintic measured 20-30 dB lower far sidebands than linear, matching or beating EqAPO at
+    /// 300/500 Hz — and was reported clickier by ear, with EqAPO sounding cleaner despite its
+    /// recorded spectrum showing more visible sidelobes. The DFT was measuring a real property
+    /// (spread energy, integrated over the window) that is not the one the ear tracks here.
+    ///
+    /// The reconciliation, found afterwards: a curve with zero-velocity endpoints must move
+    /// FASTER through the middle to cover the same distance in the same time — quintic's peak
+    /// rate is 1.875x linear's, smoothstep's 1.5x — and that peak rate, not integrated far-field
+    /// energy, is what reads as a click. This is exactly `RAMP_MS`'s finding for the coefficient
+    /// ramp (smoothstep lost to linear there too, same reason). An earlier version of this test's
+    /// doc claimed that finding was "a different mechanism" that would not transfer to mixing
+    /// two signals; the ear evidence says it does, and production uses linear again.
+    ///
+    /// The numbers below remain useful as a record of what NOT to optimise for in isolation.
     #[test]
     fn curve_choice_and_dry_switch_spectral_spread() {
         const N: usize = 8192;
