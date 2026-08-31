@@ -128,8 +128,7 @@ pub enum BlockState {
 /// values under an endpoint's `FxProperties` — pre-mix `{EACD2258-…}` / post-mix
 /// `{EC1CC9CE-…}`, verified against a live install. Their presence is how
 /// [`EqBackend::drives_endpoint`] knows EqAPO will actually process this endpoint.
-const EQAPO_APO_CLSIDS: [&str; 2] =
-    ["EACD2258-FCAC-4FF4-B36D-419E924A6D79", "EC1CC9CE-FAED-4822-828A-82A81A6F018F"];
+use cageq_backend::EQAPO_APO_CLSIDS;
 
 /// EqAPO does not reset its crossfade progress counter when a reload lands while a
 /// transition is still running (FilterEngine.cpp:258-261) — the in-flight counter gets

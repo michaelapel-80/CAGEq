@@ -125,6 +125,53 @@ impl SetupStatus {
     }
 }
 
+
+/// One playback endpoint, and what is actually attached to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointStatus {
+    pub id: String,
+    pub name: String,
+    /// CAGEq's own APO is attached here.
+    pub cageq: bool,
+    /// **Equalizer APO is attached to this same endpoint.** Both would run, so both
+    /// corrections apply — the audio is filtered twice and every measurement taken through it
+    /// is wrong. Worth reporting loudly rather than leaving to be discovered by ear.
+    pub eqapo: bool,
+    /// Windows has the endpoint's whole effect chain switched off, so nothing attached to it
+    /// runs at all — attaching here looks successful and does nothing.
+    pub effects_disabled: bool,
+}
+
+impl EndpointStatus {
+    /// Would CAGEq and Equalizer APO both process this endpoint?
+    pub fn double_filtered(&self) -> bool {
+        self.cageq && self.eqapo && !self.effects_disabled
+    }
+}
+
+/// Every playback endpoint with its per-endpoint state.
+///
+/// Separate from [`status`] because it enumerates devices, which is slower and can fail,
+/// while `status` answers the machine-wide questions from three registry reads.
+#[cfg(windows)]
+pub fn endpoints() -> Vec<EndpointStatus> {
+    let s = status();
+    cageq_backend::list_render_devices()
+        .into_iter()
+        .map(|d| EndpointStatus {
+            cageq: s.attached.iter().any(|a| a.eq_ignore_ascii_case(&d.id)),
+            eqapo: cageq_backend::endpoint_has_apo(&d.id, &cageq_backend::EQAPO_APO_CLSIDS),
+            effects_disabled: s.effects_disabled.iter().any(|e| e.eq_ignore_ascii_case(&d.id)),
+            id: d.id,
+            name: d.name,
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn endpoints() -> Vec<EndpointStatus> {
+    Vec::new()
+}
 /// A change that needs administrator rights. Performed by the helper executable, never
 /// in-process — see the module doc.
 #[derive(Debug, Clone, PartialEq, Eq)]

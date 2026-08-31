@@ -116,30 +116,73 @@ impl Output {
 
 fn print_status(out: &mut Output) {
     let s = setup::status();
+
+    out.line("MACHINE");
     match &s.registered_dll {
-        Some(p) if s.dll_present => out.line(&format!("effect registered : {}", p.display())),
-        Some(p) => out.line(&format!("effect registered : {}  [MISSING ON DISK]", p.display())),
-        None => out.line("effect registered : no"),
+        Some(p) if s.dll_present => {
+            // The DLL's own timestamp answers "is the build I made the one that would load?",
+            // which the registry path alone does not.
+            let age = std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| format!(", built {} min ago", d.as_secs() / 60))
+                .unwrap_or_default();
+            out.line(&format!("  effect registered   yes  {}{age}", p.display()));
+        }
+        Some(p) => out.line(&format!("  effect registered   NO - registered file is MISSING: {}", p.display())),
+        None => out.line("  effect registered   no"),
     }
     out.line(&format!(
-        "unsigned effects  : {}",
+        "  unsigned effects    {}",
         if s.gate_open {
             "allowed (DisableProtectedAudioDG=1)"
         } else {
-            "BLOCKED - the effect cannot load"
+            "BLOCKED - the effect cannot load, whatever else is set up"
         },
     ));
-    out.line(&format!("machine ready     : {}", if s.machine_ready() { "yes" } else { "no" }));
-    if s.attached.is_empty() {
-        out.line("attached to       : (no endpoints)");
+
+    let eps = setup::endpoints();
+    out.line("");
+    out.line("PLAYBACK DEVICES");
+    if eps.is_empty() {
+        out.line("  (none found)");
+    }
+    for e in &eps {
+        // What is attached, spelled out — "no endpoints" told you nothing about what the
+        // choices even were.
+        let who = match (e.cageq, e.eqapo) {
+            (true, true) => "CAGEq + EqualizerAPO",
+            (true, false) => "CAGEq",
+            (false, true) => "EqualizerAPO",
+            (false, false) => "-",
+        };
+        out.line(&format!("  {:<38} {who}", e.name));
+        if e.double_filtered() {
+            out.line("      ** BOTH are attached: audio is filtered TWICE and every");
+            out.line("         measurement through this device is wrong. Detach one.");
+        }
+        if e.effects_disabled {
+            out.line("      ** effects are switched off for this device, so nothing attached");
+            out.line("         to it runs at all.");
+        }
+    }
+
+    // What to do next, for the first device that is not ready — a list of facts is not the
+    // same as knowing whether anything works.
+    out.line("");
+    if !s.machine_ready() {
+        out.line(&format!("NEXT: {}", setup::Action::RegisterServer.describe()));
+        if s.registered_dll.is_some() && s.dll_present && !s.gate_open {
+            out.line(&format!("NEXT: {}", setup::Action::OpenGate.describe()));
+        }
+    } else if eps.iter().any(|e| e.cageq && !e.effects_disabled) {
+        out.line("READY: CAGEq's engine is attached and can run.");
+        out.line("(It is only actually loaded while audio is playing on that device.)");
     } else {
-        for id in &s.attached {
-            let note = if s.effects_disabled.contains(id) {
-                "  [effects disabled for this endpoint - it will not run]"
-            } else {
-                ""
-            };
-            out.line(&format!("attached to       : {id}{note}"));
+        out.line("NEXT: attach a device - cageq-apo-setup attach \"{device-guid}\"");
+        for e in &eps {
+            out.line(&format!("      {}  {}", e.id, e.name));
         }
     }
 }

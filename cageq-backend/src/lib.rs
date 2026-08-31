@@ -297,6 +297,15 @@ pub const RENDER_KEY: &str =
 
 /// Does `device_id`'s endpoint carry any of `clsids` in its effect chain (`FxProperties`)?
 /// The shared mechanic behind every backend's [`EqBackend::drives_endpoint`]: an APO
+
+/// Equalizer APO's own APO CLSIDs — pre-mix and post-mix, verified against a live install.
+///
+/// Lives here rather than in either backend because **both** need it: the EqAPO backend to
+/// know whether it will process an endpoint, and CAGEq's own APO backend to warn when EqAPO
+/// is attached to the *same* endpoint, where the two corrections would silently stack and
+/// double-filter. One definition, so those two answers cannot disagree.
+pub const EQAPO_APO_CLSIDS: [&str; 2] =
+    ["EACD2258-FCAC-4FF4-B36D-419E924A6D79", "EC1CC9CE-FAED-4822-828A-82A81A6F018F"];
 /// advertises itself by putting its CLSID into that chain, so "is this backend live on
 /// this endpoint" is the same registry question for all of them — only the CLSIDs differ.
 ///
