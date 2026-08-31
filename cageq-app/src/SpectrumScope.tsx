@@ -41,14 +41,14 @@ const DEFAULTS: Params = { trailTau: 0.18, tail: 12, glow: 0.225, undistort: tru
 // twice now.
 const TAU_REF = 0.1;
 
-function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number): Float64Array {
+function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number, sampleRate: number | undefined): Float64Array {
   const arr = new Float64Array(n);
   if (eq.filters.length) {
     const lnF0 = Math.log(s.f_min);
     const lnF1 = Math.log(s.f_max);
     const bf = new Float64Array(n);
     for (let i = 0; i < n; i++) bf[i] = Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
-    const curve = composedCurveDb(eq.filters, bf);
+    const curve = composedCurveDb(eq.filters, bf, sampleRate);
     for (let i = 0; i < n; i++) arr[i] = curve[i] + eq.preampDb;
   } else {
     arr.fill(eq.preampDb); // Dry: no filters, still undo the §4.1 loudness-match preamp
@@ -57,23 +57,26 @@ function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number): Float6
 }
 
 /** Cache for the per-bin correction curve (filter response + preamp, dB): rebuilt only when the
- *  EQ or bin layout actually changes, not on every 60 fps frame, and retargeted through a
- *  `FadingCurve` (biquad.ts) rather than swapped outright — snapping it the instant the EQ
- *  changes used to manufacture a one-frame jump in the drawn trace that isn't in the real
- *  (crossfaded) audio at all, see `apo-switch-artifacts` memory, "NOT a bug". */
-type CorrCache = { filters: ScopeEq["filters"] | null; preampDb: number; curve: FadingCurve };
-function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: SpectrumData, dtMs: number): Float64Array {
+ *  EQ, bin layout, or sample rate actually changes, not on every 60 fps frame, and retargeted
+ *  through a `FadingCurve` (biquad.ts) rather than swapped outright — snapping it the instant
+ *  the EQ changes used to manufacture a one-frame jump in the drawn trace that isn't in the real
+ *  (crossfaded) audio at all, see `apo-switch-artifacts` memory, "NOT a bug". `sampleRate` isn't
+ *  cosmetic either: a biquad's response depends on it via the bilinear transform, and this used
+ *  to silently assume `biquad.ts`'s default 48 kHz regardless of the device's real rate. */
+type CorrCache = { filters: ScopeEq["filters"] | null; preampDb: number; sampleRate: number | undefined; curve: FadingCurve };
+function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: SpectrumData, sampleRate: number | undefined, dtMs: number): Float64Array {
   const c = cache.current;
   const n = s.db.length;
   if (!c || c.curve.to.length !== n) {
-    const to = computeCorrectionCurve(eq, s, n);
-    cache.current = { filters: eq.filters, preampDb: eq.preampDb, curve: retargetFadingCurve(null, to) };
+    const to = computeCorrectionCurve(eq, s, n, sampleRate);
+    cache.current = { filters: eq.filters, preampDb: eq.preampDb, sampleRate, curve: retargetFadingCurve(null, to) };
     return to;
   }
-  if (c.filters !== eq.filters || c.preampDb !== eq.preampDb) {
+  if (c.filters !== eq.filters || c.preampDb !== eq.preampDb || c.sampleRate !== sampleRate) {
     c.filters = eq.filters;
     c.preampDb = eq.preampDb;
-    c.curve = retargetFadingCurve(c.curve, computeCorrectionCurve(eq, s, n));
+    c.sampleRate = sampleRate;
+    c.curve = retargetFadingCurve(c.curve, computeCorrectionCurve(eq, s, n, sampleRate));
   }
   return stepFadingCurve(c.curve, dtMs);
 }
@@ -349,6 +352,7 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { 
  */
 export function SpectrumScope({
   legendHost,
+  sampleRate,
 }: {
   /** The peak readout renders (via portal) into this element instead of inline below the tube —
    *  same mechanism, and the same element, as EqChart's own `legendHost` (App.tsx's
@@ -357,6 +361,10 @@ export function SpectrumScope({
    *  flex sibling of `.vs-screen`, which meant the tube was always shorter than `.chart-wrap`'s own
    *  full height by exactly the readout's height, unlike every other view's own screen. */
   legendHost?: HTMLElement | null;
+  /** The real device sample rate, when known — see EqChart's identically-named prop for why this
+   *  isn't cosmetic (the undistort correction's biquad math depends on it). Falls back to
+   *  `biquad.ts`'s default 48 kHz only when genuinely unknown. */
+  sampleRate?: number;
 }) {
   const { t } = useTranslation();
   // Ref'd on `.vs-screen` (the CRT box itself), not the outer wrap — the wrap also hosts the
@@ -402,6 +410,10 @@ export function SpectrumScope({
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
+  // Refreshed every render, read fresh each frame inside the mount-once rAF loop below — same
+  // pattern as `paramsRef`.
+  const sampleRateRef = useRef(sampleRate);
+  sampleRateRef.current = sampleRate;
 
   // Fills the chart-wrap (not square, unlike the vectorscope; not sharing a row, unlike the time
   // scope), minus a small strip at the bottom for the peak readout — both dimensions tracked from
@@ -588,7 +600,7 @@ export function SpectrumScope({
       // 2D context has no decay of its own the way the trail canvas does.
       markCtx.clearRect(0, 0, W, H);
       if (n >= 2 && s && s.signal) {
-        const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s, dt * 1000) : null;
+        const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s, sampleRateRef.current, dt * 1000) : null;
         const key = `${plotTop}|${plotBot}|${ar},${ag},${ab}|${p.glow}`;
         if (key !== gradKey) {
           gradKey = key;

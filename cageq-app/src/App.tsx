@@ -2001,10 +2001,10 @@ function App() {
     for (const s of ["A", "B"] as const) {
       const fit = slotFits[s];
       if (!fit) continue;
-      for (const v of composedCurveDb(fit.filters, freqs)) m = Math.max(m, Math.abs(v));
+      for (const v of composedCurveDb(fit.filters, freqs, sampleRate ?? undefined)) m = Math.max(m, Math.abs(v));
     }
     return m > 0 ? Math.max(6, Math.ceil(m + 1)) : undefined;
-  }, [loudness?.mode, slotFits]);
+  }, [loudness?.mode, slotFits, sampleRate]);
 
   // §5.2 chart: only the *active* slot's total (drawing every slot at once crowded the
   // legend once the per-stage lines were added — the A/B comparison is primarily by ear).
@@ -2599,9 +2599,15 @@ function App() {
                       // unmodified unit impulse, not "unavailable": ImpulseChart/impulseResponse
                       // already draw exactly that from an empty band list (impulseResponse seeds
                       // sig[0]=1 and only the loop over `bands`, skipped here, would shape it further).
-                      <ImpulseChart bands={dryActive ? [] : result.filters} color={SLOT_COLOR[activeSlot]} height={215} legendHost={legendHost} />
+                      <ImpulseChart
+                        bands={dryActive ? [] : result.filters}
+                        color={SLOT_COLOR[activeSlot]}
+                        height={215}
+                        legendHost={legendHost}
+                        fs={sampleRate ?? undefined}
+                      />
                     ) : spectrumView ? (
-                      <SpectrumScope legendHost={legendHost} />
+                      <SpectrumScope legendHost={legendHost} sampleRate={sampleRate ?? undefined} />
                     ) : (
                       <EqChart
                         series={chartSeries}
@@ -2611,6 +2617,7 @@ function App() {
                         spectrumRef={spectrumRef}
                         eqBands={selfTest?.phase === "running" ? undefined : dryActive || isolateAudition ? [] : result.filters}
                         preampDb={result?.preamp_db ?? 0}
+                        sampleRate={sampleRate ?? undefined}
                         legendHost={legendHost}
                         minSpan={comparisonSpan}
                         onFreqSweep={onFreqSweep}
