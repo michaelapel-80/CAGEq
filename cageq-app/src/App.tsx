@@ -1390,8 +1390,6 @@ function App() {
   const openOutputSettings = () => {
     void invoke("open_output_settings", { device: deviceId || null }).catch((e) => setError(String(e)));
   };
-  // Windows playback rate, shown compactly (48 kHz, 44.1 kHz, 96 kHz…).
-  const fmtRate = (hz: number) => `${+(hz / 1000).toFixed(1)} kHz`;
   // Compact local ISO timestamp for a saved preset version (YYYY-MM-DD HH:MM — unambiguous across
   // locales and aligns cleanly in the list); legacy/migrated versions have at=0 → "—".
   const fmtWhen = (at: number) => {
@@ -2376,20 +2374,18 @@ function App() {
                       </option>
                     ))}
                   </select>
-                  {/* Rate readout doubles as the deep-link button — click the format to change it
-                      in Windows Sound settings (one control, saves header width). */}
-                  <button
-                    type="button"
-                    className="dev-settings"
-                    onClick={openOutputSettings}
-                    title={tr("header.soundSettings")}
-                    aria-label={tr("header.soundSettings")}
-                  >
-                    {sampleRate != null && <span className="dev-rate">{fmtRate(sampleRate)}</span>}
-                    <span className="dev-gear" aria-hidden>
-                      ⚙
-                    </span>
-                  </button>
+                  {/* Setup for CAGEq's own audio engine (filter.md §5.3c) — a small trigger
+                      next to the device it's scoped to, opening a pop-up rather than sitting
+                      inline as a permanent panel. The Windows Sound settings deep-link lives
+                      inside that same dialog now too: the resampler turned out clean and most
+                      Bluetooth devices don't offer a rate choice anyway, so it wasn't worth a
+                      second permanent icon in the header. */}
+                  <ApoSetup
+                    endpointId={selectedDevice?.eqapo_pattern ?? null}
+                    endpointName={selectedDevice?.name ?? null}
+                    sampleRate={sampleRate}
+                    onOpenOutputSettings={openOutputSettings}
+                  />
                 </>
               )}
             </span>
@@ -2477,17 +2473,6 @@ function App() {
         </p>
       )}
 
-
-      {/* Setup for CAGEq's own audio engine (filter.md §5.3c). Placed with the device
-          warnings because it is scoped to the selected endpoint — attaching is a per-device
-          choice, and the device is picked directly above. Renders nothing once the engine is
-          set up and running, so it stays out of the way in the steady state. */}
-      {!loading && (
-        <ApoSetup
-          endpointId={selectedDevice?.eqapo_pattern ?? null}
-          endpointName={selectedDevice?.name ?? null}
-        />
-      )}
       {/* Finding #1: passive (never modal) notice when foreign config.txt filters stack on top of
           CAGEq — only once a correction is applied, and dismissable per session. */}
       {!loading && result && foreignConfig && foreignConfig.length > 0 && !foreignDismissed && (

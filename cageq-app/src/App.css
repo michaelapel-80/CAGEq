@@ -194,17 +194,13 @@ select:disabled {
   align-items: center;
   justify-content: center;
 }
-/* One control next to the device picker (§8, read-only format display): the live sample rate
-   doubles as the deep-link button to the Windows format settings — click the format to change it.
-   Just the gear shows until a rate is known. */
+/* Deep-link button next to the device picker, straight to the Windows format settings. The
+   sample rate itself lives in the tooltip, not on-screen — worth checking rarely, not worth
+   permanent header space. */
 .dev-settings {
   gap: 0.3rem;
   font-size: 0.8rem;
   padding: 0.2rem 0.5rem;
-}
-.dev-rate {
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 /* No active playback device (e.g. a configured EqAPO output that's unplugged) — a state where
    the EQ has nothing to apply to, so flag it as an amber warning chip rather than muted grey. */
@@ -224,6 +220,24 @@ select:disabled {
   font-size: 0.95em;
   opacity: 0.7;
   line-height: 1;
+}
+/* Same chrome as .dev-settings, but color-coded by which backend is actually processing audio
+   right now, so the answer to "is this thing on?" is visible without opening the dialog:
+   brand orange = CAGEq's own engine, blue (the app's existing accent) = Equalizer APO doing
+   its normal job, red = something needs attention before CAGEq's engine can take over. */
+.apo-gear {
+  font-size: 0.95em;
+  opacity: 0.85;
+  line-height: 1;
+}
+.apo-gear[data-state="apo"] {
+  color: #f4b73f;
+}
+.apo-gear[data-state="eqapo"] {
+  color: var(--accent);
+}
+.apo-gear[data-state="attention"] {
+  color: #c0392b;
 }
 /* Language picker + theme toggle sit together at the header's right edge. */
 .lang-select {

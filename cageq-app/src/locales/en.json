@@ -26,7 +26,7 @@
     "pickModel": "— pick a model —",
     "measBy": "by {{source}}",
     "measOnRig": " on {{rig}}",
-    "soundSettings": "Output sample rate — click to change the playback format in Windows Sound settings"
+    "soundSettings": "Change the playback format in Windows Sound settings"
   },
 
   "slots": { "A": "Slot A", "B": "Slot B", "Dry": "Dry" },
@@ -164,7 +164,12 @@
 
 
   "apoSetup": {
+    "triggerTitleApo": "CAGEq's own audio engine is running",
+    "triggerTitleEqapo": "Equalizer APO is running — CAGEq's own audio engine is available",
+    "triggerTitleAttention": "CAGEq's own audio engine needs attention",
+    "triggerLabel": "Engine",
     "title": "CAGEq audio engine",
+    "loading": "Checking…",
     "intro": "CAGEq can process audio itself instead of going through Equalizer APO. That removes the dependency and makes live filter edits smoother.",
     "stepRegister": "Register CAGEq's audio effect with Windows",
     "stepGate": "Allow Windows to load it",
@@ -172,7 +177,6 @@
     "gateWarning": "This step lets Windows load audio effects that are not signed by Microsoft. Equalizer APO's installer sets the same option. Apps that require a protected audio path (some streaming services) may refuse to play while it is set.",
     "effectsDisabled": "Windows has audio enhancements switched off for this device, so no effect can run on it. Continuing will switch them back on.",
     "helperMissing": "cageq-apo-setup.exe is missing from the CAGEq folder, so setup cannot run. Reinstall CAGEq.",
-    "pickDevice": "Choose an output device above to set it up.",
     "doStep": "Continue",
     "working": "Working…",
     "uacHint": "Windows will ask for administrator permission.",
