@@ -93,27 +93,21 @@ const MAX_TOTAL_GAIN_DB: f64 = 20.0;
 /// chasing a moving target, while still being far too short to feel like lag.
 const RAMP_MS: f64 = 8.0;
 
-
 /// How long a crossfade to or from dry takes, in milliseconds.
 ///
-/// **Matched to Equalizer APO's measured 15 ms**, from the first like-for-like recording:
-///
-/// | | EqAPO | ours at 8 ms |
-/// |---|---|---|
-/// | level change | -4.4 dB | -4.5 dB |
-/// | transition time | 15 ms | 10 ms |
-/// | worst sample step | 1.8x | 1.8x |
-///
-/// Identical in magnitude and equally free of discontinuity — ours was simply quicker, and
-/// quicker reads as more abrupt. That matched the listening result (ours slightly worse), so
-/// the fade matches EqAPO's duration.
-///
-/// This was 15 ms, then 8 ms, and is now 15 ms again. The shortening was made on an
-/// observation — "our swell is worse than EqAPO's" — that had been taken through a
-/// DOUBLE-FILTERED chain, with EqAPO and CAGEq both attached to the endpoint at once. That
-/// comparison was never valid, and neither was the change it justified. The number above is
-/// the first measurement of one effect at a time.
-const DRY_FADE_MS: f64 = 15.0;
+/// **Equalizer APO's own value, read from its GPL source** rather than inferred from a
+/// recording — `EqualizerAPO/FilterEngine.cpp:155`:
+/// ```cpp
+/// this->transitionLength = (unsigned) (sampleRate / 100);
+/// ```
+/// which is exactly 10 ms at any sample rate. Everything before this was a guess built on a
+/// measurement: `wavscan`'s 10%-90% crossing time on a real EqAPO recording read ~15 ms, not
+/// 10, because its 20 ms RMS analysis window is comparable in width to the transition itself
+/// and smooths (broadens) a fast envelope change — the measurement tool's own resolution
+/// limit, mistaken for EqAPO's actual duration. 15 ms was chased for two commits before the
+/// source was checked instead of remeasured again.
+const DRY_FADE_MS: f64 = 10.0;
+
 impl Coeffs {
     /// Linear interpolation towards `other` by `t` in `[0, 1]`.
     ///
@@ -440,26 +434,22 @@ impl Cascade {
             return;
         }
         let t = 1.0 - self.dry_fade_left as f64 / self.dry_fade_frames as f64;
-        // Linear — tried and reverted from quintic, and the reversal is the useful part.
+        // Raised cosine — Equalizer APO's own curve, read from its GPL source
+        // (`EqualizerAPO/FilterConfiguration.cpp:165`):
+        //     float factor = 0.5f * (1.0f - cos(transitionCounter * M_PI / transitionLength));
+        // Two earlier guesses (linear at 15 ms, then quintic) were both built on inference —
+        // a recording's measured duration, a DFT's verdict on spread, a listening impression
+        // taken through a clumsy multi-step A/B — and each left an unexplained gap or an ear
+        // report that did not match the meter. Checking the actual algorithm instead of
+        // re-measuring around it settled both: the duration was 10 ms, not 15 (`DRY_FADE_MS`'s
+        // doc explains why a 20 ms analysis window misread it), and the curve was raised
+        // cosine, not linear or quintic. Reproducing EqAPO's own transition exactly is the
+        // most literal reading of "if we cannot improve on the simple solution, use it": not an
+        // approximation of its observed behaviour, but the same arithmetic.
         //
-        // A spectrum analysis said quintic was cleaner: continuous 1st/2nd derivatives push
-        // the far sidebands 20-30 dB below linear's, matching or beating Equalizer APO at
-        // 300 Hz and 500 Hz (see the CURVE_CHOICE test and git history). BY EAR, on the same
-        // 50 Hz stress test, quintic was reported as clickier and EqAPO as cleaner-SOUNDING
-        // despite EqAPO's recorded spectrum showing more visible sidelobes.
-        //
-        // The reconciliation: quintic's endpoints have zero velocity, so to cover the same
-        // amplitude change in the same time it must move FASTER through the middle — its peak
-        // rate of change is 1.875x linear's (smoothstep: 1.5x; already the reason smoothstep
-        // lost to linear for the coefficient ramp, RAMP_MS, below). A brief, sharp momentary
-        // flick in the middle of the fade reads as a click to the ear even while total spread
-        // energy, integrated over the whole window, measures lower. Perceived abruptness
-        // tracks PEAK RATE, not far-field spectral content — the same conclusion RAMP_MS
-        // reached, which the initial quintic change wrongly assumed did not transfer here.
-        //
-        // Equalizer APO uses linear. Matched rather than re-litigated: a spectral metric that
-        // disagrees with a direct A/B listening comparison is measuring the wrong thing, and
-        // there is no basis left to prefer a curve EqAPO itself does not use.
+        // Its peak rate of change (1.571x a linear ramp's) sits between smoothstep's (1.5x)
+        // and quintic's (1.875x) — consistent with quintic having measured clickier than this
+        // by ear, on the peak-rate-predicts-click reasoning recorded against `RAMP_MS`.
         #[cfg(test)]
         let s = match self.dry_curve_for_test {
             DryCurve::Linear => t,
@@ -468,7 +458,7 @@ impl Cascade {
             DryCurve::Quintic => t * t * t * (t * (t * 6.0 - 15.0) + 10.0),
         };
         #[cfg(not(test))]
-        let s = t;
+        let s = 0.5 - 0.5 * (std::f64::consts::PI * t).cos();
         self.dry_mix = self.dry_from + (self.dry_to - self.dry_from) * s;
     }
 
@@ -1581,21 +1571,23 @@ mod tests {
     /// does not explain it (`shorter_fades_spread_further_up_the_spectrum`, above). This test
     /// measures whether the envelope SHAPE does, by DFT.
     ///
-    /// **It said yes; a listening comparison said no, and the listening comparison wins.**
-    /// Quintic measured 20-30 dB lower far sidebands than linear, matching or beating EqAPO at
-    /// 300/500 Hz — and was reported clickier by ear, with EqAPO sounding cleaner despite its
-    /// recorded spectrum showing more visible sidelobes. The DFT was measuring a real property
-    /// (spread energy, integrated over the window) that is not the one the ear tracks here.
+    /// **It said yes; a listening comparison said no.** Quintic measured 20-30 dB lower far
+    /// sidebands than linear and was reported clickier by ear, with EqAPO sounding cleaner
+    /// despite its recorded spectrum showing more visible sidelobes. Reconciled afterwards: a
+    /// curve with zero-velocity endpoints must move FASTER through the middle to cover the same
+    /// distance in the same time — quintic's peak rate is 1.875x linear's, smoothstep's 1.5x —
+    /// and peak rate, not integrated far-field energy, is what reads as a click. Same
+    /// conclusion `RAMP_MS` reached for the coefficient ramp.
     ///
-    /// The reconciliation, found afterwards: a curve with zero-velocity endpoints must move
-    /// FASTER through the middle to cover the same distance in the same time — quintic's peak
-    /// rate is 1.875x linear's, smoothstep's 1.5x — and that peak rate, not integrated far-field
-    /// energy, is what reads as a click. This is exactly `RAMP_MS`'s finding for the coefficient
-    /// ramp (smoothstep lost to linear there too, same reason). An earlier version of this test's
-    /// doc claimed that finding was "a different mechanism" that would not transfer to mixing
-    /// two signals; the ear evidence says it does, and production uses linear again.
+    /// **What actually settled it was checking Equalizer APO's own GPL source** rather than
+    /// inferring its curve from recordings — see `advance_dry`. It uses raised cosine,
+    /// `0.5*(1-cos(pi*t))`, over exactly 10 ms (`transitionLength = sampleRate/100`,
+    /// `FilterEngine.cpp:155`), neither of which this test's candidates or `DRY_FADE_MS`'s
+    /// prior value had gotten right. Reproducing that exact curve closed the engine-vs-EqAPO
+    /// gap to 2-7 dB (in our favour) at 200/300/500 Hz — down from 15-25.
     ///
-    /// The numbers below remain useful as a record of what NOT to optimise for in isolation.
+    /// The numbers below stay useful: they are what ruled out "any smooth curve is fine" and
+    /// pointed at the corner/rate tradeoff, before the source was found and ended the guessing.
     #[test]
     fn curve_choice_and_dry_switch_spectral_spread() {
         const N: usize = 8192;
