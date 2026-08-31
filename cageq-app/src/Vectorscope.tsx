@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { type Band, type BiquadCoeffs, type BiquadState, inverseBiquadCoeffs, zeroState, stepBiquad } from "./biquad";
+import { type Band, type FadingInverse, retargetFadingInverse, stepFadingInverse } from "./biquad";
 import { scopeStream } from "./streams";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { useTunableParams } from "./useTunableParams";
@@ -189,18 +189,11 @@ export function Vectorscope({
   const rawRes = Math.round(side * dpr);
   const res = fill && maxFillResRef.current !== null ? Math.min(rawRes, maxFillResRef.current) : rawRes; // canvas backing-store resolution
 
-  // The active EQ cascade (for undistort) + the built inverse cascade and its running state. Rebuilt
-  // by the rAF loop when the filters/rate change; state persists across frames.
+  // The active EQ cascade (for undistort) + the built, crossfading inverse cascade. Rebuilt by
+  // the rAF loop when the filters/rate change; state persists across frames. `null` until the
+  // first EQ arrives.
   const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0 });
-  const invRef = useRef<{
-    active: boolean;
-    filtersRef: Band[] | null; // identity of the cascade the coeffs were built from (rebuild on change)
-    rate: number;
-    coeffs: BiquadCoeffs[];
-    stateL: BiquadState[];
-    stateR: BiquadState[];
-    gain: number;
-  }>({ active: false, filtersRef: null, rate: 0, coeffs: [], stateL: [], stateR: [], gain: 1 });
+  const invRef = useRef<FadingInverse | null>(null);
 
   // Own the loopback scope-stream subscription (samples, a Channel-backed bus — see streams.ts
   // for why not `listen` events) + the `scope-eq` broadcast (cascade; a real event, it only fires
@@ -336,26 +329,26 @@ export function Vectorscope({
       // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns on,
       // then run each sample back through it to recover the pre-EQ source image. State persists
       // across frames (the stream is contiguous at ≤48 kHz), so the inverse IIR stays settled.
+      // Retargeting crossfades from whatever was running rather than snapping (`FadingInverse` in
+      // biquad.ts): an instant swap applies the *new* inverse to samples that are still the *old*
+      // filter's real output, a discontinuity a snapshot recording proved isn't in the real
+      // (crossfaded) audio at all — see `apo-switch-artifacts` memory, "NOT a bug".
       const eq = eqRef.current;
       const rate = scopeRef.current?.rate && scopeRef.current.rate > 0 ? scopeRef.current.rate : 48000;
-      const iv = invRef.current;
       if (p.invert) {
-        if (!iv.active || iv.filtersRef !== eq.filters || iv.rate !== rate) {
-          iv.active = true;
-          iv.filtersRef = eq.filters;
-          iv.rate = rate;
-          iv.coeffs = eq.filters.map((b) => inverseBiquadCoeffs(b, rate)).reverse(); // undo in reverse order
-          iv.stateL = iv.coeffs.map(zeroState);
-          iv.stateR = iv.coeffs.map(zeroState);
-          iv.gain = Math.pow(10, eq.preampDb / 20);
+        const prev = invRef.current;
+        if (prev === null || prev.filtersRef !== eq.filters || prev.rate !== rate) {
+          invRef.current = retargetFadingInverse(prev, eq.filters, eq.preampDb, rate);
         }
       } else {
-        iv.active = false;
+        invRef.current = null; // dropped while off; turning back on starts a fresh cascade, no crossfade to a mode that wasn't running
       }
+      const iv = invRef.current;
       // Undistort still runs with an empty cascade when there's a preamp to undo — e.g. Dry, which
       // has no EQ but carries the §4.1 loudness-match gain; without this its excursion wouldn't
-      // match A/B (whose preamp the inverse also removes).
-      const undistort = p.invert && (iv.coeffs.length > 0 || iv.gain !== 1);
+      // match A/B (whose preamp the inverse also removes) — or while fading out a departing
+      // cascade that had either.
+      const undistort = iv !== null && (iv.to.coeffs.length > 0 || iv.to.gain !== 1 || iv.from !== null);
 
       // 2) Trace + resting spot. The beam is always somewhere: while it moves we draw the connected
       //    trace (velocity-graded — a fast/high-frequency sweep dims, a slow dwell brightens, the
@@ -427,12 +420,7 @@ export function Vectorscope({
           let l = xy[i];
           let r = xy[i + 1];
           if (undistort) {
-            l /= iv.gain; // undo the preamp, then run the inverse cascade sample-by-sample
-            r /= iv.gain;
-            for (let k = 0; k < iv.coeffs.length; k++) {
-              l = stepBiquad(iv.coeffs[k], iv.stateL[k], l);
-              r = stepBiquad(iv.coeffs[k], iv.stateR[k], r);
-            }
+            [l, r] = stepFadingInverse(iv!, l, r);
           }
           const xp = p.rotate ? (r - l) / SQRT2 : l; // rotate −45°: L→up-left, R→up-right, mono→up
           const yp = p.rotate ? (l + r) / SQRT2 : r;

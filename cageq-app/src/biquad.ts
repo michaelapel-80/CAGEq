@@ -93,6 +93,102 @@ export function stepBiquad(c: BiquadCoeffs, s: BiquadState, x: number): number {
   return y;
 }
 
+/** A built inverse cascade + its own running per-channel state — an "undistort" filter for one
+ *  particular EQ, ready to run sample-by-sample. */
+export type InverseCascade = { coeffs: BiquadCoeffs[]; stateL: BiquadState[]; stateR: BiquadState[]; gain: number };
+
+export function buildInverseCascade(filters: Band[], preampDb: number, fs: number): InverseCascade {
+  const coeffs = filters.map((b) => inverseBiquadCoeffs(b, fs)).reverse(); // undo in reverse order
+  return { coeffs, stateL: coeffs.map(zeroState), stateR: coeffs.map(zeroState), gain: Math.pow(10, preampDb / 20) };
+}
+
+function stepInverseCascade(c: InverseCascade, l: number, r: number): [number, number] {
+  l /= c.gain; // undo the preamp, then run the inverse cascade sample-by-sample
+  r /= c.gain;
+  for (let k = 0; k < c.coeffs.length; k++) {
+    l = stepBiquad(c.coeffs[k], c.stateL[k], l);
+    r = stepBiquad(c.coeffs[k], c.stateR[k], r);
+  }
+  return [l, r];
+}
+
+/** How long the undistort views crossfade an outgoing correction (sample-domain cascade or
+ *  frequency-domain curve) into a new one, in ms. Matches the ~10 ms raised-cosine both real
+ *  backends use for a slot/dry switch (`DRY_FADE_MS` in `cageq-apo/src/dsp.rs`) — not a claim of
+ *  sample-accurate sync with whatever the real engine (a separate process, with no shared clock)
+ *  is actually doing at that instant, just close enough that a display stops manufacturing a
+ *  discontinuity of its own. */
+export const UNDISTORT_FADE_MS = 10;
+
+/**
+ * Crossfading pair of {@link InverseCascade}s: retargeting used to swap the running cascade the
+ * instant new filters arrived, which is exactly the bug this fixes. A scope/spectrum that snaps
+ * to a new inverse filter mid-stream applies the *new* filter's math to samples that are still
+ * the *old* filter's real output — a genuine, computable discontinuity that looks exactly like a
+ * DSP glitch, even though the real (crossfaded) audio never had one. See `apo-switch-artifacts`
+ * memory, "NOT a bug", for how that got mistaken for one.
+ *
+ * Deliberately simpler than the real engine's mid-switch handling (`Cascade::apply_coeffs`'s
+ * `switch_outgoing`, which pins the *original* pre-switch chain even through a retarget): this
+ * always fades from whatever the previous target was, so a rapid run of retargets (a live tone
+ * drag) just keeps chaining short fades rather than tracking one true origin. That is a visual
+ * approximation, not the audio path, so smooth-and-simple wins over exact.
+ */
+export type FadingInverse = { from: InverseCascade | null; to: InverseCascade; filtersRef: Band[] | null; rate: number; fadeLeft: number; fadeFrames: number };
+
+export function retargetFadingInverse(prev: FadingInverse | null, filters: Band[], preampDb: number, rate: number): FadingInverse {
+  const to = buildInverseCascade(filters, preampDb, rate);
+  // No prior cascade, or the sample rate itself changed (a device change, not a filter switch —
+  // the old state doesn't even apply at the new rate): nothing to fade from.
+  if (!prev || prev.rate !== rate) {
+    return { from: null, to, filtersRef: filters, rate, fadeLeft: 0, fadeFrames: 1 };
+  }
+  const fadeFrames = Math.max(1, Math.round(rate * (UNDISTORT_FADE_MS / 1000)));
+  return { from: prev.to, to, filtersRef: filters, rate, fadeLeft: fadeFrames, fadeFrames };
+}
+
+/** Advance one sample through a `FadingInverse`, returning the (possibly blended) undistorted
+ *  L/R pair. Mutates `f` (decrements the fade, drops `from` once it settles) — same "runs down,
+ *  then goes away" shape as the real engine's outgoing chain. */
+export function stepFadingInverse(f: FadingInverse, l: number, r: number): [number, number] {
+  const [tl, tr] = stepInverseCascade(f.to, l, r);
+  if (f.from === null || f.fadeLeft <= 0) return [tl, tr];
+  const [fl, fr] = stepInverseCascade(f.from, l, r);
+  const t = 1 - f.fadeLeft / f.fadeFrames;
+  const w = 0.5 - 0.5 * Math.cos(Math.PI * t); // raised cosine, matching the real engines' own crossfade
+  f.fadeLeft--;
+  if (f.fadeLeft <= 0) f.from = null;
+  return [fl + (tl - fl) * w, fr + (tr - fr) * w];
+}
+
+/**
+ * Frequency-domain analogue of {@link FadingInverse}, for views that only ever have a per-bin dB
+ * correction curve — not raw samples to run an actual crossfading filter over (SpectrumScope's
+ * trace, EqChart's spectrum backdrop). Same fix, same reasoning: snapping the curve the instant
+ * the EQ changes draws a one-frame jump that isn't in the real (crossfaded) audio at all.
+ */
+export type FadingCurve = { from: Float64Array | null; to: Float64Array; fadeMs: number };
+
+/** `to.length` differing from the previous curve means a bin-count change (a resize), not a
+ *  filter switch — nothing meaningful to fade from. */
+export function retargetFadingCurve(prev: FadingCurve | null, to: Float64Array): FadingCurve {
+  if (!prev || prev.to.length !== to.length) return { from: null, to, fadeMs: UNDISTORT_FADE_MS };
+  return { from: prev.to, to, fadeMs: 0 };
+}
+
+/** Advance a `FadingCurve` by `dtMs` of wall-clock time (this is frame-rate-driven, not
+ *  sample-driven — there's no sample stream here) and return the blended curve. Mutates `f`. */
+export function stepFadingCurve(f: FadingCurve, dtMs: number): Float64Array {
+  if (f.from === null) return f.to;
+  f.fadeMs = Math.min(UNDISTORT_FADE_MS, f.fadeMs + dtMs);
+  const t = f.fadeMs / UNDISTORT_FADE_MS;
+  const w = 0.5 - 0.5 * Math.cos(Math.PI * t); // raised cosine, matching the real engines' own crossfade
+  const out = new Float64Array(f.to.length);
+  for (let i = 0; i < out.length; i++) out[i] = f.from[i] + (f.to[i] - f.from[i]) * w;
+  if (f.fadeMs >= UNDISTORT_FADE_MS) f.from = null;
+  return out;
+}
+
 /** One band's magnitude response in dB over `freqs` (mirrors `PEQFilter.fr`). */
 export function filterResponseDb(band: Band, freqs: Float64Array, fs = FS): Float64Array {
   let [a0, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);

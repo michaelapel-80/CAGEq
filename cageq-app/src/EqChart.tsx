@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { Band, composedCurveDb, logGrid, phaseDeg } from "./biquad";
+import { Band, composedCurveDb, logGrid, phaseDeg, type FadingCurve, retargetFadingCurve, stepFadingCurve } from "./biquad";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
@@ -563,6 +563,15 @@ export function EqChart({
     // own `cursorShown` uses, so leaving the tube doesn't need a per-frame DOM write to keep
     // confirming it's still hidden.
     let cursorShown = false;
+    // The undoing correction curve (filter response + preamp, dB), retargeted through a
+    // `FadingCurve` rather than swapped outright when `eqBands`/`preampDb` change — same fix,
+    // same reasoning as SpectrumScope's own `CorrCache`: snapping it the instant the EQ changes
+    // draws a one-frame jump in the backdrop that isn't in the real (crossfaded) audio at all,
+    // see `apo-switch-artifacts` memory, "NOT a bug". This chart's backdrop is the more useful
+    // undistort view for dynamic content (music, not a tone), so the same fix matters more here.
+    let corrCache: FadingCurve | null = null;
+    let lastEqBands: Band[] | undefined;
+    let lastPreampDb: number | undefined;
 
     const render = () => {
       const now = performance.now();
@@ -605,10 +614,22 @@ export function EqChart({
         // the post-EQ shape is what's actually wanted" reasoning SpectrumScope's own switch has.
         const undoing = specParams.undistort && eqBands !== undefined;
         let corr: Float64Array | null = null;
-        if (undoing && eqBands.length) {
-          const bf = new Float64Array(n);
-          for (let i = 0; i < n; i++) bf[i] = binF(i);
-          corr = composedCurveDb(eqBands, bf);
+        if (undoing) {
+          if (corrCache === null || corrCache.to.length !== n || lastEqBands !== eqBands || lastPreampDb !== preampDb) {
+            const bf = new Float64Array(n);
+            for (let i = 0; i < n; i++) bf[i] = binF(i);
+            const to = new Float64Array(n);
+            if (eqBands.length) {
+              const curve = composedCurveDb(eqBands, bf);
+              for (let i = 0; i < n; i++) to[i] = curve[i] + preampDb;
+            } else {
+              to.fill(preampDb);
+            }
+            corrCache = retargetFadingCurve(corrCache, to); // handles a length mismatch (a resize) itself
+            lastEqBands = eqBands;
+            lastPreampDb = preampDb;
+          }
+          corr = stepFadingCurve(corrCache, dt * 1000);
         }
 
         const [nr, ng, nb] = SPEC_NEUTRAL;
@@ -631,7 +652,7 @@ export function EqChart({
           yStrokeSmooth = grown;
         }
         for (let i = 0; i < n; i++) {
-          const db = undoing ? spectrum.db[i] - (corr ? corr[i] : 0) - preampDb : spectrum.db[i];
+          const db = undoing ? spectrum.db[i] - corr![i] : spectrum.db[i];
           xScratch[i] = fx(i);
           yScratch[i] = sy(db);
         }

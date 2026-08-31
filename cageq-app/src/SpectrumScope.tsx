@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
-import { composedCurveDb } from "./biquad";
+import { composedCurveDb, type FadingCurve, retargetFadingCurve, stepFadingCurve } from "./biquad";
 import { fcHue } from "./fcColor";
 import { spectrumStream } from "./streams";
 import { createPhosphor } from "./phosphor";
@@ -41,13 +41,7 @@ const DEFAULTS: Params = { trailTau: 0.18, tail: 12, glow: 0.225, undistort: tru
 // twice now.
 const TAU_REF = 0.1;
 
-/** Cache for the per-bin correction curve (filter response + preamp, dB), keyed by reference/value
- *  so it's rebuilt only when the EQ or bin layout actually changes, not on every 60 fps frame. */
-type CorrCache = { filters: ScopeEq["filters"] | null; preampDb: number; n: number; arr: Float64Array };
-function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: SpectrumData): Float64Array {
-  const c = cache.current;
-  if (c && c.filters === eq.filters && c.preampDb === eq.preampDb && c.n === s.db.length) return c.arr;
-  const n = s.db.length;
+function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number): Float64Array {
   const arr = new Float64Array(n);
   if (eq.filters.length) {
     const lnF0 = Math.log(s.f_min);
@@ -59,8 +53,29 @@ function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: Spe
   } else {
     arr.fill(eq.preampDb); // Dry: no filters, still undo the §4.1 loudness-match preamp
   }
-  cache.current = { filters: eq.filters, preampDb: eq.preampDb, n, arr };
   return arr;
+}
+
+/** Cache for the per-bin correction curve (filter response + preamp, dB): rebuilt only when the
+ *  EQ or bin layout actually changes, not on every 60 fps frame, and retargeted through a
+ *  `FadingCurve` (biquad.ts) rather than swapped outright — snapping it the instant the EQ
+ *  changes used to manufacture a one-frame jump in the drawn trace that isn't in the real
+ *  (crossfaded) audio at all, see `apo-switch-artifacts` memory, "NOT a bug". */
+type CorrCache = { filters: ScopeEq["filters"] | null; preampDb: number; curve: FadingCurve };
+function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: SpectrumData, dtMs: number): Float64Array {
+  const c = cache.current;
+  const n = s.db.length;
+  if (!c || c.curve.to.length !== n) {
+    const to = computeCorrectionCurve(eq, s, n);
+    cache.current = { filters: eq.filters, preampDb: eq.preampDb, curve: retargetFadingCurve(null, to) };
+    return to;
+  }
+  if (c.filters !== eq.filters || c.preampDb !== eq.preampDb) {
+    c.filters = eq.filters;
+    c.preampDb = eq.preampDb;
+    c.curve = retargetFadingCurve(c.curve, computeCorrectionCurve(eq, s, n));
+  }
+  return stepFadingCurve(c.curve, dtMs);
 }
 const REF_SIZE = 512;
 const GRID_ALPHA = 0.22;
@@ -573,7 +588,7 @@ export function SpectrumScope({
       // 2D context has no decay of its own the way the trail canvas does.
       markCtx.clearRect(0, 0, W, H);
       if (n >= 2 && s && s.signal) {
-        const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s) : null;
+        const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s, dt * 1000) : null;
         const key = `${plotTop}|${plotBot}|${ar},${ag},${ab}|${p.glow}`;
         if (key !== gradKey) {
           gradKey = key;
