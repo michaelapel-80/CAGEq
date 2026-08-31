@@ -400,6 +400,14 @@ impl Cascade {
         self.dry_fade_left = self.dry_fade_frames;
     }
 
+
+    /// Override the crossfade length. **Tests only** — the fade is matched to EqualizerAPO's
+    /// measured 15 ms and is not a runtime knob; this exists so the relationship between fade
+    /// length and sideband spread can be measured rather than argued about.
+    #[cfg(test)]
+    pub fn set_fade_frames_for_test(&mut self, frames: u32) {
+        self.dry_fade_frames = frames.max(1);
+    }
     /// Is the dry signal currently selected (or being faded to)?
     pub fn is_dry(&self) -> bool {
         self.dry_to > 0.5
@@ -1444,6 +1452,77 @@ mod tests {
             "worst mid-fade sag: {:.2} dB at {:.0} Hz (phase {:+.0} deg)",
             worst.1, worst.0, worst.2,
         );
+    }
+
+    /// Sideband spread against fade length — the measurement that actually matters.
+    ///
+    /// A crossfade is an amplitude modulation, so it produces sidebands whose width scales as
+    /// 1/duration. That is what a spectrum display shows during a switch, and it is a
+    /// different quantity from the phase-cancellation sag measured elsewhere (0.05 dB, and
+    /// irrelevant here). Recorded evidence: EqAPO at 15 ms puts -83 dB at 200 Hz, ours at 8 ms
+    /// put -58 dB — 25 dB worse, purely from being quicker.
+    #[test]
+    fn shorter_fades_spread_further_up_the_spectrum() {
+        const N: usize = 8192;
+        let wet: Vec<Coeffs> =
+            realistic_correction(6.0).iter().map(|b| coefficients(b, FS)).collect();
+
+        let measure = |fade_frames: u32| -> Vec<(f64, f64)> {
+            let mut c = Cascade::new(1, FS);
+            assert!(c.apply_coeffs(&wet, -9.0));
+            c.settle();
+            c.set_fade_frames_for_test(fade_frames);
+            let warm = tone(50.0, 0, 960 * 40, 0.5);
+            let mut sink = vec![0.0f32; warm.len()];
+            c.process(&warm, &mut sink, warm.len());
+
+            // Switch at the middle of the analysed window, as the recording's centre was.
+            let pre = tone(50.0, 960 * 40, N / 2, 0.5);
+            let mut a = vec![0.0f32; N / 2];
+            c.process(&pre, &mut a, N / 2);
+            assert!(c.apply_coeffs(&[], -6.0));
+            let post = tone(50.0, 960 * 40 + N / 2, N / 2, 0.5);
+            let mut b = vec![0.0f32; N / 2];
+            c.process(&post, &mut b, N / 2);
+
+            let seg: Vec<f64> = a
+                .iter()
+                .chain(b.iter())
+                .enumerate()
+                .map(|(i, &s)| {
+                    let w = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / N as f64).cos();
+                    s as f64 * w
+                })
+                .collect();
+            let mag = |hz: f64| {
+                let k = (hz * N as f64 / FS).round();
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                for (i, &s) in seg.iter().enumerate() {
+                    let t = 2.0 * std::f64::consts::PI * k * i as f64 / N as f64;
+                    re += s * t.cos();
+                    im -= s * t.sin();
+                }
+                (re * re + im * im).sqrt()
+            };
+            let fund = mag(50.0).max(1e-12);
+            [100.0, 150.0, 200.0, 300.0, 500.0]
+                .iter()
+                .map(|&hz| (hz, 20.0 * (mag(hz) / fund).log10()))
+                .collect()
+        };
+
+        let short = measure((0.008 * FS) as u32);
+        let long = measure((0.015 * FS) as u32);
+        eprintln!("      8 ms          15 ms");
+        for (a, b) in short.iter().zip(&long) {
+            eprintln!("{:5.0} Hz  {:7.1} dB  {:7.1} dB", a.0, a.1, b.1);
+        }
+        // NO assertion on the far sidebands: the expected result — longer fade, less spread —
+        // does NOT hold. 8 ms and 15 ms differ by 0.2 dB at 300 Hz. Whatever puts energy up
+        // there is not the fade envelope, so duration is not the lever it appeared to be.
+        // Recorded evidence says EqAPO sits 25 dB lower at 200 Hz than we do, and this test
+        // shows we cannot close that by slowing down.
+        assert!(short[0].1 < -20.0, "sanity: the fundamental should dominate");
     }
     /// Does the crossfade itself bloom? Measures the output envelope through the fade.
     ///

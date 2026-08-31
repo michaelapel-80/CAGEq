@@ -102,6 +102,7 @@ fn main() {
     // "the level differs from 200 ms hence" instead fires *before* the move starts, and then
     // reports its first millisecond as though it were the whole thing.
     let ctx = (100 / HOP_MS).max(2); // 100 ms of settled level either side
+    let mut transition_points: Vec<usize> = Vec::new();
     let mut found = 0;
     let mut k = ctx + 1;
     while k + ctx < env.len() {
@@ -141,6 +142,7 @@ fn main() {
             20.0 * before.max(1e-12).log10(),
             20.0 * after.max(1e-12).log10(),
         );
+        transition_points.push(steep * hop);
         found += 1;
         k = end + ctx * 2;
         if found == 6 {
@@ -149,6 +151,44 @@ fn main() {
     }
     if found == 0 {
         println!("  (none: no sustained level change of 1 dB or more)");
+    }
+
+    // Spectrum around the first transition, so two recordings can be compared directly.
+    //
+    // A crossfade is an amplitude modulation, and modulation makes sidebands — a separate
+    // mechanism from the phase cancellation measured elsewhere, and the one that actually
+    // shows on a spectrum display. Absolute numbers here include the analysis window's own
+    // leakage from the level step, which cannot be separated out; but the SAME analysis
+    // applied to two files is directly comparable, and that is the question being asked.
+    if let Some(&centre) = transition_points.first() {
+        const N: usize = 8192; // 5.9 Hz bins at 48 kHz
+        let start = centre.saturating_sub(N / 2);
+        if start + N <= left.len() {
+            let w: Vec<f64> = (0..N)
+                // Hann: without a window the level step's leakage swamps everything and every
+                // recording looks identical.
+                .map(|i| {
+                    0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / N as f64).cos()
+                })
+                .collect();
+            let seg: Vec<f64> =
+                (0..N).map(|i| left[start + i] as f64 * w[i]).collect();
+            let bin_at = |hz: f64| (hz * N as f64 / rate as f64).round() as usize;
+            let mag = |k: usize| {
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                for (i, &s) in seg.iter().enumerate() {
+                    let a = 2.0 * std::f64::consts::PI * k as f64 * i as f64 / N as f64;
+                    re += s * a.cos();
+                    im -= s * a.sin();
+                }
+                (re * re + im * im).sqrt()
+            };
+            let fund = mag(bin_at(50.0)).max(1e-12);
+            println!("spectrum around the transition (re 50 Hz, Hann {N}):");
+            for hz in [100.0, 150.0, 200.0, 300.0, 500.0, 1000.0, 2000.0] {
+                println!("  {hz:7.0} Hz  {:6.1} dB", 20.0 * (mag(bin_at(hz)) / fund).log10());
+            }
+        }
     }
     println!("level trace (10 ms blocks, dBFS):");
     let block = rate as usize / 100;
