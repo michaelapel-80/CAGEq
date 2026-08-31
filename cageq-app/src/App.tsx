@@ -2383,6 +2383,7 @@ function App() {
                   <ApoSetup
                     endpointId={selectedDevice?.eqapo_pattern ?? null}
                     endpointName={selectedDevice?.name ?? null}
+                    eqapoEnabled={selectedDevice?.eqapo_enabled ?? false}
                     sampleRate={sampleRate}
                     onOpenOutputSettings={openOutputSettings}
                   />
@@ -2464,12 +2465,6 @@ function App() {
       {!loading && resumeDeviceMissing && (
         <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.8em" }}>
           ⚠ {tr("app.deviceUnavailable", { device: selectedDevice?.name ?? "" })}
-        </p>
-      )}
-
-      {!loading && selectedDevice && !selectedDevice.eqapo_enabled && (
-        <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.8em" }}>
-          <Trans i18nKey="app.apoWarning" components={[<em />]} />
         </p>
       )}
 

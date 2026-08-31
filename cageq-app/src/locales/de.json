@@ -10,8 +10,7 @@
 
   "app": {
     "loading": "AutoEq-Engine wird gestartet…",
-    "deviceUnavailable": "Das Ausgabegerät aus deiner letzten Sitzung ist derzeit nicht verfügbar (z. B. getrennt) — {{device}} wird stattdessen verwendet. Verbinde es wieder und starte CAGEq neu, um zurückzuwechseln.",
-    "apoWarning": "⚠ Equalizer APO ist auf diesem Gerät nicht installiert, ein EQ hier bleibt also wirkungslos. Aktiviere es für dieses Gerät mit dem <0>Configurator</0> von Equalizer APO (DeviceSelector.exe) und starte neu."
+    "deviceUnavailable": "Das Ausgabegerät aus deiner letzten Sitzung ist derzeit nicht verfügbar (z. B. getrennt) — {{device}} wird stattdessen verwendet. Verbinde es wieder und starte CAGEq neu, um zurückzuwechseln."
   },
 
   "header": {
@@ -166,11 +165,13 @@
   "apoSetup": {
     "triggerTitleApo": "CAGEqs eigene Audio-Engine läuft",
     "triggerTitleEqapo": "Equalizer APO läuft — CAGEqs eigene Audio-Engine ist verfügbar",
+    "triggerTitleUnattached": "⚠ Diesem Gerät ist kein Audioeffekt zugewiesen — der EQ hat gerade keine Wirkung",
     "triggerTitleAttention": "CAGEqs eigene Audio-Engine braucht Aufmerksamkeit",
     "triggerLabel": "Engine",
     "title": "CAGEq-Audio-Engine",
     "loading": "Wird geprüft…",
     "intro": "CAGEq kann die Audiobearbeitung selbst übernehmen, statt den Umweg über Equalizer APO zu gehen. Das entfernt die Abhängigkeit und macht Filteränderungen im laufenden Betrieb sauberer.",
+    "neitherAttached": "⚠ Equalizer APO ist diesem Gerät ebenfalls nicht zugewiesen, aktuell wirkt also kein Filter aus einer der beiden Engines — der EQ hat erst Wirkung, sobald eine davon aktiv ist.",
     "stepRegister": "CAGEqs Audioeffekt in Windows registrieren",
     "stepGate": "Windows das Laden erlauben",
     "stepAttach": "Mit {{device}} verbinden",

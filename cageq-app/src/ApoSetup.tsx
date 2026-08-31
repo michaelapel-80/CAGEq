@@ -37,6 +37,10 @@ type Props = {
   endpointName: string | null;
   /** Live playback sample rate for the selected endpoint, if known. */
   sampleRate: number | null;
+  /** Whether Equalizer APO itself is enabled for this device (its own DeviceSelector setting,
+      independent of anything CAGEq tracks) — needed to tell "EqAPO is handling it" apart from
+      "nothing is attached at all, this EQ has zero effect right now". */
+  eqapoEnabled: boolean;
   /** Opens the endpoint's page in Windows Sound settings. Lives here rather than in the header
       because the resampler turned out clean and most Bluetooth devices don't offer a rate
       choice anyway — not worth its own permanent icon, just a link inside this dialog. */
@@ -46,7 +50,7 @@ type Props = {
 // Windows playback rate, shown compactly (48 kHz, 44.1 kHz, 96 kHz…).
 const fmtRate = (hz: number) => `${+(hz / 1000).toFixed(1)} kHz`;
 
-export default function ApoSetup({ endpointId, endpointName, sampleRate, onOpenOutputSettings }: Props) {
+export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEnabled, onOpenOutputSettings }: Props) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<ApoSetupStatus | null>(null);
@@ -80,18 +84,25 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, onOpenO
   // difference between "finished" and a user wondering why it made no difference.
   const needsRestart = status !== null && attached && !inert && !status.active_backend_is_apo;
   const settled = status !== null && attached && !inert && status.active_backend_is_apo;
-  // Trigger color: which backend is actually processing audio right now, or whether CAGEq's
-  // own engine is stuck in a state that looks attached but silently isn't running — attached
-  // with effects switched off, or attached while the unsigned-effects gate is still closed
-  // (the exact "Windows silently skips the APO" failure mode found during setup-tool testing).
-  const engineState: "apo" | "eqapo" | "attention" =
+  // Why the trigger looks the way it does — which backend is actually processing audio right
+  // now, or why neither is: attached-but-inert, attached while the unsigned-effects gate is
+  // still closed (the exact "Windows silently skips the APO" failure mode found during
+  // setup-tool testing), the setup helper being missing, or neither CAGEq nor Equalizer APO
+  // attached to this device at all — which means every filter in this app currently has zero
+  // effect on what's actually being heard, the one case worth a distinct message for.
+  const engineReason: "apo" | "eqapo" | "helperMissing" | "broken" | "unattached" =
     status === null
       ? "eqapo"
-      : !status.helper_available || (attached && (inert || !status.gate_open))
-        ? "attention"
-        : settled
-          ? "apo"
-          : "eqapo";
+      : !status.helper_available
+        ? "helperMissing"
+        : attached && (inert || !status.gate_open)
+          ? "broken"
+          : settled
+            ? "apo"
+            : eqapoEnabled
+              ? "eqapo"
+              : "unattached";
+  const engineState: "apo" | "eqapo" | "attention" = engineReason === "apo" || engineReason === "eqapo" ? engineReason : "attention";
 
   async function run(action: string) {
     setBusy(true);
@@ -120,11 +131,13 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, onOpenO
   }
 
   const triggerTitle = t(
-    engineState === "apo"
-      ? "apoSetup.triggerTitleApo"
-      : engineState === "attention"
-        ? "apoSetup.triggerTitleAttention"
-        : "apoSetup.triggerTitleEqapo",
+    {
+      apo: "apoSetup.triggerTitleApo",
+      eqapo: "apoSetup.triggerTitleEqapo",
+      unattached: "apoSetup.triggerTitleUnattached",
+      helperMissing: "apoSetup.triggerTitleAttention",
+      broken: "apoSetup.triggerTitleAttention",
+    }[engineReason],
   );
 
   return (
@@ -181,6 +194,11 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, onOpenO
             ) : (
               <>
                 <p>{t("apoSetup.intro")}</p>
+
+                {/* Equalizer APO not being attached either means no filter from either engine
+                    is currently applied — worth calling out here since the checklist below
+                    only tracks CAGEq's own steps and wouldn't otherwise surface that. */}
+                {engineReason === "unattached" && <p className="warn">{t("apoSetup.neitherAttached")}</p>}
 
                 <ul className="setup-steps">
                   <Step done={status.registered_dll !== null && status.dll_present} label={t("apoSetup.stepRegister")} />
