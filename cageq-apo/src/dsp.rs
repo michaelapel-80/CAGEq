@@ -1348,6 +1348,103 @@ mod tests {
             eprintln!("    {hz:6.1} Hz  {db:6.1} dB");
         }
     }
+
+    /// How much does wet/dry **phase mismatch** cost during a crossfade?
+    ///
+    /// A crossfade sums two sinusoids of the same frequency but different phase — the filter
+    /// shifts phase, dry does not. Mid-fade they partly cancel, so the amplitude sags below a
+    /// straight interpolation between the endpoints. That is inherent to mixing signals and no
+    /// choice of duration or curve removes it; only not mixing does.
+    #[test]
+    fn how_much_does_wet_dry_phase_mismatch_cost() {
+        for (label, bands) in [
+            ("gentle 5-band", realistic_correction(6.0)),
+            (
+                "21-band, resonant low",
+                (0..21)
+                    .map(|i| {
+                        peaking(40.0 * 1.35_f64.powi(i), if i % 2 == 0 { 4.0 } else { -3.0 }, 1.4)
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            // Complex response at 50 Hz: magnitude and phase of the wet path.
+            let (mut re, mut im) = (1.0f64, 0.0f64);
+            for b in &bands {
+                let c = coefficients(b, FS);
+                let w = 2.0 * std::f64::consts::PI * 50.0 / FS;
+                let (c1, s1) = (w.cos(), w.sin());
+                let (c2, s2) = ((2.0 * w).cos(), (2.0 * w).sin());
+                let nr = c.b0 + c.b1 * c1 + c.b2 * c2;
+                let ni = -(c.b1 * s1 + c.b2 * s2);
+                let dr = 1.0 + c.a1 * c1 + c.a2 * c2;
+                let di = -(c.a1 * s1 + c.a2 * s2);
+                let den = dr * dr + di * di;
+                let (hr, hi) = ((nr * dr + ni * di) / den, (ni * dr - nr * di) / den);
+                let (pr, pi) = (re * hr - im * hi, re * hi + im * hr);
+                re = pr;
+                im = pi;
+            }
+            let wet_mag = (re * re + im * im).sqrt();
+            let phase_deg = im.atan2(re).to_degrees();
+
+            // Mid-fade the output is 0.5*wet + 0.5*dry, as complex phasors.
+            let dry_mag = 1.0;
+            let mid = (((0.5 * re + 0.5 * dry_mag).powi(2)) + (0.5 * im).powi(2)).sqrt();
+            // What a level-only interpolation would have given.
+            let ideal = 0.5 * wet_mag + 0.5 * dry_mag;
+            let sag_db = 20.0 * (mid / ideal).log10();
+            eprintln!(
+                "{label}: wet {:.1} dB at {phase_deg:+.0} deg -> mid-fade sags {sag_db:+.2} dB",
+                20.0 * wet_mag.log10(),
+            );
+        }
+    }
+
+    /// The same question across the spectrum, not just at the test tone.
+    ///
+    /// 50 Hz happens to be a frequency where this correction has almost no phase shift. Near a
+    /// band's centre a biquad swings toward +/-90 degrees, and there the wet and dry phasors
+    /// genuinely fight. This finds the worst case, which is what decides whether crossfading is
+    /// sound for *music* or only for a tone that dodges the problem.
+    #[test]
+    fn where_does_wet_dry_phase_mismatch_hurt_most() {
+        let bands: Vec<Band> = (0..21)
+            .map(|i| peaking(40.0 * 1.35_f64.powi(i), if i % 2 == 0 { 4.0 } else { -3.0 }, 1.4))
+            .collect();
+        let coeffs: Vec<Coeffs> = bands.iter().map(|b| coefficients(b, FS)).collect();
+
+        let mut worst = (0.0f64, 0.0f64, 0.0f64); // hz, sag_db, phase_deg
+        for k in 0..400 {
+            let hz = 20.0 * (20_000.0f64 / 20.0).powf(k as f64 / 399.0);
+            let (mut re, mut im) = (1.0f64, 0.0f64);
+            for c in &coeffs {
+                let w = 2.0 * std::f64::consts::PI * hz / FS;
+                let (c1, s1) = (w.cos(), w.sin());
+                let (c2, s2) = ((2.0 * w).cos(), (2.0 * w).sin());
+                let nr = c.b0 + c.b1 * c1 + c.b2 * c2;
+                let ni = -(c.b1 * s1 + c.b2 * s2);
+                let dr = 1.0 + c.a1 * c1 + c.a2 * c2;
+                let di = -(c.a1 * s1 + c.a2 * s2);
+                let den = dr * dr + di * di;
+                let (hr, hi) = ((nr * dr + ni * di) / den, (ni * dr - nr * di) / den);
+                let (pr, pi) = (re * hr - im * hi, re * hi + im * hr);
+                re = pr;
+                im = pi;
+            }
+            let wet_mag = (re * re + im * im).sqrt();
+            let mid = ((0.5 * re + 0.5).powi(2) + (0.5 * im).powi(2)).sqrt();
+            let ideal = 0.5 * wet_mag + 0.5;
+            let sag_db = 20.0 * (mid / ideal).log10();
+            if sag_db < worst.1 {
+                worst = (hz, sag_db, im.atan2(re).to_degrees());
+            }
+        }
+        eprintln!(
+            "worst mid-fade sag: {:.2} dB at {:.0} Hz (phase {:+.0} deg)",
+            worst.1, worst.0, worst.2,
+        );
+    }
     /// Does the crossfade itself bloom? Measures the output envelope through the fade.
     ///
     /// A crossfade mixes two signals with **different phase responses**, so mid-fade they
