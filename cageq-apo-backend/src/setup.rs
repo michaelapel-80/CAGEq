@@ -540,7 +540,7 @@ fn forget_displaced(endpoint_id: &str) {
 #[cfg(windows)]
 fn attach(endpoint_id: &str) -> Result<(), SetupError> {
     use winreg::RegKey;
-    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE};
 
     let path = fx_key(endpoint_id)?;
     // MMDevices is owned by TrustedInstaller, so even an administrator cannot write here
@@ -549,7 +549,7 @@ fn attach(endpoint_id: &str) -> Result<(), SetupError> {
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let fx = hklm
-        .open_subkey_with_flags(&path, KEY_SET_VALUE)
+        .open_subkey_with_flags(&path, KEY_QUERY_VALUE | KEY_SET_VALUE)
         .map_err(|_| SetupError::NoSuchEndpoint(endpoint_id.to_string()))?;
 
     // Take over every effect slot, remembering what was in each.
@@ -602,13 +602,13 @@ fn attach(endpoint_id: &str) -> Result<(), SetupError> {
 #[cfg(windows)]
 fn detach(endpoint_id: &str) -> Result<(), SetupError> {
     use winreg::RegKey;
-    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE};
 
     let path = fx_key(endpoint_id)?;
     take_ownership(&path)?;
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let fx = hklm
-        .open_subkey_with_flags(&path, KEY_SET_VALUE)
+        .open_subkey_with_flags(&path, KEY_QUERY_VALUE | KEY_SET_VALUE)
         .map_err(|_| SetupError::NoSuchEndpoint(endpoint_id.to_string()))?;
 
     // Only our own slot value is removed. The processing-modes declaration is left alone:
@@ -674,7 +674,7 @@ fn start_audio() -> Result<(), SetupError> {
 #[cfg(windows)]
 fn reset() -> Result<(), SetupError> {
     use winreg::RegKey;
-    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE};
 
     stop_audio()?;
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
@@ -694,7 +694,7 @@ fn reset() -> Result<(), SetupError> {
             problems.push(format!("{}: could not take ownership: {e}", d.name));
             continue;
         }
-        let fx = match hklm.open_subkey_with_flags(&path, KEY_SET_VALUE) {
+        let fx = match hklm.open_subkey_with_flags(&path, KEY_QUERY_VALUE | KEY_SET_VALUE) {
             Ok(fx) => fx,
             Err(e) => {
                 problems.push(format!("{}: could not open FxProperties for writing: {e}", d.name));

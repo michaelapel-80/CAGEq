@@ -68,7 +68,9 @@ fn main() -> std::process::ExitCode {
             // The audio service restart does not itself start a stream, and audiodg only loads
             // APOs when one is built. Saying so prevents the "it didn't work" report that is
             // really "nothing was playing yet".
-            out.line("Play audio on the endpoint to let Windows load the effect.");
+            if !matches!(action, Action::Reset | Action::Detach(_) | Action::UnregisterServer | Action::CloseGate) {
+                out.line("Play audio on the endpoint to let Windows load the effect.");
+            }
             // A setup command that does not show the result leaves the user to go and check,
             // which is how a half-applied state goes unnoticed.
             out.line("");
