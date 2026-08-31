@@ -46,6 +46,17 @@ const MODE_DEFAULT: &str = "{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}";
 /// The slot to attach in, as an index into the per-slot property names above.
 const EFX_SLOT: &str = "7";
 
+/// Every effect slot index, in the order Windows evaluates them.
+///
+/// `register.ps1` cleared the slots CAGEq does not occupy, and the Rust rewrite dropped that.
+/// The consequence, found on a real machine: Equalizer APO sitting in slots 5 and 6 while
+/// CAGEq sat in 7, **all three running**. Audio was filtered by both corrections at once, so
+/// "switch to dry" left EqAPO's still applied and every comparison measured the wrong thing.
+///
+/// EqAPO does NOT use the EFX slot, so attaching does not displace it — it stacks with it,
+/// which is worse because nothing looks broken.
+const ALL_SLOTS: [&str; 5] = ["1", "2", "5", "6", "7"];
+
 
 /// Where the APO DLL is installed, machine-wide: `%ProgramFiles%\CAGEq`.
 ///
@@ -126,6 +137,48 @@ impl SetupStatus {
 }
 
 
+
+/// Where a displaced effect registration is remembered, so `detach` can put it back.
+///
+/// Attaching writes CAGEq's CLSID into the endpoint's EFX slot — **the same slot Equalizer
+/// APO uses**. Overwriting it without recording what was there destroys the user's existing
+/// setup silently and permanently: EqAPO stops processing, nothing says why, and detaching
+/// CAGEq later leaves the endpoint with no effect at all rather than the one it had.
+/// `register.ps1` backed the slots up for exactly this reason; the Rust rewrite dropped it.
+const DISPLACED_KEY: &str = r"SOFTWARE\CAGEq\apo\displaced";
+
+/// What CAGEq displaced on `endpoint_id`: `slot=clsid` pairs, comma separated.
+#[cfg(windows)]
+pub fn displaced_effect(endpoint_id: &str) -> Option<String> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    let id = cageq_apo::config::normalize_endpoint_id(endpoint_id)?;
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(DISPLACED_KEY)
+        .ok()?
+        .get_value::<String, _>(&id)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+}
+
+#[cfg(not(windows))]
+pub fn displaced_effect(_endpoint_id: &str) -> Option<String> {
+    None
+}
+
+/// Is this CLSID Equalizer APO's? Used to name what was displaced, since "an effect" is much
+/// less useful than "Equalizer APO" when someone is wondering why their EQ stopped.
+pub fn describe_effect(clsid: &str) -> String {
+    let bare = clsid.trim().trim_start_matches('{').trim_end_matches('}');
+    if cageq_backend::EQAPO_APO_CLSIDS
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(bare))
+    {
+        "Equalizer APO".to_string()
+    } else {
+        format!("another effect ({clsid})")
+    }
+}
 /// One playback endpoint, and what is actually attached to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointStatus {
@@ -140,6 +193,10 @@ pub struct EndpointStatus {
     /// Windows has the endpoint's whole effect chain switched off, so nothing attached to it
     /// runs at all — attaching here looks successful and does nothing.
     pub effects_disabled: bool,
+    /// What CAGEq displaced when it attached here, if anything — Equalizer APO uses the same
+    /// EFX slot, so attaching takes it over. Recorded so `detach` can put it back, and
+    /// reported so the takeover is not invisible.
+    pub displaced: Option<String>,
 }
 
 impl EndpointStatus {
@@ -162,6 +219,7 @@ pub fn endpoints() -> Vec<EndpointStatus> {
             cageq: s.attached.iter().any(|a| a.eq_ignore_ascii_case(&d.id)),
             eqapo: cageq_backend::endpoint_has_apo(&d.id, &cageq_backend::EQAPO_APO_CLSIDS),
             effects_disabled: s.effects_disabled.iter().any(|e| e.eq_ignore_ascii_case(&d.id)),
+            displaced: displaced_effect(&d.id),
             id: d.id,
             name: d.name,
         })
@@ -187,6 +245,13 @@ pub enum Action {
     /// Attach to one endpoint, and clear anything that would stop it running there.
     Attach(String),
     Detach(String),
+    /// Remove CAGEq from the machine entirely: detach every endpoint (restoring whatever was
+    /// displaced), unregister the COM server, delete the installed DLL.
+    ///
+    /// Exists because doing that by hand is several commands in an order that matters, and
+    /// getting it wrong leaves the machine half-configured in ways that are hard to see —
+    /// our CLSID still in a slot, or a registration pointing at a file that is gone.
+    Reset,
 }
 
 impl Action {
@@ -199,6 +264,7 @@ impl Action {
             Action::CloseGate => vec!["close-gate".into()],
             Action::Attach(id) => vec!["attach".into(), id.clone()],
             Action::Detach(id) => vec!["detach".into(), id.clone()],
+            Action::Reset => vec!["reset".into()],
         }
     }
 
@@ -212,6 +278,7 @@ impl Action {
             "close-gate" => Some(Action::CloseGate),
             "attach" => args.get(1).map(|id| Action::Attach(id.clone())),
             "detach" => args.get(1).map(|id| Action::Detach(id.clone())),
+            "reset" => Some(Action::Reset),
             _ => None,
         }
     }
@@ -235,6 +302,10 @@ impl Action {
             }
             Action::Attach(id) => format!("Attach CAGEq's audio effect to device {id}."),
             Action::Detach(id) => format!("Remove CAGEq's audio effect from device {id}."),
+            Action::Reset => {
+                "Remove CAGEq from this machine: detach every device (restoring whatever was \n                 there before), unregister the effect, and delete the installed file."
+                    .into()
+            }
         }
     }
 }
@@ -342,6 +413,9 @@ pub fn perform(action: &Action) -> Result<(), SetupError> {
         // audio service rebuilds a stream's graph.
         Action::Attach(id) => attach(id).and_then(|()| restart_audio()),
         Action::Detach(id) => detach(id).and_then(|()| restart_audio()),
+        // `reset` stops and starts audio itself: it has to touch the DLL, which audiodg holds
+        // open while it lives.
+        Action::Reset => reset(),
     }
 }
 
@@ -437,6 +511,32 @@ fn fx_key(endpoint_id: &str) -> Result<String, SetupError> {
     Ok(format!(r"{RENDER_KEY}\{id}\FxProperties"))
 }
 
+
+/// Record what CAGEq displaced on `endpoint_id`.
+#[cfg(windows)]
+fn remember_displaced(endpoint_id: &str, clsid: &str) -> Result<(), SetupError> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    let Some(id) = cageq_apo::config::normalize_endpoint_id(endpoint_id) else { return Ok(()) };
+    let (key, _) = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .create_subkey(DISPLACED_KEY)
+        .map_err(|e| SetupError::Win32("create the displaced-effect key", e))?;
+    key.set_value(&id, &clsid.to_string())
+        .map_err(|e| SetupError::Win32("record the displaced effect", e))
+}
+
+/// Forget the record once it has been put back.
+#[cfg(windows)]
+fn forget_displaced(endpoint_id: &str) {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
+    let Some(id) = cageq_apo::config::normalize_endpoint_id(endpoint_id) else { return };
+    if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(DISPLACED_KEY, KEY_SET_VALUE)
+    {
+        let _ = key.delete_value(&id);
+    }
+}
 #[cfg(windows)]
 fn attach(endpoint_id: &str) -> Result<(), SetupError> {
     use winreg::RegKey;
@@ -451,6 +551,32 @@ fn attach(endpoint_id: &str) -> Result<(), SetupError> {
     let fx = hklm
         .open_subkey_with_flags(&path, KEY_SET_VALUE)
         .map_err(|_| SetupError::NoSuchEndpoint(endpoint_id.to_string()))?;
+
+    // Take over every effect slot, remembering what was in each.
+    //
+    // Not just our own slot: Windows runs ALL of them, so leaving Equalizer APO in slots 5
+    // and 6 while CAGEq occupies 7 means both corrections apply — the audio is filtered
+    // twice, "switch to dry" leaves the other one running, and nothing anywhere says so.
+    // That silently invalidated every listening comparison made against it.
+    //
+    // Everything removed is recorded first and put back by `detach`, so this is a takeover
+    // for as long as CAGEq is attached, not a deletion.
+    let mut displaced: Vec<String> = Vec::new();
+    for slot in ALL_SLOTS {
+        let name = format!("{FX_CLSID_PROP},{slot}");
+        let Ok(existing) = fx.get_value::<String, _>(&name) else { continue };
+        let existing = existing.trim().to_string();
+        if existing.is_empty() || existing.eq_ignore_ascii_case(CLSID) {
+            continue;
+        }
+        displaced.push(format!("{slot}={existing}"));
+        if slot != EFX_SLOT {
+            let _ = fx.delete_value(&name);
+        }
+    }
+    if !displaced.is_empty() {
+        remember_displaced(endpoint_id, &displaced.join(","))?;
+    }
 
     // Three values, not one. Missing any of them makes Windows skip the APO with no error
     // anywhere — which is precisely how an earlier build appeared to work only on machines
@@ -488,20 +614,34 @@ fn detach(endpoint_id: &str) -> Result<(), SetupError> {
     // Only our own slot value is removed. The processing-modes declaration is left alone:
     // it is not ours specifically, another APO in that slot needs it, and removing something
     // we did not necessarily create is how a "clean uninstall" breaks somebody's audio.
+    // Put every displaced effect back, not just our own slot. Detaching should return the
+    // machine to how it was found — leaving Equalizer APO removed because CAGEq once took
+    // the endpoint over would be the same silent damage in the other direction.
     let slot = format!("{FX_CLSID_PROP},{EFX_SLOT}");
     if fx.get_value::<String, _>(&slot).is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID)) {
         let _ = fx.delete_value(&slot);
     }
+    if let Some(record) = displaced_effect(endpoint_id) {
+        for entry in record.split(',') {
+            let Some((s, clsid)) = entry.split_once('=') else { continue };
+            if !ALL_SLOTS.contains(&s) || clsid.trim().is_empty() {
+                continue;
+            }
+            fx.set_value(format!("{FX_CLSID_PROP},{s}"), &clsid.trim().to_string())
+                .map_err(|e| SetupError::Win32("restore a displaced effect", e))?;
+        }
+        forget_displaced(endpoint_id);
+    }
     Ok(())
 }
 
-#[cfg(windows)]
 /// Stop the audio service, which takes `audiodg` down with it.
 ///
 /// **This is what releases the DLL.** `audiodg` maps an APO for as long as it is alive, so a
 /// registered DLL cannot be replaced while audio is running — the file is in use. Stopping
 /// first is the difference between "replace the DLL" being one step and being a dance of
 /// detach, unregister, restart, retry.
+#[cfg(windows)]
 fn stop_audio() -> Result<(), SetupError> {
     use std::process::Command;
     // Failure is not fatal: the service may already be stopped, which is the state we want.
@@ -514,6 +654,7 @@ fn stop_audio() -> Result<(), SetupError> {
 
 /// Start the audio service again. APOs are loaded when a stream's graph is built, so nothing
 /// takes effect until this happens *and* something plays.
+#[cfg(windows)]
 fn start_audio() -> Result<(), SetupError> {
     use std::process::Command;
     Command::new("net")
@@ -523,6 +664,72 @@ fn start_audio() -> Result<(), SetupError> {
     Ok(())
 }
 
+
+/// Remove CAGEq from every endpoint and from the machine, then say what is left.
+///
+/// Scans **every** slot of **every** endpoint for our CLSID rather than trusting a list:
+/// the point of a reset is to work when the state is already wrong, and a reset that only
+/// undoes what it expected to find is no use precisely when it is needed.
+#[cfg(windows)]
+fn reset() -> Result<(), SetupError> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
+
+    stop_audio()?;
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let mut cleared = 0usize;
+    let mut restored = 0usize;
+
+    for d in cageq_backend::list_render_devices() {
+        let path = format!(r"{RENDER_KEY}\{}\FxProperties", d.id);
+        // Ownership may already be ours from a previous attach, but not necessarily — and a
+        // reset has to work on an endpoint it never successfully attached to.
+        let _ = take_ownership(&path);
+        let Ok(fx) = hklm.open_subkey_with_flags(&path, KEY_SET_VALUE) else { continue };
+
+        for slot in ALL_SLOTS {
+            let name = format!("{FX_CLSID_PROP},{slot}");
+            if fx
+                .get_value::<String, _>(&name)
+                .is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID))
+            {
+                let _ = fx.delete_value(&name);
+                cleared += 1;
+            }
+        }
+        if let Some(record) = displaced_effect(&d.id) {
+            for entry in record.split(',') {
+                let Some((s, clsid)) = entry.split_once('=') else { continue };
+                if !ALL_SLOTS.contains(&s) || clsid.trim().is_empty() {
+                    continue;
+                }
+                if fx
+                    .set_value(format!("{FX_CLSID_PROP},{s}"), &clsid.trim().to_string())
+                    .is_ok()
+                {
+                    restored += 1;
+                }
+            }
+            forget_displaced(&d.id);
+        }
+    }
+
+    // Unregister and remove the installed file. Both are best-effort: a reset that stops at
+    // the first thing already gone would leave the rest behind.
+    let installed = installed_dll();
+    if installed.exists() {
+        let _ = std::process::Command::new("regsvr32")
+            .args(["/s", "/u"])
+            .arg(&installed)
+            .status();
+        let _ = std::fs::remove_file(&installed);
+    }
+    start_audio()?;
+
+    eprintln!("cleared {cleared} slot(s), restored {restored} displaced effect(s)");
+    Ok(())
+}
+#[cfg(windows)]
 fn restart_audio() -> Result<(), SetupError> {
     stop_audio()?;
     start_audio()
@@ -538,9 +745,6 @@ fn restart_audio() -> Result<(), SetupError> {
 /// access, so elevation alone is not enough — an admin has to take ownership first, which
 /// needs `SeTakeOwnershipPrivilege` explicitly enabled on the process token (it is present
 /// but *disabled* by default, and Windows will not enable it implicitly).
-///
-/// Equalizer APO does the same thing for the same reason; there is no gentler route to
-/// attaching an APO to an endpoint.
 #[cfg(windows)]
 fn take_ownership(key_path: &str) -> Result<(), SetupError> {
     use std::io::Error;
@@ -561,6 +765,10 @@ fn take_ownership(key_path: &str) -> Result<(), SetupError> {
         low: u32,
         high: i32,
     }
+    // Layout is an ABI here: without repr(C) the compiler may reorder these and
+    // AdjustTokenPrivileges would read garbage. The fields are written for the OS, never
+    // read back by us, hence the dead_code allowance.
+    #[allow(dead_code)]
     #[repr(C)]
     struct LuidAndAttributes {
         luid: Luid,

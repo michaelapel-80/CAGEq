@@ -69,6 +69,10 @@ fn main() -> std::process::ExitCode {
             // APOs when one is built. Saying so prevents the "it didn't work" report that is
             // really "nothing was playing yet".
             out.line("Play audio on the endpoint to let Windows load the effect.");
+            // A setup command that does not show the result leaves the user to go and check,
+            // which is how a half-applied state goes unnoticed.
+            out.line("");
+            print_status(&mut out);
             out.finish(std::process::ExitCode::SUCCESS)
         }
         Err(e) => {
@@ -158,6 +162,12 @@ fn print_status(out: &mut Output) {
             (false, false) => "-",
         };
         out.line(&format!("  {:<38} {who}", e.name));
+        if let Some(prev) = &e.displaced {
+            out.line(&format!(
+                "      note: CAGEq took this slot from {} — detach restores it",
+                setup::describe_effect(prev),
+            ));
+        }
         if e.double_filtered() {
             out.line("      ** BOTH are attached: audio is filtered TWICE and every");
             out.line("         measurement through this device is wrong. Detach one.");
@@ -199,7 +209,9 @@ fn usage() -> String {
          open-gate           allow Windows to load effects not signed by Microsoft (machine-wide)\n  \
          close-gate          restore Windows' effect-signing requirement\n  \
          attach <guid>       attach the effect to one playback endpoint\n  \
-         detach <guid>       remove it from one playback endpoint\n\n\
+         detach <guid>       remove it from one playback endpoint\n  \
+         reset               remove CAGEq from every device and this machine,\n  \
+                             restoring whatever it displaced\n\n\
          Everything except `status` needs administrator rights, and will ask for them.",
         Action::RegisterServer.describe(),
         Action::UnregisterServer.describe(),
