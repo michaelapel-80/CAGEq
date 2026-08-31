@@ -249,6 +249,19 @@ impl BiquadState {
     }
 }
 
+
+/// Candidate dry-crossfade envelope shapes, for comparing against a real spectrum analysis
+/// (`enginedump` + `wavscan`) rather than reasoning about Fourier decay in the abstract.
+/// **Test-only** — production always uses the documented linear ramp.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+enum DryCurve {
+    Linear,
+    Smoothstep,
+    RaisedCosine,
+    Quintic,
+}
+
 /// The full per-endpoint engine: a preamp and up to [`MAX_BANDS`] biquads, with independent
 /// filter state per channel.
 ///
@@ -312,6 +325,9 @@ pub struct Cascade {
     dry_preamp: f64,
     dry_fade_left: u32,
     dry_fade_frames: u32,
+    /// Which envelope shape [`Cascade::advance_dry`] uses. **Test-only.**
+    #[cfg(test)]
+    dry_curve_for_test: DryCurve,
     /// Precomputed trig for the peak-gain guard — see [`Cascade::would_be_too_loud`].
     grid: Vec<GridPoint>,
 }
@@ -352,6 +368,8 @@ impl Cascade {
             dry_preamp: 1.0,
             dry_fade_left: 0,
             dry_fade_frames: ((DRY_FADE_MS / 1000.0) * sample_rate).round().max(1.0) as u32,
+            #[cfg(test)]
+            dry_curve_for_test: DryCurve::Linear,
             grid,
         }
     }
@@ -422,14 +440,44 @@ impl Cascade {
             return;
         }
         let t = 1.0 - self.dry_fade_left as f64 / self.dry_fade_frames as f64;
-        // Linear, not smoothstep. Both are corner-free enough — the measured discontinuity is
-        // 1.8x the tone's own slew either way, identical to EqAPO's — but smoothstep's
-        // mid-travel rate is 1.5x a straight line's, and perceived abruptness tracks that rate.
-        // The evidence for it is the same experiment: at the same nominal length ours sounded
-        // more abrupt than EqAPO's, whose crossfade is linear.
-        let s = t;
+        // Quintic (`6t^5 - 15t^4 + 10t^3`): continuous first AND second derivative, so only
+        // the third derivative has a corner. Chosen over a straight line by measurement
+        // (`curve_choice_and_dry_switch_spectral_spread`), comparing a spectrum analysis
+        // identical to the one `wavscan` runs on real recordings:
+        //
+        //             linear     quintic    EqAPO (recorded)
+        //     200 Hz  -65.2 dB   -75.3 dB   -83.5 dB
+        //     300 Hz  -77.2 dB   -96.9 dB   -96.4 dB   (ties)
+        //     500 Hz  -87.1 dB  -115.7 dB  -109.8 dB   (beats it)
+        //
+        // A linear ramp's envelope has a discontinuous first derivative — a corner at each
+        // end — and that corner is itself broadband; each additional continuous derivative
+        // order buys roughly another octave of far-field rolloff. Costs nothing in return: the
+        // worst sample-to-sample jump is 1.7x the tone's own slew for every curve tested,
+        // identical to linear.
+        //
+        // This does NOT reuse RAMP_MS's finding that smoothstep measured *worse* than linear
+        // for the COEFFICIENT ramp — that was interpolating IIR coefficients, where the cost is
+        // the filter's instantaneous response changing at a different rate, not a sideband
+        // question. Mixing two full signals is a different mechanism.
+        #[cfg(test)]
+        let s = match self.dry_curve_for_test {
+            DryCurve::Linear => t,
+            DryCurve::Smoothstep => t * t * (3.0 - 2.0 * t),
+            DryCurve::RaisedCosine => 0.5 - 0.5 * (std::f64::consts::PI * t).cos(),
+            DryCurve::Quintic => t * t * t * (t * (t * 6.0 - 15.0) + 10.0),
+        };
+        #[cfg(not(test))]
+        let s = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
         self.dry_mix = self.dry_from + (self.dry_to - self.dry_from) * s;
     }
+
+    /// Select the dry-crossfade envelope shape. **Test-only** — see [`DryCurve`].
+    #[cfg(test)]
+    fn set_dry_curve_for_test(&mut self, curve: DryCurve) {
+        self.dry_curve_for_test = curve;
+    }
+
     /// Jump straight to the target, abandoning any ramp in progress.
     ///
     /// For configuration applied when there is nothing to protect — the persistent config at
@@ -1523,6 +1571,121 @@ mod tests {
         // Recorded evidence says EqAPO sits 25 dB lower at 200 Hz than we do, and this test
         // shows we cannot close that by slowing down.
         assert!(short[0].1 < -20.0, "sanity: the fundamental should dominate");
+    }
+
+    /// **Does a smoother crossfade curve reduce the sideband spread a spectrum analyser
+    /// shows during the switch?**
+    ///
+    /// Recorded evidence puts the engine's dry transition 15-25 dB above Equalizer APO's at
+    /// 200-300 Hz even with the fade length matched (`enginedump`, `f76060a`). Duration alone
+    /// does not explain it (`shorter_fades_spread_further_up_the_spectrum`, above). The
+    /// remaining candidate is the envelope SHAPE: a linear ramp has a discontinuous first
+    /// derivative — a corner at each end — and a corner is itself a broadband event, the same
+    /// reasoning that made a linear coefficient ramp beat an instant switch. A curve with a
+    /// continuous derivative (smoothstep) or a continuous second derivative (quintic) should
+    /// fall off faster in frequency.
+    ///
+    /// This does NOT reuse `RAMP_MS`'s finding that smoothstep measured *worse* than linear —
+    /// that was interpolating IIR COEFFICIENTS, where the audible cost is the filter's
+    /// instantaneous response changing at a different rate, not a sideband question. Mixing
+    /// two full signals is a different mechanism, tested here on its own terms with the same
+    /// Hann-windowed DFT `wavscan` uses on the real recordings, so the numbers are the same
+    /// kind of number.
+    #[test]
+    fn curve_choice_and_dry_switch_spectral_spread() {
+        const N: usize = 8192;
+        let wet: Vec<Coeffs> =
+            realistic_correction(6.0).iter().map(|b| coefficients(b, FS)).collect();
+
+        let measure = |curve: DryCurve| -> Vec<(f64, f64)> {
+            let mut c = Cascade::new(1, FS);
+            assert!(c.apply_coeffs(&wet, -9.0));
+            c.settle();
+            c.set_dry_curve_for_test(curve);
+            let warm = tone(50.0, 0, 960 * 40, 0.5);
+            let mut sink = vec![0.0f32; warm.len()];
+            c.process(&warm, &mut sink, warm.len());
+
+            // Switch at the centre of the analysis window, matching `enginedump`.
+            let pre = tone(50.0, 960 * 40, N / 2, 0.5);
+            let mut a = vec![0.0f32; N / 2];
+            c.process(&pre, &mut a, N / 2);
+            assert!(c.apply_coeffs(&[], -6.0));
+            let post = tone(50.0, 960 * 40 + N / 2, N / 2, 0.5);
+            let mut b = vec![0.0f32; N / 2];
+            c.process(&post, &mut b, N / 2);
+
+            // Hann window: without it the level step's own leakage swamps everything and
+            // every curve looks identical — the same trap `wavscan` was built to avoid.
+            let seg: Vec<f64> = a
+                .iter()
+                .chain(b.iter())
+                .enumerate()
+                .map(|(i, &s)| {
+                    let w = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / N as f64).cos();
+                    s as f64 * w
+                })
+                .collect();
+            let mag = |hz: f64| {
+                let k = (hz * N as f64 / FS).round();
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                for (i, &s) in seg.iter().enumerate() {
+                    let t = 2.0 * std::f64::consts::PI * k * i as f64 / N as f64;
+                    re += s * t.cos();
+                    im -= s * t.sin();
+                }
+                (re * re + im * im).sqrt()
+            };
+            let fund = mag(50.0).max(1e-12);
+            [100.0, 150.0, 200.0, 300.0, 500.0]
+                .iter()
+                .map(|&hz| (hz, 20.0 * (mag(hz) / fund).log10()))
+                .collect()
+        };
+
+        // Discontinuity check alongside the spectrum: whichever curve wins must still be at
+        // least as free of a click as linear already measured (1.7-1.8x the tone's own slew).
+        let jump = |curve: DryCurve| -> f64 {
+            let mut c = Cascade::new(1, FS);
+            assert!(c.apply_coeffs(&wet, -9.0));
+            c.settle();
+            c.set_dry_curve_for_test(curve);
+            let warm = tone(50.0, 0, 960 * 40, 0.5);
+            let mut sink = vec![0.0f32; warm.len()];
+            c.process(&warm, &mut sink, warm.len());
+            assert!(c.apply_coeffs(&[], -6.0));
+            let cont = tone(50.0, 960 * 40, 960, 0.5);
+            let mut out = vec![*sink.last().unwrap()];
+            out.extend(std::iter::repeat(0.0f32).take(960));
+            c.process(&cont, &mut out[1..], 960);
+            worst_jump_ratio(&out)
+        };
+
+        let linear = measure(DryCurve::Linear);
+        let smoothstep = measure(DryCurve::Smoothstep);
+        let raised_cosine = measure(DryCurve::RaisedCosine);
+        let quintic = measure(DryCurve::Quintic);
+
+        eprintln!("      linear    smoothstep  raised-cos  quintic");
+        for i in 0..linear.len() {
+            eprintln!(
+                "{:5.0} Hz  {:7.1} dB  {:7.1} dB  {:7.1} dB  {:7.1} dB",
+                linear[i].0, linear[i].1, smoothstep[i].1, raised_cosine[i].1, quintic[i].1,
+            );
+        }
+        eprintln!(
+            "worst jump vs slew: linear {:.1}x, smoothstep {:.1}x, raised-cos {:.1}x, quintic {:.1}x",
+            jump(DryCurve::Linear),
+            jump(DryCurve::Smoothstep),
+            jump(DryCurve::RaisedCosine),
+            jump(DryCurve::Quintic),
+        );
+
+        // The far bin (500 Hz) is where an asymptotic rolloff difference should show most
+        // clearly. No assertion beyond sanity: this test's job is to produce the numbers that
+        // decide whether to change DRY_FADE curve, not to bake in an expectation before they
+        // are seen (the same mistake that produced a failing assertion two commits ago).
+        assert!(linear[0].1 < -20.0, "sanity: the fundamental should dominate at 100 Hz");
     }
     /// Does the crossfade itself bloom? Measures the output envelope through the fade.
     ///
