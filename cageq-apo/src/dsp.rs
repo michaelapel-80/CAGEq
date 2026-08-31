@@ -96,12 +96,27 @@ const RAMP_MS: f64 = 8.0;
 
 /// How long a crossfade to or from dry takes, in milliseconds.
 ///
-/// Longer than [`RAMP_MS`] because it is doing a different job. A coefficient ramp nudges a
-/// filter to a nearby filter; this switches between two *entirely different signals*, and the
-/// only thing keeping that inaudible is that both are continuous and the weighting moves
-/// smoothly. Short enough to still feel instant for A/B listening, which is the whole point of
-/// the control.
-const DRY_FADE_MS: f64 = 15.0;
+/// **Shorter than it first was, and shorter than Equalizer APO's ~10 ms**, because the thing
+/// people actually notice here is not a click but a *swell*: on a 50 Hz tone (20 ms period) a
+/// 15 ms fade spans three quarters of a cycle, and the level audibly glides rather than
+/// moving. Reported directly as worse than EqAPO on that test signal, which is what a longer
+/// fade would predict — EqAPO's dry switch is the same mechanism (crossfade to a chain with no
+/// filters, whose coldness costs nothing because a passthrough has no state), only quicker.
+///
+/// The length was chosen by measuring what it buys: worst sample-to-sample jump against the
+/// tone's own slew, across fade lengths.
+///
+/// | fade | to dry | from dry |
+/// |---|---|---|
+/// | instant | 79x | 59.6x |
+/// | 4 ms | 2.0x | 2.4x |
+/// | **8 ms** | **1.9x** | **2.1x** |
+/// | 15 ms | 1.7x | 1.8x |
+///
+/// Every fade removes the discontinuity outright; past a few milliseconds the extra length
+/// buys a rounding error and costs audible swell. 8 ms also matches [`RAMP_MS`], so the engine
+/// has one transition time rather than two arbitrary ones.
+const DRY_FADE_MS: f64 = RAMP_MS;
 impl Coeffs {
     /// Linear interpolation towards `other` by `t` in `[0, 1]`.
     ///
