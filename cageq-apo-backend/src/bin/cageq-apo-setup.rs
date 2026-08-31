@@ -34,6 +34,7 @@ fn main() -> std::process::ExitCode {
         return out.finish(std::process::ExitCode::SUCCESS);
     }
 
+    resolve_device_arg(&mut args);
     let Some(action) = Action::from_argv(&args) else {
         out.line(&usage());
         return out.finish(std::process::ExitCode::from(2));
@@ -84,6 +85,22 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+
+/// Let `attach`/`detach` take the number `status` printed instead of a GUID.
+///
+/// Copying a brace-wrapped GUID out of one command and into another (quoted, because
+/// PowerShell parses `{...}` as a script block) is exactly the friction that makes people
+/// avoid a tool. The number is resolved here, in the unelevated parent, so the Action that
+/// crosses into the elevated helper still carries a real endpoint id and never an index whose
+/// meaning depends on when it was resolved.
+fn resolve_device_arg(args: &mut [String]) {
+    let Some(arg) = args.get(1) else { return };
+    let Ok(n) = arg.parse::<usize>() else { return };
+    let eps = setup::endpoints();
+    if n >= 1 && n <= eps.len() {
+        args[1] = eps[n - 1].id.clone();
+    }
+}
 /// Pull `--log <token>` out of the arguments, leaving the action's own.
 fn take_log_token(args: &mut Vec<String>) -> Option<String> {
     let at = args.iter().position(|a| a == "--log")?;
@@ -154,7 +171,8 @@ fn print_status(out: &mut Output) {
     if eps.is_empty() {
         out.line("  (none found)");
     }
-    for e in &eps {
+    for (i, e) in eps.iter().enumerate() {
+        let n = i + 1;
         // What is attached, spelled out — "no endpoints" told you nothing about what the
         // choices even were.
         let who = match (e.cageq, e.eqapo) {
@@ -163,7 +181,11 @@ fn print_status(out: &mut Output) {
             (false, true) => "EqualizerAPO",
             (false, false) => "-",
         };
-        out.line(&format!("  {:<38} {who}", e.name));
+        // Number and GUID always shown, not only in the "nothing attached yet" branch: the
+        // GUID is what `attach` needs, and having to hunt for it elsewhere is the whole
+        // friction this listing exists to remove. The number is accepted in its place.
+        out.line(&format!("  {n}  {:<36} {who}", e.name));
+        out.line(&format!("     {}", e.id));
         if let Some(prev) = &e.displaced {
             out.line(&format!(
                 "      note: CAGEq took this slot from {} — detach restores it",
@@ -192,10 +214,7 @@ fn print_status(out: &mut Output) {
         out.line("READY: CAGEq's engine is attached and can run.");
         out.line("(It is only actually loaded while audio is playing on that device.)");
     } else {
-        out.line("NEXT: attach a device - cageq-apo-setup attach \"{device-guid}\"");
-        for e in &eps {
-            out.line(&format!("      {}  {}", e.id, e.name));
-        }
+        out.line("NEXT: attach a device - cageq-apo-setup attach 1   (or paste its GUID)");
     }
 }
 
@@ -210,8 +229,8 @@ fn usage() -> String {
          unregister          {}\n  \
          open-gate           allow Windows to load effects not signed by Microsoft (machine-wide)\n  \
          close-gate          restore Windows' effect-signing requirement\n  \
-         attach <guid>       attach the effect to one playback endpoint\n  \
-         detach <guid>       remove it from one playback endpoint\n  \
+         attach <n|guid>     attach the effect to one playback endpoint (n from the list)\n  \
+         detach <n|guid>     remove it from one playback endpoint\n  \
          reset               remove CAGEq from every device and this machine,\n  \
                              restoring whatever it displaced\n\n\
          Everything except `status` needs administrator rights, and will ask for them.",
