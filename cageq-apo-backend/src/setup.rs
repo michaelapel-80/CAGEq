@@ -95,6 +95,15 @@ pub struct SetupStatus {
     /// deleted file looks fine in the registry and fails silently at load — worth telling
     /// apart from "not registered".
     pub dll_present: bool,
+    /// Whether the registered DLL is byte-for-byte the one shipped with *this build* of the
+    /// app. `register` always re-copies the shipped DLL over the installed one (see its own
+    /// doc), so this is what makes an app update actually take effect on the audio side — but
+    /// nothing ever prompted for it, and `next_step` used to consider setup finished forever
+    /// once the DLL merely *existed*, with no version or hash check at all. An app update
+    /// shipping a fixed/newer CAGEqApo.dll left the OLD one running, attached and apparently
+    /// healthy, indefinitely. `true` when there is nothing shipped to compare against (a bare
+    /// CLI/dev context) or nothing registered yet — nothing to warn about in either case.
+    pub dll_current: bool,
     /// `DisableProtectedAudioDG = 1`. **Without this the APO will not load at all**: Windows'
     /// APO signature check rejects unsigned *and* self-signed DLLs, so this key is the gate
     /// (verified on the VM). Equalizer APO's own installer sets exactly the same value.
@@ -109,8 +118,10 @@ pub struct SetupStatus {
 
 impl SetupStatus {
     /// Is the machine-wide half done — the part an installer would normally have handled?
+    /// Includes `dll_current`: a stale DLL is not "ready" in the sense that matters here, even
+    /// though it is still running and still doing something (see `dll_current`'s own doc).
     pub fn machine_ready(&self) -> bool {
-        self.registered_dll.is_some() && self.dll_present && self.gate_open
+        self.registered_dll.is_some() && self.dll_present && self.dll_current && self.gate_open
     }
 
     /// The single next thing to do, or `None` when this endpoint is fully set up.
@@ -119,8 +130,14 @@ impl SetupStatus {
     /// bearing: attaching an endpoint while the gate is shut *appears* to succeed and then
     /// silently does nothing, which is exactly the failure that cost a VM cycle. The UI
     /// should never offer "attach" as an available action before the gate is open.
+    ///
+    /// A stale DLL (`!dll_current`) re-triggers the *same* `RegisterServer` action a first-time
+    /// setup uses — `register` already always re-copies the shipped DLL (see its own doc), so
+    /// there is no separate "update" action to add; the app can still tell the two situations
+    /// apart for its own wording via `dll_present`/`dll_current` directly, without needing a
+    /// distinct step.
     pub fn next_step(&self, endpoint_id: &str) -> Option<Action> {
-        if self.registered_dll.is_none() || !self.dll_present {
+        if self.registered_dll.is_none() || !self.dll_present || !self.dll_current {
             return Some(Action::RegisterServer);
         }
         if !self.gate_open {
@@ -343,11 +360,24 @@ pub fn status() -> SetupStatus {
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let mut out = SetupStatus::default();
+    out.dll_current = true; // overridden below only on a confirmed mismatch — see its own doc
 
     if let Ok(server) = hklm.open_subkey(format!(r"{CLSID_KEY}\{CLSID}\InprocServer32")) {
         if let Ok(path) = server.get_value::<String, _>("") {
             let path = PathBuf::from(path);
             out.dll_present = path.exists();
+            if out.dll_present {
+                // Both sides read unelevated (the shipped copy is just a file next to this
+                // process; the installed one is world-readable), so this needs no privilege —
+                // consistent with the rest of `status()`. `None` from either side (can't hash
+                // one, or nothing is shipped here at all — a bare CLI/dev context) means there
+                // is nothing trustworthy to compare, so it stays `true` rather than guessing.
+                if let (Ok(shipped), Some(installed_hash)) = (shipped_dll(), file_hash(&path)) {
+                    if let Some(shipped_hash) = file_hash(&shipped) {
+                        out.dll_current = shipped_hash == installed_hash;
+                    }
+                }
+            }
             out.registered_dll = Some(path);
         }
     }
@@ -482,6 +512,17 @@ fn shipped_dll() -> Result<PathBuf, SetupError> {
     let exe = std::env::current_exe().map_err(|e| SetupError::Win32("current_exe", e))?;
     let dll = exe.with_file_name("CAGEqApo.dll");
     if dll.exists() { Ok(dll) } else { Err(SetupError::DllMissing) }
+}
+
+/// SHA-256 of a file's contents, or `None` if it cannot be read — never a reason to fail a
+/// status read (see `status`'s own doc: every field there is a best-effort, unelevated
+/// snapshot, and a hash that cannot be computed is exactly as informative as one that mismatches
+/// would be misleading, so it is treated as "nothing to compare" rather than "stale").
+#[cfg(windows)]
+fn file_hash(path: &std::path::Path) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    Some(Sha256::digest(&bytes).into())
 }
 
 #[cfg(windows)]
@@ -1254,6 +1295,7 @@ mod tests {
         let registered = SetupStatus {
             registered_dll: Some(PathBuf::from("C:/x/CAGEqApo.dll")),
             dll_present: true,
+            dll_current: true,
             ..Default::default()
         };
         assert_eq!(registered.next_step(ep), Some(Action::OpenGate), "gate before attach");
@@ -1283,6 +1325,57 @@ mod tests {
         assert_eq!(stale.next_step("{6cafe423-cde5-4ec1-a1e2-e3fcec778349}"), Some(Action::RegisterServer));
     }
 
+    /// **The bug this fixes.** An app update can ship a newer `CAGEqApo.dll` while an OLD one
+    /// is still registered, attached, and working — `dll_present` alone cannot tell, since the
+    /// stale file is genuinely still there. Before `dll_current`, `next_step` considered this
+    /// endpoint fully set up forever: nothing ever re-offered `RegisterServer` (the same action
+    /// that already always re-copies the shipped DLL — see its own doc), so the old file just
+    /// kept running, unannounced, however many releases later.
+    #[test]
+    fn a_stale_dll_is_offered_register_again_even_though_everything_else_looks_done() {
+        let ep = "{6cafe423-cde5-4ec1-a1e2-e3fcec778349}";
+        let stale_but_attached = SetupStatus {
+            registered_dll: Some(PathBuf::from("C:/x/CAGEqApo.dll")),
+            dll_present: true,
+            dll_current: false,
+            gate_open: true,
+            attached: vec![ep.to_string()],
+            effects_disabled: vec![],
+        };
+        assert!(!stale_but_attached.machine_ready(), "a stale DLL is not \"ready\", even though it is running");
+        assert_eq!(
+            stale_but_attached.next_step(ep),
+            Some(Action::RegisterServer),
+            "re-offered exactly the action that refreshes the DLL, ahead of gate/attach checks \
+             that are already satisfied and would otherwise make this read as fully done",
+        );
+    }
+
+    /// `file_hash` itself, isolated from the registry reads `status()` wraps it in: identical
+    /// content hashes equal regardless of path, a single changed byte must not, and a missing
+    /// file is `None` (a hard failure here would take down the whole unelevated status read,
+    /// which is the one thing this module's own doc insists must always stay available).
+    #[test]
+    fn file_hash_distinguishes_content_not_missing_files() {
+        let dir = std::env::temp_dir().join(format!("cageq-apo-backend-hash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let a = dir.join("a.bin");
+        let b_same = dir.join("b-same.bin");
+        let c_different = dir.join("c-different.bin");
+        std::fs::write(&a, b"CAGEqApo build 1").unwrap();
+        std::fs::write(&b_same, b"CAGEqApo build 1").unwrap();
+        std::fs::write(&c_different, b"CAGEqApo build 2").unwrap();
+
+        let hash_a = file_hash(&a).expect("a real file must hash");
+        assert_eq!(hash_a, file_hash(&b_same).unwrap(), "identical content must hash equal across paths");
+        assert_ne!(hash_a, file_hash(&c_different).unwrap(), "different content must hash different");
+        assert_eq!(file_hash(&dir.join("does-not-exist.bin")), None, "a missing file is None, not an error");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// An endpoint with the effect chain switched off needs fixing even when the APO is
     /// already attached to it — attaching alone achieves nothing there.
     #[test]
@@ -1291,6 +1384,7 @@ mod tests {
         let status = SetupStatus {
             registered_dll: Some(PathBuf::from("C:/x/CAGEqApo.dll")),
             dll_present: true,
+            dll_current: true,
             gate_open: true,
             attached: vec![ep.to_string()],
             effects_disabled: vec![ep.to_string()],

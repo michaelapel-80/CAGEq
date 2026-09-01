@@ -472,6 +472,10 @@ struct ApoSetupDto {
     /// A registration can point at a deleted file: that looks fine in the registry and fails
     /// silently at load, so the UI has to tell it apart from "not registered".
     dll_present: bool,
+    /// Whether the registered DLL is byte-for-byte the one shipped with this build — `false`
+    /// means an app update shipped a newer `CAGEqApo.dll` that was never installed, so the old
+    /// one is still what's actually running. See `SetupStatus::dll_current`'s own doc.
+    dll_current: bool,
     /// `DisableProtectedAudioDG`. Without it the APO cannot load at all.
     gate_open: bool,
     /// The machine-wide half is done — what an installer would normally have handled.
@@ -518,6 +522,7 @@ fn apo_setup_status(
     ApoSetupDto {
         registered_dll: s.registered_dll.as_ref().map(|p| p.display().to_string()),
         dll_present: s.dll_present,
+        dll_current: s.dll_current,
         gate_open: s.gate_open,
         machine_ready: s.machine_ready(),
         attached: s.attached.clone(),

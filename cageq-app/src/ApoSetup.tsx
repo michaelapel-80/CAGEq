@@ -22,6 +22,11 @@ import { invoke } from "@tauri-apps/api/core";
 export type ApoSetupStatus = {
   registered_dll: string | null;
   dll_present: boolean;
+  /** Whether the registered DLL is byte-for-byte the one shipped with this build — `false`
+   *  means an app update shipped a newer `CAGEqApo.dll` that hasn't been installed yet, so the
+   *  OLD one is what's actually running. `register` (the same step first-time setup uses)
+   *  fixes it: it always re-copies the shipped DLL, no separate "update" action exists. */
+  dll_current: boolean;
   gate_open: boolean;
   machine_ready: boolean;
   attached: string[];
@@ -84,7 +89,18 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
   // `active_backend_is_apo` is reconciled against reality on every status read (the backend
   // can now swap live — see `reconcile_backend` on the Rust side), so this flips true right
   // after attaching, on the very next poll. No "restart to take effect" state exists anymore.
-  const settled = status !== null && attached && !inert && status.active_backend_is_apo;
+  // CAGEq's own APO is genuinely what's processing audio here regardless of whether it's
+  // stale — this answers "which engine is running", the question the trigger's colour answers.
+  const activeIsApo = status !== null && attached && !inert && status.active_backend_is_apo;
+  // An app update shipped a newer CAGEqApo.dll that was never installed — see
+  // `ApoSetupStatus.dll_current`'s own doc. Independent of `activeIsApo`: it's readable even
+  // before anything is attached, so it also fires for "registered, present, but stale" on its
+  // own, not just once running.
+  const stale = status !== null && status.dll_present && !status.dll_current;
+  // Fully done, nothing to show or do — also requires the DLL being current, so a stale-but-
+  // active install doesn't read as finished: it re-enters the checklist below instead, with
+  // its own explanation, rather than silently keeping the old build running indefinitely.
+  const settled = activeIsApo && !stale;
   // Why the trigger looks the way it does — which backend is actually processing audio right
   // now, or why neither is: attached-but-inert, attached while the unsigned-effects gate is
   // still closed (the exact "Windows silently skips the APO" failure mode found during
@@ -98,7 +114,7 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
         ? "helperMissing"
         : attached && (inert || !status.gate_open)
           ? "broken"
-          : settled
+          : activeIsApo
             ? "apo"
             : eqapoEnabled
               ? "eqapo"
@@ -126,13 +142,15 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
   }
 
   const triggerTitle = t(
-    {
-      apo: "apoSetup.triggerTitleApo",
-      eqapo: "apoSetup.triggerTitleEqapo",
-      unattached: "apoSetup.triggerTitleUnattached",
-      helperMissing: "apoSetup.triggerTitleAttention",
-      broken: "apoSetup.triggerTitleAttention",
-    }[engineReason],
+    engineReason === "apo" && stale
+      ? "apoSetup.triggerTitleApoStale"
+      : {
+          apo: "apoSetup.triggerTitleApo",
+          eqapo: "apoSetup.triggerTitleEqapo",
+          unattached: "apoSetup.triggerTitleUnattached",
+          helperMissing: "apoSetup.triggerTitleAttention",
+          broken: "apoSetup.triggerTitleAttention",
+        }[engineReason],
   );
 
   return (
@@ -188,8 +206,13 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
                       only tracks CAGEq's own steps and wouldn't otherwise surface that. */}
                   {engineReason === "unattached" && <p className="warn">{t("apoSetup.neitherAttached")}</p>}
 
+                  {/* Distinct from "never set up" — an already-attached, working install that
+                      just hasn't picked up an app update yet. Shown before the checklist so it
+                      reads as the reason Register reappeared, not as a surprise regression. */}
+                  {stale && <p className="warn">{t("apoSetup.updateAvailable")}</p>}
+
                   <ul className="setup-steps">
-                    <Step done={status.registered_dll !== null && status.dll_present} label={t("apoSetup.stepRegister")} />
+                    <Step done={status.registered_dll !== null && status.dll_present && status.dll_current} label={t("apoSetup.stepRegister")} />
                     <Step done={status.gate_open} label={t("apoSetup.stepGate")} />
                     <Step done={attached && !inert} label={t("apoSetup.stepAttach", { device: endpointName ?? "" })} />
                   </ul>

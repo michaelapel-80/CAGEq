@@ -163,6 +163,7 @@
 
   "apoSetup": {
     "triggerTitleApo": "CAGEqs eigene Audio-Engine läuft",
+    "triggerTitleApoStale": "⚠ CAGEqs eigene Audio-Engine läuft in einer veralteten Version — zum Aktualisieren klicken",
     "triggerTitleEqapo": "Equalizer APO läuft — CAGEqs eigene Audio-Engine ist verfügbar",
     "triggerTitleUnattached": "⚠ Diesem Gerät ist kein Audioeffekt zugewiesen — der EQ hat gerade keine Wirkung",
     "triggerTitleAttention": "CAGEqs eigene Audio-Engine braucht Aufmerksamkeit",
@@ -171,6 +172,7 @@
     "loading": "Wird geprüft…",
     "intro": "CAGEq kann die Audiobearbeitung selbst übernehmen, statt den Umweg über Equalizer APO zu gehen. Das entfernt die Abhängigkeit und macht Filteränderungen im laufenden Betrieb sauberer.",
     "neitherAttached": "⚠ Equalizer APO ist diesem Gerät ebenfalls nicht zugewiesen, aktuell wirkt also kein Filter aus einer der beiden Engines — der EQ hat erst Wirkung, sobald eine davon aktiv ist.",
+    "updateAvailable": "⚠ Dieses CAGEq-Update bringt eine neuere Audio-Engine mit, als aktuell installiert ist. Dein EQ funktioniert weiterhin — „Weiter“ unten aktualisiert sie (kurze, geräteweite Audiounterbrechung währenddessen).",
     "stepRegister": "CAGEqs Audioeffekt in Windows registrieren",
     "stepGate": "Windows das Laden erlauben",
     "stepAttach": "Mit {{device}} verbinden",
