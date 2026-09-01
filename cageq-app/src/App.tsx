@@ -168,6 +168,22 @@ type LoadedRef = { id: string; name: string; at?: number | "head"; sig: string }
 const appliedBands = (st: Stages): CustomFilter[] =>
   STAGE_ORDER.flatMap((id) => (st[id].enabled ? st[id].bands.filter((b) => b.enabled !== false) : []));
 
+/** Mirrors `MAX_BANDS` in `cageq-apo/src/dsp.rs` — CAGEq's own APO holds coefficients in a
+ *  fixed-size array and refuses anything past this, silently as far as this app used to be
+ *  concerned: the config file has no write-time cap, so an oversized correction wrote to disk
+ *  without complaint and then failed invisibly the next time anything tried to load or push it
+ *  (the live push's own refusal was discarded, and a load failure inside audiodg never crosses
+ *  back to the app at all — see `apo_switch_artifacts` memory for the fuller trace). The
+ *  EqAPO backend has no equivalent limit, so this only bites once CAGEq's own APO is the active
+ *  backend — exactly the case that's now reachable without a restart. Checked client-side
+ *  instead: refusing to add a band that would exceed it here is the only place in the whole
+ *  chain that can actually explain *why* to the user, rather than a correction that quietly
+ *  stops taking effect somewhere the app can never see.
+ *
+ *  Update if `MAX_BANDS` ever changes — no shared source of truth between Rust and TS here,
+ *  same as `DRY_FADE_MS`/`RAMP_MS`'s own cross-file duplication elsewhere in this codebase. */
+const MAX_BANDS = 32;
+
 /** §5.2 solo: which band, in which stage, is soloed (hear only it, within its stage). */
 type Solo = { stage: StageId; idx: number };
 // The Q of EqChart's middle-mouse "frequency finder" sweep's bandpass — "relatively high" per the
@@ -1468,10 +1484,19 @@ function App() {
     newBandNonce.current += 1;
     setNewBand({ stage: activeStage, idx, nonce: newBandNonce.current, focusGrid });
   };
+  // Checked before either add path below appends one more band. `totalBandsUsed` is declared
+  // further down (it needs `stages` and the slot's fit, computed later in this same render),
+  // but a closure over a `const` from later in an enclosing scope only needs it to exist by the
+  // time the closure actually *runs* — a later click, never during this render itself.
+  const atMaxBands = () => totalBandsUsed >= MAX_BANDS;
   // Double-click on the chart: create a peaking band exactly at the cursor (x → fc, y → gain),
   // so it lands where you're looking rather than at a fixed 1 kHz you then have to find. Mouse
   // path → pulse only, no grid focus-steal (you stay on the chart to drag/wheel it).
   const addFilterAt = (freq_hz: number, gain_db: number) => {
+    if (atMaxBands()) {
+      setError(tr("errors.tooManyBands", { max: MAX_BANDS }));
+      return;
+    }
     captureBaseline();
     dropAudition(); // a new band is a structural change — exit any solo/isolate
     const idx = stages[activeStage].bands.length;
@@ -1484,6 +1509,10 @@ function App() {
   // gap between existing bands (in log-frequency), so it never lands on top of a neighbour,
   // and open its Fc for typing straight away (keyboard-first).
   const addFilter = () => {
+    if (atMaxBands()) {
+      setError(tr("errors.tooManyBands", { max: MAX_BANDS }));
+      return;
+    }
     captureBaseline();
     dropAudition(); // a new band is a structural change — exit any solo/isolate
     const bands = stages[activeStage].bands;
@@ -1977,6 +2006,13 @@ function App() {
   }, [autoEqBands.length]);
   // Tab count comes straight from the same slot-synced source, so it renders in the same paint.
   const autoEqCount = autoEqBands.length;
+  // What the active slot would actually carry if applied right now — AutoEq's own fit plus every
+  // enabled custom band across all three stages. Reacts to *any* way `stages` can change
+  // (the Add button, a template/preset load, a stage toggle, undo/redo, resume restore), not
+  // just the single-band add path — a preset stacked onto a slot that already has bands, or two
+  // presets loaded into different stages in a row, reaches MAX_BANDS just as easily as clicking
+  // Add repeatedly, and none of those other paths went through `addFilter`'s own guard.
+  const totalBandsUsed = autoEqCount + appliedCustom.length;
 
   // Presets list alphabetically rather than in `library.presets`' own order (append-on-create,
   // stable-in-place on update via `upsert` — see there), which put a freshly-saved preset at the
@@ -2795,12 +2831,26 @@ function App() {
                         onInput={(i, patch) => updateFilter(i, patch, 70)}
                         onCommit={(i, patch) => updateFilter(i, patch, 0)}
                         onAdd={addFilter}
+                        addDisabled={atMaxBands()}
+                        addDisabledTitle={tr("errors.tooManyBands", { max: MAX_BANDS })}
                         onRemove={removeFilter}
                       />
                       {/* Always rendered (with reserved height) so switching to an empty stage
                           doesn't shrink the panel; the text just adapts to empty vs populated. */}
                       <p className="tg-hint">{activeBands.length > 0 ? tr("bands.hint") : tr("bands.emptyHint")}</p>
                     </>
+                  )}
+                  {/* Reacts to the same `totalBandsUsed` the Add button's own guard uses, but
+                      catches every OTHER way it can grow past MAX_BANDS: a template/preset
+                      stacked onto a slot that already has bands, a second preset loaded into a
+                      different stage, re-enabling a stage that was disabled while over, undo/
+                      redo — none of those go through addFilter's own check. Equalizer APO has
+                      no such cap, so this is a heads-up, not a hard error: only CAGEq's own APO
+                      actually refuses the excess. */}
+                  {totalBandsUsed > MAX_BANDS && (
+                    <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0.5em 0 0" }}>
+                      {tr("errors.overMaxBands", { count: totalBandsUsed, max: MAX_BANDS })}
+                    </p>
                   )}
                 </>
               )}

@@ -61,6 +61,16 @@ pub enum ApoBackendError {
     /// is a version mismatch between app and APO, not a normal state.
     #[error("the APO on {0} published no sample rate; is CAGEqApo.dll current?")]
     NoSampleRate(String),
+    /// The live control channel refused the correction outright — too many bands
+    /// (`dsp::MAX_BANDS`), an unsafe/unstable coefficient, or an out-of-range preamp (see
+    /// `control::publish`'s own checks). The config *file* still wrote (checked strictly
+    /// before this), so the correction is durably saved and will be retried at the endpoint's
+    /// next `LockForProcess` — where it will be refused there too, for the same reason,
+    /// equally invisibly (that boundary can't report back to the app at all, see
+    /// `cageq_apo_load_config`'s own doc). Surfacing it now, while there's still a channel
+    /// open to tell a refusal apart from "nothing playing," is the only chance the app gets.
+    #[error("the correction for {0} was refused by CAGEq's own engine (too many bands, or an unsafe filter) — saved to disk, but not live")]
+    LivePushRefused(String),
 }
 
 /// Applies filters through CAGEq's own APO. Holds the directory corrections live in;
@@ -130,11 +140,16 @@ impl CageqApoBackend {
         let apo_config = to_apo_config(cfg);
 
         self.write_config(&id, &apo_config)?;
-        // Best-effort by design: no channel simply means nothing is playing on that endpoint,
-        // in which case the file above is the whole job and the APO will read it when it next
-        // locks. A push failure must never fail an apply.
-        let _ = push_live(&id, &apo_config);
-        Ok(())
+        // No channel simply means nothing is playing on that endpoint — the file above is the
+        // whole job in that case, and the APO will read it when it next locks. A genuine
+        // refusal is different: the file is saved either way, but the live engine has
+        // explicitly declined to run this correction (see `LivePushRefused`'s own doc for why
+        // that's worth surfacing rather than swallowing — this used to be indistinguishable
+        // from the benign "no channel" case, both discarded the same way, silently).
+        match push_live(&id, &apo_config)? {
+            PushOutcome::NoChannel | PushOutcome::Published => Ok(()),
+            PushOutcome::Refused => Err(ApoBackendError::LivePushRefused(id)),
+        }
     }
 
     fn write_config(&self, id: &str, apo_config: &ApoConfig) -> Result<(), ApoBackendError> {
@@ -276,17 +291,31 @@ fn to_band(f: &Filter) -> Band {
     }
 }
 
+/// What happened when trying to push a correction down an endpoint's live control channel —
+/// three states, not two: whoever calls `push_live` needs to tell "there was nothing to push
+/// to" apart from "there was, and it said no," and a plain `bool` can't do that (see
+/// `ApoBackendError::LivePushRefused`'s own doc for why the difference matters).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushOutcome {
+    /// No stream is running on that endpoint — ordinary, not a problem; the config file is
+    /// the whole job in this case.
+    NoChannel,
+    /// A channel was open and the correction was accepted.
+    Published,
+    /// A channel was open, but the correction was refused (see `control::publish`'s checks —
+    /// too many bands, an unsafe/unstable coefficient, or an out-of-range preamp). The
+    /// previous correction is still running; nothing was left half-applied.
+    Refused,
+}
+
 /// Push a correction down the live control channel, if one is open.
-///
-/// `Ok(false)` when there is no channel — no stream is running on that endpoint, which is
-/// ordinary and means the config file is the whole job.
 ///
 /// The endpoint's sample rate comes from the APO rather than being assumed: coefficients
 /// depend on it, and a correction computed for the wrong rate lands at the wrong frequencies
 /// while looking entirely healthy.
-pub fn push_live(endpoint_id: &str, cfg: &ApoConfig) -> Result<bool, ApoBackendError> {
+pub fn push_live(endpoint_id: &str, cfg: &ApoConfig) -> Result<PushOutcome, ApoBackendError> {
     let Ok(channel) = ControlChannel::open(endpoint_id) else {
-        return Ok(false);
+        return Ok(PushOutcome::NoChannel);
     };
     let Some(rate) = cageq_apo::control::sample_rate(channel.block()) else {
         return Err(ApoBackendError::NoSampleRate(endpoint_id.to_string()));
@@ -301,11 +330,11 @@ pub fn push_live(endpoint_id: &str, cfg: &ApoConfig) -> Result<bool, ApoBackendE
         })
         .collect();
 
-    // A refusal here is not an error to propagate: the channel validates against the same
-    // limits the APO would, so this means the correction was unsafe to run and the previous
-    // one is still in force. The config file was written either way, which is the durable
-    // record of what the user asked for.
-    Ok(channel.publish(cfg.preamp_db, &coeffs))
+    // The channel validates against the same limits the APO itself would, so a refusal here
+    // means the correction was unsafe to run and the previous one is still in force — the
+    // config file was written either way, which is the durable record of what the user asked
+    // for, but the caller decides whether a refusal is worth surfacing (`apply_one` does).
+    Ok(if channel.publish(cfg.preamp_db, &coeffs) { PushOutcome::Published } else { PushOutcome::Refused })
 }
 
 /// Drop the hash marker so the remainder is exactly what was hashed.
@@ -341,6 +370,11 @@ mod tests {
 
     const EP: &str = "{6cafe423-cde5-4ec1-a1e2-e3fcec778349}";
     const EP2: &str = "{11112222-3333-4444-5555-666677778888}";
+    // Own ids for the live-channel tests below: `ControlChannel::create` opens a machine-wide
+    // `Global\` named section keyed by endpoint id, and tests run on separate threads within
+    // the same process — reusing EP/EP2 here would race whichever other test runs alongside.
+    const EP_LIVE_REFUSED: &str = "{99990001-0001-0001-0001-000000000001}";
+    const EP_LIVE_OK: &str = "{99990002-0002-0002-0002-000000000002}";
 
     /// A private directory per test, so these never touch the machine's real corrections.
     fn temp_backend(tag: &str) -> (CageqApoBackend, PathBuf) {
@@ -484,6 +518,57 @@ mod tests {
             StartupDecision::ResumeTrusted,
         );
         assert_eq!(backend.startup_decision(Some("x")).unwrap(), StartupDecision::ExternallyModified);
+    }
+
+    /// **The bug this fixes.** A correction past `dsp::MAX_BANDS` used to write its config file
+    /// (unconditionally — no cap at write time) and then have its live push silently discarded
+    /// either way, `apply()` still returning `Ok`: the app told the user "applied" while the
+    /// live audio never received it, and the *only* other place that would ever have refused it
+    /// — the APO's own config-file parser, at its next `LockForProcess`, inside audiodg — cannot
+    /// report anything back across that privilege boundary. `apply` must now surface this.
+    ///
+    /// Creating a `Global\` section needs `SeCreateGlobalPrivilege`, which a normal developer
+    /// account does not hold — same as `cageq-apo/src/channel.rs`'s own
+    /// `a_real_section_round_trips_a_published_update`, this skips rather than fails when it
+    /// cannot create one. (In production the creator is audiodg, which does hold it; CAGEq
+    /// itself only ever *opens* an existing section, never creates one.)
+    #[test]
+    fn apply_reports_a_refused_live_push_instead_of_swallowing_it() {
+        let (backend, dir) = temp_backend("live-refused");
+        let Some(channel) = ControlChannel::create(EP_LIVE_REFUSED) else {
+            eprintln!("skipping: could not create a Global\\ section (needs SeCreateGlobalPrivilege)");
+            return;
+        };
+        cageq_apo::control::set_sample_rate(channel.block(), 48_000);
+
+        let too_many: Vec<Filter> = (0..dsp::MAX_BANDS + 1)
+            .map(|i| Filter { kind: FilterType::Peaking, freq_hz: 100.0 + i as f64, gain_db: 1.0, q: 1.0 })
+            .collect();
+        let cfg = DeviceConfig { device: EP_LIVE_REFUSED.to_string(), preamp_db: -3.0, filters: too_many };
+
+        let err = backend.apply(&[cfg]).expect_err("a channel that refuses the push must fail the apply");
+        assert!(matches!(err, BackendError::Backend(_)), "should be a backend error, not e.g. a bad-args one");
+
+        // The config file is still the durable record of what was asked for, exactly as before
+        // this fix — only the live-push half of `apply_one` changed.
+        let path = config::config_path_in(&dir, EP_LIVE_REFUSED);
+        let text = fs::read_to_string(&path).expect("the file must still be written despite the refusal");
+        assert!(text.contains("Filter"), "the (too-large) correction should still be on disk: {text}");
+    }
+
+    /// The positive case, for contrast with the test above: a channel that's open and a
+    /// correction well within `MAX_BANDS` must still succeed exactly as before this fix.
+    /// Same `SeCreateGlobalPrivilege` caveat as the test above — skips, doesn't fail.
+    #[test]
+    fn apply_still_succeeds_live_when_the_channel_accepts_it() {
+        let (backend, _dir) = temp_backend("live-ok");
+        let Some(channel) = ControlChannel::create(EP_LIVE_OK) else {
+            eprintln!("skipping: could not create a Global\\ section (needs SeCreateGlobalPrivilege)");
+            return;
+        };
+        cageq_apo::control::set_sample_rate(channel.block(), 48_000);
+
+        backend.apply(&[device(EP_LIVE_OK, -6.0)]).expect("a safe, small correction must still apply");
     }
 }
 

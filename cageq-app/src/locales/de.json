@@ -316,7 +316,9 @@
   "errors": {
     "pickHeadphone": "Zuerst ein Kopfhörer-Modell und eine Messung wählen.",
     "pickDevice": "Zuerst ein Ausgabegerät wählen.",
-    "slotEmpty": "Slot {{from}} ist leer – wende zuerst etwas darauf an."
+    "slotEmpty": "Slot {{from}} ist leer – wende zuerst etwas darauf an.",
+    "tooManyBands": "Diese Korrektur hat bereits {{max}} Bänder (AutoEqs Fit plus jedes eigene Band) – mehr kann CAGEqs eigene Audio-Engine nicht verarbeiten. Entferne eins, bevor du ein weiteres hinzufügst.",
+    "overMaxBands": "⚠ Diese Korrektur hat {{count}} Bänder (AutoEqs Fit plus jedes eigene Band) – CAGEqs eigene Audio-Engine kann nur {{max}} verarbeiten. Equalizer APO kennt dieses Limit nicht, das spielt also nur eine Rolle, falls du auf diesem Gerät CAGEqs eigene Engine nutzt."
   },
 
   "footer": {

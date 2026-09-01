@@ -43,6 +43,13 @@ export type ToneGridProps = {
   /** Final, un-throttled — drag release / blur / Enter / enable toggle. */
   onCommit: (index: number, patch: Partial<ToneBand>) => void;
   onAdd: () => void;
+  /** Disables just the Add button (existing bands stay fully editable) — e.g. at MAX_BANDS,
+   *  where adding one more would exceed what CAGEq's own APO can run. Separate from the
+   *  blanket `disabled` above on purpose: that one also freezes editing/removing. */
+  addDisabled?: boolean;
+  /** Overrides the Add button's tooltip while `addDisabled` — explains *why*, not just that it
+   *  won't respond. Falls back to the ordinary "Add band" title when absent. */
+  addDisabledTitle?: string;
   onRemove: (index: number) => void;
   /** Storage index of a just-added band to reveal + focus (its Fc), or null. */
   focusIndex?: number | null;
@@ -124,7 +131,26 @@ function KindGlyph({ kind }: { kind: FilterKind }) {
   );
 }
 
-export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focusNonce, hoverIndex, onHover, soloIndex, onSolo, isolateIndex, onIsolate, onInput, onCommit, onAdd, onRemove }: ToneGridProps) {
+export function ToneGrid({
+  filters,
+  disabled,
+  readOnly,
+  accent,
+  focusIndex,
+  focusNonce,
+  hoverIndex,
+  onHover,
+  soloIndex,
+  onSolo,
+  isolateIndex,
+  onIsolate,
+  onInput,
+  onCommit,
+  onAdd,
+  addDisabled,
+  addDisabledTitle,
+  onRemove,
+}: ToneGridProps) {
   const { t } = useTranslation();
   const inert = disabled || readOnly; // no interaction while read-only, even without `disabled`
   // Display order: sort indices by Fc; storage order (and thus the indices we pass back)
@@ -340,7 +366,13 @@ export function ToneGrid({ filters, disabled, readOnly, accent, focusIndex, focu
       })}
 
       {!readOnly && (
-        <button type="button" className="tg-add" disabled={disabled} onClick={onAdd} title={t("bands.addTitle")}>
+        <button
+          type="button"
+          className="tg-add"
+          disabled={disabled || addDisabled}
+          onClick={onAdd}
+          title={addDisabled && addDisabledTitle ? addDisabledTitle : t("bands.addTitle")}
+        >
           <span aria-hidden="true">＋</span>
           <span className="tg-add-lbl">{t("bands.add")}</span>
         </button>
