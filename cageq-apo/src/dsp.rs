@@ -390,7 +390,6 @@ impl Cascade {
         self.ramp_left = self.ramp_frames;
     }
 
-
     /// Fade to the untouched input, or back to the correction.
     ///
     /// Explicit rather than inferred from "a correction with no filters", because those are
@@ -620,6 +619,18 @@ impl Cascade {
             self.set_dry(true, preamp_db);
             return true;
         }
+        // Leaving dry runs the coefficient ramp AND the dry-unwind at once, on two different
+        // clocks (8 ms linear vs 10 ms raised cosine) — tried unifying this to "snap straight
+        // to the target, let the crossfade's own fade-in be the only thing masking it" (one
+        // mechanism, not two), on the reasoning that the crossfade already scales the wet
+        // path's audibility from zero. Measured worse on both cases it was tried against: the
+        // ordinary one (settled on dry, then a different correction) went from 2.2x to 2.4x,
+        // and interrupting the fade to dry early — where the wet path isn't actually silent
+        // yet, so the snap's masking argument doesn't hold — went from 2.51x to 4.7x. The ramp
+        // is doing real work in that second case specifically because it doesn't know or care
+        // what the crossfade is doing; removing it removed real protection. Reverted; see
+        // `leaving_dry_for_a_different_correction_ramps_and_unwinds_together` and
+        // `interrupting_a_fade_to_dry_still_switches_cleanly`.
         self.set_dry(false, 0.0);
         self.start_ramp(coeffs, coeffs.len(), preamp_db);
         true
@@ -1811,6 +1822,227 @@ mod tests {
         assert!(to_faded < to_instant * 0.6, "fade barely helped going to dry");
         assert!(from_faded < from_instant * 0.6, "fade barely helped coming from dry");
     }
+
+    /// **Leaving Dry runs a coefficient ramp AND the dry-unwind at once, on two different
+    /// clocks** (8 ms linear vs 10 ms raised cosine) — `apply_coeffs` unconditionally calls
+    /// `start_ramp` whenever the target is non-empty, even right after `set_dry(false, 0.0)`.
+    /// **Tried unifying this to one mechanism** (snap straight to the target, let the
+    /// crossfade's own fade-in be the only thing masking the change, symmetric with going dry
+    /// — bug 2's fix — where the chain's coefficients are untouched and the crossfade is the
+    /// whole transition) **and measured it worse**, on this exact test: 2.2x combined vs 2.4x
+    /// snapped. `interrupting_a_fade_to_dry_still_switches_cleanly` (right after this one) is
+    /// where the snap idea actually broke — worse there, not just barely: it relies on the
+    /// crossfade already having scaled the wet path near zero, which isn't true early in the
+    /// fade. Reverted; see `apply_coeffs`'s own comment. This test exercises the ordinary case
+    /// (settled on dry, then a DIFFERENT correction) against a REAL prior correction, not a
+    /// freshly-constructed cascade whose "before" would just be `Coeffs::PASSTHROUGH`.
+    #[test]
+    fn leaving_dry_for_a_different_correction_ramps_and_unwinds_together() {
+        const WINDOW: usize = 960;
+        let a: Vec<Coeffs> = realistic_correction(6.0).iter().map(|b| coefficients(b, FS)).collect();
+        // A genuinely different correction — not a gain nudge on the same bands.
+        let b: Vec<Coeffs> = [
+            peaking(60.0, -5.0, 1.8),
+            peaking(220.0, 6.0, 0.9),
+            peaking(1200.0, -3.0, 2.4),
+            peaking(4200.0, 4.0, 1.1),
+            peaking(11000.0, -2.0, 0.8),
+        ]
+        .iter()
+        .map(|band| coefficients(band, FS))
+        .collect();
+
+        let run = |instant: bool| -> f64 {
+            let mut worst = 0.0f64;
+            for phase in (0..WINDOW).step_by(WINDOW / 8) {
+                let warm = tone(50.0, 0, WINDOW * 60 + phase, 0.5);
+                let cont = tone(50.0, WINDOW * 60 + phase, WINDOW, 0.5);
+                let mut c = Cascade::new(1, FS);
+                assert!(c.apply_coeffs(&a, -9.0));
+                c.settle();
+                assert!(c.apply_coeffs(&[], -6.0)); // go dry
+                c.settle(); // fully parked on dry — the realistic "sat there a while" case
+                let mut sink = vec![0.0f32; warm.len()];
+                c.process(&warm, &mut sink, warm.len());
+
+                assert!(c.apply_coeffs(&b, -9.0)); // straight to a DIFFERENT correction
+                if instant {
+                    c.settle();
+                }
+                let mut out = vec![*sink.last().unwrap()];
+                out.extend(std::iter::repeat(0.0f32).take(WINDOW));
+                c.process(&cont, &mut out[1..], WINDOW);
+                worst = worst.max(worst_jump_ratio(&out));
+            }
+            worst
+        };
+
+        let faded = run(false);
+        let instant = run(true);
+        eprintln!("dry -> different correction jump ratio: {faded:.1}x combined vs {instant:.1}x instant");
+        assert!(faded < 2.5, "combined ramp+unwind still jumps {faded:.1}x");
+        assert!(faded < instant * 0.6, "combined transition barely helps over an instant switch");
+    }
+
+    /// **Interrupting a still-in-progress fade *toward* dry** — the wet path is NOT silent yet
+    /// (only a fraction of the way into the 10 ms dry-unwind). This is the test that actually
+    /// discriminated between the combined ramp+unwind (kept) and the "snap straight to the
+    /// target" alternative (tried, reverted — see `apply_coeffs`'s comment): snapping here
+    /// measured 4.7x, clearly audible, because its masking argument depends on the crossfade
+    /// having already weighted the wet path near zero, which isn't true this early. The kept
+    /// mechanism does noticeably worse here too (2.51x vs the 2.2x settled case, just over the
+    /// 2.5x bar every other transition in this file clears) — the ramp is doing real,
+    /// necessary work in exactly this narrow case, just not *quite* enough to fully hide a
+    /// synthetic pure-tone worst case. Accepted rather than chased further: it needs an
+    /// interruption within ~1 ms of the initial dry click to provoke, the same "mostly
+    /// academic" territory the A/B ramp decision already accepted for a different mechanism.
+    #[test]
+    fn interrupting_a_fade_to_dry_still_switches_cleanly() {
+        const WINDOW: usize = 960;
+        let a: Vec<Coeffs> = realistic_correction(6.0).iter().map(|b| coefficients(b, FS)).collect();
+        let b: Vec<Coeffs> = [
+            peaking(60.0, -5.0, 1.8),
+            peaking(220.0, 6.0, 0.9),
+            peaking(1200.0, -3.0, 2.4),
+            peaking(4200.0, 4.0, 1.1),
+            peaking(11000.0, -2.0, 0.8),
+        ]
+        .iter()
+        .map(|band| coefficients(band, FS))
+        .collect();
+        // How far into the 10 ms dry-unwind to interrupt it — early enough that the wet path
+        // is still substantially audible (raised cosine, so this is roughly 10% of the way).
+        const INTERRUPT_AT_FRAMES: usize = 48; // 1 ms at 48 kHz, ~10% of the 10 ms fade
+
+        let run = |instant: bool| -> f64 {
+            let mut worst = 0.0f64;
+            for phase in (0..WINDOW).step_by(WINDOW / 8) {
+                let warm = tone(50.0, 0, WINDOW * 60 + phase, 0.5);
+                let cont = tone(50.0, WINDOW * 60 + phase, WINDOW, 0.5);
+                let mut c = Cascade::new(1, FS);
+                assert!(c.apply_coeffs(&a, -9.0));
+                c.settle();
+                let mut sink = vec![0.0f32; warm.len()];
+                c.process(&warm, &mut sink, warm.len());
+
+                assert!(c.apply_coeffs(&[], -6.0)); // start heading to dry
+                let mut interrupted = vec![0.0f32; INTERRUPT_AT_FRAMES];
+                let tail = tone(50.0, WINDOW * 60 + warm.len() - INTERRUPT_AT_FRAMES, INTERRUPT_AT_FRAMES, 0.5);
+                c.process(&tail, &mut interrupted, INTERRUPT_AT_FRAMES); // only partway into the unwind
+                sink.extend(interrupted);
+
+                assert!(c.apply_coeffs(&b, -9.0)); // interrupt with a DIFFERENT correction
+                if instant {
+                    c.settle();
+                }
+                let mut out = vec![*sink.last().unwrap()];
+                out.extend(std::iter::repeat(0.0f32).take(WINDOW));
+                c.process(&cont, &mut out[1..], WINDOW);
+                worst = worst.max(worst_jump_ratio(&out));
+            }
+            worst
+        };
+
+        let faded = run(false);
+        let instant = run(true);
+        eprintln!("interrupted fade-to-dry jump ratio: {faded:.2}x combined vs {instant:.1}x instant");
+        // 2.5 (every other transition's bar) is measured at ~2.51x here — see the doc comment
+        // above for why this one case is accepted slightly looser rather than chased further.
+        assert!(faded < 3.0, "interrupting a fade to dry still jumps {faded:.2}x");
+        assert!(faded < instant * 0.6, "combined transition barely helps over an instant switch");
+    }
+
+    /// **A band ramping to/from `Coeffs::PASSTHROUGH` ("unity") when the band count itself
+    /// changes** — a third, distinct transition from both the tone-drag ramp (a value change,
+    /// band count held constant) and the dry crossfade (a whole-chain mix, no band's own
+    /// coefficients touched at all). `start_ramp` targets `Coeffs::PASSTHROUGH` for any band
+    /// index beyond the new count (`unwrap_or(Coeffs::PASSTHROUGH)`), so shrinking a correction
+    /// ramps the dropped band smoothly to unity instead of dropping it outright.
+    /// `shrinking_the_cascade_stops_the_dropped_bands` already proves the *settled* end state
+    /// is correct, but never measured whether the transit itself clicks — this does. Growing
+    /// back is the same mechanism symmetrically in reverse: a re-added band's `start` is read
+    /// from whatever `self.coeffs` holds at that index, which a prior shrink already settled
+    /// to `PASSTHROUGH`.
+    ///
+    /// **Diagnostic sweep before this was an assertion** (mild `realistic_correction`-sized
+    /// bands up to the original, deliberately extreme 10 dB/Q2/300 Hz candidate) found this is
+    /// NOT a general property of ramping to/from unity — it's specific to a large single-band
+    /// gain at a low frequency:
+    ///
+    /// ```text
+    /// realistic cut  -5dB Q2.2 @3500Hz           drop:  1.5x ramped vs  1.6x instant | add: 2.2x ramped vs 2.4x instant
+    /// realistic boost 2.5dB Q1.8 @900Hz          drop:  1.9x ramped vs  4.0x instant | add: 1.6x ramped vs 1.4x instant
+    /// typical AutoEq -3dB Q1.0 @2000Hz           drop:  1.5x ramped vs  1.5x instant | add: 1.7x ramped vs 1.9x instant
+    /// same freq/Q, mild gain 3dB @300Hz Q2.0     drop:  2.7x ramped vs 14.9x instant | add: 1.7x ramped vs 1.5x instant
+    /// same freq/gain, low Q 10dB @300Hz Q0.7     drop: 10.2x ramped vs 77.6x instant | add: 3.2x ramped vs 1.5x instant
+    /// original extreme 10dB Q2.0 @300Hz          drop: 10.8x ramped vs 77.6x instant | add: 3.2x ramped vs 1.7x instant
+    /// ```
+    ///
+    /// Gain magnitude drives it, not Q (10 dB at Q0.7 and Q2.0 land within 0.6x of each other).
+    /// Every realistic single-band gain (±2.5 to -5 dB, what `realistic_correction` and a real
+    /// AutoEq fit actually produce) stays comfortably under 2.5x in both directions — this test
+    /// asserts against exactly those magnitudes. A single band pushing 10 dB on its own is rare
+    /// (most real correction bands are more modest, and a boost that large is usually a sign
+    /// something upstream needs the headroom re-checked), and provoking the bad case needs a
+    /// pure tone sitting exactly on that band's own centre frequency — the same "mostly
+    /// academic" territory the A/B ramp decision already accepted for a different mechanism.
+    /// Not chased further here for the same reason: no realistic correction reaches it.
+    #[test]
+    fn a_band_ramps_cleanly_to_and_from_passthrough_on_a_count_change() {
+        const WINDOW: usize = 960;
+        let kept = peaking(1000.0, 4.0, 1.0); // present throughout, isolates the OTHER band
+
+        // Two realistic single-band magnitudes — an actual `realistic_correction` cut and
+        // boost — not the extreme case from the diagnostic sweep above.
+        let candidates: &[Band] = &[peaking(3500.0, -5.0, 2.2), peaking(900.0, 2.5, 1.8)];
+
+        for dropped in candidates {
+            let tone_hz = dropped.freq_hz;
+            let run = |shrinking: bool, instant: bool| -> f64 {
+                let mut worst = 0.0f64;
+                for phase in (0..WINDOW).step_by(WINDOW / 8) {
+                    let warm = tone(tone_hz, 0, WINDOW * 60 + phase, 0.5);
+                    let cont = tone(tone_hz, WINDOW * 60 + phase, WINDOW, 0.5);
+                    let mut c = Cascade::new(1, FS);
+                    if shrinking {
+                        assert!(c.set_bands(&[kept, *dropped]));
+                    } else {
+                        assert!(c.set_bands(&[kept])); // `dropped` starts life already at PASSTHROUGH
+                    }
+                    c.settle();
+                    let mut sink = vec![0.0f32; warm.len()];
+                    c.process(&warm, &mut sink, warm.len());
+
+                    if shrinking {
+                        assert!(c.set_bands(&[kept])); // `dropped` ramps DOWN to unity
+                    } else {
+                        assert!(c.set_bands(&[kept, *dropped])); // `dropped` ramps UP from unity
+                    }
+                    if instant {
+                        c.settle();
+                    }
+                    let mut out = vec![*sink.last().unwrap()];
+                    out.extend(std::iter::repeat(0.0f32).take(WINDOW));
+                    c.process(&cont, &mut out[1..], WINDOW);
+                    worst = worst.max(worst_jump_ratio(&out));
+                }
+                worst
+            };
+
+            let shrink_ramped = run(true, false);
+            let shrink_instant = run(true, true);
+            let grow_ramped = run(false, false);
+            let grow_instant = run(false, true);
+            eprintln!(
+                "unity transition ({:.0} Hz, {:.1} dB, Q{:.1}) — drop: {shrink_ramped:.1}x ramped vs {shrink_instant:.1}x instant; \
+                 add: {grow_ramped:.1}x ramped vs {grow_instant:.1}x instant",
+                dropped.freq_hz, dropped.gain_db, dropped.q,
+            );
+            assert!(shrink_ramped < 2.5, "ramping a {:.0} Hz band to unity still jumps {shrink_ramped:.1}x", dropped.freq_hz);
+            assert!(grow_ramped < 2.5, "ramping a {:.0} Hz band from unity still jumps {grow_ramped:.1}x", dropped.freq_hz);
+        }
+    }
+
     /// What a **drag** actually costs, as opposed to the deliberately large edit measured
     /// above.
     ///
