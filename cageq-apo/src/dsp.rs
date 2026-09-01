@@ -246,7 +246,9 @@ impl BiquadState {
 
 /// Candidate dry-crossfade envelope shapes, for comparing against a real spectrum analysis
 /// (`enginedump` + `wavscan`) rather than reasoning about Fourier decay in the abstract.
-/// **Test-only** — production always uses the documented linear ramp.
+/// **Test-only** — production always uses raised cosine (see the `#[cfg(not(test))]` branch
+/// in [`Cascade::advance_dry`]). Not to be confused with [`RAMP_MS`]'s linear coefficient ramp,
+/// a separate mechanism that runs alongside this one.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 enum DryCurve {
