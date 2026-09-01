@@ -416,8 +416,10 @@ fn list_headphones(state: State<Backend>) -> Result<Value, String> {
 /// be driven by one backend and not another. [`AudioDevice`] therefore carries only what
 /// the audio system itself knows (id, name), and this joins it to the backend's answer.
 ///
-/// Field names are EqAPO-flavoured for now because the frontend has always used them; they
-/// generalise when the backend picker lands and the UI has two backends to talk about.
+/// Field names are still EqAPO-flavoured even though the backend picker has landed and the
+/// UI now has two backends to talk about — `eqapo_pattern`/`eqapo_enabled` mean "this
+/// endpoint"/"the active backend drives it", not literally EqAPO. Left as-is because the
+/// frontend has always used these names and renaming buys nothing but churn.
 #[derive(serde::Serialize)]
 struct DeviceDto {
     id: String,
