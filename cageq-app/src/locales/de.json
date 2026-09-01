@@ -185,7 +185,9 @@
     "active": "CAGEq verarbeitet das Audio auf {{device}} selbst. Equalizer APO ist nicht beteiligt.",
     "detach": "CAGEqs Audio-Engine für dieses Gerät nicht mehr verwenden",
     "cancelled": "Abgebrochen — es wurde nichts geändert.",
-    "detailsSummary": "Details"
+    "detailsSummary": "Details",
+    "tryNudge": "CAGEq hat eine eigene Audio-Engine — keine Abhängigkeit von Equalizer APO, sauberere Filteränderungen im laufenden Betrieb. Über den Engine-Button oben ausprobieren.",
+    "tryNudgeDismiss": "Nicht mehr anzeigen"
   },
   "foreignConfig": {
     "notice": "config.txt enthält {{count}} weitere aktive Filterzeile(n), die sich über jede CAGEq-Korrektur stapeln.",

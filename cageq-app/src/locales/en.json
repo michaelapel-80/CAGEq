@@ -185,7 +185,9 @@
     "active": "CAGEq is processing audio on {{device}} itself. Equalizer APO is not involved.",
     "detach": "Stop using CAGEq's audio engine on this device",
     "cancelled": "Cancelled — nothing was changed.",
-    "detailsSummary": "Details"
+    "detailsSummary": "Details",
+    "tryNudge": "CAGEq has its own audio engine — no Equalizer APO dependency, smoother live filter edits. Try it from the Engine button above.",
+    "tryNudgeDismiss": "Don't show this again"
   },
   "foreignConfig": {
     "notice": "config.txt has {{count}} other active filter line(s) that stack on top of every CAGEq correction.",

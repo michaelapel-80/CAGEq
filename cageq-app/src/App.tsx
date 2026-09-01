@@ -16,7 +16,7 @@ import { spectrumStream } from "./streams";
 import { Vectorscope } from "./Vectorscope";
 import { TimeScope } from "./TimeScope";
 import { SpectrumScope } from "./SpectrumScope";
-import ApoSetup from "./ApoSetup";
+import ApoSetup, { computeEngineReason, type ApoSetupStatus } from "./ApoSetup";
 import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
@@ -638,6 +638,14 @@ function App() {
   const [foreignConfig, setForeignConfig] = useState<string[] | null>(null);
   const [foreignReview, setForeignReview] = useState<null | "review" | "done">(null);
   const [foreignDismissed, setForeignDismissed] = useState(false);
+  // One-time "try CAGEq's own engine" nudge while Equalizer APO is the active backend — a
+  // second, independent apo_setup_status fetch of its own rather than lifting ApoSetup's
+  // internal one, matching this whole area's "reading is free" convention (see ApoSetup.tsx's
+  // own doc). `computeEngineReason` is the shared, exported logic so the two never drift into
+  // disagreeing about what "eqapo" means. `null` until both the persisted dismissal and a
+  // fresh status have loaded, so the banner never flashes on for one frame before either is known.
+  const [apoNudgeDismissed, setApoNudgeDismissed] = useState<boolean | null>(null);
+  const [apoNudgeStatus, setApoNudgeStatus] = useState<ApoSetupStatus | null>(null);
   // App version (from tauri.conf.json via getVersion) — shown in the footer so a deployed build is
   // identifiable ("I'm on vX"). The single authoritative product version.
   const [appVersion, setAppVersion] = useState("");
@@ -708,6 +716,7 @@ function App() {
         setStatus(await invoke<Status>("status"));
         setLoudness(await invoke<LoudnessSettings>("get_loudness"));
         setConfirmFinalVolume(await invoke<boolean>("get_confirm_final_volume"));
+        setApoNudgeDismissed(await invoke<boolean>("get_apo_nudge_dismissed"));
         const lib = await invoke<Parameters<typeof normalizeLibrary>[0]>("get_library");
         if (lib) setLibrary(normalizeLibrary(lib));
         const [hp, tg, dev] = await Promise.all([
@@ -1839,6 +1848,34 @@ function App() {
 
   const selectedDevice = devices.find((d) => d.id === deviceId);
   const dryActive = activeSlot === "Dry";
+
+  // Re-fetched whenever the selected device changes (not polled) — cheap, no-elevation, same
+  // as ApoSetup's own read, just independently so the nudge below doesn't need that component
+  // open to know whether to show at all.
+  useEffect(() => {
+    const endpoint = selectedDevice?.eqapo_pattern ?? null;
+    if (endpoint === null) {
+      setApoNudgeStatus(null);
+      return;
+    }
+    let active = true;
+    void invoke<ApoSetupStatus>("apo_setup_status", { endpoint }).then((s) => {
+      if (active) setApoNudgeStatus(s);
+    });
+    return () => {
+      active = false;
+    };
+  }, [selectedDevice?.eqapo_pattern]);
+
+  const showApoNudge =
+    apoNudgeDismissed === false &&
+    selectedDevice !== undefined &&
+    computeEngineReason(apoNudgeStatus, selectedDevice.eqapo_enabled, selectedDevice.eqapo_pattern) === "eqapo";
+
+  const dismissApoNudge = () => {
+    setApoNudgeDismissed(true); // optimistic — this is a one-way, best-effort preference, not a critical write
+    void invoke("set_apo_nudge_dismissed").catch(() => {});
+  };
   // Whether `result.filters` currently IS the §5.2 isolate bandpass audition, rather than the
   // real applied correction — see `excludeFromScale` below and `FilterKind`'s doc (Bandpass only
   // ever appears here). Shared by every place that would otherwise try to *invert* the cascade.
@@ -2516,6 +2553,21 @@ function App() {
           </button>
           <button type="button" onClick={() => setForeignDismissed(true)} style={{ fontSize: "0.85em" }}>
             {tr("foreignConfig.dismiss")}
+          </button>
+        </p>
+      )}
+
+      {/* One-time-ever nudge (not per-session, unlike the notice above) toward CAGEq's own
+          engine while Equalizer APO is the active backend — shown once, dismissed for good.
+          No "try it" button here: the Engine trigger in the header, right above this, already
+          is that action, now visibly blue for exactly this state — a second button doing the
+          same thing would just be clutter. `--accent`, not the amber warning colour: this is a
+          suggestion, not a problem to fix. */}
+      {!loading && showApoNudge && (
+        <p style={{ color: "var(--accent)", fontSize: "0.85em", margin: "0 0 0.8em", display: "flex", alignItems: "center", gap: "0.5em", flexWrap: "wrap" }}>
+          <span>💡 {tr("apoSetup.tryNudge")}</span>
+          <button type="button" onClick={dismissApoNudge} style={{ fontSize: "0.85em" }}>
+            {tr("apoSetup.tryNudgeDismiss")}
           </button>
         </p>
       )}

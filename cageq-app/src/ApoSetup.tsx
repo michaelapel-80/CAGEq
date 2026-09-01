@@ -57,6 +57,34 @@ type Props = {
 // Windows playback rate, shown compactly (48 kHz, 44.1 kHz, 96 kHz…).
 const fmtRate = (hz: number) => `${+(hz / 1000).toFixed(1)} kHz`;
 
+export type EngineReason = "apo" | "eqapo" | "helperMissing" | "broken" | "unattached";
+
+/**
+ * Which backend is actually processing audio on `endpointId` right now, or why neither is —
+ * pure and exported so the one-time "try CAGEq's own engine" nudge (App.tsx) can ask the exact
+ * same question this component's trigger colour answers, from its own independent status
+ * fetch, without the two ever silently drifting into disagreeing about what "eqapo" means.
+ *
+ * attached-but-inert, attached while the unsigned-effects gate is still closed (the exact
+ * "Windows silently skips the APO" failure mode found during setup-tool testing), the setup
+ * helper being missing, or neither CAGEq nor Equalizer APO attached to this device at all —
+ * which means every filter in this app currently has zero effect on what's actually being
+ * heard, the one case worth a distinct message for.
+ */
+export function computeEngineReason(status: ApoSetupStatus | null, eqapoEnabled: boolean, endpointId: string): EngineReason {
+  const attached = status !== null && status.attached.includes(endpointId);
+  const inert = status !== null && status.effects_disabled.includes(endpointId);
+  // `active_backend_is_apo` is reconciled against reality on every status read (the backend
+  // can now swap live — see `reconcile_backend` on the Rust side), so this flips true right
+  // after attaching, on the very next poll. No "restart to take effect" state exists anymore.
+  const activeIsApo = status !== null && attached && !inert && status.active_backend_is_apo;
+  if (status === null) return "eqapo";
+  if (!status.helper_available) return "helperMissing";
+  if (attached && (inert || !status.gate_open)) return "broken";
+  if (activeIsApo) return "apo";
+  return eqapoEnabled ? "eqapo" : "unattached";
+}
+
 export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEnabled, onOpenOutputSettings }: Props) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -86,11 +114,6 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
 
   const attached = status !== null && status.attached.includes(endpointId);
   const inert = status !== null && status.effects_disabled.includes(endpointId);
-  // `active_backend_is_apo` is reconciled against reality on every status read (the backend
-  // can now swap live — see `reconcile_backend` on the Rust side), so this flips true right
-  // after attaching, on the very next poll. No "restart to take effect" state exists anymore.
-  // CAGEq's own APO is genuinely what's processing audio here regardless of whether it's
-  // stale — this answers "which engine is running", the question the trigger's colour answers.
   const activeIsApo = status !== null && attached && !inert && status.active_backend_is_apo;
   // An app update shipped a newer CAGEqApo.dll that was never installed — see
   // `ApoSetupStatus.dll_current`'s own doc. Independent of `activeIsApo`: it's readable even
@@ -101,24 +124,7 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
   // active install doesn't read as finished: it re-enters the checklist below instead, with
   // its own explanation, rather than silently keeping the old build running indefinitely.
   const settled = activeIsApo && !stale;
-  // Why the trigger looks the way it does — which backend is actually processing audio right
-  // now, or why neither is: attached-but-inert, attached while the unsigned-effects gate is
-  // still closed (the exact "Windows silently skips the APO" failure mode found during
-  // setup-tool testing), the setup helper being missing, or neither CAGEq nor Equalizer APO
-  // attached to this device at all — which means every filter in this app currently has zero
-  // effect on what's actually being heard, the one case worth a distinct message for.
-  const engineReason: "apo" | "eqapo" | "helperMissing" | "broken" | "unattached" =
-    status === null
-      ? "eqapo"
-      : !status.helper_available
-        ? "helperMissing"
-        : attached && (inert || !status.gate_open)
-          ? "broken"
-          : activeIsApo
-            ? "apo"
-            : eqapoEnabled
-              ? "eqapo"
-              : "unattached";
+  const engineReason = computeEngineReason(status, eqapoEnabled, endpointId);
   const engineState: "apo" | "eqapo" | "attention" = engineReason === "apo" || engineReason === "eqapo" ? engineReason : "attention";
 
   async function run(action: string) {

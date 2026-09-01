@@ -875,6 +875,19 @@ fn set_confirm_final_volume(enabled: bool) {
     update_settings(|s| s.confirm_final_volume = enabled);
 }
 
+/// Has the user already dismissed the one-time "try CAGEq's own engine" nudge?
+#[tauri::command]
+fn get_apo_nudge_dismissed() -> bool {
+    load_settings().apo_nudge_dismissed
+}
+
+/// Dismiss the nudge permanently — there is no un-dismiss; the Engine button itself stays
+/// reachable regardless, so nothing is actually lost by dropping this.
+#[tauri::command]
+fn set_apo_nudge_dismissed() {
+    update_settings(|s| s.apo_nudge_dismissed = true);
+}
+
 /// Backend status for the UI: startup verdict, watchdog health, recovery count,
 /// and which sidecar is live.
 #[tauri::command]
@@ -947,6 +960,13 @@ struct AppSettings {
     /// opaque UI-owned-blob treatment as `resume` (persist + return verbatim).
     #[serde(default)]
     library: Option<Value>,
+    /// The one-time "try CAGEq's own engine" nudge, shown while Equalizer APO is the active
+    /// backend, dismissed. Explicit and permanent (not per-session, unlike the foreign-config
+    /// notice): the point is to mention the option exactly once and then respect a "no", not
+    /// to keep re-litigating it every launch for someone who has already decided to stay on
+    /// EqAPO.
+    #[serde(default)]
+    apo_nudge_dismissed: bool,
 }
 
 fn default_true() -> bool {
@@ -962,6 +982,7 @@ impl Default for AppSettings {
             confirm_final_volume: true,
             resume: None,
             library: None,
+            apo_nudge_dismissed: false,
         }
     }
 }
@@ -1384,6 +1405,8 @@ pub fn run() {
             preview_loudness,
             get_confirm_final_volume,
             set_confirm_final_volume,
+            get_apo_nudge_dismissed,
+            set_apo_nudge_dismissed,
             get_selection,
             get_resume,
             set_resume,
