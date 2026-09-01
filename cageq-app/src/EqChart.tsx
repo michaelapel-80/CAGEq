@@ -502,6 +502,21 @@ export function EqChart({
   const dbTicks: number[] = [];
   for (let v = -Math.floor(yMax / step) * step; v <= yMax; v += step) dbTicks.push(v);
 
+  // Phase tick labels — deliberately never at ±phaseRange itself. `yPhase` maps that value to
+  // exactly y=0/H (the plot's own top/bottom edge, PAD being zero everywhere in this chart), so
+  // a label there has no room for its own glyph height and clips against the edge — reported
+  // live as the ±45° label (phaseRange's minimum snap, hence the most common value) being cut
+  // off. The `< phaseRange` bound (not `<=`) is what actually fixes it, for any phaseRange: the
+  // outermost printed tick always sits one step short of the true edge, same idea as an
+  // oscilloscope graticule whose outermost division carries no printed number. Coarser than the
+  // dB axis's own step scaling would allow the same 45°-multiple to fall exactly on the boundary
+  // again (e.g. a 45° step at phaseRange=90); 30° avoids that for the common 45°/90° ranges and
+  // still reads cleanly, coarsening only once the range is wide enough that 30° would crowd it.
+  const phaseStep = phaseRange <= 90 ? 30 : phaseRange <= 180 ? 45 : 90;
+  const phasePosTicks: number[] = [];
+  for (let v = 0; v < phaseRange; v += phaseStep) phasePosTicks.push(v);
+  const phaseTicks = [...phasePosTicks.slice(1).reverse().map((v) => -v), ...phasePosTicks];
+
   // Legend rows: every series, then reference curves, phase, then markers, in draw order.
   type LegendStyle = "solid" | "dashed" | "dotted" | "diamond";
   const legend: { id: string; color: string; label: string; style: LegendStyle }[] = [
@@ -1008,7 +1023,7 @@ export function EqChart({
           position. */}
       {phaseOn && phase && (
         <g>
-          {[phaseRange, 0, -phaseRange].map((deg) => (
+          {phaseTicks.map((deg) => (
             <text key={deg} x={W - PAD.r - 4} y={yPhase(deg) + 3.5} textAnchor="end" fontSize="10" fill={phase.color} opacity={0.85}>
               {deg > 0 ? `+${deg}` : deg}°
             </text>
