@@ -54,6 +54,18 @@ pub struct MeterUpdate {
 pub struct SpectrumUpdate {
     /// Smoothed magnitude per log-frequency bin, dB (relative), from low freq (index 0) up.
     pub db: Vec<f32>,
+    /// One-to-one with `db`, but the true linear-FFT level at each bin's span — the *max* of the
+    /// (temporally-smoothed) linear power spectrum over `[lo, hi]`, not `gaussian_power`'s
+    /// density-weighted average. `db` is the right thing to *draw*: a real spectral-density shape,
+    /// correct for broadband content, that accepts a swept tone reading up to ~19dB low at HF as
+    /// the tradeoff (see `gaussian_power`'s doc). That droop is real dilution, though, not just a
+    /// cosmetic slope — a tone's whole energy sits in 1-2 linear bins, and averaging those with an
+    /// increasingly wide window of near-silent neighbours understates its actual level. Taking the
+    /// max over the same span instead reports whichever linear bin actually saw the tone,
+    /// undiluted. Only meant for reading a *specific* frequency's level (a detected peak, the
+    /// hover cursor) — as a curve it would be a poor density estimator (biased high, noisy) for
+    /// broadband material, which is exactly why it's a second field and not a `db` replacement.
+    pub peak_db: Vec<f32>,
     /// `false` when the endpoint produced no audio this window (same silence test as
     /// [`MeterUpdate::signal`]). The analyzer view blanks its beam on this instead of painting the
     /// idle-decay sweep: without it, the ~35 dB/s slide to the floor is *actively redrawn* into
@@ -581,6 +593,18 @@ mod windows_impl {
         }
     }
 
+    /// Companion to `gaussian_power`, for `SpectrumUpdate::peak_db` — the plain max of `power`
+    /// over the bin's own exact (fractional) span `[lo, hi]`, rounded outward to whole linear
+    /// bins rather than weighted/interpolated at the edges. Unlike `gaussian_power`, correctness
+    /// here isn't about a smooth *shape*: this only ever gets read at a single reported frequency
+    /// (a peak, the cursor), so there's no adjacent-bin sweep to jump between and nothing for a
+    /// hard edge to visibly break.
+    fn max_power(power: &[f32], lo: f32, hi: f32) -> f32 {
+        let lo_i = lo.max(0.0).floor() as usize;
+        let hi_i = (hi.max(0.0).ceil() as usize).min(power.len().saturating_sub(1));
+        power[lo_i..=hi_i].iter().copied().fold(0.0f32, f32::max)
+    }
+
     fn to_db(linear: f32) -> f32 {
         if linear <= 0.0 {
             DB_FLOOR
@@ -728,6 +752,7 @@ mod windows_impl {
         /// Collapse the averaged power onto log bins (dB).
         fn snapshot(&mut self, signal: bool) -> SpectrumUpdate {
             let mut db = Vec::with_capacity(N_LOG_BINS);
+            let mut peak_db = Vec::with_capacity(N_LOG_BINS);
             for &(lo, hi) in self.ranges.iter() {
                 // Gaussian-weighted integral of linear power across the log bin's own span, not
                 // the single loudest sample in it — see `gaussian_power`'s doc for the full case
@@ -742,8 +767,18 @@ mod windows_impl {
                     SPEC_FLOOR
                 };
                 db.push(round_to(cur, 1));
+
+                // Same span, but the true (undiluted) level — see `peak_db`'s own doc on
+                // `SpectrumUpdate` for why this is a second reduction rather than reusing `power`.
+                let pk = max_power(&self.avg_power, lo, hi);
+                let pk_cur = if pk > 0.0 {
+                    (10.0 * (pk * self.power_scale).log10()).max(SPEC_FLOOR)
+                } else {
+                    SPEC_FLOOR
+                };
+                peak_db.push(round_to(pk_cur, 1));
             }
-            SpectrumUpdate { db, signal, f_min: SPEC_F_MIN, f_max: SPEC_F_MAX }
+            SpectrumUpdate { db, peak_db, signal, f_min: SPEC_F_MIN, f_max: SPEC_F_MAX }
         }
     }
 
@@ -1223,6 +1258,62 @@ mod windows_impl {
                 );
                 prev = update.db[i];
             }
+        }
+
+        /// The reason `peak_db` exists at all: `db`'s density-normalized reduction genuinely
+        /// dilutes an isolated tone at HF (the accepted ~19dB droop — see `gaussian_power`'s doc,
+        /// and `decimation_spike.rs`'s `production_formula_tone_and_pink_noise_behavior` for the
+        /// measured curve). A full-scale 12kHz tone is well up that droop; `max_power`'s job is to
+        /// still report it at ~0dBFS despite `db` reporting it well below that at the same bin.
+        #[test]
+        fn peak_db_recovers_a_full_scale_tone_that_db_droops() {
+            let rate = 48_000u32;
+            let mut spec = Spectrum::new(rate);
+            let freq = 12_000.0f32;
+            let amp = 1.0f32;
+            let total_samples = rate as usize * 2; // 2s — well past SPEC_TAU_SECS settling
+            let mut phase = 0.0f64;
+            let step = 2.0 * std::f64::consts::PI * freq as f64 / rate as f64;
+            let mut buf = vec![0.0f32; 4096];
+            let mut fed = 0;
+            while fed < total_samples {
+                let n = buf.len().min(total_samples - fed);
+                for s in buf.iter_mut().take(n) {
+                    *s = amp * phase.sin() as f32;
+                    phase += step;
+                }
+                spec.push(&buf[..n]);
+                fed += n;
+            }
+
+            let update = spec.snapshot(true);
+            let peak_i = update
+                .db
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+                .unwrap();
+
+            // The droop this whole field exists to route around: `db` at the tone's own peak bin
+            // reads well below 0dBFS despite the input being a full-scale sine.
+            assert!(
+                update.db[peak_i] < -10.0,
+                "expected the documented HF droop in db at 12kHz, got {} dB — if this no longer \
+                 droops, gaussian_power's tradeoff changed and peak_db's rationale should be \
+                 re-checked, not just this assertion loosened",
+                update.db[peak_i]
+            );
+            // peak_db at the same bin should read close to the true 0dBFS level instead — a
+            // generous tolerance covers residual scalloping loss, not the ~10dB+ of density
+            // dilution `db` shows at this frequency.
+            assert!(
+                update.peak_db[peak_i] > -1.5,
+                "peak_db should recover the true tone level near 0dBFS, got {} dB (db read {} dB \
+                 at the same bin)",
+                update.peak_db[peak_i],
+                update.db[peak_i]
+            );
         }
     }
 }

@@ -565,6 +565,16 @@ export function SpectrumScope({
     // Every bin's (possibly corrected) value, one-to-one with xScratch/yScratch — `findPeaks` reads
     // this directly for true bin-to-bin adjacency (needed to detect local maxima correctly).
     let vScratch = new Float64Array(0);
+    // Same bins' *true* linear-FFT level (`peak_db` — max within the bin's span, not the
+    // Gaussian-weighted density average `db`/vScratch uses) — one-to-one with vScratch, but only
+    // ever read for the numeric peak/cursor readouts below, never drawn. The two exist because
+    // they answer different questions: vScratch is "what does the spectral *density* look like"
+    // (correct shape for broadband content, ~19dB-droops a swept tone by design — see
+    // `gaussian_power`'s doc in cageq-monitor), pScratch is "what is the actual level right here"
+    // (correct for an isolated tone, noisier as a *shape* for broadband content — exactly why it's
+    // never the thing stroked). Peak *positions* still come from vScratch/findPeaks so the crosses
+    // stay visually on the drawn curve; only the reported dB numbers switch to this array.
+    let pScratch = new Float64Array(0);
     // Exponentially-smoothed copy of yScratch actually drawn — see the render loop's own comment
     // (the window-drag stutter fix). NaN marks "not yet initialized" so a fresh bin snaps straight
     // to target instead of animating in from zero.
@@ -617,6 +627,7 @@ export function SpectrumScope({
           xScratch = new Float64Array(n);
           yScratch = new Float64Array(n);
           vScratch = new Float64Array(n);
+          pScratch = new Float64Array(n);
           const grown = new Float64Array(n).fill(NaN);
           grown.set(yScratchSmooth); // preserve already-settled bins; new ones start at NaN (unset)
           yScratchSmooth = grown;
@@ -627,6 +638,7 @@ export function SpectrumScope({
         // left to collapse or preserve the shape of.
         for (let i = 0; i < n; i++) {
           vScratch[i] = corr ? s.db[i] - corr[i] : s.db[i];
+          pScratch[i] = corr ? s.peak_db[i] - corr[i] : s.peak_db[i];
           const frac = Math.max(0, Math.min(1, (vScratch[i] - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
           xScratch[i] = (i / (n - 1)) * W;
           yScratch[i] = plotBot - frac * (plotBot - plotTop);
@@ -680,7 +692,11 @@ export function SpectrumScope({
             if (j < peaks.length) {
               const hz = binHz(peaks[j].i);
               hzSpan.textContent = fmtPeakHz(hz);
-              dbSpan.textContent = `${peaks[j].v.toFixed(1)} dB`;
+              // pScratch, not peaks[j].v: the cross's position (drawn above) still comes from
+              // the Gaussian curve so it sits on the trace, but the *number* reports the true
+              // linear-FFT level at that bin — see pScratch's own comment.
+              const pBin = Math.max(0, Math.min(n - 1, Math.round(peaks[j].i)));
+              dbSpan.textContent = `${pScratch[pBin].toFixed(1)} dB`;
               // Same Fc→hue mapping ToneGrid's Fc readout uses, at the same full strength — a
               // peak's frequency reads as the same colour here as a band tuned to it would there.
               slot.style.color = fcHue(hz);
@@ -739,12 +755,14 @@ export function SpectrumScope({
           // Linear interpolation between the two bins straddling the cursor — reads the underlying
           // data directly rather than the cosmetically-smoothed spline drawn through it (`traceSmooth`),
           // which is the right choice for a readout: the spline's only job is to look good between
-          // points, not to claim sub-bin structure the data itself doesn't have.
+          // points, not to claim sub-bin structure the data itself doesn't have. pScratch, not
+          // vScratch, for the same reason as the peak readout above — the true level, not the
+          // density-smoothed one the trace is drawn from.
           const fi = hoverFrac * (n - 1);
           const i0 = Math.floor(fi);
           const i1 = Math.min(n - 1, i0 + 1);
           const t = fi - i0;
-          dbText = `${(vScratch[i0] * (1 - t) + vScratch[i1] * t).toFixed(1)} dB`;
+          dbText = `${(pScratch[i0] * (1 - t) + pScratch[i1] * t).toFixed(1)} dB`;
         }
         if (cursorHzRef.current) cursorHzRef.current.textContent = fmtPeakHz(hz);
         if (cursorDbRef.current) cursorDbRef.current.textContent = dbText;

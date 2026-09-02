@@ -72,8 +72,11 @@ export type PhaseCurve = { id: string; bands: Band[]; color: string; label: stri
  *  gentle fade-away is the intended look here). The capture is the post-EQ output; the chart draws
  *  the **pre-filter** (source) view by removing the applied filter response per bin (see
  *  `eqBands`), so it reads against the EQ curve as "what's coming in" rather than the
- *  already-corrected output (§5.3c). */
-export type SpectrumData = { db: number[]; signal: boolean; f_min: number; f_max: number };
+ *  already-corrected output (§5.3c). `peak_db` is one-to-one with `db`, but reports the true
+ *  linear-FFT level (max within the bin's span) instead of `db`'s Gaussian-weighted density
+ *  average — the shape to draw vs. the number to read off a peak or the cursor, see
+ *  SpectrumScope.tsx's `pScratch` for why the two disagree on purpose. */
+export type SpectrumData = { db: number[]; peak_db: number[]; signal: boolean; f_min: number; f_max: number };
 
 /** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). */
 export type Nodes = {
