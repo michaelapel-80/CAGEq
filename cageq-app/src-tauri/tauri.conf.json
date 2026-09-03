@@ -4,9 +4,9 @@
   "version": "0.7.0",
   "identifier": "com.cageq.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/check-apo-staleness.ps1 & npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/check-apo-staleness.ps1 -Block && npm run build",
     "frontendDist": "../dist"
   },
   "app": {

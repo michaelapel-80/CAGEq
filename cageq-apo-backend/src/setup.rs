@@ -229,7 +229,9 @@ impl EndpointStatus {
 /// while `status` answers the machine-wide questions from three registry reads.
 #[cfg(windows)]
 pub fn endpoints() -> Vec<EndpointStatus> {
-    let s = status();
+    // Only .attached/.effects_disabled are read below — dll_current plays no part here, so
+    // there is nothing for a caller to pass in.
+    let s = status(None);
     cageq_backend::list_render_devices()
         .into_iter()
         .map(|d| EndpointStatus {
@@ -353,8 +355,17 @@ pub enum SetupError {
 // Status — pure reads, no elevation
 // ---------------------------------------------------------------------------
 
+/// `shipped_dll_path`: where *this* caller's copy of the shipped `CAGEqApo.dll` is, if it
+/// knows — `None` if it has no way to find one (nothing to compare, not "stale").
+///
+/// **Not `shipped_dll()`.** That helper resolves the DLL beside `current_exe()`, which is
+/// correct for [`register`] (it runs *inside the elevated helper process*, staged next to its
+/// own DLL — see `build-apo.ps1`'s doc) but wrong here: `status` runs unelevated, in-process,
+/// inside the *main app*, whose own exe is never beside the bundled `apo/` resources. The
+/// caller (which holds the Tauri `AppHandle` this crate deliberately does not depend on)
+/// resolves the real one via `resource_dir()` and passes it in.
 #[cfg(windows)]
-pub fn status() -> SetupStatus {
+pub fn status(shipped_dll_path: Option<&std::path::Path>) -> SetupStatus {
     use winreg::RegKey;
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 
@@ -367,13 +378,13 @@ pub fn status() -> SetupStatus {
             let path = PathBuf::from(path);
             out.dll_present = path.exists();
             if out.dll_present {
-                // Both sides read unelevated (the shipped copy is just a file next to this
-                // process; the installed one is world-readable), so this needs no privilege —
-                // consistent with the rest of `status()`. `None` from either side (can't hash
-                // one, or nothing is shipped here at all — a bare CLI/dev context) means there
-                // is nothing trustworthy to compare, so it stays `true` rather than guessing.
-                if let (Ok(shipped), Some(installed_hash)) = (shipped_dll(), file_hash(&path)) {
-                    if let Some(shipped_hash) = file_hash(&shipped) {
+                // Both sides read unelevated (the shipped copy is just a file, and the
+                // installed one is world-readable), so this needs no privilege — consistent
+                // with the rest of `status()`. `None` from either side (caller couldn't
+                // resolve one, or can't hash it) means there is nothing trustworthy to compare,
+                // so it stays `true` rather than guessing.
+                if let (Some(shipped), Some(installed_hash)) = (shipped_dll_path, file_hash(&path)) {
+                    if let Some(shipped_hash) = file_hash(shipped) {
                         out.dll_current = shipped_hash == installed_hash;
                     }
                 }
@@ -411,7 +422,7 @@ pub fn status() -> SetupStatus {
 }
 
 #[cfg(not(windows))]
-pub fn status() -> SetupStatus {
+pub fn status(_shipped_dll_path: Option<&std::path::Path>) -> SetupStatus {
     SetupStatus::default()
 }
 
@@ -432,7 +443,7 @@ pub fn perform(action: &Action) -> Result<(), SetupError> {
             // references to CAGEq forever and the next register looks like it did nothing.
             // Making the user detach by hand first was busywork for something only this code
             // knows the full list for.
-            for id in status().attached {
+            for id in status(None).attached {
                 detach(&id)?;
             }
             regsvr32(true)
@@ -1396,7 +1407,7 @@ mod tests {
     /// machine's registry looks like.
     #[test]
     fn reading_status_needs_no_privileges() {
-        let s = status();
+        let s = status(None);
         assert!(s.attached.windows(2).all(|w| w[0] <= w[1]), "attached should be sorted");
     }
 }

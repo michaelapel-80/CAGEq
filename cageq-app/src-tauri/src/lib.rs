@@ -462,6 +462,29 @@ fn apo_helper_path(app: &tauri::AppHandle) -> Option<PathBuf> {
         dev.exists().then_some(dev)
     })
 }
+
+/// The shipped `CAGEqApo.dll`, as `cageq_apo_backend::setup::status`'s hash comparison needs
+/// it — that crate deliberately has no `tauri` dependency to call `resource_dir()` itself (see
+/// `status`'s own doc for why it takes this as a parameter rather than discovering it).
+///
+/// **Not `apo_helper_path`'s dev fallback pattern** — there is no `cargo build` output to fall
+/// back to for the DLL the way there is for the helper exe: `CAGEqApo.dll` only ever exists
+/// after `build-apo.ps1` links it with the MSVC toolchain and stages it here, in `apo/` beside
+/// this crate's manifest. So in dev that staged copy *is* the only "shipped" copy there is —
+/// the same file `tauri build` would go on to bundle from this same directory.
+fn apo_shipped_dll_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    use tauri::Manager;
+    let bundled = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|r| r.join("apo").join("CAGEqApo.dll"))
+        .filter(|p| p.exists());
+    bundled.or_else(|| {
+        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("apo").join("CAGEqApo.dll");
+        dev.exists().then_some(dev)
+    })
+}
 /// Setup state for CAGEq's own APO, for the setup panel.
 ///
 /// Every field comes from a plain `HKLM` read, so this needs no elevation and can be polled
@@ -511,7 +534,7 @@ fn apo_setup_status(
 ) -> ApoSetupDto {
     use cageq_apo_backend::setup;
 
-    let s = setup::status();
+    let s = setup::status(apo_shipped_dll_path(&app).as_deref());
     let next = endpoint.as_deref().and_then(|e| s.next_step(e));
     // Reconciling here rather than caching a startup snapshot is what lets finishing setup
     // (or detaching) take effect immediately — see `reconcile_backend`.

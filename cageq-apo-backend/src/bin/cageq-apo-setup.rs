@@ -138,7 +138,9 @@ impl Output {
 }
 
 fn print_status(out: &mut Output) {
-    let s = setup::status();
+    // dll_current plays no part in this printout, so there is nothing to pass in — this CLI
+    // diagnostic dump has never needed the shipped-vs-installed comparison.
+    let s = setup::status(None);
 
     out.line("MACHINE");
     match &s.registered_dll {
