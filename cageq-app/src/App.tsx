@@ -638,14 +638,20 @@ function App() {
   const [foreignConfig, setForeignConfig] = useState<string[] | null>(null);
   const [foreignReview, setForeignReview] = useState<null | "review" | "done">(null);
   const [foreignDismissed, setForeignDismissed] = useState(false);
-  // One-time "try CAGEq's own engine" nudge while Equalizer APO is the active backend — a
-  // second, independent apo_setup_status fetch of its own rather than lifting ApoSetup's
-  // internal one, matching this whole area's "reading is free" convention (see ApoSetup.tsx's
-  // own doc). `computeEngineReason` is the shared, exported logic so the two never drift into
-  // disagreeing about what "eqapo" means. `null` until both the persisted dismissal and a
-  // fresh status have loaded, so the banner never flashes on for one frame before either is known.
+  // One-time "try CAGEq's own engine" nudge while Equalizer APO is the active backend, PLUS the
+  // "your CAGEq engine build is stale" banner below — both read `apoDeviceStatus`, a second,
+  // independent apo_setup_status fetch of its own rather than lifting ApoSetup's internal one,
+  // matching this whole area's "reading is free" convention (see ApoSetup.tsx's own doc).
+  // `computeEngineReason` is the shared, exported logic so nothing here ever drifts from what
+  // the Engine trigger's own colour means. `apoNudgeDismissed` is `null` until both the
+  // persisted dismissal and a fresh status have loaded, so that banner never flashes on for one
+  // frame before either is known.
   const [apoNudgeDismissed, setApoNudgeDismissed] = useState<boolean | null>(null);
-  const [apoNudgeStatus, setApoNudgeStatus] = useState<ApoSetupStatus | null>(null);
+  const [apoDeviceStatus, setApoDeviceStatus] = useState<ApoSetupStatus | null>(null);
+  // Stale-DLL notice is session-only, not permanent like the nudge above: staying on an old
+  // build matters again every launch (a shipped fix silently not applying), where the nudge is
+  // a one-time preference that deserves to be dropped once declined.
+  const [apoStaleDismissed, setApoStaleDismissed] = useState(false);
   // App version (from tauri.conf.json via getVersion) — shown in the footer so a deployed build is
   // identifiable ("I'm on vX"). The single authoritative product version.
   const [appVersion, setAppVersion] = useState("");
@@ -1850,31 +1856,46 @@ function App() {
   const dryActive = activeSlot === "Dry";
 
   // Re-fetched whenever the selected device changes (not polled) — cheap, no-elevation, same
-  // as ApoSetup's own read, just independently so the nudge below doesn't need that component
+  // as ApoSetup's own read, just independently so neither banner below needs that component
   // open to know whether to show at all.
   useEffect(() => {
     const endpoint = selectedDevice?.eqapo_pattern ?? null;
     if (endpoint === null) {
-      setApoNudgeStatus(null);
+      setApoDeviceStatus(null);
       return;
     }
     let active = true;
     void invoke<ApoSetupStatus>("apo_setup_status", { endpoint }).then((s) => {
-      if (active) setApoNudgeStatus(s);
+      if (active) setApoDeviceStatus(s);
     });
     return () => {
       active = false;
     };
   }, [selectedDevice?.eqapo_pattern]);
 
-  const showApoNudge =
-    apoNudgeDismissed === false &&
-    selectedDevice !== undefined &&
-    computeEngineReason(apoNudgeStatus, selectedDevice.eqapo_enabled, selectedDevice.eqapo_pattern) === "eqapo";
+  const engineReason =
+    selectedDevice !== undefined
+      ? computeEngineReason(apoDeviceStatus, selectedDevice.eqapo_enabled, selectedDevice.eqapo_pattern)
+      : null;
+
+  const showApoNudge = apoNudgeDismissed === false && engineReason === "eqapo";
 
   const dismissApoNudge = () => {
     setApoNudgeDismissed(true); // optimistic — this is a one-way, best-effort preference, not a critical write
     void invoke("set_apo_nudge_dismissed").catch(() => {});
+  };
+
+  // "Your build is stale" banner — filter.md §5.3c's dll_current, surfaced here rather than
+  // left to the trigger's tooltip: a colour-coded button that still looks perfectly settled
+  // (orange, `engineReason === "apo"`) is not where anyone goes looking for a warning. Only
+  // shown while CAGEq's own engine is actually the one running (a registered-but-inactive stale
+  // DLL isn't processing anything right now, so it isn't urgent the same way).
+  const apoStale =
+    !apoStaleDismissed && engineReason === "apo" && apoDeviceStatus !== null &&
+    apoDeviceStatus.dll_present && !apoDeviceStatus.dll_current;
+
+  const dismissApoStale = () => {
+    setApoStaleDismissed(true); // session-only — see the state's own doc for why this isn't persisted
   };
   // Whether `result.filters` currently IS the §5.2 isolate bandpass audition, rather than the
   // real applied correction — see `excludeFromScale` below and `FilterKind`'s doc (Bandpass only
@@ -2568,6 +2589,20 @@ function App() {
           <span>💡 {tr("apoSetup.tryNudge")}</span>
           <button type="button" onClick={dismissApoNudge} style={{ fontSize: "0.85em" }}>
             {tr("apoSetup.tryNudgeDismiss")}
+          </button>
+        </p>
+      )}
+
+      {/* Stale-DLL notice — pulled out here instead of left as the trigger's tooltip text: the
+          Engine button still reads as its normal settled orange while stale (see engineReason's
+          own doc — "apo" covers both, deliberately, since it IS running), so a tooltip nobody
+          hovers was effectively invisible. Amber, same as foreignConfig's notice below: this is
+          a real "you're not on the build you shipped" fact, not a mere suggestion. */}
+      {!loading && apoStale && (
+        <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.8em", display: "flex", alignItems: "center", gap: "0.5em", flexWrap: "wrap" }}>
+          <span>⚠ {tr("apoSetup.staleNotice")}</span>
+          <button type="button" onClick={dismissApoStale} style={{ fontSize: "0.85em" }}>
+            {tr("apoSetup.staleDismiss")}
           </button>
         </p>
       )}

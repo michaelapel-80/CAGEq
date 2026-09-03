@@ -187,7 +187,9 @@
     "cancelled": "Cancelled — nothing was changed.",
     "detailsSummary": "Details",
     "tryNudge": "CAGEq has its own audio engine — no Equalizer APO dependency, smoother live filter edits. Try it from the Engine button above.",
-    "tryNudgeDismiss": "Don't show this again"
+    "tryNudgeDismiss": "Don't show this again",
+    "staleNotice": "CAGEq's own audio engine is running an outdated build. Open Engine above and continue to update it.",
+    "staleDismiss": "Dismiss"
   },
   "foreignConfig": {
     "notice": "config.txt has {{count}} other active filter line(s) that stack on top of every CAGEq correction.",

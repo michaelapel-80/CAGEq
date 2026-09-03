@@ -187,7 +187,9 @@
     "cancelled": "Abgebrochen — es wurde nichts geändert.",
     "detailsSummary": "Details",
     "tryNudge": "CAGEq hat eine eigene Audio-Engine — keine Abhängigkeit von Equalizer APO, sauberere Filteränderungen im laufenden Betrieb. Über den Engine-Button oben ausprobieren.",
-    "tryNudgeDismiss": "Nicht mehr anzeigen"
+    "tryNudgeDismiss": "Nicht mehr anzeigen",
+    "staleNotice": "CAGEqs eigene Audio-Engine läuft in einer veralteten Version. Über den Engine-Button oben aktualisieren.",
+    "staleDismiss": "Ausblenden"
   },
   "foreignConfig": {
     "notice": "config.txt enthält {{count}} weitere aktive Filterzeile(n), die sich über jede CAGEq-Korrektur stapeln.",
