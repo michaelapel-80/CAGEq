@@ -91,7 +91,30 @@ const MAX_TOTAL_GAIN_DB: f64 = 20.0;
 /// 8 ms is chosen against how updates actually arrive: a live tone drag produces them at
 /// roughly 60 Hz (~17 ms apart), so the ramp finishes between edits instead of permanently
 /// chasing a moving target, while still being far too short to feel like lag.
+///
+/// **This is a floor, not the ramp length** — see [`Cascade::ramp_ms_for`]. A live drag's
+/// steps are small (this is the length that fits them), but a whole-slot swap or preset
+/// change is not: 8 ms of it measured as an audible lurch (confirmed live, not guessed), the
+/// exact "far too fast for a large tonal jump" problem `morph.rs`'s own module doc names —
+/// this crate just used to have no answer for it, because pushing the *final* coefficients in
+/// one call (rather than several spaced writes — see `Capabilities::owns_transitions`'s doc in
+/// `cageq-backend`) meant nothing ever paced the ramp itself to the size of the change.
 const RAMP_MS: f64 = 8.0;
+
+/// How much perceptual distance one second of ramp buys, dB/s — see [`Cascade::ramp_ms_for`].
+/// Deliberately the same number as `cageq-core::morph::TONE_MORPH_RATE_DB_PER_SEC`: however
+/// CAGEq is driving the audio, a jump of a given size should take about the same time to feel
+/// deliberate rather than abrupt, not a different pace depending on which backend is active.
+/// Not shared as an actual Rust constant across the two crates — `cageq-apo` doesn't depend on
+/// `cageq-core` (and shouldn't start to just for one `f64`) — so this is a second copy, the
+/// same tradeoff already made three times over for the K-weighting constants in `morph.rs`,
+/// the sidecar, and `biquad.ts`.
+const RAMP_RATE_DB_PER_SEC: f64 = 40.0;
+
+/// Ceiling on the adaptive ramp, matching `cageq-core::morph::TONE_MORPH_MAX` — see that
+/// constant's doc for why an unbounded slew is its own problem (short auditory memory makes a
+/// slow morph as unusable for A/B as an instant jump, just in the other direction).
+const RAMP_MAX_MS: f64 = 300.0;
 
 /// How long a crossfade to or from dry takes, in milliseconds.
 ///
@@ -276,7 +299,9 @@ pub struct Cascade {
     start: [Coeffs; MAX_BANDS],
     /// Frames left in the current ramp; 0 means the coefficients are settled.
     ramp_left: u32,
-    /// Ramp length in frames, derived from the sample rate — see [`RAMP_MS`].
+    /// Length of the *current* ramp, in frames — set fresh by every [`Cascade::start_ramp`]
+    /// call from [`Cascade::ramp_ms_for`], not a fixed constant: a live-drag-sized nudge gets
+    /// [`RAMP_MS`]'s floor, a whole-slot swap gets proportionally longer, up to [`RAMP_MAX_MS`].
     ramp_frames: u32,
     /// Bands the target uses. Becomes `process_count` once a ramp completes.
     band_count: usize,
@@ -350,7 +375,9 @@ impl Cascade {
             target: [Coeffs::PASSTHROUGH; MAX_BANDS],
             start: [Coeffs::PASSTHROUGH; MAX_BANDS],
             ramp_left: 0,
-            // At least one frame, so a pathologically low rate cannot divide by zero.
+            // Placeholder until the first start_ramp() picks a real, distance-based value —
+            // never divided against while ramp_left is 0, but kept a sane, in-range number
+            // rather than 0 on principle.
             ramp_frames: ((RAMP_MS / 1000.0) * sample_rate).round().max(1.0) as u32,
             band_count: 0,
             process_count: 0,
@@ -370,7 +397,8 @@ impl Cascade {
         }
     }
 
-    /// Begin moving the coefficients towards `target`, over [`RAMP_MS`].
+    /// Begin moving the coefficients towards `target`, paced by [`Cascade::ramp_ms_for`] —
+    /// [`RAMP_MS`] for a small change, longer for a large one, up to [`RAMP_MAX_MS`].
     ///
     /// Retargeting mid-ramp is fine and expected — a drag produces a stream of these — because
     /// the new ramp starts from wherever the coefficients have actually reached, not from the
@@ -389,7 +417,52 @@ impl Cascade {
         // the step this is here to remove.
         self.process_count = self.process_count.max(new_count);
         self.band_count = new_count;
+        // Sized to how different `start` and `target` actually are, not a fixed length — see
+        // `ramp_ms_for`'s own doc for why a whole-slot swap needs far more than a live drag's
+        // 8 ms. Computed from `start`/`target` themselves (just assigned above), the same
+        // per-sample-independent one-shot cost `would_be_too_loud` already pays on every
+        // `apply_coeffs`/`set_bands` call, so this is not new real-time-path risk, just more of
+        // the same affordable kind.
+        let ms = Self::ramp_ms_for(self.ramp_distance_db());
+        self.ramp_frames = ((ms / 1000.0) * self.sample_rate).round().max(1.0) as u32;
         self.ramp_left = self.ramp_frames;
+    }
+
+    /// How far apart `start` and `target` are, combined response in dB, RMS over [`Cascade::grid`].
+    ///
+    /// A deliberately simpler cousin of `cageq-core::morph::tonal_distance_db`: that one is
+    /// K-weighted and pink-noise-bin-weighted because it feeds a number people compare presets
+    /// by, evaluated on a *symbolic* band list (`Fc`/`Q`/gain). This only has to size a ramp —
+    /// "is this a nudge or a whole new curve" — and only has raw, already-baked coefficients to
+    /// work from (whatever arrived over the control channel, symbolic or not), so it reuses the
+    /// guard's own plain log-spaced grid and takes an unweighted RMS across it instead of
+    /// porting K-weighting a fourth time for a heuristic that never reaches the user as a
+    /// number.
+    fn ramp_distance_db(&self) -> f64 {
+        let mut sum_sq = 0.0;
+        for g in &self.grid {
+            let mut db_from = self.preamp_from_db;
+            let mut db_to = self.preamp_to_db;
+            for i in 0..MAX_BANDS {
+                // Floored, not left to reach zero/negative-infinite: a genuine null in one
+                // curve at one grid point must not make the whole distance metric blow up or
+                // go NaN over a difference that is really "very large but finite".
+                db_from += 10.0 * self.start[i].power_at(g).max(1e-12).log10();
+                db_to += 10.0 * self.target[i].power_at(g).max(1e-12).log10();
+            }
+            let d = db_to - db_from;
+            sum_sq += d * d;
+        }
+        (sum_sq / self.grid.len() as f64).sqrt()
+    }
+
+    /// Ramp duration for a change of `distance_db` — [`RAMP_MS`] below it, scaling at
+    /// [`RAMP_RATE_DB_PER_SEC`] above, capped at [`RAMP_MAX_MS`]. Mirrors
+    /// `cageq-core::morph::morph_frames`'s shape (same rate, same cap, see those constants'
+    /// docs) but returns a duration rather than a frame count: this crate's ramp already knows
+    /// its own sample rate and needs no separate step size the way spaced app-level writes do.
+    fn ramp_ms_for(distance_db: f64) -> f64 {
+        (distance_db / RAMP_RATE_DB_PER_SEC * 1000.0).clamp(RAMP_MS, RAMP_MAX_MS)
     }
 
     /// Fade to the untouched input, or back to the correction.
@@ -2124,13 +2197,84 @@ mod tests {
             assert!(frames < 10_000, "ramp never finished");
         }
 
-        // ~8 ms at 48 kHz, and it must land exactly on the target rather than near it — a long
-        // series of edits must not let rounding drift the response away from what was asked.
-        assert!((frames as f64 - 0.008 * FS).abs() < 4.0, "ramp was {frames} frames");
+        // A 3 dB -> 9 dB single-band retune is this file's own "large" edit (see the neighbour
+        // test's `measure` closure just above: 0.2 dB is "drag", 1 dB "brisk", 6 dB "large"), so
+        // since `ramp_ms_for` it is no longer pinned to the RAMP_MS floor — it must still land
+        // exactly on the target rather than near it (a long series of edits must not let
+        // rounding drift the response away from what was asked), but the ramp itself is now
+        // longer than the floor, on purpose. Checked against the real formula, not a re-guessed
+        // literal, so this stays a regression guard on the *formula* rather than tautologically
+        // re-deriving frames and asserting it equals itself: it also has to have actually grown
+        // past the old fixed 8 ms, which is the whole point of `ramp_ms_for` existing.
+        let expected_ms = Cascade::ramp_ms_for(c.ramp_distance_db());
+        let expected_frames = ((expected_ms / 1000.0) * FS).round().max(1.0) as u32;
+        assert_eq!(frames, expected_frames, "ramp length disagrees with ramp_ms_for");
+        assert!(
+            frames as f64 > 0.008 * FS + 4.0,
+            "a 6 dB single-band edit should now ramp longer than the old fixed 8 ms floor, got {frames} frames"
+        );
         for (got, want) in c.coeffs.iter().zip(c.target.iter()) {
             assert_eq!(got.b0, want.b0);
             assert_eq!(got.a2, want.a2);
         }
+    }
+
+    /// The floor `RAMP_MS` was tuned for still applies unchanged: a genuinely drag-sized
+    /// single-band nudge (0.2 dB, this file's own reference "drag" increment — see
+    /// `a_drag_sized_edit_is_far_below_the_headline_figure`) must not be lengthened by
+    /// `ramp_ms_for`, or a live tone drag at ~60 Hz would start missing its own cadence.
+    #[test]
+    fn a_drag_sized_single_band_edit_still_hits_the_floor() {
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&realistic_correction(3.0)));
+        c.settle();
+        assert!(c.set_bands(&realistic_correction(3.2)));
+        assert_eq!(
+            c.ramp_frames,
+            ((RAMP_MS / 1000.0) * FS).round().max(1.0) as u32,
+            "a 0.2 dB single-band nudge should still clamp to the RAMP_MS floor"
+        );
+    }
+
+    /// The actual bug this exists to fix (reported live, not guessed): swapping between two
+    /// unrelated multi-band corrections — what a slot A/B switch or a preset change does —
+    /// measured harsh at the old fixed 8 ms. It must now ramp far longer than a same-crate
+    /// single-band drag, proportional to how different the two curves really are.
+    #[test]
+    fn a_full_slot_swap_ramps_far_longer_than_a_drag() {
+        // Two curves that share nothing: a bass-boost slot and a treble-boost slot, the exact
+        // "bass-boost preset for a treble-boost one" scenario `cageq-core::morph`'s own module
+        // doc names as the case a fixed short crossfade cannot cover.
+        let bass = vec![
+            peaking(60.0, 8.0, 1.0),
+            peaking(120.0, 6.0, 1.0),
+            peaking(250.0, 4.0, 1.0),
+            peaking(8000.0, -4.0, 1.0),
+        ];
+        let treble = vec![
+            peaking(60.0, -4.0, 1.0),
+            peaking(4000.0, 5.0, 1.0),
+            peaking(8000.0, 7.0, 1.0),
+            peaking(14000.0, 6.0, 1.0),
+        ];
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&bass));
+        c.settle();
+        assert!(c.set_bands(&treble));
+        let swap_ms = Cascade::ramp_ms_for(c.ramp_distance_db());
+
+        let mut d = Cascade::new(1, FS);
+        assert!(d.set_bands(&realistic_correction(3.0)));
+        d.settle();
+        assert!(d.set_bands(&realistic_correction(3.2)));
+        let drag_ms = Cascade::ramp_ms_for(d.ramp_distance_db());
+
+        eprintln!("drag {drag_ms:.2} ms, slot swap {swap_ms:.2} ms");
+        assert!(drag_ms <= RAMP_MS + 0.01, "drag should still sit at the floor, got {drag_ms} ms");
+        assert!(
+            swap_ms > drag_ms * 5.0,
+            "a full slot swap should ramp far longer than a single-band drag: {swap_ms} ms vs {drag_ms} ms"
+        );
     }
 
     /// Retargeting mid-ramp — what a drag produces — must start from where the coefficients
