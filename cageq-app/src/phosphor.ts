@@ -62,8 +62,10 @@
  * ## Bloom
  * Opt-in per call (`commit()`'s `bloomIntensity`/`bloomWide`, both default 0/off) — EqChart's
  * backdrop should never get it (same "don't fight the curves drawn over it" reasoning as the
- * removed `over` blend above), and it's untried on TimeScope/SpectrumScope until Vectorscope's
- * result says whether it's a good fit there too.
+ * removed `over` blend above). Confirmed live on Vectorscope (shipped enabled there); wired into
+ * TimeScope too but defaulted off there pending its own live check — its beam/content differ
+ * enough (thicker default beam, two lanes of continuous waveform rather than a dwelling point)
+ * that Vectorscope's tuned numbers aren't assumed to carry over. Still untried on SpectrumScope.
  *
  * Two tiers, modelling two different physical things, so each gets its own colour treatment AND
  * its own compositing operator (see `FS_COMPOSITE`'s own doc for the operators) — both whole-frame,
@@ -89,6 +91,14 @@
  *      (textbook under-sampling: sparse fixed taps on a still-detailed texture alias instead of
  *      blurring it), reverted in favour of this cascade, which only ever samples texels next to
  *      each other and gets its width from shrinking the canvas onto a tiny target instead.
+ *
+ * **Both tiers' bright-passes read a shared prefilter, not the accumulator directly** — see the
+ * doc at its point of use in `commit()`. The accumulator is NEAREST-filtered (deliberately, for
+ * its own 1:1 exactness), and sampling that straight into a much smaller target is point-sampling,
+ * not averaging: it skips most source texels in a perfectly regular pattern, which produced the
+ * same grid artefact as the wide tier's own first mistake, just faint enough at low `bloomIntensity`
+ * to go unnoticed until it was turned up. The prefilter is one safe (LINEAR, exact-2x) halving that
+ * both tiers then reduce further from, themselves already band-limited.
  *
  * Both tiers together are still only a handful of GL passes, all on small (or, for the wide tier's
  * far stage, tiny) targets, on top of the existing accumulate+blit — see `BLOOM_SCALE`/
@@ -526,35 +536,39 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     uSharp: WebGLUniformLocation | null; uBloom: WebGLUniformLocation | null; uBloomWide: WebGLUniformLocation | null;
     uIntensity: WebGLUniformLocation | null; uIntensityWide: WebGLUniformLocation | null;
   } | null = null;
-  type BloomPair = [{ tex: WebGLTexture; fbo: WebGLFramebuffer }, { tex: WebGLTexture; fbo: WebGLFramebuffer }];
+  type BloomTarget = { tex: WebGLTexture; fbo: WebGLFramebuffer };
+  type BloomPair = [BloomTarget, BloomTarget];
   let bloomTex: BloomPair | null = null; // tight tier — resized with the caller's own canvas
   let bloomWideTex: BloomPair | null = null; // wide tier — fixed BLOOM_WIDE_SIZE, allocated once
   let bloomFarTex: BloomPair | null = null; // wide tier's further downsample — fixed BLOOM_FAR_SIZE
+  let bloomPrefilterTex: BloomTarget | null = null; // see its own doc at the point of use
   let bloomW = 0;
   let bloomH = 0;
+  let prefilterW = 0;
+  let prefilterH = 0;
 
   // LINEAR, not the main accumulator's NEAREST: every bloom texture is sampled both smaller (each
   // tier's own downsample step) and larger (the composite's upscale back to full res, and the wide
   // tier's own downsample *from* the tight tier's result) than its actual resolution, and LINEAR is
   // what makes all of that a cheap, smooth filter instead of a blocky one — exactly what a
   // *precise* 1:1 accumulator must NOT have, but a soft bloom layer wants.
+  const mkBloomTex = (w: number, h: number): BloomTarget | null => {
+    const tex = mkTexSized(gl.UNSIGNED_BYTE, w, h, gl.LINEAR);
+    const fbo = gl.createFramebuffer();
+    if (!fbo) return null;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      console.warn("[phosphor] bloom framebuffer incomplete:", status.toString(16));
+      return null;
+    }
+    return { tex, fbo };
+  };
   const mkBloomPair = (w: number, h: number): BloomPair | null => {
-    const mk = () => {
-      const tex = mkTexSized(gl.UNSIGNED_BYTE, w, h, gl.LINEAR);
-      const fbo = gl.createFramebuffer();
-      if (!fbo) return null;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-      const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      if (status !== gl.FRAMEBUFFER_COMPLETE) {
-        console.warn("[phosphor] bloom framebuffer incomplete:", status.toString(16));
-        return null;
-      }
-      return { tex, fbo };
-    };
-    const a = mk();
-    const b = mk();
+    const a = mkBloomTex(w, h);
+    const b = mkBloomTex(w, h);
     return a && b ? [a, b] : null;
   };
 
@@ -564,7 +578,9 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   // self-corrects the next time this runs, with no need to coordinate with the main accumulator's
   // own resize logic. The wide tier never depends on the caller's size at all (see
   // BLOOM_WIDE_SIZE's own doc), so it's allocated once and left alone.
-  const ensureBloom = (w: number, h: number): boolean => {
+  const ensureBloom = (canvasW: number, canvasH: number): boolean => {
+    const w = Math.max(1, Math.round(canvasW * BLOOM_SCALE));
+    const h = Math.max(1, Math.round(canvasH * BLOOM_SCALE));
     if (!bloomProg) {
       const brightPass = link(gl, FS_BRIGHTPASS);
       const brightPassColor = link(gl, FS_BRIGHTPASS_COLOR);
@@ -609,6 +625,20 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       bloomFarTex = mkBloomPair(BLOOM_FAR_SIZE, BLOOM_FAR_SIZE);
       if (!bloomFarTex) return false;
     }
+    // Half the caller's actual canvas — see its own doc at the point of use (in commit()) for why
+    // every bright-pass reads this instead of the accumulator directly.
+    const pw = Math.max(1, Math.round(canvasW / 2));
+    const ph = Math.max(1, Math.round(canvasH / 2));
+    if (!bloomPrefilterTex || prefilterW !== pw || prefilterH !== ph) {
+      if (bloomPrefilterTex) {
+        gl.deleteTexture(bloomPrefilterTex.tex);
+        gl.deleteFramebuffer(bloomPrefilterTex.fbo);
+      }
+      bloomPrefilterTex = mkBloomTex(pw, ph);
+      if (!bloomPrefilterTex) return false;
+      prefilterW = pw;
+      prefilterH = ph;
+    }
     return true;
   };
 
@@ -647,21 +677,40 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       gl.bindTexture(gl.TEXTURE_2D, ping[src].tex);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-      const bloomReady =
-        (bloomIntensity > 0 || bloomWide > 0) &&
-        ensureBloom(Math.max(1, Math.round(W * BLOOM_SCALE)), Math.max(1, Math.round(H * BLOOM_SCALE)));
+      const bloomReady = (bloomIntensity > 0 || bloomWide > 0) && ensureBloom(W, H);
 
-      if (bloomReady && bloomProg && bloomTex && bloomWideTex && bloomFarTex) {
+      if (bloomReady && bloomProg && bloomTex && bloomWideTex && bloomFarTex && bloomPrefilterTex) {
         const [a, b] = bloomTex;
         const [wa, wb] = bloomWideTex;
         const [fa, fb] = bloomFarTex;
+        const pf = bloomPrefilterTex;
+
+        // Prefilter: a *safe* (LINEAR, half-resolution) copy of the sharp accumulator, which both
+        // tiers' bright-passes read instead of `ping[dst].tex` directly. That texture is NEAREST
+        // (deliberately, for the accumulator's own exactness — see its setup), and sampling it at
+        // a large reduction (tight: 4x via BLOOM_SCALE; wide: similar) is point-sampling, not
+        // averaging — it skips most source texels in a perfectly regular pattern, which is exactly
+        // what produced a visible grid at high bloom intensity (the same under-sampling family as
+        // the wide tier's earlier one, just faint enough at low intensity to go unnoticed until
+        // reported live). A single, safe 2x LINEAR halving here — exact for an even-sized target,
+        // since bilinear correctly averages precisely the 4 source texels a 2x reduction maps each
+        // destination texel to — band-limits the content once, before either tier's own further
+        // (safe, LINEAR-sourced) reduction.
+        gl.useProgram(blit);
+        gl.uniform1i(uTex, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, pf.fbo);
+        gl.viewport(0, 0, prefilterW, prefilterH);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, ping[dst].tex);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
         gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo);
         gl.viewport(0, 0, bloomW, bloomH);
         gl.useProgram(bloomProg.brightPass);
         gl.uniform1f(bloomProg.uThreshold, BLOOM_THRESHOLD);
         gl.uniform1i(bloomProg.uBPTex, 0);
         gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, ping[dst].tex);
+        gl.bindTexture(gl.TEXTURE_2D, pf.tex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         // Separable blur, ping-ponging the two small targets (a -> b horizontally, b -> a
@@ -679,15 +728,16 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         gl.bindTexture(gl.TEXTURE_2D, b.tex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-        // Wide tier: its own bright-pass sampled fresh from the sharp accumulator (NOT chained
-        // from `a`, which is already grayscale — see FS_BRIGHTPASS_COLOR's own doc for why this
-        // tier needs its own colour-preserving pass instead).
+        // Wide tier: its own bright-pass, also off the safe prefilter (NOT the sharp accumulator
+        // directly — same aliasing reasoning as the tight tier above; NOT chained from `a` either,
+        // which is already grayscale — see FS_BRIGHTPASS_COLOR's own doc for why this tier needs
+        // its own colour-preserving pass instead).
         gl.useProgram(bloomProg.brightPassColor);
         gl.uniform1f(bloomProg.uThresholdColor, BLOOM_THRESHOLD);
         gl.uniform1i(bloomProg.uBPColorTex, 0);
         gl.bindFramebuffer(gl.FRAMEBUFFER, wa.fbo);
         gl.viewport(0, 0, BLOOM_WIDE_SIZE, BLOOM_WIDE_SIZE);
-        gl.bindTexture(gl.TEXTURE_2D, ping[dst].tex);
+        gl.bindTexture(gl.TEXTURE_2D, pf.tex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         // BLOOM_WIDE_BLUR_PASSES horizontal+vertical pairs, ping-ponging wa/wb — small, safe
@@ -788,6 +838,10 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
           gl.deleteTexture(b.tex);
           gl.deleteFramebuffer(b.fbo);
         }
+      }
+      if (bloomPrefilterTex) {
+        gl.deleteTexture(bloomPrefilterTex.tex);
+        gl.deleteFramebuffer(bloomPrefilterTex.fbo);
       }
       if (bloomProg) {
         gl.deleteProgram(bloomProg.brightPass);

@@ -26,6 +26,9 @@ type Params = {
   tail: number;
   glow: number;
   beam: number;
+  bloom: number; // tight-radius glow intensity (phosphor.ts's bloomIntensity) — 0 = off; see
+  //                Vectorscope.tsx's own Params doc, tried there first
+  haze: number; // broad, faint glow intensity (phosphor.ts's bloomWide) — 0 = off
   undistort: boolean;
   msPerDivIdx: number;
   trigger: boolean;
@@ -36,7 +39,10 @@ type Params = {
 // (DIVISIONS) is the standard horizontal graticule count, so total span = ms/div × 10.
 const MS_PER_DIV_STEPS = [0.2, 0.5, 1, 2, 5, 10];
 const DIVISIONS = 10;
-const DEFAULTS: Params = { trailTau: 0.06, tail: 12, glow: 0.40, beam: 3.0, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 80, mode: "mix" }; // 2 ms/div × 10 = 20 ms
+// bloom/haze default 0 (off) rather than copying Vectorscope's tuned 0.3/1.2 — this view's beam
+// (thicker, brighter by default) and content (two lanes of a continuous waveform, not a dwelling
+// point/curve) haven't been checked against those numbers at all yet.
+const DEFAULTS: Params = { trailTau: 0.06, tail: 6, glow: 0.40, beam: 3.0, bloom: 0.3, haze: 0.6, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 80, mode: "mix" }; // 2 ms/div × 10 = 20 ms
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
 const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler than the lane centrelines
@@ -560,7 +566,7 @@ export function TimeScope() {
       }
 
       // 4) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
-      phos.commit(dt, p.trailTau, p.tail, doseMult);
+      phos.commit(dt, p.trailTau, p.tail, doseMult, p.bloom, p.haze);
 
       raf = requestAnimationFrame(render);
     };
@@ -572,12 +578,14 @@ export function TimeScope() {
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "tail" | "glow" | "beam" | "triggerFilterHz";
+  type NumKey = "trailTau" | "tail" | "glow" | "beam" | "bloom" | "haze" | "triggerFilterHz";
   const CONTROLS: { key: NumKey; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), min: 0.02, max: 1, step: 0.02 },
     { key: "beam", label: t("scope.beam"), min: 0.1, max: 8, step: 0.05 },
+    { key: "bloom", label: t("scope.bloom"), min: 0, max: 2, step: 0.05 },
+    { key: "haze", label: t("scope.haze"), min: 0, max: 4, step: 0.05 },
     { key: "triggerFilterHz", label: t("scope.trigFilter"), min: 40, max: 1000, step: 10 },
   ];
   const msPerDiv = MS_PER_DIV_STEPS[params.msPerDivIdx] ?? MS_PER_DIV_STEPS[0];
