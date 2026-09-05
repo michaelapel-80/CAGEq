@@ -58,12 +58,19 @@ const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
 // Brightness quantisation for velocity glow (batched strokes, not per-segment) — the per-bucket draw
-// loop is the only cost that scales with this (one Path2D + one stroke() call per bucket, gated to
-// the ~60Hz real scope-window rate, not every rAF frame — see the render loop's own doc), so raising
-// it is cheap; the expensive per-sample work (~768 points, biquad undistort) doesn't scale with it at
-// all. Raised from 16 after removing beam blanking's hard cutoff exposed visible banding at the
-// bright/first-draw end, before the phosphor trail's own accumulation across frames smooths it out.
-const VEL_BUCKETS = 64;
+// loop is the only cost that scales with this: one Path2D + one stroke() call per bucket, gated to
+// the ~60Hz real scope-window rate, not every rAF frame (see the render loop's own doc). Had been
+// raised to 64 after removing beam blanking's hard cutoff exposed visible banding at the
+// bright/first-draw end, before the phosphor trail's own accumulation across frames smooths it out —
+// but "raising it is cheap" was never actually measured against real content, only asserted, and 64
+// non-trivial stroke() calls a busy/dynamic signal spreads across (vs. mostly-empty ones for a
+// slow/uniform-velocity one) is a real, plausible cost that scales with exactly the kind of content
+// reported as slow. Lowered back to the original 16 to re-test that tradeoff.
+//
+// **If banding reappears** on genuinely dynamic content (the failure mode this was raised to fix —
+// see above), that is real evidence 16 is too coarse and this should go back up, ideally to whatever
+// the lowest value that doesn't band turns out to be rather than straight back to 64.
+const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05; // dimmest a fast segment goes (keeps sharp transitions faintly visible)
 const VEL_REF_RATE = 48000; // the velocity glow judges beam speed in *time*; the per-sample segment
 //   length is scaled to this rate so a given speed reads the same at 44.1/48/96/192 kHz.
