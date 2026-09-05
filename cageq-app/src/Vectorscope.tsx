@@ -445,7 +445,6 @@ export function Vectorscope({
         }
         ctx.globalCompositeOperation = "lighter";
         ctx.lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE));
-        ctx.lineJoin = "round";
         // Butt (not round) caps: consecutive samples that land in different velocity buckets are
         // stroked separately, and round caps at their shared point would overlap and add into a
         // bright dot at every such sample. Flat caps meet at the point instead of stacking.
