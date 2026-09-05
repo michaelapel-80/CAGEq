@@ -370,8 +370,8 @@ export function Vectorscope({
         drawn = s;
         // This view only draws a fresh trace once per real scope window (~60/s from the backend —
         // see ScopeUpdate), not every animation frame: re-stroking ~768 connected points across up
-        // to 15 velocity buckets on every rAF frame dropped frames on a large tube (see phosphor.ts's
-        // module doc, "rejected fixes"). commit()'s own dt/DOSE_REF_DT normalization assumes it's
+        // to VEL_BUCKETS velocity buckets on every rAF frame dropped frames on a large tube (see
+        // phosphor.ts's module doc, "rejected fixes"). commit()'s own dt/DOSE_REF_DT normalization assumes it's
         // called once per unit of real content — true for SpectrumScope/EqChart's own every-frame
         // redraws, not here: at a display faster than the ~60 Hz data rate, this call's own dt (the
         // rAF interval) is shorter than the true gap since the last real trace, so commit() would
@@ -454,7 +454,7 @@ export function Vectorscope({
         // visible instead of being blanked outright. A hard blanking cutoff (skipping the fastest
         // bucket(s) entirely) was tried, to fight burn-in under the old 8-bit phosphor accumulator's
         // decay-stall bug (a fast-beam line that never fully faded) — dropped now that half-float
-        // storage fixed that stall at its source (see phosphor.ts), and with only VEL_BUCKETS (16)
+        // storage fixed that stall at its source (see phosphor.ts), and with only VEL_BUCKETS
         // buckets to tune a cutoff across, it wasn't worth keeping as a tunable either.
         for (let b = 0; b < VEL_BUCKETS; b++) {
           ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * (b + 1)) / VEL_BUCKETS})`;
