@@ -60,12 +60,13 @@
  * — see git history if the self-limiting behaviour is ever needed again.
  *
  * ## Bloom
- * Opt-in per call (`commit()`'s `bloomIntensity`/`bloomWide`, both default 0/off) — EqChart's
- * backdrop should never get it (same "don't fight the curves drawn over it" reasoning as the
- * removed `over` blend above). Confirmed live on Vectorscope (shipped enabled there); wired into
- * TimeScope too but defaulted off there pending its own live check — its beam/content differ
- * enough (thicker default beam, two lanes of continuous waveform rather than a dwelling point)
- * that Vectorscope's tuned numbers aren't assumed to carry over. Still untried on SpectrumScope.
+ * Opt-in per call (`commit()`'s `bloomIntensity`/`bloomWide`, both default 0/off unless a caller
+ * says otherwise) — EqChart's backdrop should never get it (same "don't fight the curves drawn
+ * over it" reasoning as the removed `over` blend above). Confirmed live and shipped enabled, each
+ * with its own tuned numbers rather than sharing one set: Vectorscope (a dwelling point/curve),
+ * and — despite starting as the one shape this seemed least likely to suit, a log-frequency curve
+ * rather than anything that dwells — SpectrumScope too, which fit better than expected. Wired into
+ * TimeScope as well but left off there pending its own live check.
  *
  * Two tiers, modelling two different physical things, so each gets its own colour treatment AND
  * its own compositing operator (see `FS_COMPOSITE`'s own doc for the operators) — both whole-frame,

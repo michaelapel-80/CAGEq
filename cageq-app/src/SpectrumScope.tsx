@@ -19,8 +19,12 @@ import type { ScopeEq } from "./Vectorscope";
  *  applies) — see `getCorrection` below for why it's a frequency-domain subtraction here rather
  *  than the scopes' sample-domain inverse cascade: this view never sees raw samples, only the
  *  backend's already-FFT'd, already-log-binned dB values. */
-type Params = { trailTau: number; tail: number; glow: number; undistort: boolean };
-const DEFAULTS: Params = { trailTau: 0.18, tail: 12, glow: 0.225, undistort: true };
+// bloom/haze: phosphor.ts's opt-in glow tiers (see Vectorscope.tsx's own Params doc, tried there
+// first) — a log-frequency curve rather than a dwelling point/beam was the one content shape this
+// hadn't been tried against yet; confirmed live to fit better than expected, enabled by default
+// with its own tuned numbers rather than Vectorscope's/TimeScope's.
+type Params = { trailTau: number; tail: number; glow: number; bloom: number; haze: number; undistort: boolean };
+const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation, and
@@ -780,7 +784,7 @@ export function SpectrumScope({
       }
 
       // TAU_REF/p.trailTau is the Trail/Glow orthogonality fix — see TAU_REF's own doc.
-      phos.commit(dt, p.trailTau, p.tail, TAU_REF / p.trailTau);
+      phos.commit(dt, p.trailTau, p.tail, TAU_REF / p.trailTau, p.bloom, p.haze);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -803,11 +807,13 @@ export function SpectrumScope({
   };
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "tail" | "glow";
+  type NumKey = "trailTau" | "tail" | "glow" | "bloom" | "haze";
   const CONTROLS: { key: NumKey; label: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), min: 0.02, max: 1, step: 0.02 },
+    { key: "bloom", label: t("scope.bloom"), min: 0, max: 2, step: 0.05 },
+    { key: "haze", label: t("scope.haze"), min: 0, max: 4, step: 0.05 },
   ];
 
   return (
