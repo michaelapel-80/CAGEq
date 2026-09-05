@@ -40,17 +40,25 @@ type Params = {
   //                energy-per-sample. Larger = weaker effect (more of the trace stays bright).
   radiusFrac: number; // full-scale ring radius as a fraction of the half-size
   gridAlpha: number; // graticule brightness
+  bloom: number; // tight-radius glow intensity (phosphor.ts's bloomIntensity) — 0 = off
+  haze: number; // broad, faint glow intensity (phosphor.ts's bloomWide) — 0 = off; a genuinely
+  //               wider/softer halo than `bloom`, not the same effect at a bigger radius, see
+  //               phosphor.ts's own "Bloom" doc. Both are whole-frame, not per-primitive, so a
+  //               resting spot blooms by the same modest amount as the moving trace instead of
+  //               ballooning (see phosphor.ts's own `commit()` doc for why that distinction matters)
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
 const DEFAULTS: Params = {
   trailTau: 0.08,
-  tail: 12,
+  tail: 6,
   glow: 0.32,
   beam: 1.0,
   focus: 8,
   radiusFrac: 0.48,
   gridAlpha: 0.22,
+  bloom: 0.3,
+  haze: 1.2,
   rotate: false,
   invert: true,
 };
@@ -473,7 +481,7 @@ export function Vectorscope({
       }
 
       // 3) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
-      phos.commit(dt, p.trailTau, p.tail, doseMult);
+      phos.commit(dt, p.trailTau, p.tail, doseMult, p.bloom, p.haze);
 
       // 4) Draw the beam spot every frame — the beam's energy dumped on one point, like a CRT dot.
       // Its brightness eases toward the target (spotVis → spotB) so it fades in when silence lands
@@ -542,6 +550,8 @@ export function Vectorscope({
     { key: "focus", label: t("scope.focus"), min: 1, max: 24, step: 0.5 },
     { key: "radiusFrac", label: t("scope.scale"), min: 0.3, max: 0.5, step: 0.01 },
     { key: "gridAlpha", label: t("scope.grid"), min: 0, max: 0.5, step: 0.02 },
+    { key: "bloom", label: t("scope.bloom"), min: 0, max: 2, step: 0.05 },
+    { key: "haze", label: t("scope.haze"), min: 0, max: 4, step: 0.05 },
   ];
 
   // Inline (not fill): `.vectorscope-wrap:not(.fill)` is already an exact CSS square

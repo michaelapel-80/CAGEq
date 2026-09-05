@@ -129,6 +129,8 @@
     "focus": "Fokus",
     "scale": "Skala",
     "grid": "Raster",
+    "bloom": "Bloom",
+    "haze": "Schleier",
     "rotate": "Drehen",
     "undistort": "Entzerren",
     "undistortHint": "Loopback invers filtern, um das Bild vor der EQ-Korrektur zu zeigen (für Oszilloskop-Musik bei aktiver Korrektur)",

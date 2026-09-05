@@ -129,6 +129,8 @@
     "focus": "Focus",
     "scale": "Scale",
     "grid": "Grid",
+    "bloom": "Bloom",
+    "haze": "Haze",
     "rotate": "Rotate",
     "undistort": "Undistort",
     "undistortHint": "Inverse-filter the loopback to show the pre-EQ image (for oscilloscope music with correction on)",
