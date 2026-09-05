@@ -62,14 +62,11 @@ const SQRT2 = Math.SQRT2;
 // the ~60Hz real scope-window rate, not every rAF frame (see the render loop's own doc). Had been
 // raised to 64 after removing beam blanking's hard cutoff exposed visible banding at the
 // bright/first-draw end, before the phosphor trail's own accumulation across frames smooths it out —
-// but "raising it is cheap" was never actually measured against real content, only asserted, and 64
-// non-trivial stroke() calls a busy/dynamic signal spreads across (vs. mostly-empty ones for a
-// slow/uniform-velocity one) is a real, plausible cost that scales with exactly the kind of content
-// reported as slow. Lowered back to the original 16 to re-test that tradeoff.
-//
-// **If banding reappears** on genuinely dynamic content (the failure mode this was raised to fix —
-// see above), that is real evidence 16 is too coarse and this should go back up, ideally to whatever
-// the lowest value that doesn't band turns out to be rather than straight back to 64.
+// but "raising it is cheap" was asserted, never measured, and 64 non-trivial stroke() calls a
+// busy/dynamic signal spreads across (vs. mostly-empty ones for a slow/uniform-velocity one) turned
+// out to be the real cost behind reports of the view bogging down on busy content. Lowered back to
+// the original 16 and confirmed live both ways: the reported slowdown is gone, and banding on
+// genuinely dynamic audio (the failure mode 64 existed to fix) is not noticeably worse.
 const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05; // dimmest a fast segment goes (keeps sharp transitions faintly visible)
 const VEL_REF_RATE = 48000; // the velocity glow judges beam speed in *time*; the per-sample segment
