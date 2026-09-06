@@ -188,6 +188,21 @@ const HARMONIC_TOLERANCE_CENTS = 45;
 // threshold) reads as more of a glitch than a fixed-width dash sitting there quietly does.
 const PEAK_PLACEHOLDER_HZ = "--- Hz";
 const PEAK_PLACEHOLDER_DB = "--- dB";
+// How close (in octaves) a candidate has to land to a readout slot's last-known frequency to count
+// as "the same peak, still there" rather than an unrelated one — see `assignPeakSlots`. Half
+// `PEAK_MIN_SEPARATION_OCTAVES`, the minimum gap `findPeaks` already guarantees between two
+// genuinely distinct peaks, so this can never mistake one still-qualifying peak for another one
+// that also survived this frame; it only has to be loose enough to track a real peak's own frame-
+// to-frame jitter (bin quantisation, a slow glide/vibrato), which is far smaller than that gap.
+const PEAK_SLOT_MATCH_OCTAVES = PEAK_MIN_SEPARATION_OCTAVES / 2;
+// How long a slot keeps showing its last reading after nothing matches it before actually clearing
+// — long enough to bridge an ordinary flicker right at a detection threshold (prominence, the noise
+// gate, octave separation — a real peak sitting near any of those can wink out for a frame or two
+// without the underlying content changing at all), short enough that a peak genuinely gone stops
+// being reported promptly. In the same neighbourhood as cageq-monitor's own `PEAK_HOLD` (350ms) for
+// a consistent feel — not the same value, since that one holds a meter *level*, this one holds an
+// *identity*, but both answer "how long does a peak reading outlive the instant that produced it".
+const PEAK_SLOT_HOLD_MS = 400;
 
 /** Parabolic (quadratic) interpolation across the three log bins straddling a peak at integer index
  *  `i`, refining both its reported frequency and level to sub-bin precision. Without this, a peak
@@ -319,6 +334,91 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { 
   // the final reported frequency/level do.
   picked.sort((a, b) => a.i - b.i);
   return picked.map((p) => interpolatePeak(v, p.i, n));
+}
+
+/** A readout chip's identity across frames: the frequency it last showed, and when it last had a
+ *  live match — see `assignPeakSlots`. `null` means the slot has nothing in it (never assigned, or
+ *  timed out since). */
+type PeakSlot = { hz: number; lastSeen: number } | null;
+
+/** What `assignPeakSlots` decided for one chip this tick: draw a (possibly still-the-same) peak —
+ *  `i` is the matched candidate's own (fractional, interpolated) bin index, exactly as `findPeaks`
+ *  returned it, so the caller can derive both the frequency and the true linear-FFT level from it
+ *  the same way the old direct-indexing code did — leave the chip exactly as it is (a slot mid-
+ *  `PEAK_SLOT_HOLD_MS` grace period with nothing new to show), or clear it to the placeholder.
+ *  Kept distinct from a bare `null` so the caller never has to re-derive "was this just released or
+ *  was it always empty" from `slots` itself. */
+type PeakSlotDisplay = { kind: "value"; i: number } | { kind: "frozen" } | { kind: "empty" };
+
+/** Give each of `slots` (one per readout chip, index-stable across calls) the peak — if any — that
+ *  best continues whatever it was already showing, mutating `slots` in place to record the result.
+ *
+ * `findPeaks` has no memory: it recomputes the whole peak set from nothing every call, and a real
+ * peak sitting near any of its thresholds (prominence, the noise gate, `PEAK_MIN_SEPARATION_OCTAVES`
+ * from a louder neighbour) can wink out for a frame or two, or a new peak appearing below an
+ * existing one shifts every later entry to a different array index. Since the readout used to map
+ * chip `j` straight to `peaks[j]`, either one made an unrelated chip's *content* jump, not just the
+ * genuinely new/gone one's — reported live as the readout "shuffling" on ordinary, momentary content.
+ *
+ * This is the same fix already shipped for CAGEq's own live EQ push (`SlotAssignment` in
+ * `cageq-apo-backend`, "identity-matched ramps"): reuse a slot for whichever new candidate is
+ * closest to what it last held, within `PEAK_SLOT_MATCH_OCTAVES`; a slot nothing matches keeps its
+ * last reading rather than clearing on the spot, and only actually frees up after
+ * `PEAK_SLOT_HOLD_MS` of silence. A genuinely new peak takes the lowest slot that's free (never
+ * used, or just timed out) — first-fit, not "wherever keeps the row sorted by frequency": the two
+ * pull in opposite directions (stability vs. a tidy row) and this picks stability, same tradeoff and
+ * for the same reason `SlotAssignment` doesn't try to preserve band order either. The row therefore
+ * drifts out of strict left-to-right frequency order over time; that's the accepted cost of a chip
+ * not jumping around for a reason that has nothing to do with the peak it's showing. */
+function assignPeakSlots(
+  slots: PeakSlot[],
+  peaks: { i: number; v: number }[],
+  binHz: (i: number) => number,
+  now: number,
+): PeakSlotDisplay[] {
+  const candidateHz = peaks.map((p) => binHz(p.i));
+  const used = new Array(peaks.length).fill(false);
+  const out: PeakSlotDisplay[] = slots.map(() => ({ kind: "empty" }));
+
+  // 1) Slots that already hold something: keep the closest still-unclaimed candidate, if one is
+  // near enough to trust as "the same peak". Closest, not merely first-within-tolerance, so two
+  // slots that both drifted toward the same gap don't race for whichever candidate they see first.
+  for (let s = 0; s < slots.length; s++) {
+    const slot = slots[s];
+    if (!slot) continue;
+    let best = -1;
+    let bestDist = PEAK_SLOT_MATCH_OCTAVES;
+    for (let k = 0; k < peaks.length; k++) {
+      if (used[k]) continue;
+      const dist = Math.abs(Math.log2(candidateHz[k] / slot.hz));
+      if (dist < bestDist) {
+        best = k;
+        bestDist = dist;
+      }
+    }
+    if (best >= 0) {
+      used[best] = true;
+      slots[s] = { hz: candidateHz[best], lastSeen: now };
+      out[s] = { kind: "value", i: peaks[best].i };
+    } else if (now - slot.lastSeen > PEAK_SLOT_HOLD_MS) {
+      slots[s] = null; // grace period over; falls into the free-slot pool below
+    } else {
+      out[s] = { kind: "frozen" }; // still within the grace period — leave the chip untouched
+    }
+  }
+
+  // 2) Whatever's left over is a genuinely new peak (or one whose old slot just timed out): hand
+  // it the lowest slot that's actually free, in the order `findPeaks` already presents them
+  // (ascending frequency), so a first-ever frame still fills the row left-to-right as before.
+  for (let k = 0; k < peaks.length; k++) {
+    if (used[k]) continue;
+    const s = slots.findIndex((x) => x === null);
+    if (s < 0) break; // every slot already holds something (live or still within its grace period)
+    slots[s] = { hz: candidateHz[k], lastSeen: now };
+    out[s] = { kind: "value", i: peaks[k].i };
+  }
+
+  return out;
 }
 
 /**
@@ -559,6 +659,11 @@ export function SpectrumScope({
     let lastReadout = 0;
     let hadPeak = false;
     const READOUT_INTERVAL_MS = 120;
+    // Per-chip peak identity across ticks — see `assignPeakSlots`. Lives here (not a ref) for the
+    // same reason `hadPeak` does: it belongs to this render loop's closure and should reset
+    // whenever the effect itself re-runs (a device/param change is a clean slate, not something a
+    // stale slot should survive across).
+    let peakSlots: PeakSlot[] = Array.from({ length: PEAK_COUNT }, () => null);
     // Whether the cursor label was showing last frame — same one-shot-hide idea as `hadPeak`, so
     // leaving the tube doesn't need a per-frame DOM write to keep confirming it's still hidden.
     let cursorShown = false;
@@ -684,22 +789,28 @@ export function SpectrumScope({
         }
 
         // The readout row's text, throttled independently of the (unthrottled) crosses above — see
-        // `lastReadout`'s own comment.
+        // `lastReadout`'s own comment. `assignPeakSlots` gives each chip identity across ticks
+        // (see its own doc) instead of the old direct `peaks[j]` indexing, so a peak flickering
+        // near a detection threshold — or a new one appearing below it and shifting every later
+        // index — no longer makes an unrelated chip's content jump.
         if (now - lastReadout > READOUT_INTERVAL_MS) {
           lastReadout = now;
           hadPeak = peaks.length > 0;
+          const display = assignPeakSlots(peakSlots, peaks, binHz, now);
           for (let j = 0; j < PEAK_COUNT; j++) {
             const slot = peakSlotRefs.current[j];
             const hzSpan = peakHzRefs.current[j];
             const dbSpan = peakDbRefs.current[j];
             if (!slot || !hzSpan || !dbSpan) continue;
-            if (j < peaks.length) {
-              const hz = binHz(peaks[j].i);
+            const d = display[j];
+            if (d.kind === "frozen") continue; // mid-grace-period: leave the chip exactly as is
+            if (d.kind === "value") {
+              const hz = binHz(d.i);
               hzSpan.textContent = fmtPeakHz(hz);
-              // pScratch, not peaks[j].v: the cross's position (drawn above) still comes from
-              // the Gaussian curve so it sits on the trace, but the *number* reports the true
-              // linear-FFT level at that bin — see pScratch's own comment.
-              const pBin = Math.max(0, Math.min(n - 1, Math.round(peaks[j].i)));
+              // pScratch, not the Gaussian curve's own value: the cross's position (drawn above)
+              // still comes from that curve so it sits on the trace, but the *number* reports the
+              // true linear-FFT level at that bin — see pScratch's own comment.
+              const pBin = Math.max(0, Math.min(n - 1, Math.round(d.i)));
               dbSpan.textContent = `${pScratch[pBin].toFixed(1)} dB`;
               // Same Fc→hue mapping ToneGrid's Fc readout uses, at the same full strength — a
               // peak's frequency reads as the same colour here as a band tuned to it would there.
@@ -717,8 +828,11 @@ export function SpectrumScope({
         // Signal just dropped — reset to the placeholder once rather than leaving the last reading
         // stale on screen (matching the beam itself, which the `signal` gate above also stops
         // updating on silence). Layer clear itself is unconditional now (above); this only resets
-        // the DOM readout text.
+        // the DOM readout text. Slot identity is dropped too — a real signal gap is not the
+        // momentary flicker `assignPeakSlots`'s grace period exists to bridge, and resuming should
+        // start from a clean slate rather than let a stale slot claim whatever peak turns up first.
         hadPeak = false;
+        peakSlots = peakSlots.map(() => null);
         for (let j = 0; j < PEAK_COUNT; j++) {
           const slot = peakSlotRefs.current[j];
           const hzSpan = peakHzRefs.current[j];
