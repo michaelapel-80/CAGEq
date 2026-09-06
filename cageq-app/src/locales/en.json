@@ -42,6 +42,7 @@
   "correction": {
     "title": "Correction",
     "target": "Target",
+    "targetTitle": "The frequency response this correction aims for. If unsure, pick a Harman target — over-ear/on-ear for full-size headphones, in-ear for IEMs.",
     "apply": "Apply → {{slot}}",
     "fitting": "Fitting…",
     "applyDry": "Dry (pick A or B)",

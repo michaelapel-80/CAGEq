@@ -2679,6 +2679,7 @@ function App() {
                   value={targetPath}
                   onChange={(e) => setTargetPath(e.currentTarget.value)}
                   disabled={dryActive}
+                  title={tr("correction.targetTitle")}
                   style={{ minWidth: 0, maxWidth: "28em" }}
                 >
                   {targets.map((t) => (

@@ -42,6 +42,7 @@
   "correction": {
     "title": "Korrektur",
     "target": "Zielkurve",
+    "targetTitle": "Der Frequenzgang, auf den diese Korrektur zielt. Im Zweifel eine Zielkurve mit „Harman“ und „over-ear“ im Namen für Kopfhörer wählen, „in-ear“ für In-Ear-Hörer – die Liste selbst ist nicht übersetzt.",
     "apply": "Anwenden → {{slot}}",
     "fitting": "Fitten…",
     "applyDry": "Dry (A oder B wählen)",
