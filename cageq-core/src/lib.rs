@@ -297,6 +297,18 @@ struct SlotStore {
 }
 
 impl SlotStore {
+    /// Set the shared output device, and restamp A/B's already-cached fits — see
+    /// [`Core::set_device`]'s own doc for why the restamp matters (it's the whole fix).
+    fn set_device(&mut self, device: String) {
+        if let Some(a) = self.a.as_mut() {
+            a.device = device.clone();
+        }
+        if let Some(b) = self.b.as_mut() {
+            b.device = device.clone();
+        }
+        self.device = Some(device);
+    }
+
     fn slot_mut(&mut self, slot: Slot) -> &mut Option<CalcResult> {
         match slot {
             Slot::A => &mut self.a,
@@ -539,9 +551,23 @@ impl Core {
     }
 
     /// Set the shared output device every slot is scoped to (§3.0). Lets Dry be written
-    /// before any fit exists; a subsequent apply overwrites it with its own device.
+    /// before any fit exists.
+    ///
+    /// **Also restamps A/B's already-cached fits, not just the shared field.** A cached
+    /// [`CalcResult`] carries its own `device` (whatever it was fit against), and
+    /// `current_effective`/`activate_slot` write *that* value, not this shared one — Dry is
+    /// the only slot [`SlotStore::effective`] synthesises from `self.device` directly. Leaving
+    /// an already-hydrated slot's stale device in place reproduces exactly the bug this fixes:
+    /// switching to a slot after picking a new output silently keeps writing the *previous*
+    /// device's endpoint, so the newly-selected one never receives anything until that slot
+    /// happens to be re-fit (which is what a plain `apply()` does, incidentally overwriting the
+    /// stale value along with everything else it recomputes) — reported live as "switching does
+    /// nothing after the device changed, until I hit Apply once." The fit itself (Fc/Q/gain)
+    /// doesn't depend on the output device at all, only where it gets written, so restamping
+    /// needs no re-fit and no sidecar round trip — just correcting where each slot already
+    /// cached fit is destined for.
     pub fn set_device(&self, device: String) {
-        self.inner.slots.lock().unwrap().device = Some(device);
+        self.inner.slots.lock().unwrap().set_device(device);
     }
 
     /// Send a raw request to the sidecar (the core is the process's front door).
@@ -980,5 +1006,31 @@ mod tests {
         let p = compose_preamp(-4.0, 6.0, &s);
         approx(p.db, -6.0); // -G_max_peak, regardless of base_pregain / G_target
         assert!(!p.clipping_warning);
+    }
+
+    fn fit(device: &str) -> CalcResult {
+        CalcResult { device: device.to_string(), filters: Vec::new(), g_target_db: 0.0, g_max_peak_db: 0.0, reference_curve: Vec::new() }
+    }
+
+    /// **The bug this fixes.** A already-hydrated slot's cached fit carries its own `device`
+    /// from whenever it was last fit — `SlotStore::effective()` writes *that*, not the shared
+    /// field, so switching output devices and then activating an already-cached slot (without
+    /// re-fitting it) must not keep targeting the old device.
+    #[test]
+    fn set_device_restamps_already_cached_slots() {
+        let mut store = SlotStore { a: Some(fit("old-guid")), b: Some(fit("old-guid")), device: Some("old-guid".into()), active: Slot::A };
+        store.set_device("new-guid".into());
+        assert_eq!(store.a.as_ref().unwrap().device, "new-guid", "A's cached fit must follow the device switch");
+        assert_eq!(store.b.as_ref().unwrap().device, "new-guid", "B's cached fit must follow it too");
+        assert_eq!(store.effective().unwrap().device, "new-guid", "activating the cached slot now targets the new device");
+    }
+
+    /// An empty slot has nothing to restamp — must not panic reaching into a `None`.
+    #[test]
+    fn set_device_tolerates_empty_slots() {
+        let mut store = SlotStore { a: None, b: None, device: None, active: Slot::Dry };
+        store.set_device("guid".into());
+        assert_eq!(store.device.as_deref(), Some("guid"));
+        assert_eq!(store.effective().unwrap().device, "guid", "Dry synthesises from the shared field, as before");
     }
 }
