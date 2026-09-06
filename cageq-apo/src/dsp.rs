@@ -24,9 +24,15 @@
 //! therefore an explicit parameter everywhere rather than a constant.
 
 /// Hard cap on bands in the cascade, so the sample loop never allocates. CAGEq's own limit
-/// is 20 (matching AQUA's), and this leaves headroom above it; `set_bands` refuses more
-/// rather than silently truncating a correction.
-pub const MAX_BANDS: usize = 32;
+/// is 20 (matching AQUA's); this leaves headroom above it both for that margin and for
+/// `cageq-apo-backend`'s `SlotAssignment`, which can leave a slot occupied — fading toward
+/// passthrough, not reusable by an unrelated band — well after the *real* band count has
+/// dropped (see its own doc for why: reusing a slot across too large an `Fc` jump makes
+/// `Cascade::start_ramp` sweep audibly through the octaves between old and new instead of
+/// sounding like two independent fades). Doubled from 32 once that policy shipped, because 32
+/// was already tight against ordinary fragmentation even before slots could be held back on
+/// `Fc` grounds. `set_bands` refuses more rather than silently truncating a correction.
+pub const MAX_BANDS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterKind {

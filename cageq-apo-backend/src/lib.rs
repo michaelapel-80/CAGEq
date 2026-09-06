@@ -382,6 +382,32 @@ fn band_key(b: &Band) -> (u8, i64, i64) {
     (kind, (b.freq_hz * 1000.0).round() as i64, (b.q * 1000.0).round() as i64)
 }
 
+/// How far a genuinely new band's centre may sit from a freed slot's last known centre before
+/// [`SlotAssignment::assign`] will reuse that slot for it, rather than opening a fresh one.
+///
+/// The identity match above only fires on an exact `band_key` hit; everything else used to be
+/// "any free slot, any new band" — but a slot's coefficients don't teleport, `Cascade::start_ramp`
+/// interpolates straight from whatever was last there to the new target. Reusing a slot that
+/// was e.g. a 100 Hz band for an unrelated 8 kHz one makes that interpolation sweep audibly
+/// through every octave in between, which is a worse artefact than the "phasing" this whole
+/// mechanism exists to avoid, not a fix for it. One octave either way: close enough that a
+/// direct ramp is a reasonable description of what happened to that region of the spectrum,
+/// far enough to still catch same-band Q/gain-only edits (which don't move `Fc` at all).
+const MAX_REUSE_FC_RATIO: f64 = 2.0;
+
+/// Is `old` — a freed slot's last known identity, or `None` if the slot has never held one —
+/// close enough to `band` for [`SlotAssignment::assign`] to reuse that slot? A slot that never
+/// held anything is always fair game: there is no live interpolation to sweep away from.
+fn fc_close_enough(old: &Option<(u8, i64, i64)>, band: &Band) -> bool {
+    let Some((_, old_freq_milli_hz, _)) = old else { return true };
+    let old_hz = *old_freq_milli_hz as f64 / 1000.0;
+    if !(old_hz > 0.0 && band.freq_hz > 0.0) {
+        return false;
+    }
+    let ratio = (band.freq_hz / old_hz).max(old_hz / band.freq_hz);
+    ratio <= MAX_REUSE_FC_RATIO
+}
+
 /// Stable per-endpoint slot assignment for the live control channel.
 ///
 /// `Cascade::start_ramp` (dsp.rs) pairs `start[i]`/`target[i]` purely by array position — it has
@@ -402,20 +428,29 @@ fn band_key(b: &Band) -> (u8, i64, i64) {
 /// live, exactly the same "fade toward identity" `start_ramp` already does for a correction that
 /// merely gets shorter — this only extends where in the array that can happen, from "the tail"
 /// to "anywhere".
+///
+/// A freed slot isn't fair game for just *any* new band, either — see [`fc_close_enough`]. So a
+/// slot's remembered identity survives rounds where nothing reused it (it stays fading toward
+/// passthrough, untouched), rather than being wiped back to "empty" the moment its own band
+/// drops; only [`MAX_BANDS`](dsp::MAX_BANDS)-headroom pays for that, not correctness.
 #[derive(Debug, Default)]
 struct SlotAssignment {
-    /// Index i is the identity occupying that slot as of the last push, or `None` for a slot
-    /// freed since (its band dropped, nothing new claimed it yet).
+    /// Index i is the identity last assigned to that slot — kept even once that band is gone
+    /// and the slot is fading toward passthrough, so a later unrelated band can't silently
+    /// inherit its in-flight ramp (see [`fc_close_enough`]). `None` only for a slot that has
+    /// never held a band at all.
     slots: Vec<Option<(u8, i64, i64)>>,
 }
 
 impl SlotAssignment {
     /// Reorders `bands` into slot order: a band whose identity matches a previous slot stays in
-    /// that exact slot; everything else (genuinely new, or a duplicate identity beyond the first
-    /// match — rare, and not worth more bookkeeping to handle perfectly) takes the lowest slot
-    /// freed by a dropped band, or a fresh one past the end. Trailing frees are trimmed (the
-    /// existing count-shrink behaviour already covers those); a freed slot with something later
-    /// still live stays as an explicit gap.
+    /// that exact slot. Everything else (genuinely new, or a duplicate identity beyond the first
+    /// match — rare, and not worth more bookkeeping to handle perfectly) reuses the lowest slot
+    /// that is both free *and* [`fc_close_enough`] to its last occupant, or opens a fresh one
+    /// past the end if none qualifies. Trailing frees are trimmed (the existing count-shrink
+    /// behaviour already covers those); a freed slot with something later still live stays as an
+    /// explicit gap — and keeps remembering what it held, so it stays off-limits to a distant
+    /// band for as long as it takes something close enough to come reclaim it.
     fn assign<'a>(&mut self, bands: &'a [Band]) -> Vec<Option<&'a Band>> {
         let mut out: Vec<Option<&Band>> = vec![None; self.slots.len()];
         let mut used = vec![false; bands.len()];
@@ -433,8 +468,12 @@ impl SlotAssignment {
             if used[j] {
                 continue;
             }
-            match out.iter_mut().find(|s| s.is_none()) {
-                Some(slot) => *slot = Some(band),
+            let reuse_at = out
+                .iter()
+                .zip(self.slots.iter())
+                .position(|(occupant, old)| occupant.is_none() && fc_close_enough(old, band));
+            match reuse_at {
+                Some(i) => out[i] = Some(band),
                 None => out.push(Some(band)),
             }
         }
@@ -442,7 +481,15 @@ impl SlotAssignment {
             out.pop();
         }
 
-        self.slots = out.iter().map(|b| b.map(band_key)).collect();
+        // A slot nobody claimed this round keeps whatever identity it last remembered (still
+        // fading, still off-limits to a distant band) instead of being wiped to "never used" —
+        // only a slot that actually got a new occupant updates its memory.
+        self.slots.resize(out.len(), None);
+        for (i, occupant) in out.iter().enumerate() {
+            if let Some(band) = occupant {
+                self.slots[i] = Some(band_key(band));
+            }
+        }
         out
     }
 }
@@ -729,7 +776,9 @@ mod tests {
     }
 
     /// A genuinely new band takes the slot a dropped one freed, rather than growing the array
-    /// forever — the array only grows when there is no free slot to reuse.
+    /// forever — as long as it's close enough in `Fc` to trust a direct ramp between the two
+    /// (see `fc_close_enough`). This one lands well inside `MAX_REUSE_FC_RATIO` of the freed
+    /// slot's old centre.
     #[test]
     fn a_new_band_reuses_a_freed_slot_before_growing() {
         let mut sa = SlotAssignment::default();
@@ -738,11 +787,46 @@ mod tests {
         sa.assign(&[low, mid]);
         sa.assign(&[low]); // drop mid, freeing slot 1
 
-        let high = band(8000.0, 1.0, 1.0);
-        let low_high = [low, high];
-        let third = sa.assign(&low_high);
+        let near_mid = band(1400.0, 1.0, 1.0);
+        let low_near = [low, near_mid];
+        let third = sa.assign(&low_near);
         assert_eq!(third.len(), 2, "the new band reused the freed slot instead of appending");
-        assert_eq!(third[1].unwrap().freq_hz, 8000.0);
+        assert_eq!(third[1].unwrap().freq_hz, 1400.0);
+    }
+
+    /// The case the reuse limit exists for: a freed slot must NOT be handed to a new band whose
+    /// `Fc` is nowhere near what used to live there — that would make `Cascade::start_ramp`
+    /// sweep straight from 1 kHz to 15 kHz instead of two independent fades. The old slot keeps
+    /// fading in place (a genuine mid-array gap, per `removing_a_middle_band_...` above — a
+    /// two-band drop-the-last-one would just shrink, so `high` has to stay present after `mid`
+    /// is dropped to keep this a mid-array gap) and the new band gets a slot of its own.
+    #[test]
+    fn a_distant_band_does_not_reuse_a_freed_slot() {
+        let mut sa = SlotAssignment::default();
+        let low = band(100.0, 3.0, 0.7);
+        let mid = band(1000.0, -2.0, 1.0);
+        let high = band(8000.0, 4.0, 0.7);
+        sa.assign(&[low, mid, high]);
+
+        let low_high = [low, high];
+        sa.assign(&low_high); // drop mid — slot 1 fades in place, high stays in slot 2
+
+        let distant = band(15000.0, 1.0, 1.0);
+        let low_high_distant = [low, high, distant];
+        let third = sa.assign(&low_high_distant);
+        assert_eq!(third.len(), 4, "the distant band must not reuse mid's slot — it needs its own");
+        assert_eq!(third[0].unwrap().freq_hz, 100.0, "low keeps its slot");
+        assert!(third[1].is_none(), "mid's old slot keeps fading, untouched by the unrelated band");
+        assert_eq!(third[2].unwrap().freq_hz, 8000.0, "high keeps its slot");
+        assert_eq!(third[3].unwrap().freq_hz, 15000.0, "the distant band gets a fresh slot instead");
+
+        // And a later band that genuinely is close to what slot 1 used to hold can still
+        // reclaim it — the reservation isn't permanent, just distance-gated.
+        let reclaim = band(900.0, 1.0, 1.0);
+        let low_reclaim_high_distant = [low, reclaim, high, distant];
+        let fourth = sa.assign(&low_reclaim_high_distant);
+        assert_eq!(fourth.len(), 4, "no new slot needed — the close band reclaimed the old one");
+        assert_eq!(fourth[1].unwrap().freq_hz, 900.0, "close enough to mid's old 1 kHz to reuse slot 1");
     }
 
     /// Trailing frees must still shrink the array — the existing "correction gets shorter"

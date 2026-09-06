@@ -38,7 +38,11 @@ use crate::dsp::{Coeffs, MAX_BANDS};
 pub const CONTROL_MAGIC: u32 = 0x4341_4751;
 /// Layout version. A mismatch is refused rather than interpreted: this describes what
 /// someone is listening to, and a half-understood layout is not worth guessing at.
-pub const CONTROL_VERSION: u32 = 4;
+///
+/// Bump whenever `ControlBlock`'s layout changes size or shape — e.g. `dsp::MAX_BANDS`
+/// changing resizes `coeffs`, and an old DLL and a new app (or vice versa) disagreeing about
+/// that size must not be allowed to interpret each other's memory.
+pub const CONTROL_VERSION: u32 = 5;
 
 /// Preamp bounds mirroring [`crate::config`]'s, for the same reason: attenuation is
 /// harmless, gain is a hazard, and the writer is not trusted merely because it is ours.

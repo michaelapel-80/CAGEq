@@ -181,8 +181,11 @@ const appliedBands = (st: Stages): CustomFilter[] =>
  *  stops taking effect somewhere the app can never see.
  *
  *  Update if `MAX_BANDS` ever changes — no shared source of truth between Rust and TS here,
- *  same as `DRY_FADE_MS`/`RAMP_MS`'s own cross-file duplication elsewhere in this codebase. */
-const MAX_BANDS = 32;
+ *  same as `DRY_FADE_MS`/`RAMP_MS`'s own cross-file duplication elsewhere in this codebase.
+ *  Doubled to 64 alongside the Rust constant, to give `SlotAssignment`'s `Fc`-limited slot
+ *  reuse headroom (a slot held back from an unrelated band doesn't shrink the real band count,
+ *  but does use up array space until something close enough reclaims it). */
+const MAX_BANDS = 64;
 
 /** §5.2 solo: which band, in which stage, is soloed (hear only it, within its stage). */
 type Solo = { stage: StageId; idx: number };
