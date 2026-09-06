@@ -58,7 +58,7 @@ const DEFAULTS: Params = {
   radiusFrac: 0.48,
   gridAlpha: 0.22,
   bloom: 0.3,
-  haze: 1.2,
+  haze: 0.6,
   rotate: false,
   invert: true,
 };
