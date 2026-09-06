@@ -75,9 +75,16 @@ pub enum ApoBackendError {
 
 /// Applies filters through CAGEq's own APO. Holds the directory corrections live in;
 /// everything else is derived from an endpoint id.
-#[derive(Debug, Clone)]
+///
+/// `slots`: per-endpoint live-push slot assignment (§5.3c "identity-matched ramps") — see
+/// [`SlotAssignment`]'s own doc for what it's for. `Mutex`, not `RefCell`: [`EqBackend::apply`]
+/// takes `&self`, so this is the interior mutability that needs, and the app already shares one
+/// `CageqApoBackend` behind an `Arc` rather than cloning it — nothing actually needed `Clone`,
+/// which a bare `Mutex` field can't derive anyway.
+#[derive(Debug)]
 pub struct CageqApoBackend {
     config_dir: PathBuf,
+    slots: std::sync::Mutex<std::collections::HashMap<String, SlotAssignment>>,
 }
 
 impl Default for CageqApoBackend {
@@ -90,7 +97,7 @@ impl CageqApoBackend {
     /// Target `config_dir` — normally `%ProgramData%\CAGEq\apo` via [`Default`]. Injectable
     /// so tests can drive a temp directory rather than the machine's real configuration.
     pub fn new(config_dir: impl Into<PathBuf>) -> Self {
-        CageqApoBackend { config_dir: config_dir.into() }
+        CageqApoBackend { config_dir: config_dir.into(), slots: std::sync::Mutex::new(std::collections::HashMap::new()) }
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -146,7 +153,7 @@ impl CageqApoBackend {
         // explicitly declined to run this correction (see `LivePushRefused`'s own doc for why
         // that's worth surfacing rather than swallowing — this used to be indistinguishable
         // from the benign "no channel" case, both discarded the same way, silently).
-        match push_live(&id, &apo_config)? {
+        match self.push_live(&id, &apo_config)? {
             PushOutcome::NoChannel | PushOutcome::Published => Ok(()),
             PushOutcome::Refused => Err(ApoBackendError::LivePushRefused(id)),
         }
@@ -158,6 +165,54 @@ impl CageqApoBackend {
         let text = format!("{HASH_PREFIX}{}\n{body}", short_hex(&Sha256::digest(body.as_bytes())));
         write_atomic(&path, &text)
     }
+
+    /// Push a correction down the live control channel, if one is open.
+    ///
+    /// The endpoint's sample rate comes from the APO rather than being assumed: coefficients
+    /// depend on it, and a correction computed for the wrong rate lands at the wrong
+    /// frequencies while looking entirely healthy.
+    ///
+    /// A method (not a free function) so it can reach `self.slots` — see [`SlotAssignment`]'s
+    /// own doc for why the ramp needs it: `Cascade::start_ramp` pairs `start[i]`/`target[i]`
+    /// purely by array position, and reordering `cfg.bands` into a *stable* position — the same
+    /// band keeping the same slot across an edit — has to happen here, before it is flattened
+    /// into the raw coefficients the channel actually carries, because only here does a band
+    /// still have the identity (kind/Fc/Q) needed to recognise it as "the same band" at all.
+    fn push_live(&self, endpoint_id: &str, cfg: &ApoConfig) -> Result<PushOutcome, ApoBackendError> {
+        let Ok(channel) = ControlChannel::open(endpoint_id) else {
+            return Ok(PushOutcome::NoChannel);
+        };
+        let Some(rate) = cageq_apo::control::sample_rate(channel.block()) else {
+            return Err(ApoBackendError::NoSampleRate(endpoint_id.to_string()));
+        };
+
+        let assigned = {
+            let mut slots = self.slots.lock().unwrap();
+            slots.entry(endpoint_id.to_string()).or_default().assign(&cfg.bands)
+        };
+        let coeffs: Vec<RawCoeffs> = assigned
+            .iter()
+            .map(|slot| {
+                let c = match slot {
+                    Some(b) => dsp::coefficients(b, rate as f64),
+                    // A slot whose band is gone this push — held here (not dropped from the
+                    // array) so whatever is running in it fades to identity in place, the same
+                    // "ramp toward PASSTHROUGH" `Cascade::start_ramp` already does when a
+                    // correction merely gets *shorter*, just now happening mid-array instead of
+                    // only at the tail.
+                    None => dsp::Coeffs::PASSTHROUGH,
+                };
+                RawCoeffs { b0: c.b0, b1: c.b1, b2: c.b2, a1: c.a1, a2: c.a2 }
+            })
+            .collect();
+
+        // The channel validates against the same limits the APO itself would, so a refusal here
+        // means the correction was unsafe to run and the previous one is still in force — the
+        // config file was written either way, which is the durable record of what the user
+        // asked for, but the caller decides whether a refusal is worth surfacing (`apply_one`
+        // does).
+        Ok(if channel.publish(cfg.preamp_db, &coeffs) { PushOutcome::Published } else { PushOutcome::Refused })
+    }
 }
 
 impl EqBackend for CageqApoBackend {
@@ -166,9 +221,11 @@ impl EqBackend for CageqApoBackend {
             // No reload to collide with: coefficients are pushed into a running filter, so
             // there is no minimum spacing to respect (§5.3a's MIN_WRITE_SPACING evaporates).
             min_write_spacing: std::time::Duration::ZERO,
-            // The APO ramps coefficients in place with filter state carried, over 8 ms, which
-            // the core cannot better from outside. So the core must NOT emulate a transition
-            // by writing intermediate frames — that would be two transitions fighting.
+            // The APO ramps coefficients in place with filter state carried, paced to the size
+            // of the change (`ramp_ms_for` in dsp.rs, not the fixed 8 ms this comment used to
+            // say — that was the floor for a live-drag-sized nudge even then), which the core
+            // cannot better from outside. So the core must NOT emulate a transition by writing
+            // intermediate frames — that would be two transitions fighting.
             owns_transitions: true,
             // Nothing else writes these files; there is no shared config surface to collide
             // over, which is one of the things dropping the EqAPO dependency buys.
@@ -199,7 +256,7 @@ impl EqBackend for CageqApoBackend {
         for path in self.config_files() {
             let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
             self.write_config(id, &safe).map_err(BackendError::backend)?;
-            let _ = push_live(id, &safe);
+            let _ = self.push_live(id, &safe);
         }
         Ok(())
     }
@@ -308,33 +365,86 @@ pub enum PushOutcome {
     Refused,
 }
 
-/// Push a correction down the live control channel, if one is open.
+/// Identity of a band for [`SlotAssignment`] — same reasoning as `cageq-core::morph::key()`
+/// (same type, quantised centre and Q means "the same band" for matching purposes), a second
+/// copy rather than a shared one because it works over `cageq_apo::dsp::Band`, not
+/// `cageq_backend::Filter` — the two crates don't share a type, the same tradeoff already made
+/// for e.g. the K-weighting constants duplicated across the sidecar/`morph.rs`/`biquad.ts`.
+/// Quantised (not compared as raw floats) so a value that round-tripped through JSON/config text
+/// can't fail to match itself by a float-formatting ULP.
+fn band_key(b: &Band) -> (u8, i64, i64) {
+    let kind = match b.kind {
+        FilterKind::LowShelf => 0,
+        FilterKind::HighShelf => 1,
+        FilterKind::Peaking => 2,
+        FilterKind::Bandpass => 3,
+    };
+    (kind, (b.freq_hz * 1000.0).round() as i64, (b.q * 1000.0).round() as i64)
+}
+
+/// Stable per-endpoint slot assignment for the live control channel.
 ///
-/// The endpoint's sample rate comes from the APO rather than being assumed: coefficients
-/// depend on it, and a correction computed for the wrong rate lands at the wrong frequencies
-/// while looking entirely healthy.
-pub fn push_live(endpoint_id: &str, cfg: &ApoConfig) -> Result<PushOutcome, ApoBackendError> {
-    let Ok(channel) = ControlChannel::open(endpoint_id) else {
-        return Ok(PushOutcome::NoChannel);
-    };
-    let Some(rate) = cageq_apo::control::sample_rate(channel.block()) else {
-        return Err(ApoBackendError::NoSampleRate(endpoint_id.to_string()));
-    };
+/// `Cascade::start_ramp` (dsp.rs) pairs `start[i]`/`target[i]` purely by array position — it has
+/// no notion of band identity at all, and cannot: the raw coefficients the control channel
+/// carries don't encode Fc/Q/kind, only the finished biquad numbers. Left alone, that means an
+/// edit that changes *which* bands are present — toggling one off, adding one, loading a preset
+/// — silently reindexes every band after the change point: band N's old slot now holds whatever
+/// band ended up at position N in the new list, and the ramp interpolates unrelated bands into
+/// each other. Reported live as an audible "phasing" artefact on ordinary edits, not just a full
+/// slot swap — the coefficient path has none of the protection `cageq-core::morph::lerp_bands`
+/// already has for the EqAPO path (matching by identity before interpolating).
+///
+/// This fixes it upstream of `Cascade` rather than inside it: identity only exists here, where
+/// `cfg.bands` is still symbolic, so the reordering has to happen before it's ever flattened
+/// into raw coefficients — see `push_live`'s own doc. `Cascade`/the control channel need no
+/// changes at all: a slot whose band was dropped is represented as an explicit `None` (which
+/// `push_live` turns into `Coeffs::PASSTHROUGH`) if something *later* in the array is still
+/// live, exactly the same "fade toward identity" `start_ramp` already does for a correction that
+/// merely gets shorter — this only extends where in the array that can happen, from "the tail"
+/// to "anywhere".
+#[derive(Debug, Default)]
+struct SlotAssignment {
+    /// Index i is the identity occupying that slot as of the last push, or `None` for a slot
+    /// freed since (its band dropped, nothing new claimed it yet).
+    slots: Vec<Option<(u8, i64, i64)>>,
+}
 
-    let coeffs: Vec<RawCoeffs> = cfg
-        .bands
-        .iter()
-        .map(|b| {
-            let c = dsp::coefficients(b, rate as f64);
-            RawCoeffs { b0: c.b0, b1: c.b1, b2: c.b2, a1: c.a1, a2: c.a2 }
-        })
-        .collect();
+impl SlotAssignment {
+    /// Reorders `bands` into slot order: a band whose identity matches a previous slot stays in
+    /// that exact slot; everything else (genuinely new, or a duplicate identity beyond the first
+    /// match — rare, and not worth more bookkeeping to handle perfectly) takes the lowest slot
+    /// freed by a dropped band, or a fresh one past the end. Trailing frees are trimmed (the
+    /// existing count-shrink behaviour already covers those); a freed slot with something later
+    /// still live stays as an explicit gap.
+    fn assign<'a>(&mut self, bands: &'a [Band]) -> Vec<Option<&'a Band>> {
+        let mut out: Vec<Option<&Band>> = vec![None; self.slots.len()];
+        let mut used = vec![false; bands.len()];
 
-    // The channel validates against the same limits the APO itself would, so a refusal here
-    // means the correction was unsafe to run and the previous one is still in force — the
-    // config file was written either way, which is the durable record of what the user asked
-    // for, but the caller decides whether a refusal is worth surfacing (`apply_one` does).
-    Ok(if channel.publish(cfg.preamp_db, &coeffs) { PushOutcome::Published } else { PushOutcome::Refused })
+        for (i, slot) in self.slots.iter().enumerate() {
+            let Some(key) = slot else { continue };
+            if let Some(j) = bands.iter().position(|b| band_key(b) == *key) {
+                if !used[j] {
+                    out[i] = Some(&bands[j]);
+                    used[j] = true;
+                }
+            }
+        }
+        for (j, band) in bands.iter().enumerate() {
+            if used[j] {
+                continue;
+            }
+            match out.iter_mut().find(|s| s.is_none()) {
+                Some(slot) => *slot = Some(band),
+                None => out.push(Some(band)),
+            }
+        }
+        while out.last().is_some_and(Option::is_none) {
+            out.pop();
+        }
+
+        self.slots = out.iter().map(|b| b.map(band_key)).collect();
+        out
+    }
 }
 
 /// Drop the hash marker so the remainder is exactly what was hashed.
@@ -569,6 +679,95 @@ mod tests {
         cageq_apo::control::set_sample_rate(channel.block(), 48_000);
 
         backend.apply(&[device(EP_LIVE_OK, -6.0)]).expect("a safe, small correction must still apply");
+    }
+
+    fn band(freq_hz: f64, gain_db: f64, q: f64) -> Band {
+        Band { kind: FilterKind::Peaking, freq_hz, gain_db, q }
+    }
+
+    /// The bug this whole type exists to fix: dropping a band in the *middle* of the list must
+    /// not reindex the ones after it. A plain positional diff would put `high`'s coefficients
+    /// where `mid` used to be; this must instead recognise `high` and keep it exactly where it
+    /// was, leaving `mid`'s old slot an explicit gap.
+    #[test]
+    fn removing_a_middle_band_does_not_reindex_the_one_after_it() {
+        let mut sa = SlotAssignment::default();
+        let low = band(100.0, 3.0, 0.7);
+        let mid = band(1000.0, -2.0, 1.0);
+        let high = band(8000.0, 4.0, 0.7);
+
+        let all_three = [low, mid, high];
+        let first = sa.assign(&all_three);
+        assert_eq!(first.len(), 3);
+        assert_eq!(first[2].unwrap().freq_hz, 8000.0, "high starts in slot 2");
+
+        // Drop mid. Only low and high remain, in that order — a naive positional rebuild would
+        // put high at index 1.
+        let low_high = [low, high];
+        let second = sa.assign(&low_high);
+        assert_eq!(second.len(), 3, "high's slot must stay put, not collapse the array");
+        assert_eq!(second[0].unwrap().freq_hz, 100.0, "low keeps its slot");
+        assert!(second[1].is_none(), "mid's old slot fades in place instead of being reused yet");
+        assert_eq!(second[2].unwrap().freq_hz, 8000.0, "high must still be in slot 2, not slot 1");
+    }
+
+    /// A band edited in place (same identity, different gain — a live drag) must keep its slot:
+    /// identity is `(kind, Fc, Q)`, not gain, so this is exactly the common "nudge one band"
+    /// case the fix must leave alone.
+    #[test]
+    fn editing_a_bands_gain_keeps_its_own_slot() {
+        let mut sa = SlotAssignment::default();
+        let a = band(1000.0, 2.0, 1.0);
+        let b = band(5000.0, -3.0, 0.7);
+        sa.assign(&[a, b]);
+
+        let a_louder = band(1000.0, 6.0, 1.0);
+        let louder_pair = [a_louder, b];
+        let second = sa.assign(&louder_pair);
+        assert_eq!(second[0].unwrap().gain_db, 6.0, "the edited band stays in slot 0");
+        assert_eq!(second[1].unwrap().freq_hz, 5000.0, "the untouched band stays in slot 1");
+    }
+
+    /// A genuinely new band takes the slot a dropped one freed, rather than growing the array
+    /// forever — the array only grows when there is no free slot to reuse.
+    #[test]
+    fn a_new_band_reuses_a_freed_slot_before_growing() {
+        let mut sa = SlotAssignment::default();
+        let low = band(100.0, 3.0, 0.7);
+        let mid = band(1000.0, -2.0, 1.0);
+        sa.assign(&[low, mid]);
+        sa.assign(&[low]); // drop mid, freeing slot 1
+
+        let high = band(8000.0, 1.0, 1.0);
+        let low_high = [low, high];
+        let third = sa.assign(&low_high);
+        assert_eq!(third.len(), 2, "the new band reused the freed slot instead of appending");
+        assert_eq!(third[1].unwrap().freq_hz, 8000.0);
+    }
+
+    /// Trailing frees must still shrink the array — the existing "correction gets shorter"
+    /// behaviour this type must not regress, only extend to the middle of the array too.
+    #[test]
+    fn a_trailing_drop_still_shrinks_the_array() {
+        let mut sa = SlotAssignment::default();
+        let low = band(100.0, 3.0, 0.7);
+        let high = band(8000.0, 1.0, 1.0);
+        sa.assign(&[low, high]);
+
+        let low_only = [low];
+        let second = sa.assign(&low_only);
+        assert_eq!(second.len(), 1, "dropping the last band must shrink, not leave a trailing gap");
+    }
+
+    /// The very first assignment (nothing tracked yet) must reproduce the given order exactly —
+    /// no behaviour change for the common "first correction after opening a channel" case.
+    #[test]
+    fn the_first_assignment_preserves_the_given_order() {
+        let mut sa = SlotAssignment::default();
+        let bands = [band(100.0, 3.0, 0.7), band(1000.0, -2.0, 1.0), band(8000.0, 1.0, 1.0)];
+        let out = sa.assign(&bands);
+        let freqs: Vec<f64> = out.iter().map(|b| b.unwrap().freq_hz).collect();
+        assert_eq!(freqs, vec![100.0, 1000.0, 8000.0]);
     }
 }
 
