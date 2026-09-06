@@ -1854,6 +1854,15 @@ function App() {
 
   const selectedDevice = devices.find((d) => d.id === deviceId);
   const dryActive = activeSlot === "Dry";
+  // Whether what's actually running matches what the editor shows. `result.device` only ever
+  // updates on a genuine apply (`activate_slot`/`apply_to_slot`) — switching devices
+  // (`set_device`) deliberately writes nothing on its own, so `result` still names whatever
+  // device the *last* apply targeted, stale the moment a different device gets selected. This
+  // is the only signal telling you the chart's correction isn't live yet — covers first run
+  // (`result` is null until the first apply) and a device switch alike. Dry excluded: its
+  // scoping already updates the moment a device is picked, and there's no correction to apply
+  // in the same sense.
+  const notYetApplied = !dryActive && (!result || result.device !== selectedDevice?.eqapo_pattern);
 
   // Re-fetched whenever the selected device changes (not polled) — cheap, no-elevation, same
   // as ApoSetup's own read, just independently so neither banner below needs that component
@@ -2604,6 +2613,20 @@ function App() {
           <button type="button" onClick={dismissApoStale} style={{ fontSize: "0.85em" }}>
             {tr("apoSetup.staleDismiss")}
           </button>
+        </p>
+      )}
+
+      {/* "Not applied yet" notice — no dismiss button, deliberately: this isn't a preference to
+          acknowledge, it's a fact about whether the audio matches the screen, and it resolves
+          itself the moment Apply is clicked (result.device then matches again). Reported live:
+          both first run and a device switch left this silently unclear, and each looked
+          identical from the outside — "I clicked things and nothing happened" — with no signal
+          pointing at why. No separate action button either; Apply is already on screen right
+          below this, same reasoning as the engine-nudge banners not duplicating a visible
+          trigger. */}
+      {!loading && notYetApplied && (
+        <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0 0 0.8em", display: "flex", alignItems: "center", gap: "0.5em", flexWrap: "wrap" }}>
+          <span>⚠ {tr("correction.notApplied")}</span>
         </p>
       )}
 

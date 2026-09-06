@@ -45,6 +45,7 @@
     "apply": "Apply → {{slot}}",
     "fitting": "Fitting…",
     "applyDry": "Dry (pick A or B)",
+    "notApplied": "Not applied yet — what's shown here isn't running on this device until you click Apply.",
     "eq": "Eq",
     "impulse": "Impulse",
     "eqTitle": "Frequency domain — magnitude (and phase)",

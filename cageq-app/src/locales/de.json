@@ -45,6 +45,7 @@
     "apply": "Anwenden → {{slot}}",
     "fitting": "Fitten…",
     "applyDry": "Dry (A oder B wählen)",
+    "notApplied": "Noch nicht angewendet — was hier angezeigt wird, läuft auf diesem Gerät erst nach Klick auf Anwenden.",
     "eq": "Eq",
     "impulse": "Impuls",
     "eqTitle": "Frequenzbereich – Magnitude (und Phase)",
