@@ -170,11 +170,14 @@ const PEAK_MIN_SEPARATION_OCTAVES = 1;
 // as a real peak, not noise-floor texture. PEAK_MIN_PROMINENCE_DB alone isn't enough down at the
 // noise floor: it only asks "is this bump taller than its immediate valleys", and a floor's natural
 // statistical ripple routinely clears 6dB purely by chance somewhere across 240 bins — e.g. a clean
-// 1kHz sine visibly showing a second "peak" at 5.77kHz, -103dB, ~80dB below the real tone. 60dB is
-// a standard analyzer noise-floor gate: generous enough to keep real, quiet harmonics (a sawtooth's
-// ladder is nowhere near 60dB down within the range anyone's looking at), tight enough to reject
-// content that's actually down at the floor.
-const PEAK_MAX_RANGE_DB = 60;
+// 1kHz sine visibly showing a second "peak" at 5.77kHz, -103dB, ~80dB below the real tone. A generic
+// analyzer gate would sit closer to 60dB — generous enough to keep real, quiet harmonics (a
+// sawtooth's ladder is nowhere near that far down within the range anyone's looking at) — but this
+// isn't measuring communications or synthetic test signals, it's marking peaks in audio someone is
+// actually listening to: content 30-60dB below the loudest thing in the room is inaudible against
+// it, so a "peak" back there is true content the ear can't use, not a false one worth relaxing the
+// gate for. 30dB keeps the readout to what's actually perceptually relevant.
+const PEAK_MAX_RANGE_DB = 30;
 // A candidate within this many partials of a lower, already-established peak still counts as
 // belonging to that peak's harmonic series (see `harmonicOf`) — a mains hum's 50/100/150/200 Hz
 // ladder or a sawtooth's n*f0 shouldn't compete for their own readout slots once the fundamental
