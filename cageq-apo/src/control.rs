@@ -42,7 +42,7 @@ pub const CONTROL_MAGIC: u32 = 0x4341_4751;
 /// Bump whenever `ControlBlock`'s layout changes size or shape — e.g. `dsp::MAX_BANDS`
 /// changing resizes `coeffs`, and an old DLL and a new app (or vice versa) disagreeing about
 /// that size must not be allowed to interpret each other's memory.
-pub const CONTROL_VERSION: u32 = 5;
+pub const CONTROL_VERSION: u32 = 6;
 
 /// Preamp bounds mirroring [`crate::config`]'s, for the same reason: attenuation is
 /// harmless, gain is a hazard, and the writer is not trusted merely because it is ours.
@@ -89,6 +89,24 @@ impl RawCoeffs {
 /// `#[repr(C)]` and fixed-size throughout: the writer is a separate process, so the layout is
 /// an ABI. Nothing here is a pointer or a length the reader would have to trust — the only
 /// count is bounds-checked against a compile-time array.
+///
+/// **`coeffs` is declared last, deliberately, and must stay that way.** It is the one field
+/// whose size moves whenever [`MAX_BANDS`] does, so putting it last keeps every other field's
+/// *byte offset* stable across a `MAX_BANDS` change — which matters because [`CONTROL_VERSION`]
+/// stops a version-mismatched pair from *processing* each other's data, but it cannot stop the
+/// writer from opening the section and reading `sample_rate`/`heartbeat`/etc. at its own
+/// compiled offsets first, since that happens before `publish` ever gets a chance to notice
+/// anything is wrong. A real case: `RegisterServer` stops and restarts `audiosrv` to swap the
+/// DLL, so the APO side of a `MAX_BANDS` bump is live the moment a stream re-locks — but nothing
+/// about that rebuilds the *app* process hosting this code, which native Rust has no way to do
+/// to itself. Before this field was last, a still-running old build reading a since-grown
+/// section landed inside the middle of the new (larger) `coeffs` array instead of the real
+/// `sample_rate`, and read back plausible-looking garbage instead of failing cleanly. With
+/// `coeffs` last, that same old build instead reads its own genuinely-correct, unmoved
+/// `sample_rate`/etc. — `publish` still gets refused by the newer reader's version check
+/// exactly as it always would, just without first taking a wrong turn on the way there. This
+/// only helps as of the version where it shipped; it does nothing for a mismatch straddling an
+/// older build that never had this ordering.
 #[repr(C)]
 pub struct ControlBlock {
     pub magic: u32,
@@ -98,7 +116,6 @@ pub struct ControlBlock {
     /// Bands actually in use, `<= MAX_BANDS`. Validated on every read.
     pub band_count: u32,
     pub preamp_db: f64,
-    pub coeffs: [RawCoeffs; MAX_BANDS],
     /// Incremented by the APO so the app can see it is alive and being processed. Purely
     /// outbound; the reader never trusts it.
     pub heartbeat: AtomicU64,
@@ -129,6 +146,9 @@ pub struct ControlBlock {
     /// the one being loaded. Mistaking one for the other has twice sent a hunt for DSP bugs
     /// that were already fixed.
     pub build_stamp: AtomicU64,
+    /// See this struct's own doc: kept last so its size (the one thing that moves when
+    /// [`MAX_BANDS`] does) never disturbs any other field's offset.
+    pub coeffs: [RawCoeffs; MAX_BANDS],
 }
 
 /// A validated snapshot, ready to hand to the cascade. Fixed-size so taking one allocates

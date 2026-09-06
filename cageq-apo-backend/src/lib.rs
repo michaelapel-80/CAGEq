@@ -57,9 +57,13 @@ pub enum ApoBackendError {
         source: std::io::Error,
     },
     /// The APO has not published a sample rate, so coefficients cannot be computed for it.
-    /// Only reachable with a channel open, which means an APO instance is locked — so this
-    /// is a version mismatch between app and APO, not a normal state.
-    #[error("the APO on {0} published no sample rate; is CAGEqApo.dll current?")]
+    /// Only reachable with a channel open, which means an APO instance is locked. Almost always
+    /// a race on the very first buffer after `LockForProcess` (the section exists the instant
+    /// `CreateFileMappingW` returns, before the rest of lock setup — including `set_sample_rate`
+    /// — has run). See `ControlBlock`'s own doc for why this field's offset is now guaranteed
+    /// stable across a [`dsp::MAX_BANDS`] change, so a *stale build* is no longer a plausible
+    /// cause of this specific symptom the way it used to be.
+    #[error("the APO on {0} published no sample rate — try again shortly")]
     NoSampleRate(String),
     /// The live control channel refused the correction outright — too many bands
     /// (`dsp::MAX_BANDS`), an unsafe/unstable coefficient, or an out-of-range preamp (see
