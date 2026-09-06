@@ -159,9 +159,13 @@ const CURSOR_LINE_COLOR = "rgba(230,240,255,0.55)";
 // flank, which never finds a low-enough valley before running into that bigger peak.
 const PEAK_MIN_PROMINENCE_DB = 6;
 // Minimum spacing between picked peaks, in octaves (so it means the same thing at the low and high
-// end of a log axis, unlike a fixed Hz or bin-count gap). ~a third-octave — roughly a critical
-// band in the midrange — stops one broad resonance's own ripples from filling every slot.
-const PEAK_MIN_SEPARATION_OCTAVES = 1 / 3;
+// end of a log axis, unlike a fixed Hz or bin-count gap). A third-octave (roughly a critical band
+// in the midrange) still let one broad resonance's ripples fill several slots at once — confirmed
+// live, "still finds too many peaks" even after the slot-persistence fix stopped them jumping
+// around. A full octave is a much stronger claim ("nothing else within 2x/0.5x this frequency"),
+// closer to how far apart two features need to be before a reader would call them separate peaks
+// rather than texture on one bump.
+const PEAK_MIN_SEPARATION_OCTAVES = 1;
 // How far (dB) below the loudest content in the current frame a candidate may sit and still count
 // as a real peak, not noise-floor texture. PEAK_MIN_PROMINENCE_DB alone isn't enough down at the
 // noise floor: it only asks "is this bump taller than its immediate valleys", and a floor's natural
