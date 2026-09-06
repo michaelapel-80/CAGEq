@@ -435,7 +435,7 @@ pub fn status(_shipped_dll_path: Option<&std::path::Path>) -> SetupStatus {
 #[cfg(windows)]
 pub fn perform(action: &Action) -> Result<(), SetupError> {
     match action {
-        Action::RegisterServer => regsvr32(false),
+        Action::RegisterServer => secure_config_dir().and_then(|()| regsvr32(false)),
         Action::UnregisterServer => {
             // Detach every endpoint FIRST. Unregistering a COM server that endpoints still
             // point at leaves the machine referencing a CLSID nothing implements: Windows
@@ -515,6 +515,124 @@ fn regsvr32(unregister: bool) -> Result<(), SetupError> {
         let _ = std::fs::remove_file(&target);
     }
     start_audio()
+}
+
+/// Grant CAGEq's own (unelevated) process write access to the directory its persistent
+/// corrections live in — `%ProgramData%\CAGEq\apo`, read by `audiodg` (LocalService) at
+/// `LockForProcess` (see `cageq_apo::config::config_dir`'s own doc).
+///
+/// **This was missing entirely.** The only place this ACL was ever actually set was
+/// `cageq-apo/scripts/write-config.ps1 -Elevated` — a manual, run-once-by-hand bring-up script,
+/// not part of `RegisterServer`/`Attach`/anything a real install runs. A machine that had never
+/// had that script run against it (i.e. every real install, and any dev box that only ever used
+/// the in-app wizard) was left with `%ProgramData%\CAGEq\apo` at whatever ACL `fs::create_dir_all`
+/// running unelevated happened to produce — not guaranteed to include write access for the very
+/// account that needs it — so `apply()`'s config-file write could fail from the very first
+/// correction, invisibly to everything except the "could not write" error it surfaces, and
+/// nothing in `RegisterServer`/`OpenGate`/`Attach` ever fixed it no matter how many times they
+/// ran, since none of them touched this directory at all.
+///
+/// Protected and reset every run rather than only-if-missing: a directory left more restrictive
+/// by an earlier attempt (elevated or not) must not stay that way, and setting the same DACL
+/// twice is harmless. SIDs, not names — see the localized-account-names lesson elsewhere in
+/// this codebase: `S-1-5-18`/`S-1-5-32-544`/`S-1-5-11` are SYSTEM, Administrators, and
+/// Authenticated Users on every locale, where `BUILTIN\Administrators` etc. would not resolve.
+/// `D:P` = protected DACL, not inherited from `%ProgramData%`. SYSTEM and Administrators get
+/// full control (`FA`); Authenticated Users get `0x1301bf` — FILE_GENERIC_READ|WRITE|EXECUTE
+/// plus DELETE, the same mask .NET's `FileSystemRights.Modify` sets (matching
+/// `write-config.ps1`'s own choice) — not merely read-only, since CAGEq runs unelevated and has
+/// to write here itself. `OICI` (object-inherit, container-inherit) applies both rules to files
+/// created inside the directory, not just the directory object. SIDs, not names — see the
+/// localized-account-names lesson elsewhere in this codebase: `SY`/`BA`/`AU` (SYSTEM,
+/// Administrators, Authenticated Users) resolve on every locale, where spelled-out account
+/// names would not.
+const CONFIG_DIR_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;AU)";
+
+#[cfg(windows)]
+type SdHandle = *mut std::ffi::c_void;
+
+#[cfg(windows)]
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string_security_descriptor: *const u16,
+        string_sd_revision: u32,
+        security_descriptor: *mut SdHandle,
+        security_descriptor_size: *mut u32,
+    ) -> i32;
+    fn SetFileSecurityW(file_name: *const u16, security_information: u32, security_descriptor: SdHandle) -> i32;
+    fn LocalFree(h_mem: SdHandle) -> SdHandle;
+}
+
+#[cfg(windows)]
+fn wide(s: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    s.as_ref().encode_wide().chain(std::iter::once(0)).collect()
+}
+
+/// Build the security descriptor [`CONFIG_DIR_SDDL`] describes. `None` if the string itself
+/// fails to parse — checked by its own test, but kept as a real runtime path rather than an
+/// `unwrap`, since a Win32 SDDL parser is not something to trust blindly from Rust.
+#[cfg(windows)]
+fn config_dir_security_descriptor() -> Option<SdHandle> {
+    const SDDL_REVISION_1: u32 = 1;
+    let sddl = wide(CONFIG_DIR_SDDL);
+    let mut psd: SdHandle = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated; the callee writes at most one pointer to `psd`.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut psd, std::ptr::null_mut())
+    };
+    if ok == 0 || psd.is_null() { None } else { Some(psd) }
+}
+
+/// Grant CAGEq's own (unelevated) process write access to the directory its persistent
+/// corrections live in — `%ProgramData%\CAGEq\apo`, read by `audiodg` (LocalService) at
+/// `LockForProcess` (see `cageq_apo::config::config_dir`'s own doc).
+///
+/// **This was missing entirely.** The only place this ACL was ever actually set was
+/// `cageq-apo/scripts/write-config.ps1 -Elevated` — a manual, run-once-by-hand bring-up script,
+/// not part of `RegisterServer`/`Attach`/anything a real install runs. A machine that had never
+/// had that script run against it (i.e. every real install, and any dev box that only ever used
+/// the in-app wizard) was left with `%ProgramData%\CAGEq\apo` at whatever ACL `fs::create_dir_all`
+/// running unelevated happened to produce — not guaranteed to include write access for the very
+/// account that needs it — so `apply()`'s config-file write could fail from the very first
+/// correction, invisibly to everything except the "could not write" error it surfaces, and
+/// nothing in `RegisterServer`/`OpenGate`/`Attach` ever fixed it no matter how many times they
+/// ran, since none of them touched this directory at all.
+///
+/// Reset every run rather than only-if-missing: a directory left more restrictive by an earlier
+/// attempt (elevated or not) must not stay that way, and setting the same DACL twice is
+/// harmless.
+#[cfg(windows)]
+fn secure_config_dir() -> Result<(), SetupError> {
+    let dir = cageq_apo::config::config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| SetupError::Win32("create the config directory", e))?;
+
+    const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+    const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+
+    let Some(psd) = config_dir_security_descriptor() else {
+        return Err(SetupError::Win32(
+            "build the config directory's security descriptor",
+            std::io::Error::last_os_error(),
+        ));
+    };
+
+    let path = wide(dir.as_os_str());
+    // SAFETY: `path` is NUL-terminated; `psd` was just built above and is freed below regardless
+    // of outcome.
+    let applied = unsafe { SetFileSecurityW(path.as_ptr(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, psd) };
+    let err = std::io::Error::last_os_error();
+    unsafe { LocalFree(psd) };
+    if applied == 0 {
+        return Err(SetupError::Win32("set the config directory's permissions", err));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn secure_config_dir() -> Result<(), SetupError> {
+    Ok(())
 }
 
 /// The DLL as shipped beside the helper, i.e. inside the application's resources.
@@ -1237,6 +1355,18 @@ pub fn helper_path() -> Result<PathBuf, SetupError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The SDDL must actually parse — a typo here would silently leave the config directory
+    /// unsecured (or `secure_config_dir` erroring instead of fixing anything), and the whole
+    /// point of this string is the ACL that a real install's very first correction depends on.
+    #[test]
+    fn the_config_dir_sddl_is_valid() {
+        let psd = config_dir_security_descriptor();
+        assert!(psd.is_some(), "CONFIG_DIR_SDDL failed to parse: {CONFIG_DIR_SDDL}");
+        if let Some(psd) = psd {
+            unsafe { LocalFree(psd) };
+        }
+    }
 
     /// The log token names a file an ELEVATED process writes, chosen by an UNELEVATED one.
     /// If the parent could supply a path rather than a token, the helper would become an
