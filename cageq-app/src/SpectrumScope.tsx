@@ -657,10 +657,15 @@ export function SpectrumScope({
     // the underlying data is already smoothed at the source (cageq-monitor's SPEC_TAU_SECS), but
     // text updating 60x/s reads as vibrating rather than as a number, in a way a moving cross
     // doesn't. `hadPeak` blanks the row exactly once on losing signal / peaks, rather than writing
-    // to it every idle frame for nothing.
+    // to it every idle frame for nothing. Was 120ms before `trackPeaks` — the old direct `peaks[j]`
+    // indexing meant a slow rate also happened to hide some of the index-reshuffling jumps a faster
+    // one would have caught more often; with peak identity itself stable now, that extra margin
+    // isn't needed and the only remaining constraint is genuinely just digit-vibration. Halved as a
+    // starting point, not a measured ideal — retune freely if it still reads as settled or as
+    // vibrating at this rate.
     let lastReadout = 0;
     let hadPeak = false;
-    const READOUT_INTERVAL_MS = 120;
+    const READOUT_INTERVAL_MS = 60;
     // Tracked-peak identity across ticks — see `trackPeaks`. Lives here (not a ref) for the same
     // reason `hadPeak` does: it belongs to this render loop's closure and should reset whenever the
     // effect itself re-runs (a device/param change is a clean slate, not something a tracked peak
