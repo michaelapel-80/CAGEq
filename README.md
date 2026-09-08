@@ -45,8 +45,8 @@ catches inter-sample overs a plain sample-peak read misses) and true-RMS marks, 
 momentary/short-term LUFS meter sits beside it, making the auto-loudness compensation this app is
 built around actually visible rather than just trusted to work.
 
-All three views share a CRT-phosphor-style persistence/bloom renderer — a trailing glow that
-decays at a real, tunable rate, closer to a real analog scope's look than a plain clear-and-redraw.
+The scopes share a CRT-phosphor-style persistence/bloom renderer — a trailing glow that decays at
+a real, tunable rate, closer to a real analog scope's look than a plain clear-and-redraw.
 
 A few things about the spectrum analyzer specifically:
 
@@ -70,17 +70,17 @@ guarded against by several independent checks, not a single calculation anyone c
 
 ```
 Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──JSON-RPC over stdio──▶ Python sidecar
-                                                     │                                    │
-                                              process/watchdog                    AutoEq framework,
-                                                management                        NumPy/SciPy, DSP
-                                                     │                                    │
-                                                     └──────────── biquad coefficients ───┘
-                                                                      │
-                                          ┌───────────────────────────┴───────────────────────────┐
-                                          ▼                                                         ▼
-                              Equalizer APO (external, optional)                    CAGEq's own Windows Audio
-                              — click-free config-reload crossfade                  Processing Object — live
-                                                                                     coefficient ramping over a
+                                                    │                                     │
+                                            process/watchdog                      AutoEq framework,
+                                               management                         NumPy/SciPy, DSP
+                                                    │                                     │
+                                                    └──────── biquad coefficients ────────┘
+                                                                       │
+                                           ┌───────────────────────────┴───────────────────────────┐
+                                           ▼                                                       ▼
+                          Equalizer APO (external, optional)                           CAGEq's own Windows Audio
+                         — click-free config-reload crossfade                          Processing Object — live
+                                                                                      coefficient ramping over a
                                                                                      shared-memory control channel
 ```
 
@@ -105,7 +105,7 @@ Windows-specific audio engine, not restructuring the rest.
 
 Built and working: both audio engines, the fitting pipeline, the custom-filter editor, A/B/Dry
 comparison with loudness matching, the fail-safe watchdog, and the oscilloscope/vectorscope/
-spectrum-analyzer instrument views. Actively developed — expect rough edges.
+spectrum-analyzer/meter instrument views. Actively developed — expect rough edges.
 
 ## Getting started
 
