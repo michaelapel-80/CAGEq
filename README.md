@@ -42,9 +42,8 @@ WASAPI loopback capture of the actual (post-EQ) output — not mockups, not a ge
 
 The spectrum analyzer in particular holds up against dedicated analyzer tools:
 
-* **Log-frequency binned**, not the linear-Hz plot most tools default to — equal screen distance
-  means equal perceived pitch, so an octave looks like an octave whether it's 55–110 Hz or
-  5.5–11 kHz.
+* **Log-frequency binned** — equal screen distance means equal perceived pitch, so an octave
+  looks like an octave whether it's 55–110 Hz or 5.5–11 kHz.
 * **Real peak detection, not "loudest bin wins."** Peaks are picked by prominence against their
   local valleys (so a shoulder bump riding on a bigger resonance doesn't count), gated against
   the frame's own noise floor, and folded by harmonic series — a fundamental's own overtone
