@@ -109,7 +109,8 @@ spectrum-analyzer/meter instrument views. Actively developed — expect rough ed
 
 ## Getting started
 
-See [DEPLOY.md](DEPLOY.md) for installation (end users) and building from source (maintainers).
+Grab the installer from [Releases](../../releases/latest), or see [DEPLOY.md](DEPLOY.md) for the
+full installation walkthrough and building from source (maintainers).
 
 ## License
 
