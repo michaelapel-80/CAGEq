@@ -22,7 +22,7 @@
 //! CAGEq itself: a Tauri app running as administrator means a webview running as
 //! administrator, which is a bad trade for a handful of registry writes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// CAGEq's APO CLSID. Must match `CLSID_CageqApo` in `cageq-apo/shim/cageq_apo.cpp` and
 /// `scripts/register.ps1`.
@@ -109,6 +109,17 @@ fn installed_version() -> Option<u32> {
 fn parse_version_marker(text: &str) -> Option<u32> {
     text.trim().parse().ok()
 }
+
+/// Is `registered` — whatever `InprocServer32`'s default value currently says — the exact path
+/// `register` always writes, [`installed_dll`]? Split out so it's testable without touching the
+/// registry, same reasoning as [`parse_version_marker`]. Case-insensitive: Windows paths are.
+fn registered_at_expected_location(registered: &Path, expected: &Path) -> bool {
+    registered
+        .as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
+}
+
 /// Everything the UI needs to describe the current setup, all of it readable unelevated.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SetupStatus {
@@ -118,20 +129,36 @@ pub struct SetupStatus {
     /// deleted file looks fine in the registry and fails silently at load — worth telling
     /// apart from "not registered".
     pub dll_present: bool,
-    /// Whether the installed DLL is the version *this build* of the app expects — compared as
-    /// a plain number (`cageq_apo::APO_VERSION` against `installed_version_path()`'s content),
-    /// not by hashing the DLL's bytes: a byte comparison meant every dev rebuild looked like a
-    /// new release (compiler output isn't byte-reproducible build to build) and nagged to
-    /// re-run the elevated Register step for zero actual behaviour change — see `APO_VERSION`'s
-    /// own doc. `register` always re-copies the shipped DLL and re-writes the version marker
-    /// (see its own doc), so this is what makes an intentional app update actually take effect
-    /// on the audio side — but nothing ever prompted for it before this field existed, and
-    /// `next_step` used to consider setup finished forever once the DLL merely *existed*, no
-    /// version check at all. Defaults `true` (nothing registered yet — `next_step` catches that
-    /// case on its own, via `registered_dll`/`dll_present`, before this field is ever asked).
-    /// `false` if something *is* registered but has no marker at all — an install from before
-    /// this field existed, confidently older than any build that can even check it, not an
-    /// ambiguous case to shrug off.
+    /// Whether what is actually registered is the up-to-date DLL at the expected location —
+    /// two independent checks, both required:
+    ///
+    ///   1. `registered_dll` really is `installed_dll()` (`%ProgramFiles%\CAGEq\CAGEqApo.dll`),
+    ///      not some other path. `register` always writes the `InprocServer32` default as
+    ///      exactly that path, so anything else means the registration did not go through
+    ///      `register` at all — a DLL built and `regsvr32`'d by hand against a dev output
+    ///      directory, say. That is silent in exactly the way a wrong version number is not:
+    ///      the version marker at `installed_version_path()` is untouched by a rogue
+    ///      registration (it is still whatever an earlier, legitimate `register` run left), so
+    ///      checking the version alone reports "current" for a DLL this check never even looked
+    ///      at — while `audiodg`, running as LocalService, silently fails to load a path under a
+    ///      user's own profile and the control channel simply never appears, with nothing
+    ///      anywhere to say why.
+    ///   2. The version marker (`cageq_apo::APO_VERSION` against `installed_version_path()`'s
+    ///      content) matches this build — compared as a plain number, not by hashing the DLL's
+    ///      bytes: a byte comparison meant every dev rebuild looked like a new release
+    ///      (compiler output isn't byte-reproducible build to build) and nagged to re-run the
+    ///      elevated Register step for zero actual behaviour change — see `APO_VERSION`'s own
+    ///      doc.
+    ///
+    /// `register` always re-copies the shipped DLL to the right place and re-writes the version
+    /// marker (see its own doc), so this is what makes an intentional app update actually take
+    /// effect on the audio side — but nothing ever prompted for it before this field existed,
+    /// and `next_step` used to consider setup finished forever once the DLL merely *existed*, no
+    /// version (or location) check at all. Defaults `true` (nothing registered yet —
+    /// `next_step` catches that case on its own, via `registered_dll`/`dll_present`, before this
+    /// field is ever asked). `false` if something *is* registered but has no marker at all — an
+    /// install from before this field existed, confidently older than any build that can even
+    /// check it, not an ambiguous case to shrug off.
     pub dll_current: bool,
     /// `DisableProtectedAudioDG = 1`. **Without this the APO will not load at all**: Windows'
     /// APO signature check rejects unsigned *and* self-signed DLLs, so this key is the gate
@@ -403,7 +430,15 @@ pub fn status() -> SetupStatus {
             let path = PathBuf::from(path);
             out.dll_present = path.exists();
             if out.dll_present {
-                out.dll_current = installed_version() == Some(cageq_apo::APO_VERSION);
+                // Both halves matter, independently: the version marker alone was fooled by a
+                // registration pointing somewhere other than `installed_dll()` — a build run
+                // directly against a dev output path, say, `regsvr32`'d by hand instead of
+                // through `register`. That leaves an entry in `installed_version_path()` from
+                // an earlier *legitimate* registration, so the version check alone reported
+                // "current" for a DLL it had never actually looked at. See
+                // `registered_at_expected_location`'s own doc.
+                let right_place = registered_at_expected_location(&path, &installed_dll());
+                out.dll_current = right_place && installed_version() == Some(cageq_apo::APO_VERSION);
             }
             out.registered_dll = Some(path);
         }
@@ -1518,6 +1553,32 @@ mod tests {
         assert_eq!(parse_version_marker(""), None, "empty is not a version");
         assert_eq!(parse_version_marker("not a number"), None, "garbage must not panic");
         assert_eq!(parse_version_marker("1.5"), None, "APO_VERSION is a plain integer, not semver");
+    }
+
+    /// **The bug this guards**: a DLL registered by hand against a dev build output directory
+    /// (`regsvr32`'d directly, bypassing `register` entirely) looked identical to a proper
+    /// install as far as `dll_current` was concerned — the version marker at
+    /// `installed_version_path()` was untouched by the rogue registration, so it still matched
+    /// from an earlier *legitimate* run, and status reported "current" for a DLL that was not
+    /// the one anyone had actually checked. `registered_at_expected_location` is the fix.
+    #[test]
+    fn registered_at_expected_location_rejects_anything_but_the_installed_path() {
+        let expected = PathBuf::from(r"C:\Program Files\CAGEq\CAGEqApo.dll");
+        assert!(registered_at_expected_location(&expected, &expected), "the exact path must match itself");
+        assert!(
+            registered_at_expected_location(
+                &PathBuf::from(r"c:\program files\cageq\cageqapo.dll"),
+                &expected
+            ),
+            "Windows paths are case-insensitive"
+        );
+        assert!(
+            !registered_at_expected_location(
+                &PathBuf::from(r"C:\Users\micha\Documents\CAGE\cageq-apo\build\CAGEqApo.dll"),
+                &expected
+            ),
+            "a dev build output path must not count as the expected install location"
+        );
     }
 
     /// An endpoint with the effect chain switched off needs fixing even when the APO is
