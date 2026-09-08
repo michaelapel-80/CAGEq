@@ -720,6 +720,26 @@ function App() {
   }
 
   useEffect(() => {
+    // Headphone/target catalogue: a round trip to the sidecar (`core.request_with_deadline` on
+    // the Rust side), so even a warm on-disk index still waits on the sidecar's own numpy/scipy/
+    // autoeq import time before answering at all. Kicked off immediately but deliberately NOT
+    // awaited inline below — nothing on the resume-from-cache fast path (§3.5: seed_slot/
+    // activate_slot, both explicitly sidecar-free) actually needs it, so blocking `loading` on it
+    // meant a returning user with a cached correction stared at a spinner for the sidecar's own
+    // startup cost for no reason EqChart cared about. Populated in the background whenever it
+    // resolves; the one place that still genuinely needs it (no-resume fallback, below) awaits the
+    // same promise directly rather than re-requesting it.
+    const catalogue = Promise.all([
+      invoke<{ headphones: Headphone[] }>("list_headphones"),
+      invoke<{ targets: Target[] }>("list_targets"),
+    ]);
+    catalogue
+      .then(([hp, tg]) => {
+        setHeadphones(hp.headphones);
+        setTargets(tg.targets);
+      })
+      .catch((e) => setError(String(e)));
+
     (async () => {
       try {
         setStatus(await invoke<Status>("status"));
@@ -728,13 +748,9 @@ function App() {
         setApoNudgeDismissed(await invoke<boolean>("get_apo_nudge_dismissed"));
         const lib = await invoke<Parameters<typeof normalizeLibrary>[0]>("get_library");
         if (lib) setLibrary(normalizeLibrary(lib));
-        const [hp, tg, dev] = await Promise.all([
-          invoke<{ headphones: Headphone[] }>("list_headphones"),
-          invoke<{ targets: Target[] }>("list_targets"),
-          invoke<AudioDevice[]>("list_devices"),
-        ]);
-        setHeadphones(hp.headphones);
-        setTargets(tg.targets);
+        // Local WASAPI enumeration (`list_render_devices`), not a sidecar call — safe to await
+        // directly rather than folding into `catalogue` above.
+        const dev = await invoke<AudioDevice[]>("list_devices");
         setDevices(dev);
         // Prefer a device EqAPO is actually installed on, so the default selection works.
         const initial = dev.find((d) => d.eqapo_enabled) ?? dev[0];
@@ -813,7 +829,10 @@ function App() {
           }
         } else {
           // No resume (or active slot was empty/Dry): pre-fill the pickers from the older
-          // last-selection, Harman as the default target.
+          // last-selection, Harman as the default target. Genuinely needs the catalogue to
+          // validate/search against — the one place in this effect that has no way around
+          // waiting on the sidecar (there's no cached correction to show early here anyway).
+          const [hp, tg] = await catalogue;
           const sel = await invoke<Selection>("get_selection");
           const savedHp = sel.headphone ? hp.headphones.find((h) => h.path === sel.headphone) : undefined;
           if (savedHp) {
@@ -2633,9 +2652,15 @@ function App() {
         </p>
       )}
 
-      {/* The cold-start wait is the Python DSP sidecar: after a reboot its numpy/scipy bundle
-          is read cold from disk (a couple of seconds; the OS file cache makes repeat launches
-          fast) plus the one-time import — I/O-bound, not the catalogue (a 17 ms read). */}
+      {/* Only waits on the sidecar at all when there's no cached fit to resume from (first
+          launch, or a headphone/target never fit before) — the §3.5 resume-from-cache path
+          (seed_slot/activate_slot) is local-only, so a returning user's own last correction no
+          longer sits behind the Python DSP sidecar's cold-start cost (numpy/scipy read cold from
+          disk after a reboot — a couple of seconds; the OS file cache makes repeat launches fast
+          — plus the one-time import) just to draw what's already known. The headphone/target
+          catalogue (needed for search, not for drawing an already-known correction) loads
+          independently in the background and no longer gates this at all — see the startup
+          effect's own doc. */}
       {loading && <p>{tr("app.loading")}</p>}
 
       <div className="app-main">
