@@ -86,6 +86,29 @@ pub fn install_dir() -> PathBuf {
 pub fn installed_dll() -> PathBuf {
     install_dir().join("CAGEqApo.dll")
 }
+
+/// Where `register` records the installed DLL's [`cageq_apo::APO_VERSION`] — a plain decimal
+/// number, nothing fancier — so `status`'s `dll_current` can compare *that* against the number
+/// this build was compiled with, instead of hashing the DLL's own bytes (see `APO_VERSION`'s
+/// own doc for why the byte comparison had to go). Sits beside the DLL, not inside it: reading
+/// it back is then a plain file read, no PE/resource parsing needed.
+pub fn installed_version_path() -> PathBuf {
+    install_dir().join("CAGEqApo.version")
+}
+
+/// The installed DLL's recorded [`cageq_apo::APO_VERSION`], or `None` if the marker is
+/// missing/unreadable/not a plain number — e.g. an install from before this file existed at
+/// all. `status` treats that the same as a confirmed mismatch (see `dll_current`'s own doc):
+/// unlike a transient read failure, "no marker" is a confident signal on its own.
+fn installed_version() -> Option<u32> {
+    parse_version_marker(&std::fs::read_to_string(installed_version_path()).ok()?)
+}
+
+/// The parsing half of [`installed_version`], split out so it's testable without touching the
+/// filesystem — see its own test.
+fn parse_version_marker(text: &str) -> Option<u32> {
+    text.trim().parse().ok()
+}
 /// Everything the UI needs to describe the current setup, all of it readable unelevated.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SetupStatus {
@@ -95,14 +118,20 @@ pub struct SetupStatus {
     /// deleted file looks fine in the registry and fails silently at load — worth telling
     /// apart from "not registered".
     pub dll_present: bool,
-    /// Whether the registered DLL is byte-for-byte the one shipped with *this build* of the
-    /// app. `register` always re-copies the shipped DLL over the installed one (see its own
-    /// doc), so this is what makes an app update actually take effect on the audio side — but
-    /// nothing ever prompted for it, and `next_step` used to consider setup finished forever
-    /// once the DLL merely *existed*, with no version or hash check at all. An app update
-    /// shipping a fixed/newer CAGEqApo.dll left the OLD one running, attached and apparently
-    /// healthy, indefinitely. `true` when there is nothing shipped to compare against (a bare
-    /// CLI/dev context) or nothing registered yet — nothing to warn about in either case.
+    /// Whether the installed DLL is the version *this build* of the app expects — compared as
+    /// a plain number (`cageq_apo::APO_VERSION` against `installed_version_path()`'s content),
+    /// not by hashing the DLL's bytes: a byte comparison meant every dev rebuild looked like a
+    /// new release (compiler output isn't byte-reproducible build to build) and nagged to
+    /// re-run the elevated Register step for zero actual behaviour change — see `APO_VERSION`'s
+    /// own doc. `register` always re-copies the shipped DLL and re-writes the version marker
+    /// (see its own doc), so this is what makes an intentional app update actually take effect
+    /// on the audio side — but nothing ever prompted for it before this field existed, and
+    /// `next_step` used to consider setup finished forever once the DLL merely *existed*, no
+    /// version check at all. Defaults `true` (nothing registered yet — `next_step` catches that
+    /// case on its own, via `registered_dll`/`dll_present`, before this field is ever asked).
+    /// `false` if something *is* registered but has no marker at all — an install from before
+    /// this field existed, confidently older than any build that can even check it, not an
+    /// ambiguous case to shrug off.
     pub dll_current: bool,
     /// `DisableProtectedAudioDG = 1`. **Without this the APO will not load at all**: Windows'
     /// APO signature check rejects unsigned *and* self-signed DLLs, so this key is the gate
@@ -231,7 +260,7 @@ impl EndpointStatus {
 pub fn endpoints() -> Vec<EndpointStatus> {
     // Only .attached/.effects_disabled are read below — dll_current plays no part here, so
     // there is nothing for a caller to pass in.
-    let s = status(None);
+    let s = status();
     cageq_backend::list_render_devices()
         .into_iter()
         .map(|d| EndpointStatus {
@@ -355,17 +384,13 @@ pub enum SetupError {
 // Status — pure reads, no elevation
 // ---------------------------------------------------------------------------
 
-/// `shipped_dll_path`: where *this* caller's copy of the shipped `CAGEqApo.dll` is, if it
-/// knows — `None` if it has no way to find one (nothing to compare, not "stale").
-///
-/// **Not `shipped_dll()`.** That helper resolves the DLL beside `current_exe()`, which is
-/// correct for [`register`] (it runs *inside the elevated helper process*, staged next to its
-/// own DLL — see `build-apo.ps1`'s doc) but wrong here: `status` runs unelevated, in-process,
-/// inside the *main app*, whose own exe is never beside the bundled `apo/` resources. The
-/// caller (which holds the Tauri `AppHandle` this crate deliberately does not depend on)
-/// resolves the real one via `resource_dir()` and passes it in.
+/// Reads `HKLM` plus `installed_version_path()` — all world-readable, so this needs no
+/// privilege, matching the rest of `status()`. No parameter to resolve a "shipped" copy
+/// against any more: `dll_current` compares `installed_version_path()`'s number against
+/// [`cageq_apo::APO_VERSION`], the constant *this build* was compiled with, not another file
+/// on disk — see both their own docs for why that replaced a byte-for-byte DLL hash.
 #[cfg(windows)]
-pub fn status(shipped_dll_path: Option<&std::path::Path>) -> SetupStatus {
+pub fn status() -> SetupStatus {
     use winreg::RegKey;
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 
@@ -378,16 +403,7 @@ pub fn status(shipped_dll_path: Option<&std::path::Path>) -> SetupStatus {
             let path = PathBuf::from(path);
             out.dll_present = path.exists();
             if out.dll_present {
-                // Both sides read unelevated (the shipped copy is just a file, and the
-                // installed one is world-readable), so this needs no privilege — consistent
-                // with the rest of `status()`. `None` from either side (caller couldn't
-                // resolve one, or can't hash it) means there is nothing trustworthy to compare,
-                // so it stays `true` rather than guessing.
-                if let (Some(shipped), Some(installed_hash)) = (shipped_dll_path, file_hash(&path)) {
-                    if let Some(shipped_hash) = file_hash(shipped) {
-                        out.dll_current = shipped_hash == installed_hash;
-                    }
-                }
+                out.dll_current = installed_version() == Some(cageq_apo::APO_VERSION);
             }
             out.registered_dll = Some(path);
         }
@@ -422,7 +438,7 @@ pub fn status(shipped_dll_path: Option<&std::path::Path>) -> SetupStatus {
 }
 
 #[cfg(not(windows))]
-pub fn status(_shipped_dll_path: Option<&std::path::Path>) -> SetupStatus {
+pub fn status() -> SetupStatus {
     SetupStatus::default()
 }
 
@@ -443,7 +459,7 @@ pub fn perform(action: &Action) -> Result<(), SetupError> {
             // references to CAGEq forever and the next register looks like it did nothing.
             // Making the user detach by hand first was busywork for something only this code
             // knows the full list for.
-            for id in status(None).attached {
+            for id in status().attached {
                 detach(&id)?;
             }
             regsvr32(true)
@@ -480,6 +496,9 @@ fn regsvr32(unregister: bool) -> Result<(), SetupError> {
     stop_audio()?;
 
     let target = if unregister {
+        // Nothing reads this once the DLL itself is gone; removing it is tidiness, not
+        // correctness, so a failure here is not fatal to the unregister the caller asked for.
+        let _ = std::fs::remove_file(installed_version_path());
         installed_dll()
     } else {
         // Copy the shipped DLL into its machine-wide home and register THAT — see
@@ -491,6 +510,12 @@ fn regsvr32(unregister: bool) -> Result<(), SetupError> {
         std::fs::create_dir_all(install_dir())
             .map_err(|e| SetupError::Win32("create install directory", e))?;
         std::fs::copy(&source, &dest).map_err(|e| SetupError::Win32("install the DLL", e))?;
+        // Records what THIS build (the one doing the installing) considers itself to be —
+        // see APO_VERSION's own doc. Written before regsvr32 runs, alongside the copy, so a
+        // failure partway through never leaves the DLL updated but the marker still claiming
+        // the old version (which `status` would then wrongly call current).
+        std::fs::write(installed_version_path(), cageq_apo::APO_VERSION.to_string())
+            .map_err(|e| SetupError::Win32("write the installed version marker", e))?;
         dest
     };
 
@@ -641,17 +666,6 @@ fn shipped_dll() -> Result<PathBuf, SetupError> {
     let exe = std::env::current_exe().map_err(|e| SetupError::Win32("current_exe", e))?;
     let dll = exe.with_file_name("CAGEqApo.dll");
     if dll.exists() { Ok(dll) } else { Err(SetupError::DllMissing) }
-}
-
-/// SHA-256 of a file's contents, or `None` if it cannot be read — never a reason to fail a
-/// status read (see `status`'s own doc: every field there is a best-effort, unelevated
-/// snapshot, and a hash that cannot be computed is exactly as informative as one that mismatches
-/// would be misleading, so it is treated as "nothing to compare" rather than "stale").
-#[cfg(windows)]
-fn file_hash(path: &std::path::Path) -> Option<[u8; 32]> {
-    use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path).ok()?;
-    Some(Sha256::digest(&bytes).into())
 }
 
 #[cfg(windows)]
@@ -1492,29 +1506,18 @@ mod tests {
         );
     }
 
-    /// `file_hash` itself, isolated from the registry reads `status()` wraps it in: identical
-    /// content hashes equal regardless of path, a single changed byte must not, and a missing
-    /// file is `None` (a hard failure here would take down the whole unelevated status read,
-    /// which is the one thing this module's own doc insists must always stay available).
+    /// `parse_version_marker` itself, isolated from the file read `installed_version` wraps it
+    /// in: a plain number parses, surrounding whitespace (a trailing newline, say, from
+    /// however the marker got written) doesn't break it, and garbage is `None` rather than a
+    /// panic — a corrupted marker must read as "not confirmed current", not take down the
+    /// whole unelevated status read.
     #[test]
-    fn file_hash_distinguishes_content_not_missing_files() {
-        let dir = std::env::temp_dir().join(format!("cageq-apo-backend-hash-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let a = dir.join("a.bin");
-        let b_same = dir.join("b-same.bin");
-        let c_different = dir.join("c-different.bin");
-        std::fs::write(&a, b"CAGEqApo build 1").unwrap();
-        std::fs::write(&b_same, b"CAGEqApo build 1").unwrap();
-        std::fs::write(&c_different, b"CAGEqApo build 2").unwrap();
-
-        let hash_a = file_hash(&a).expect("a real file must hash");
-        assert_eq!(hash_a, file_hash(&b_same).unwrap(), "identical content must hash equal across paths");
-        assert_ne!(hash_a, file_hash(&c_different).unwrap(), "different content must hash different");
-        assert_eq!(file_hash(&dir.join("does-not-exist.bin")), None, "a missing file is None, not an error");
-
-        let _ = std::fs::remove_dir_all(&dir);
+    fn parse_version_marker_handles_whitespace_and_garbage() {
+        assert_eq!(parse_version_marker("1"), Some(1));
+        assert_eq!(parse_version_marker("  2\n"), Some(2), "surrounding whitespace must not break it");
+        assert_eq!(parse_version_marker(""), None, "empty is not a version");
+        assert_eq!(parse_version_marker("not a number"), None, "garbage must not panic");
+        assert_eq!(parse_version_marker("1.5"), None, "APO_VERSION is a plain integer, not semver");
     }
 
     /// An endpoint with the effect chain switched off needs fixing even when the APO is
@@ -1537,7 +1540,7 @@ mod tests {
     /// machine's registry looks like.
     #[test]
     fn reading_status_needs_no_privileges() {
-        let s = status(None);
+        let s = status();
         assert!(s.attached.windows(2).all(|w| w[0] <= w[1]), "attached should be sorted");
     }
 }

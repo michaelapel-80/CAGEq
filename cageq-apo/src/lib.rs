@@ -51,6 +51,20 @@ pub mod dsp;
 
 use std::ffi::c_void;
 
+/// This build's behaviour version — bump by hand whenever a change to this crate (or
+/// `cageq-apo-backend`, which drives it) is something a user should actually be prompted to
+/// update for: DSP math, the config file format, `control::CONTROL_VERSION`, ramp timing, and
+/// so on. **Not** tied to source changes in general, and deliberately *not* derived from a
+/// build timestamp or a source hash — `cageq-apo-backend::setup::status`'s `dll_current` used
+/// to compare the installed DLL's SHA-256 against the freshly-staged one, which meant every
+/// single dev rebuild looked like a new release (compiler output isn't byte-reproducible
+/// across otherwise-identical builds — timestamps, absolute paths in debug info, and similar
+/// noise), nagging to re-run the elevated Register step for zero actual behaviour change.
+/// Compared against `install_dir()`'s own `CAGEqApo.version` marker file (written by
+/// `register`, read by `status` — see both their own docs) instead of the DLL's bytes, so
+/// staleness now means "an intentional version bump", not "recompiled".
+pub const APO_VERSION: u32 = 1;
+
 /// Per-instance state. One of these exists per APO instance (per endpoint, per mode),
 /// created at `LockForProcess` and destroyed at `UnlockForProcess`.
 ///

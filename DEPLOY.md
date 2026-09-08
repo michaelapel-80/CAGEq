@@ -107,13 +107,19 @@ gone. `register` re-copies each time, so an app update refreshes the installed D
 registry entry keeps pointing at one fixed path.
 
 **An app update alone does not re-run `register`.** Nothing does it automatically — the app
-detects staleness (`dll_current`: a SHA-256 comparison between the shipped copy in its own
-resources and whatever is actually installed at `%ProgramFiles%\CAGEq\CAGEqApo.dll`) and shows an
-in-app notice; clicking through it re-runs the same `RegisterServer` action a first-time setup
-uses. So shipping a newer `CAGEqApo.dll` in a release is enough — the running app on an already-
-installed machine will notice next launch and prompt the user, no separate installer-side update
-step needed. This is exactly why step 3 above refuses to build with a stale staged DLL: shipping
-an update whose *bundled* copy is itself stale would make that whole detection meaningless.
+detects staleness (`dll_current`: `cageq_apo::APO_VERSION`, the number *this build* was compiled
+with, against a plain-text marker `register` writes alongside the installed DLL at
+`%ProgramFiles%\CAGEq\CAGEqApo.version`) and shows an in-app notice; clicking through it re-runs
+the same `RegisterServer` action a first-time setup uses. **Not a hash of the DLL's bytes** —
+that was the original mechanism, and it meant every dev rebuild looked like a new release
+(compiler output isn't byte-reproducible build to build), nagging to re-run an elevated step for
+zero actual behaviour change. The trade-off: bumping `APO_VERSION` by hand in `cageq-apo/src/
+lib.rs` is now a **real release step**, not automatic — forgetting it means a genuine APO change
+ships without the update prompt ever firing. Bump it for anything a user should actually be
+prompted to update for (DSP math, the config format, `control::CONTROL_VERSION`, ramp timing);
+don't for anything else. This is exactly why step 3 above refuses to build with a stale staged
+DLL: shipping an update whose *bundled* copy is itself stale would make that whole detection
+meaningless.
 
 Nothing about this is automatic on install: setup is driven from the app's own panel, because
 **attaching is a per-endpoint choice** and at install time nobody knows which device the user
