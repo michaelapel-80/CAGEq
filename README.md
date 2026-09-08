@@ -40,9 +40,11 @@ filters without guardrails risks digital clipping or jarring level jumps.
 CAGEq ships its own oscilloscope, stereo vectorscope, spectrum analyzer, and level/LUFS meters,
 all fed by a live WASAPI loopback capture of the actual (post-EQ) output — not mockups.
 
-The level meter is the same phosphor-beam rendering the scopes use, not a plain bar, with peak and
-true-RMS marks; a BS.1770 momentary/short-term LUFS meter sits beside it, making the auto-loudness
-compensation this app is built around actually visible, not just trusted to work.
+The level meter carries peak and true-RMS marks, and a BS.1770 momentary/short-term LUFS meter
+sits beside it, making the auto-loudness compensation this app is built around actually visible
+rather than just trusted to work. The level bar happens to share the scopes' phosphor-beam
+rendering instead of a plain bar — mostly a visual touch, occasionally genuinely useful for
+noticing a signal whose energy distribution isn't "normal", but an edge case rather than the point.
 
 All three views share a CRT-phosphor-style persistence/bloom renderer — a trailing glow that
 decays at a real, tunable rate, closer to a real analog scope's look than a plain clear-and-redraw.
