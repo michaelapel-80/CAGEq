@@ -44,21 +44,19 @@ The level meter is the same phosphor-beam rendering the scopes use, not a plain 
 true-RMS marks; a BS.1770 momentary/short-term LUFS meter sits beside it, making the auto-loudness
 compensation this app is built around actually visible, not just trusted to work.
 
-The spectrum analyzer in particular holds up against dedicated analyzer tools:
-
-* **Log-frequency binned** — equal screen distance means equal perceived pitch, so an octave
-  looks like an octave whether it's 55–110 Hz or 5.5–11 kHz.
-* **Real peak detection, not "loudest bin wins."** Peaks are picked by prominence against their
-  local valleys (so a shoulder bump riding on a bigger resonance doesn't count), gated against
-  the frame's own noise floor, and folded by harmonic series — a fundamental's own overtone
-  ladder doesn't clutter the readout competing for its own slot. Reported frequency is refined to
-  sub-bin precision by parabolic interpolation, not just "whichever of ~240 fixed bins is tallest."
-* **Peaks keep their identity from frame to frame** instead of being recomputed from nothing on
-  every tick, so the numeric readout stays legible instead of flickering every time a peak briefly
-  dips below a detection threshold.
-
 All three views share a CRT-phosphor-style persistence/bloom renderer — a trailing glow that
 decays at a real, tunable rate, closer to a real analog scope's look than a plain clear-and-redraw.
+
+A few things about the spectrum analyzer specifically:
+
+* **A fast update rate from heavy window overlap** — each analysis window advances by only a
+  quarter of its own length (75% overlap), so a new result lands roughly every 43 ms instead of
+  waiting out a full window per update.
+* **Interpolated on top of that**, both in frequency (zero-padding resolves the same window's
+  transform more finely, not adding fake information) and between successive updates on the
+  frontend, so the display reads as continuous motion rather than a stepped, sample-and-hold look.
+* **Still readable on fast-moving signals**, since the CRT-phosphor persistence above integrates
+  rapid change into a legible trail instead of flickering into noise.
 
 ## Safety first
 
