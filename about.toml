@@ -1,0 +1,17 @@
+# cargo-about config for THIRD_PARTY_LICENSES.txt — see scripts/gen_third_party_licenses.py's
+# own header for the full regeneration process. Every SPDX id actually found across both cargo
+# workspaces (root + cageq-app/src-tauri) has to be listed here or cargo-about refuses to run,
+# by design — a new dependency with an unreviewed license should stop the generator, not get
+# silently included. GPL-3.0-or-later is CAGEq's own crates, not a third party; the generator
+# filters them back out of the actual output.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "Unlicense",
+    "Unicode-3.0",
+    "GPL-3.0-or-later",
+    "BSD-3-Clause",
+    "MPL-2.0",
+    "Zlib",
+]

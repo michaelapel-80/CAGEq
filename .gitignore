@@ -20,3 +20,11 @@ cageq-app/src-tauri/apo/
 # code comments are breadcrumbs to this file for local development, not links a public reader
 # needs to follow.
 /filter.md
+
+# Intermediate license reports scripts/gen_third_party_licenses.py merges into
+# THIRD_PARTY_LICENSES.txt — regenerate fresh each time (see that script's own header for the
+# commands) rather than trusting a stale one; not meant to be committed themselves.
+/rust_licenses_root.json
+/rust_licenses_tauri.json
+/npm_licenses.json
+/python_licenses.json

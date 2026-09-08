@@ -113,7 +113,10 @@ See [DEPLOY.md](DEPLOY.md) for installation (end users) and building from source
 
 ## License
 
-[GPL-3.0-or-later](LICENSE).
+[GPL-3.0-or-later](LICENSE). Third-party dependencies bundled into the built application (Rust
+crates, the frontend's npm packages, the frozen Python sidecar) are all permissively licensed
+(MIT/BSD/Apache-2.0 and similar) — see [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) for
+the full list and their license texts.
 
 ## Acknowledgments
 
