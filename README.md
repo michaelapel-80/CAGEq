@@ -37,8 +37,12 @@ filters without guardrails risks digital clipping or jarring level jumps.
 
 ## Built-in instrumentation
 
-CAGEq ships its own oscilloscope, stereo vectorscope, and spectrum analyzer, all fed by a live
-WASAPI loopback capture of the actual (post-EQ) output — not mockups, not a generic VU meter.
+CAGEq ships its own oscilloscope, stereo vectorscope, spectrum analyzer, and level/LUFS meters,
+all fed by a live WASAPI loopback capture of the actual (post-EQ) output — not mockups.
+
+The level meter is the same phosphor-beam rendering the scopes use, not a plain bar, with peak and
+true-RMS marks; a BS.1770 momentary/short-term LUFS meter sits beside it, making the auto-loudness
+compensation this app is built around actually visible, not just trusted to work.
 
 The spectrum analyzer in particular holds up against dedicated analyzer tools:
 
