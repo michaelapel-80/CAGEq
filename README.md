@@ -89,8 +89,7 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──JSON-R
   — the actual real-time audio path lives entirely in the two engines above.
 * **Why Rust/Tauri:** a lean native WebView2 shell instead of a bundled Chromium (Electron), plus
   a fail-safe watchdog independent of Python. Honestly: no component here strictly needs Rust's
-  performance — it's also a deliberate learning project, in contrast to the mostly AI-assisted
-  frontend.
+  performance for what it actually does.
 * **Why a second, custom audio engine alongside Equalizer APO:** Equalizer APO works well but
   its config-reload crossfade has a measurable cold-start bloom on every edit. CAGEq's own APO
   keeps filter state across edits and ramps coefficients live over a control channel instead,
@@ -100,6 +99,13 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──JSON-R
 Windows-only today (via Equalizer APO / a custom Windows Audio Processing Object), though the
 data model, DSP math, and most of the UI are platform-agnostic — a port would mean swapping the
 Windows-specific audio engine, not restructuring the rest.
+
+Built with heavy AI assistance (Claude) across the whole stack, not just the frontend — worth
+saying plainly rather than leaving it to be inferred. In practice that means the DSP math is
+checked against an analytic ground truth rather than just listened to, corners of the Windows
+audio APIs got verified against source/documentation rather than assumed, and behavior that
+matters (loudness matching, clipping protection, the fail-safe path) was tested directly, not
+taken on faith.
 
 ## Status
 
