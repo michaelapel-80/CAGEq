@@ -357,6 +357,42 @@ pub struct Cascade {
     dry_curve_for_test: DryCurve,
     /// Precomputed trig for the peak-gain guard — see [`Cascade::would_be_too_loud`].
     grid: Vec<GridPoint>,
+
+    // --- Secondary bank: a second, independently-running cascade used only while
+    // `start_crossfade` is fading one whole correction into an unrelated one (§5.2 isolate
+    // on/off) — see that method's own doc for why this exists instead of just ramping
+    // `coeffs`. Idle (`process_count2 == 0`) the rest of the time, so it costs nothing extra
+    // per sample outside of a crossfade.
+    /// Mirrors `coeffs`/`state`/`process_count`/`preamp` but for the incoming correction.
+    coeffs2: [Coeffs; MAX_BANDS],
+    state2: Vec<BiquadState>,
+    process_count2: usize,
+    preamp2: f64,
+    /// Crossfade position between the primary bank and the secondary one: 0 = fully primary
+    /// (secondary silent), 1 = fully secondary. Same shape as `dry_mix`, but a distinct
+    /// mechanism — `dry_mix`'s "other side" is free (the raw input, no filtering, always
+    /// settled); this one's is a real cascade that starts cold and has to be run before it's
+    /// trustworthy.
+    cross_mix: f64,
+    cross_from: f64,
+    cross_to: f64,
+    /// Frames left in the audible crossfade; 0 means either idle or still pre-rolling (see
+    /// `cross_preroll_left`).
+    cross_fade_left: u32,
+    cross_fade_frames: u32,
+    /// Frames left before the crossfade may start *moving*. The secondary bank still runs on
+    /// real input during this window — `cross_mix` just stays pinned at `cross_from` — so its
+    /// (cold) delay registers get a head start settling before they carry any weight in the
+    /// output, rather than joining the fade already ringing.
+    cross_preroll_left: u32,
+    /// A `start_crossfade` call that arrived while the *current* fade already carries real
+    /// weight (`cross_fade_left > 0`) — too late to repoint `coeffs2` in place without stepping
+    /// its contribution to the output instantly. Held here instead of applied immediately; the
+    /// frame the in-flight fade lands, [`Cascade::advance_cross`] starts a fresh crossfade
+    /// toward it. `None` when nothing is queued. `(band count, coefficients, preamp dB)` — a
+    /// fixed-size payload, not a second `Vec`, so queuing one costs nothing on the real-time
+    /// path.
+    pending_crossfade: Option<(usize, [Coeffs; MAX_BANDS], f64)>,
 }
 
 impl Cascade {
@@ -400,6 +436,21 @@ impl Cascade {
             #[cfg(test)]
             dry_curve_for_test: DryCurve::Linear,
             grid,
+            coeffs2: [Coeffs::PASSTHROUGH; MAX_BANDS],
+            state2: vec![BiquadState::default(); channels * MAX_BANDS],
+            process_count2: 0,
+            preamp2: 1.0,
+            cross_mix: 0.0,
+            cross_from: 0.0,
+            cross_to: 0.0,
+            cross_fade_left: 0,
+            // Reuses DRY_FADE_MS: a pure level crossfade between two already-valid signals
+            // needs no distance-based scaling the way the coefficient ramp does (see
+            // `start_crossfade`'s doc) — the same fixed, proven window Dry itself uses for
+            // exactly the same shape of transition.
+            cross_fade_frames: ((DRY_FADE_MS / 1000.0) * sample_rate).round().max(1.0) as u32,
+            cross_preroll_left: 0,
+            pending_crossfade: None,
         }
     }
 
@@ -410,6 +461,24 @@ impl Cascade {
     /// the new ramp starts from wherever the coefficients have actually reached, not from the
     /// previous target. There is no discontinuity at a retarget.
     fn start_ramp(&mut self, target: &[Coeffs], new_count: usize, preamp_db: f64) {
+        self.point_ramp_at(target, new_count, preamp_db);
+        // Sized to how different `start` and `target` actually are, not a fixed length — see
+        // this method's own doc for why a whole-slot swap needs far more than a live drag's
+        // 8 ms. Computed from `start`/`target` themselves (just assigned above), the same
+        // per-sample-independent one-shot cost `would_be_too_loud` already pays on every
+        // `apply_coeffs`/`set_bands` call, so this is not new real-time-path risk, just more of
+        // the same affordable kind.
+        let ms = Self::ramp_ms_for(self.ramp_distance_db());
+        self.ramp_frames = ((ms / 1000.0) * self.sample_rate).round().max(1.0) as u32;
+        self.ramp_left = self.ramp_frames;
+    }
+
+    /// The part of [`Cascade::start_ramp`] and [`Cascade::apply_coeffs_fast`] that is
+    /// identical: point `start`/`target`/the preamp ramp at the new values and widen
+    /// `process_count` so a band going away fades to identity instead of vanishing. Leaves
+    /// `ramp_frames`/`ramp_left` for the caller, since sizing the ramp itself is the one thing
+    /// the two disagree about.
+    fn point_ramp_at(&mut self, target: &[Coeffs], new_count: usize, preamp_db: f64) {
         // From wherever the preamp has actually reached, not from the previous target, so a
         // switch that interrupts a ramp still moves continuously.
         self.preamp_from_db = 20.0 * self.preamp.log10();
@@ -423,15 +492,6 @@ impl Cascade {
         // the step this is here to remove.
         self.process_count = self.process_count.max(new_count);
         self.band_count = new_count;
-        // Sized to how different `start` and `target` actually are, not a fixed length — see
-        // `ramp_ms_for`'s own doc for why a whole-slot swap needs far more than a live drag's
-        // 8 ms. Computed from `start`/`target` themselves (just assigned above), the same
-        // per-sample-independent one-shot cost `would_be_too_loud` already pays on every
-        // `apply_coeffs`/`set_bands` call, so this is not new real-time-path risk, just more of
-        // the same affordable kind.
-        let ms = Self::ramp_ms_for(self.ramp_distance_db());
-        self.ramp_frames = ((ms / 1000.0) * self.sample_rate).round().max(1.0) as u32;
-        self.ramp_left = self.ramp_frames;
     }
 
     /// How far apart `start` and `target` are, combined response in dB, RMS over [`Cascade::grid`].
@@ -549,6 +609,159 @@ impl Cascade {
         self.dry_curve_for_test = curve;
     }
 
+    /// Fade the **entire signal path** over to `target`, for a transition that replaces the
+    /// whole correction with something conceptually unrelated (§5.2 isolate on and off) —
+    /// crossfading two independently-valid signals rather than coefficient-ramping through
+    /// every intermediate filter shape between them.
+    ///
+    /// **Why this exists alongside `start_ramp`.** A ramp works well for an in-place edit —
+    /// one band's Fc/gain moving, a slot swap — because "what's in between" is still a
+    /// reasonable filter. It stops being reasonable once several unrelated bands ramp toward
+    /// `PASSTHROUGH` on one shared clock at once: each individually stays clean (verified:
+    /// no single band, ramped alone, ever overshoots its own endpoints), but at one shared
+    /// point along a *large*, many-band transition their curves can sum into a real spike —
+    /// measured directly on a real correction (21 bands including a low-shelf stack) dropping
+    /// to a single isolate bandpass: +22 dB above *both* endpoints, mid-ramp, entirely gone by
+    /// the time the ramp finished. `dry_mix` already sidesteps this same class of problem for
+    /// going dry, by blending two already-computed, always-valid *signals* instead of
+    /// interpolating the *filters* that produce them — there is no "in between" to glitch
+    /// through. This generalises that idea to a second, real cascade instead of dry's free
+    /// "other side" (the untouched input, no filtering, always settled).
+    ///
+    /// Duration is fixed ([`Cascade::cross_fade_frames`], same window as `DRY_FADE_MS`), not
+    /// distance-scaled like `ramp_ms_for`: nothing about a pure level crossfade gets harder
+    /// the further apart the two corrections are — that scaling existed only because a ramp
+    /// has to survive *traveling through* the space between them, and this doesn't.
+    ///
+    /// The secondary bank starts from a cold, zeroed state (unlike `dry`'s always-settled raw
+    /// input), so it runs on real input for a short **pre-roll** window first, entirely
+    /// inaudible (`cross_mix` pinned at 0), before the fade itself starts moving — settling
+    /// its delay registers on real signal rather than joining the fade already ringing.
+    ///
+    /// **Retargeting mid-preroll is safe and immediate**: `cross_mix` is still pinned at
+    /// `cross_from` (zero weight in the output), so repointing `coeffs2` there changes nothing
+    /// anyone can hear yet — the same "don't restart, just redirect" rule `start_ramp` follows
+    /// for its own retargets.
+    ///
+    /// **Retargeting mid-*fade* is different and cannot use that same rule.** `start_ramp`'s
+    /// retarget is safe because it continues *from wherever `coeffs` currently is* — a
+    /// continuous quantity. `coeffs2` is not: it is a flat assignment, no interpolation of its
+    /// own, so overwriting it while `cross_mix` already carries real weight would step the
+    /// secondary bank's contribution to the output instantly — a smaller-scale version of
+    /// exactly the discontinuity this whole mechanism exists to avoid, and the reason a fast,
+    /// repeated §5.2 isolate drag could still reproduce the reported artefact even after the
+    /// crossfade itself shipped. So a mid-fade call is **queued** in
+    /// [`Cascade::pending_crossfade`] instead of applied: the current fade is left to land on
+    /// whatever it already committed to, and [`Cascade::advance_cross`] starts a fresh
+    /// crossfade toward the newest target the moment it does. A later call before that happens
+    /// simply replaces the queued one — only the most recent target during a fast drag ever
+    /// matters, matching the drag's own coalescing throttle upstream (`requestApply`).
+    ///
+    /// Returns `false` — changing nothing (queued or otherwise) — if `target` would exceed
+    /// [`MAX_BANDS`] or the combination would be too loud, the same checks
+    /// [`Cascade::apply_coeffs`] makes (whose signature this deliberately mirrors: coefficients
+    /// straight through, count implied by the slice length).
+    pub fn start_crossfade(&mut self, target: &[Coeffs], preamp_db: f64) -> bool {
+        if target.len() > MAX_BANDS || !preamp_db.is_finite() {
+            return false;
+        }
+        let preamp = db_to_gain(preamp_db);
+        if !preamp.is_finite() || self.would_be_too_loud(target, preamp) {
+            return false;
+        }
+
+        if self.cross_fade_left > 0 {
+            let mut coeffs = [Coeffs::PASSTHROUGH; MAX_BANDS];
+            for i in 0..MAX_BANDS {
+                coeffs[i] = target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH);
+            }
+            self.pending_crossfade = Some((target.len(), coeffs, preamp_db));
+            return true;
+        }
+
+        let fresh = self.cross_mix == 0.0 && self.cross_preroll_left == 0;
+        for i in 0..MAX_BANDS {
+            self.coeffs2[i] = target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH);
+        }
+        self.process_count2 = target.len();
+        self.preamp2 = preamp;
+        if fresh {
+            for s in &mut self.state2 {
+                s.reset();
+            }
+            self.cross_from = self.cross_mix; // == 0.0
+            self.cross_to = 1.0;
+            self.cross_fade_left = 0; // gated behind the pre-roll below
+            self.cross_preroll_left = self.cross_fade_frames;
+        }
+        // This call supersedes anything still queued from an earlier mid-fade retarget — it
+        // is itself now the newest intention.
+        self.pending_crossfade = None;
+        true
+    }
+
+    /// Advance the pre-roll and/or the crossfade itself by one frame — mirrors
+    /// [`Cascade::advance_dry`]'s envelope exactly (raised cosine, same reasoning).
+    #[inline]
+    fn advance_cross(&mut self) {
+        if self.cross_preroll_left > 0 {
+            self.cross_preroll_left -= 1;
+            if self.cross_preroll_left == 0 {
+                self.cross_fade_left = self.cross_fade_frames;
+            }
+            return;
+        }
+        self.cross_fade_left -= 1;
+        if self.cross_fade_left == 0 {
+            self.cross_mix = self.cross_to;
+            self.promote_secondary();
+            // A retarget that arrived mid-fade (see `start_crossfade`'s doc) was queued rather
+            // than applied — this fade has now landed, `cross_mix` is freshly 0, so it is safe
+            // to start immediately. Recursion depth is one: `promote_secondary` just reset
+            // everything this call checks, so this new call always lands on the `fresh` branch,
+            // never back into the queue-again path.
+            if let Some((count, coeffs, preamp_db)) = self.pending_crossfade.take() {
+                self.start_crossfade(&coeffs[..count], preamp_db);
+            }
+            return;
+        }
+        let t = 1.0 - self.cross_fade_left as f64 / self.cross_fade_frames as f64;
+        let s = 0.5 - 0.5 * (std::f64::consts::PI * t).cos();
+        self.cross_mix = self.cross_from + (self.cross_to - self.cross_from) * s;
+    }
+
+    /// The secondary bank becomes the primary one, and goes idle. Called once the crossfade
+    /// lands (`cross_mix` reaches `cross_to`, currently always 1.0 — there is no path back to
+    /// the old primary once a crossfade starts, matching how isolate/un-isolate always
+    /// replaces the whole correction rather than blending partway).
+    ///
+    /// Delay-register state carries straight across (`state2` was live the whole time, not
+    /// something rebuilt from cold at this instant), so nothing about the promotion itself is
+    /// audible — the frame it happens on already had `cross_mix == 1`, i.e. zero weight left
+    /// on the old primary, so skipping its computation from here on changes nothing about the
+    /// output.
+    fn promote_secondary(&mut self) {
+        self.coeffs = self.coeffs2;
+        self.target = self.coeffs2;
+        self.start = self.coeffs2;
+        self.state.copy_from_slice(&self.state2);
+        self.process_count = self.process_count2;
+        self.band_count = self.process_count2;
+        self.preamp = self.preamp2;
+        self.preamp_from_db = 20.0 * self.preamp2.log10();
+        self.preamp_to_db = self.preamp_from_db;
+        self.ramp_left = 0; // a crossfade always lands settled, never mid-ramp
+
+        self.process_count2 = 0;
+        self.preamp2 = 1.0;
+        self.cross_mix = 0.0;
+        self.cross_from = 0.0;
+        self.cross_to = 0.0;
+        for s in &mut self.state2 {
+            s.reset();
+        }
+    }
+
     /// Jump straight to the target, abandoning any ramp in progress.
     ///
     /// For configuration applied when there is nothing to protect — the persistent config at
@@ -562,6 +775,15 @@ impl Cascade {
         self.dry_fade_left = 0;
         self.process_count = self.band_count;
         self.ramp_left = 0;
+        // A pending crossfade (see `start_crossfade`) takes priority over the lines above: it
+        // represents the more recent instruction, and lands the secondary bank straight into
+        // place rather than leaving it queued to fade in on its own schedule later.
+        if self.process_count2 > 0 {
+            self.promote_secondary();
+        }
+        self.cross_fade_left = 0;
+        self.cross_preroll_left = 0;
+        self.pending_crossfade = None; // abandoned along with everything else in flight
     }
 
     /// Is a coefficient ramp currently running?
@@ -717,6 +939,45 @@ impl Cascade {
         true
     }
 
+    /// Apply new coefficients ramped at the fixed [`RAMP_MS`] floor — never longer, regardless
+    /// of how far apart old and new are — for a fast-moving §5.2 isolate audition drag, where
+    /// the filter must keep up with the pointer instead of chasing it through
+    /// [`Cascade::ramp_ms_for`]'s distance-scaled duration.
+    ///
+    /// **Why `apply_coeffs`'s ramp is the wrong tool here.** That duration is sized against the
+    /// *response-curve distance* between old and new (`ramp_distance_db`), RMS over a uniform
+    /// log-spaced grid — a fine proxy for "is this a nudge or a whole new curve" when the bands
+    /// involved are the moderate-Q peaking/shelf filters a real correction uses. It breaks down
+    /// for the isolate audition's narrow Q≈8 bandpass: moving its centre frequency even a
+    /// little flips most of the grid from "on the old peak" to "off it," so the metric reads a
+    /// small, perceptually continuous move as a large jump and hands back a 100–300 ms ramp.
+    /// Real drags retarget roughly every 70 ms, so that ramp never finished before the next
+    /// tick replaced it — the coefficients spent the whole gesture chasing a moving pointer,
+    /// measured (replaying a real captured drag) falling up to ~18× behind the requested
+    /// frequency and taking a further 300 ms to land *after* the drag actually stopped. That is
+    /// the reported "sweep and lurch," confirmed by
+    /// `a_coefficient_ramp_falls_behind_the_pointer_during_a_real_isolate_drag`.
+    ///
+    /// **Why a fixed 8 ms ramp, not an instant step.** `RAMP_MS` was already sized for exactly
+    /// this shape of update (see its own doc: "a live tone drag produces them at roughly
+    /// 60 Hz... so the ramp finishes between edits") — it is short enough to comfortably finish
+    /// within a ~70 ms isolate tick (no chasing), while still softening the step enough to avoid
+    /// a hard click. An unconditional step straight to target would remove that softening for
+    /// no benefit, since 8 ms already fits the cadence.
+    pub fn apply_coeffs_fast(&mut self, coeffs: &[Coeffs], preamp_db: f64) -> bool {
+        if coeffs.len() > MAX_BANDS || !preamp_db.is_finite() {
+            return false;
+        }
+        let preamp = db_to_gain(preamp_db);
+        if !preamp.is_finite() || self.would_be_too_loud(coeffs, preamp) {
+            return false;
+        }
+        self.point_ramp_at(coeffs, coeffs.len(), preamp_db);
+        self.ramp_frames = ((RAMP_MS / 1000.0) * self.sample_rate).round().max(1.0) as u32;
+        self.ramp_left = self.ramp_frames;
+        true
+    }
+
     /// Set the preamp in dB (negative attenuates), matching EqAPO's `Preamp:` line.
     ///
     /// Returns `false` and changes nothing if the result would exceed the safety ceiling in
@@ -741,6 +1002,9 @@ impl Cascade {
     /// carrying state would be wrong (a fresh lock, a device change), never for an edit.
     pub fn reset_state(&mut self) {
         for s in self.state.iter_mut() {
+            s.reset();
+        }
+        for s in self.state2.iter_mut() {
             s.reset();
         }
     }
@@ -787,9 +1051,14 @@ impl Cascade {
         let mut peak = 0.0f32;
         for frame in 0..frames {
             // Ramped through silence too, so an edit made during a pause has finished by the
-            // time audio returns rather than resuming as an audible jump.
+            // time audio returns rather than resuming as an audible jump. Same reasoning for
+            // the crossfade (`start_crossfade`): a pause mid-fade must not resume with a
+            // half-finished transition dumped on the listener all at once.
             if self.ramp_left > 0 {
                 self.advance_ramp();
+            }
+            if self.cross_preroll_left > 0 || self.cross_fade_left > 0 {
+                self.advance_cross();
             }
             for ch in 0..channels {
                 let base = ch * MAX_BANDS;
@@ -798,7 +1067,15 @@ impl Cascade {
                 for b in 0..self.process_count {
                     x = self.state[base + b].step(&self.coeffs[b], x);
                 }
-                let y = x as f32;
+                let y = if self.process_count2 > 0 {
+                    let mut x2 = 0.0f64;
+                    for b in 0..self.process_count2 {
+                        x2 = self.state2[base + b].step(&self.coeffs2[b], x2);
+                    }
+                    (x + (x2 - x) * self.cross_mix) as f32
+                } else {
+                    x as f32
+                };
                 output[frame * channels + ch] = y;
                 let mag = y.abs();
                 if mag > peak {
@@ -839,6 +1116,9 @@ impl Cascade {
             if self.dry_fade_left > 0 {
                 self.advance_dry();
             }
+            if self.cross_preroll_left > 0 || self.cross_fade_left > 0 {
+                self.advance_cross();
+            }
             for ch in 0..channels {
                 let i = frame * channels + ch;
                 let raw = input[i] as f64;
@@ -851,7 +1131,22 @@ impl Cascade {
                 // coming back is as clean as going. That is the whole cost of the feature: a
                 // multiply-add per sample, and filters that never go cold.
                 let dry = raw * self.dry_preamp;
-                output[i] = (x + (dry - x) * self.dry_mix) as f32;
+                let wet = (x + (dry - x) * self.dry_mix) as f64;
+                // The secondary bank (`start_crossfade`) only runs while a crossfade is
+                // actually in flight — `process_count2 == 0` the rest of the time, so this is
+                // one cheap branch, not a second cascade's worth of multiply-adds, in the
+                // common case. It deliberately bypasses `dry_mix` entirely: nothing reaches
+                // this bank except a §5.2 isolate on/off, which the app never triggers while
+                // Dry is active (see `onFreqSweep`'s own guard).
+                output[i] = if self.process_count2 > 0 {
+                    let mut x2 = raw * self.preamp2;
+                    for b in 0..self.process_count2 {
+                        x2 = self.state2[base + b].step(&self.coeffs2[b], x2);
+                    }
+                    (wet + (x2 - wet) * self.cross_mix) as f32
+                } else {
+                    wet as f32
+                };
             }
         }
     }
@@ -2422,5 +2717,400 @@ mod tests {
             ramped_db < instant_db - 3.0,
             "ramping should beat an instant switch: ramped {ramped_db:.1} vs instant {instant_db:.1}",
         );
+    }
+
+    /// The real-world 21-band correction (a low-shelf stack plus a broad low-Q cut around
+    /// 105–167 Hz, among others) captured live from a §5.2 isolate press over the low shelf.
+    /// The regression this guards: `apply_coeffs` (plain coefficient ramp) drives this exact
+    /// drop-to-a-single-bandpass transition to +22 dB above *both* endpoints at 172 Hz, purely
+    /// from several individually-clean per-band fades sharing one ramp clock (verified: no
+    /// single band here, faded alone, ever overshoots its own endpoints) — see
+    /// `start_crossfade`'s own doc for the mechanism this replaces it with.
+    fn real_isolate_correction() -> Vec<Band> {
+        vec![
+            Band { kind: FilterKind::LowShelf, freq_hz: 105.0, gain_db: 4.18, q: 0.7 },
+            Band { kind: FilterKind::HighShelf, freq_hz: 10000.0, gain_db: -3.26, q: 0.7 },
+            Band { kind: FilterKind::Peaking, freq_hz: 167.06, gain_db: -3.28, q: 0.3834 },
+            Band { kind: FilterKind::Peaking, freq_hz: 2279.24, gain_db: 4.33, q: 2.0228 },
+            Band { kind: FilterKind::Peaking, freq_hz: 5880.51, gain_db: -6.2, q: 5.2771 },
+            Band { kind: FilterKind::Peaking, freq_hz: 3883.2, gain_db: -3.82, q: 5.9839 },
+            Band { kind: FilterKind::Peaking, freq_hz: 1370.05, gain_db: 1.21, q: 2.6791 },
+            Band { kind: FilterKind::Peaking, freq_hz: 4591.72, gain_db: 1.29, q: 6.0 },
+            Band { kind: FilterKind::Peaking, freq_hz: 6768.92, gain_db: 1.54, q: 6.0 },
+            Band { kind: FilterKind::Peaking, freq_hz: 5347.68, gain_db: -1.31, q: 5.9947 },
+            Band { kind: FilterKind::LowShelf, freq_hz: 105.0, gain_db: 0.6, q: 0.7 },
+            Band { kind: FilterKind::Peaking, freq_hz: 5789.0, gain_db: -2.0, q: 3.0 },
+            Band { kind: FilterKind::Peaking, freq_hz: 8337.0, gain_db: 1.6, q: 2.8 },
+            Band { kind: FilterKind::HighShelf, freq_hz: 12000.0, gain_db: 0.3, q: 0.7 },
+            Band { kind: FilterKind::Peaking, freq_hz: 1601.0, gain_db: -3.0, q: 1.0 },
+            Band { kind: FilterKind::Peaking, freq_hz: 2402.0, gain_db: 1.2, q: 2.0 },
+            Band { kind: FilterKind::Peaking, freq_hz: 3894.0, gain_db: -2.8, q: 3.0 },
+            Band { kind: FilterKind::Peaking, freq_hz: 3291.0, gain_db: -1.0, q: 0.6 },
+            Band { kind: FilterKind::LowShelf, freq_hz: 105.0, gain_db: 0.0, q: 1.0 },
+            Band { kind: FilterKind::HighShelf, freq_hz: 4000.0, gain_db: 0.0, q: 0.7 },
+            Band { kind: FilterKind::HighShelf, freq_hz: 12000.0, gain_db: 0.0, q: 0.7 },
+        ]
+    }
+
+    /// The composed response (all bands + preamp, in dB) of whichever bank is currently
+    /// contributing to the output, at every point along a full crossfade transition — the
+    /// mid-transition ground truth `response_db` deliberately does not provide (it reports the
+    /// *target*, per its own doc), the same reason `retuning_live_does_not_splatter...` above
+    /// measures actual samples instead of trusting the endpoints.
+    fn composed_output_db(c: &Cascade, f: f64) -> f64 {
+        let wet: f64 = (0..c.process_count).map(|i| c.coeffs[i].response_db(f, FS)).sum::<f64>()
+            + 20.0 * c.preamp.log10();
+        if c.process_count2 == 0 {
+            return wet;
+        }
+        let wet_lin = 10.0_f64.powf(wet / 20.0);
+        let secondary: f64 = (0..c.process_count2).map(|i| c.coeffs2[i].response_db(f, FS)).sum::<f64>()
+            + 20.0 * c.preamp2.log10();
+        let secondary_lin = 10.0_f64.powf(secondary / 20.0);
+        let mixed_lin = wet_lin + (secondary_lin - wet_lin) * c.cross_mix;
+        20.0 * mixed_lin.abs().max(1e-12).log10()
+    }
+
+    /// Walks every frame of a crossfade (or plain ramp, if `cross`ing is `false`) and returns
+    /// the worst (max) composed response found anywhere along the way, across a 20 Hz–20 kHz
+    /// log grid.
+    fn worst_response_along_transition(c: &mut Cascade) -> f64 {
+        let freqs: Vec<f64> = (0..200).map(|i| 20.0 * 1000.0f64.powf(i as f64 / 199.0)).collect();
+        let mut worst = f64::MIN;
+        while c.is_ramping() || c.process_count2 > 0 {
+            for &f in &freqs {
+                worst = worst.max(composed_output_db(c, f));
+            }
+            if c.ramp_left > 0 {
+                c.advance_ramp();
+            } else if c.cross_preroll_left > 0 || c.cross_fade_left > 0 {
+                c.advance_cross();
+            } else {
+                break; // process_count2 > 0 but neither clock is running: shouldn't happen
+            }
+        }
+        for &f in &freqs {
+            worst = worst.max(composed_output_db(c, f));
+        }
+        worst
+    }
+
+    /// The bug: a plain coefficient ramp (`apply_coeffs`) drops the whole correction to a
+    /// single isolate bandpass by sweeping every one of the 21 bands towards `PASSTHROUGH` on
+    /// one shared clock, and at 31 Hz that sails to +22 dB above both endpoints (measured; see
+    /// `real_isolate_correction`'s doc). Confirms the regression is real before proving the fix
+    /// below closes it — a fix test with no matching failure-mode test proves nothing.
+    #[test]
+    fn a_coefficient_ramp_spikes_on_this_real_correction() {
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&real_isolate_correction()));
+        c.settle();
+        let start_max = (0..200)
+            .map(|i| 20.0 * 1000.0f64.powf(i as f64 / 199.0))
+            .map(|f| composed_output_db(&c, f))
+            .fold(f64::MIN, f64::max);
+
+        let bandpass = Band { kind: FilterKind::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 };
+        let mut target: Vec<Coeffs> = vec![Coeffs::PASSTHROUGH; real_isolate_correction().len()];
+        target.push(coefficients(&bandpass, FS));
+        assert!(c.apply_coeffs(&target, 0.0));
+        assert!(c.is_ramping());
+
+        let worst = worst_response_along_transition(&mut c);
+        eprintln!("coefficient ramp: start_max={start_max:.1} dB, worst_mid_ramp={worst:.1} dB");
+        assert!(
+            worst > start_max + 10.0,
+            "expected the known coefficient-ramp spike (>10 dB over start), got only {:.1} dB over",
+            worst - start_max
+        );
+    }
+
+    /// The fix, proven directly on real audio rather than an analytic frequency-response proxy
+    /// (which would have to model phase between the two banks to be trustworthy — magnitude
+    /// responses don't simply add). Since `process()`'s blend is
+    /// `wet + (secondary - wet) * cross_mix` with `cross_mix` in `[0, 1]`, every output sample
+    /// is a **convex combination** of the two banks' own outputs — by the triangle inequality
+    /// that can never exceed `max(|wet|, |secondary|)`, regardless of their relative phase.
+    /// There is nothing left to spike, by construction, not by luck. This measures that bound
+    /// directly: the same real correction, the same isolate bandpass, but driven through
+    /// `start_crossfade` instead of `apply_coeffs`, and checks the transition's output never
+    /// gets louder, sample for sample, than running either side alone on identical input.
+    #[test]
+    fn a_crossfade_never_exceeds_either_side_alone() {
+        const N: usize = 4000; // well past pre-roll + fade (2 * DRY_FADE_MS worth of frames)
+        // A few simultaneous tones rather than one — closer to real content, and exercises
+        // more of the spectrum (including near the correction's own low-end cluster) at once.
+        let input: Vec<f32> = (0..N)
+            .map(|n| {
+                let t = n as f64 / FS;
+                let s = 0.2 * (2.0 * std::f64::consts::PI * 60.0 * t).sin()
+                    + 0.15 * (2.0 * std::f64::consts::PI * 500.0 * t).sin()
+                    + 0.1 * (2.0 * std::f64::consts::PI * 4000.0 * t).sin();
+                s as f32
+            })
+            .collect();
+
+        for isolate_freq in [31.0, 2000.0, 9000.0] {
+            let bandpass = Band { kind: FilterKind::Bandpass, freq_hz: isolate_freq, gain_db: 0.0, q: 8.0 };
+
+            // Reference A: the old correction alone, untouched, for the whole window.
+            let mut wet_only = Cascade::new(1, FS);
+            assert!(wet_only.set_bands(&real_isolate_correction()));
+            wet_only.settle();
+            let mut wet_out = vec![0.0f32; N];
+            wet_only.process(&input, &mut wet_out, N);
+
+            // Reference B: just the bandpass, from the same cold start `start_crossfade` gives
+            // the real secondary bank (a fresh `Cascade`'s delay registers are already zero).
+            let mut secondary_only = Cascade::new(1, FS);
+            assert!(secondary_only.set_bands(std::slice::from_ref(&bandpass)));
+            secondary_only.settle();
+            let mut secondary_out = vec![0.0f32; N];
+            secondary_only.process(&input, &mut secondary_out, N);
+
+            // The actual transition: the old correction crossfading to the bandpass mid-stream.
+            let mut actual = Cascade::new(1, FS);
+            assert!(actual.set_bands(&real_isolate_correction()));
+            actual.settle();
+            let target = [coefficients(&bandpass, FS)];
+            assert!(actual.start_crossfade(&target, 0.0), "the crossfade must be accepted");
+            assert!(!actual.is_ramping(), "a crossfade must not also start a coefficient ramp");
+            let mut actual_out = vec![0.0f32; N];
+            actual.process(&input, &mut actual_out, N);
+
+            let mut worst_excess = 0.0f32;
+            for n in 0..N {
+                let bound = wet_out[n].abs().max(secondary_out[n].abs());
+                worst_excess = worst_excess.max(actual_out[n].abs() - bound);
+            }
+            eprintln!(
+                "isolate_freq={isolate_freq:.0} Hz: worst sample excess over max(wet, secondary) = {worst_excess:.6}"
+            );
+            assert!(
+                worst_excess < 1e-4,
+                "crossfade produced a sample louder than either side alone: excess {worst_excess:.6} at {isolate_freq} Hz"
+            );
+
+            // And it lands correctly once the transition finishes.
+            assert_eq!(actual.process_count2, 0, "the secondary bank must be idle once the fade lands");
+            assert_eq!(actual.process_count, 1, "the bandpass must now be the one and only primary band");
+        }
+    }
+
+    /// A retarget that arrives during **pre-roll** (`cross_mix` still pinned at 0 — see
+    /// `start_crossfade`'s doc) is safe to apply immediately: nothing audible has committed to
+    /// the old target yet. Must redirect smoothly, not restart the pre-roll clock.
+    #[test]
+    fn retargeting_mid_preroll_repoints_immediately_without_restarting() {
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&real_isolate_correction()));
+        c.settle();
+
+        let first = [coefficients(&Band { kind: FilterKind::Bandpass, freq_hz: 100.0, gain_db: 0.0, q: 8.0 }, FS)];
+        assert!(c.start_crossfade(&first, 0.0));
+
+        // Run the pre-roll down partway — well before the audible fade even begins.
+        let mut out = [0.0f32; 1];
+        for _ in 0..50 {
+            c.process(&[0.1], &mut out, 1);
+        }
+        assert!(c.cross_preroll_left > 0, "should still be pre-rolling");
+        assert_eq!(c.cross_mix, 0.0, "nothing should be audible yet");
+
+        let second = [coefficients(&Band { kind: FilterKind::Bandpass, freq_hz: 8000.0, gain_db: 0.0, q: 8.0 }, FS)];
+        assert!(c.start_crossfade(&second, 0.0));
+        assert_eq!(c.coeffs2[0].b0, second[0].b0, "the secondary bank must repoint immediately — nothing to defer");
+        assert!(c.pending_crossfade.is_none(), "a pre-roll retarget has nothing to queue");
+
+        // Must still land cleanly — no NaN/instability, and it does eventually finish.
+        let mut frames = 0;
+        while c.process_count2 > 0 {
+            c.process(&[0.1], &mut out, 1);
+            assert!(out[0].is_finite(), "retargeting mid-preroll must not go unstable");
+            frames += 1;
+            assert!(frames < 100_000, "crossfade never landed after a retarget");
+        }
+        assert_eq!(c.process_count, 1);
+        assert_eq!(c.coeffs[0].b0, second[0].b0, "must have landed on the retargeted band, not the first one");
+    }
+
+    /// The bug a fast, repeated §5.2 isolate drag could still reproduce even after the
+    /// crossfade itself shipped: a retarget that arrives once the fade is already **audible**
+    /// (`cross_mix > 0`) must NOT overwrite `coeffs2` in place — that steps the secondary
+    /// bank's own contribution to the output instantly, a smaller-scale version of exactly the
+    /// discontinuity this whole mechanism exists to avoid. It must be queued instead, land on
+    /// whatever the in-flight fade already committed to, and only then start a fresh crossfade
+    /// toward the newest target.
+    #[test]
+    fn retargeting_mid_fade_is_deferred_lands_first_then_chases_the_newest_target() {
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&real_isolate_correction()));
+        c.settle();
+
+        let first = [coefficients(&Band { kind: FilterKind::Bandpass, freq_hz: 9000.0, gain_db: 0.0, q: 8.0 }, FS)];
+        assert!(c.start_crossfade(&first, 0.0));
+
+        // Clear the pre-roll entirely, then run into the audible fade so `cross_mix` is
+        // genuinely non-zero — the exact condition a naive in-place retarget would step.
+        let mut out = [0.0f32; 1];
+        while c.cross_preroll_left > 0 {
+            c.process(&[0.1], &mut out, 1);
+        }
+        for _ in 0..100 {
+            c.process(&[0.1], &mut out, 1);
+        }
+        assert!(c.cross_fade_left > 0, "should be mid-fade");
+        assert!(c.cross_mix > 0.0, "should already carry real weight");
+        let coeffs2_before = c.coeffs2[0];
+
+        let second = [coefficients(&Band { kind: FilterKind::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 }, FS)];
+        assert!(c.start_crossfade(&second, 0.0));
+        assert_eq!(c.coeffs2[0].b0, coeffs2_before.b0, "coeffs2 must not move while it carries real weight");
+        assert!(c.pending_crossfade.is_some(), "the retarget must be queued instead of applied");
+
+        // The first fade must land on what it already committed to — `first`, not `second` —
+        // and a fresh crossfade toward `second` must begin the very same frame.
+        let mut landed_on_first = false;
+        for _ in 0..2000 {
+            c.process(&[0.1], &mut out, 1);
+            assert!(out[0].is_finite(), "must never go unstable");
+            if !landed_on_first && c.process_count == 1 && c.coeffs[0].b0 == first[0].b0 {
+                landed_on_first = true;
+                assert!(c.process_count2 > 0, "a fresh crossfade toward the queued target must start immediately");
+                assert_eq!(c.coeffs2[0].b0, second[0].b0, "the queued target must be the one that starts fading in next");
+                break;
+            }
+        }
+        assert!(landed_on_first, "the first fade must land on what it already committed to");
+
+        // ...and it must go on to land on the queued target too.
+        let mut frames = 0;
+        while c.process_count2 > 0 {
+            c.process(&[0.1], &mut out, 1);
+            assert!(out[0].is_finite());
+            frames += 1;
+            assert!(frames < 100_000, "the queued crossfade never landed");
+        }
+        assert_eq!(c.coeffs[0].b0, second[0].b0, "must eventually land on the queued (second) target");
+    }
+
+    /// The actual tick sequence and inter-tick timing captured live from a reported
+    /// "sweep and lurch" §5.2 isolate drag (the `[isolate-debug]` log), replayed frame-by-frame
+    /// at 48 kHz exactly as real audio would see it.
+    ///
+    /// (elapsed_ms_since_previous_tick, freq_hz) from `t=875306` (first isolate tick) through
+    /// `t=883165` (release excluded: that is the crossfade back to the full correction, a
+    /// different mechanism).
+    const REAL_DRAG_TICKS: &[(u64, f64)] = &[
+        (0, 38.0), (170, 58.0), (75, 89.0), (75, 110.0), (74, 136.0), (72, 170.0), (75, 220.0),
+        (74, 277.0), (71, 337.0), (71, 430.0), (75, 553.0), (75, 746.0), (76, 1048.0), (74, 1512.0),
+        (75, 2383.0), (76, 3583.0), (74, 5573.0), (76, 9597.0), (74, 10699.0), (230, 7566.0),
+        (75, 5535.0), (75, 4275.0), (73, 3394.0), (72, 2863.0), (74, 2304.0), (75, 1854.0),
+        (75, 1384.0), (75, 946.0), (76, 642.0), (74, 424.0), (72, 286.0), (75, 223.0), (75, 160.0),
+        (75, 110.0), (75, 81.0), (75, 59.0), (73, 50.0), (73, 46.0), (81, 46.0), (154, 49.0),
+        (125, 53.0), (75, 65.0), (75, 72.0), (75, 77.0), (75, 89.0), (74, 134.0), (75, 237.0),
+        (76, 394.0), (75, 647.0), (74, 914.0), (75, 1241.0), (76, 1586.0), (75, 2109.0), (74, 3003.0),
+        (71, 4734.0), (75, 7021.0), (75, 9467.0), (71, 12173.0), (83, 12940.0), (128, 13029.0),
+        (72, 10341.0), (75, 8434.0), (74, 6695.0), (73, 5726.0), (72, 4865.0), (74, 3941.0),
+        (75, 3149.0), (75, 2483.0), (75, 1841.0), (75, 1471.0), (75, 1099.0), (75, 766.0),
+        (75, 517.0), (72, 326.0), (75, 223.0), (75, 160.0), (75, 110.0), (75, 81.0), (75, 59.0),
+        (73, 50.0), (73, 46.0), (73, 43.0), (74, 39.0), (71, 37.0),
+    ];
+
+    /// Highest-magnitude-response frequency in the cascade's *actual, current* single band —
+    /// what a listener would hear the peak sitting at right now, as opposed to `response_db`'s
+    /// documented target-only answer.
+    fn peak_freq(c: &Cascade, scan: &[f64]) -> f64 {
+        scan.iter()
+            .copied()
+            .fold((f64::MIN, 0.0), |(best_db, best_f), f| {
+                let db = c.coeffs[0].response_db(f, FS);
+                if db > best_db { (db, f) } else { (best_db, best_f) }
+            })
+            .1
+    }
+
+    /// The bug: `apply_coeffs`'s ramp is sized by [`Cascade::ramp_ms_for`] against the
+    /// response-curve distance of the change, which reads a narrow Q≈8 bandpass's frequency
+    /// move as far larger than it perceptually is — real isolate-drag ticks arrive roughly
+    /// every 70 ms, but this hands back 100-300 ms ramps, so the coefficients spend the whole
+    /// drag chasing a moving target rather than tracking it. Confirms the regression is real
+    /// before proving the fix below closes it.
+    #[test]
+    fn a_coefficient_ramp_falls_behind_the_pointer_during_a_real_isolate_drag() {
+        let q = 8.0;
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&[Band {
+            kind: FilterKind::Bandpass,
+            freq_hz: REAL_DRAG_TICKS[0].1,
+            gain_db: 0.0,
+            q,
+        }]));
+        c.settle();
+
+        let scan: Vec<f64> = (0..800).map(|i| 20.0 * 1000.0f64.powf(i as f64 / 799.0)).collect();
+        let (input, mut output) = ([0.0f32; 1], [0.0f32; 1]);
+        let mut max_lag_pct = 0.0f64;
+        for &(elapsed_ms, freq_hz) in &REAL_DRAG_TICKS[1..] {
+            for _ in 0..(elapsed_ms as f64 / 1000.0 * FS).round() as usize {
+                c.process(&input, &mut output, 1);
+            }
+            let lag_pct = 100.0 * (freq_hz - peak_freq(&c, &scan)).abs() / freq_hz;
+            max_lag_pct = max_lag_pct.max(lag_pct);
+            assert!(c.set_bands(&[Band { kind: FilterKind::Bandpass, freq_hz, gain_db: 0.0, q }]));
+        }
+        let mut settle_frames = 0;
+        while c.is_ramping() {
+            c.process(&input, &mut output, 1);
+            settle_frames += 1;
+        }
+        assert!(
+            max_lag_pct > 100.0,
+            "expected the known chase-the-pointer lag (>100% behind at some tick), got only {max_lag_pct:.1}%"
+        );
+        assert!(
+            settle_frames as f64 / FS * 1000.0 > 100.0,
+            "expected a long settle tail after the drag stops (RAMP_MAX_MS territory), got only \
+             {:.1} ms",
+            settle_frames as f64 / FS * 1000.0
+        );
+    }
+
+    /// The fix: [`Cascade::apply_coeffs_fast`] applied on every tick of the same real drag
+    /// always ramps at the fixed [`RAMP_MS`] (8 ms) floor, never the distance-scaled duration —
+    /// short enough to land well before the next tick arrives (the shortest real gap in this
+    /// drag is ~70 ms), so the filter never falls behind the pointer the way the plain ramp did.
+    #[test]
+    fn apply_coeffs_fast_lands_well_before_the_next_tick_through_the_same_drag() {
+        let q = 8.0;
+        let mut c = Cascade::new(1, FS);
+        let first = coefficients(
+            &Band { kind: FilterKind::Bandpass, freq_hz: REAL_DRAG_TICKS[0].1, gain_db: 0.0, q },
+            FS,
+        );
+        assert!(c.apply_coeffs_fast(&[first], 0.0));
+
+        let scan: Vec<f64> = (0..800).map(|i| 20.0 * 1000.0f64.powf(i as f64 / 799.0)).collect();
+        let (input, mut output) = ([0.0f32; 1], [0.0f32; 1]);
+        for &(elapsed_ms, freq_hz) in &REAL_DRAG_TICKS[1..] {
+            let target = coefficients(&Band { kind: FilterKind::Bandpass, freq_hz, gain_db: 0.0, q }, FS);
+            assert!(c.apply_coeffs_fast(&[target], 0.0));
+            assert!(c.is_ramping(), "a fast apply still ramps, just at the fixed floor");
+            assert_eq!(c.ramp_frames, ((RAMP_MS / 1000.0) * FS).round() as u32, "must always use the fixed floor, never the distance-scaled duration");
+
+            // Run out the gap until the next tick — RAMP_MS (8ms) is far shorter than any real
+            // gap in this drag (shortest is ~70ms), so the ramp must have fully landed by then.
+            for _ in 0..(elapsed_ms as f64 / 1000.0 * FS).round() as usize {
+                c.process(&input, &mut output, 1);
+            }
+            assert!(!c.is_ramping(), "the fixed 8ms ramp must have finished well within the tick gap");
+            let actual = peak_freq(&c, &scan);
+            // The scan grid is discrete (800 log-spaced points), so "exact" means within one
+            // grid step, not bit-identical to the requested frequency.
+            assert!(
+                (freq_hz - actual).abs() / freq_hz < 0.01,
+                "tick {freq_hz}Hz: actual peak {actual:.1}Hz, expected to have landed by the next tick"
+            );
+        }
     }
 }

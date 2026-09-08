@@ -157,7 +157,7 @@ impl CageqApoBackend {
         // explicitly declined to run this correction (see `LivePushRefused`'s own doc for why
         // that's worth surfacing rather than swallowing — this used to be indistinguishable
         // from the benign "no channel" case, both discarded the same way, silently).
-        match self.push_live(&id, &apo_config)? {
+        match self.push_live(&id, &apo_config, true)? {
             PushOutcome::NoChannel | PushOutcome::Published => Ok(()),
             PushOutcome::Refused => Err(ApoBackendError::LivePushRefused(id)),
         }
@@ -182,7 +182,19 @@ impl CageqApoBackend {
     /// band keeping the same slot across an edit — has to happen here, before it is flattened
     /// into the raw coefficients the channel actually carries, because only here does a band
     /// still have the identity (kind/Fc/Q) needed to recognise it as "the same band" at all.
-    fn push_live(&self, endpoint_id: &str, cfg: &ApoConfig) -> Result<PushOutcome, ApoBackendError> {
+    ///
+    /// `allow_crossfade` exists for exactly one caller — [`Self::write_safe_state`] passes
+    /// `false` — because its target (`safe_state()`) always has zero bands, and
+    /// `Cascade::start_crossfade`'s secondary bank with zero bands never trips
+    /// `Cascade::process`'s dual-bank mix at all (`process_count2 == 0` is the same condition
+    /// that gates it off): a crossfade-routed safe-state push would silently do *nothing* to the
+    /// running audio, exactly when the fail-safe's push most needs to land.
+    fn push_live(
+        &self,
+        endpoint_id: &str,
+        cfg: &ApoConfig,
+        allow_crossfade: bool,
+    ) -> Result<PushOutcome, ApoBackendError> {
         let Ok(channel) = ControlChannel::open(endpoint_id) else {
             return Ok(PushOutcome::NoChannel);
         };
@@ -190,10 +202,52 @@ impl CageqApoBackend {
             return Err(ApoBackendError::NoSampleRate(endpoint_id.to_string()));
         };
 
-        let assigned = {
+        // §5.2 isolate is the one place `cfg.bands` is always exactly one `Bandpass` — see
+        // `is_isolate_audition`'s own doc. A push that *crosses* that boundary (starting or
+        // ending an isolate audition) is a wholesale replacement of the correction, which
+        // `Cascade::start_ramp` cannot do safely: it pairs `start[i]`/`target[i]` purely by
+        // slot, so several unrelated bands independently fading toward `PASSTHROUGH` on the
+        // same shared clock can sum into a real spike (measured, on a real correction, at
+        // +22 dB above both endpoints — see `cageq-apo::dsp`'s
+        // `a_coefficient_ramp_spikes_on_this_real_correction`). `start_crossfade` sidesteps
+        // that entirely; an in-place edit (an isolate drag's own continuation, or an ordinary
+        // tone edit, or an A/B slot switch — deliberately unaffected, see that test's own doc)
+        // still wants the ramp, so this only fires on the actual boundary crossing.
+        //
+        // Entering/leaving isn't the only boundary, though: a drag that jumps far enough
+        // between throttled pushes that `slot_reusable` refuses to reuse the sweep's own slot
+        // (see its own doc — over an octave, or a big enough Q change) opens a *fresh* slot for
+        // the new position and leaves the old one an independent fading gap — the exact same
+        // "unrelated bands sharing one ramp clock" shape as the boundary case, just entirely
+        // inside an isolate session (`is_isolate` stays `true` throughout, so that check alone
+        // misses it). `isolate_boundary_crossed` covers both — driven by whether the isolate
+        // band's *slot index itself* changed (`SlotAssignment::assign_isolate`), not by array
+        // length: length alone missed the case where a drag swings back near an abandoned slot
+        // (see that method's own doc for the real, reported bug this closes).
+        let is_isolate = is_isolate_audition(&cfg.bands);
+        let (assigned, crossfade) = {
             let mut slots = self.slots.lock().unwrap();
-            slots.entry(endpoint_id.to_string()).or_default().assign(&cfg.bands)
+            let entry = slots.entry(endpoint_id.to_string()).or_default();
+            let was_isolate = entry.was_isolate;
+            let prev_isolate_slot = entry.isolate_slot;
+            let out = entry.assign(&cfg.bands);
+            let isolate_slot_changed = entry.isolate_slot != prev_isolate_slot;
+            let crossfade =
+                allow_crossfade && isolate_boundary_crossed(was_isolate, is_isolate, isolate_slot_changed);
+            entry.was_isolate = is_isolate;
+            (out, crossfade)
         };
+        // Every push *within* an active isolate sweep (not itself a boundary crossing) ramps at
+        // the fixed `RAMP_MS` floor instead of `apply_coeffs`'s distance-scaled duration — see
+        // `cageq_apo::dsp::Cascade::apply_coeffs_fast`'s own doc: that scaling reads the
+        // sweep's narrow bandpass moving even a little as a huge change, so real drags (ticking
+        // roughly every 70 ms) kept landing 100-300 ms ramps that never finished before the
+        // next tick replaced them — the coefficients spent the whole gesture chasing the
+        // pointer instead of tracking it (measured directly: up to ~18x behind — see
+        // `a_coefficient_ramp_falls_behind_the_pointer_during_a_real_isolate_drag` in
+        // `cageq-apo::dsp`, replaying a real captured drag). The fixed 8 ms floor comfortably
+        // finishes within a ~70 ms tick gap while still softening the step against a hard click.
+        let fast_ramp = is_isolate && !crossfade;
         let coeffs: Vec<RawCoeffs> = assigned
             .iter()
             .map(|slot| {
@@ -215,7 +269,8 @@ impl CageqApoBackend {
         // config file was written either way, which is the durable record of what the user
         // asked for, but the caller decides whether a refusal is worth surfacing (`apply_one`
         // does).
-        Ok(if channel.publish(cfg.preamp_db, &coeffs) { PushOutcome::Published } else { PushOutcome::Refused })
+        let published = channel.publish(cfg.preamp_db, &coeffs, crossfade, fast_ramp);
+        Ok(if published { PushOutcome::Published } else { PushOutcome::Refused })
     }
 }
 
@@ -260,7 +315,10 @@ impl EqBackend for CageqApoBackend {
         for path in self.config_files() {
             let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
             self.write_config(id, &safe).map_err(BackendError::backend)?;
-            let _ = self.push_live(id, &safe);
+            // `allow_crossfade: false` — see `push_live`'s own doc: `safe_state()` always has
+            // zero bands, and a crossfade to zero bands silently does nothing to the running
+            // audio, exactly when this fail-safe most needs to land.
+            let _ = self.push_live(id, &safe, false);
         }
         Ok(())
     }
@@ -386,6 +444,35 @@ fn band_key(b: &Band) -> (u8, i64, i64) {
     (kind, (b.freq_hz * 1000.0).round() as i64, (b.q * 1000.0).round() as i64)
 }
 
+/// Is `bands` the §5.2 isolate audition — a bandpass-only substitute for the real correction,
+/// used to hear one filter's region in isolation? Always exactly one `Bandpass` band; anything
+/// else (an ordinary correction, a shelf/peaking band alone, two bandpasses) is not.
+fn is_isolate_audition(bands: &[Band]) -> bool {
+    bands.len() == 1 && bands[0].kind == FilterKind::Bandpass
+}
+
+/// Should *this* push cross the wire as a crossfade (see `cageq_apo::control::ControlBlock`'s
+/// `crossfade` field doc) rather than a plain ramp?
+///
+/// Two independent triggers, both the same underlying problem: an old band and a new,
+/// unrelated one ending up on *different* slots that fade toward/from `PASSTHROUGH` on
+/// `Cascade`'s one shared ramp clock.
+///
+///  1. **Entering or leaving isolate** (`is_isolate != was_isolate`) — the obvious case: the
+///     whole correction is replaced by (or restored from) a single bandpass.
+///  2. **`isolate_slot_changed` while *staying* inside isolate** — less obvious, easy to miss: a
+///     drag that jumps far enough between throttled pushes that [`slot_reusable`] refuses to
+///     hand the sweep its own slot back (over an octave, or too big a Q change — see that
+///     function's own doc), *or* one that swings back near an earlier, already-abandoned slot
+///     (see [`SlotAssignment::assign_isolate`]'s own doc for the exact reported bug this
+///     catches — array length alone missed it), lands the band on a genuinely different slot
+///     index than it held a moment ago. `is_isolate` stays `true` on both sides of that push,
+///     so trigger 1 alone would miss it entirely — this session never "left" isolate, it just
+///     briefly ran two unrelated bandpasses on two different, clock-sharing slots.
+fn isolate_boundary_crossed(was_isolate: bool, is_isolate: bool, isolate_slot_changed: bool) -> bool {
+    is_isolate != was_isolate || (is_isolate && isolate_slot_changed)
+}
+
 /// How far a genuinely new band's centre may sit from a freed slot's last known centre before
 /// [`SlotAssignment::assign`] will reuse that slot for it, rather than opening a fresh one.
 ///
@@ -399,17 +486,46 @@ fn band_key(b: &Band) -> (u8, i64, i64) {
 /// far enough to still catch same-band Q/gain-only edits (which don't move `Fc` at all).
 const MAX_REUSE_FC_RATIO: f64 = 2.0;
 
+/// Same idea as [`MAX_REUSE_FC_RATIO`], for `Q`. A slot that held a broad, gentle band and one
+/// about to hold a narrow, sharp one (or vice versa) are not "the same band" just because their
+/// centres happen to land close together — interpolating raw coefficients between two very
+/// different bandwidths is audibly its own shape change, the same "sweep through everything in
+/// between" artefact the Fc gate exists to avoid, just along the other axis a biquad has. Wider
+/// than the Fc ratio (bandwidth varies more than Fc does across ordinary same-band edits) so an
+/// in-place Q drag still reclaims its own slot.
+const MAX_REUSE_Q_RATIO: f64 = 4.0;
+
 /// Is `old` — a freed slot's last known identity, or `None` if the slot has never held one —
 /// close enough to `band` for [`SlotAssignment::assign`] to reuse that slot? A slot that never
 /// held anything is always fair game: there is no live interpolation to sweep away from.
-fn fc_close_enough(old: &Option<(u8, i64, i64)>, band: &Band) -> bool {
-    let Some((_, old_freq_milli_hz, _)) = old else { return true };
+///
+/// Three independent gates, all of which must pass: same **filter kind**, [`MAX_REUSE_FC_RATIO`]
+/// on `Fc`, and [`MAX_REUSE_Q_RATIO`] on `Q`. The kind check matters even when Fc and Q both look
+/// close: a shelf and a peaking/bandpass band don't share a response *shape*, so interpolating
+/// their raw coefficients is meaningless regardless of how near their numbers land — this is
+/// exactly what let the §5.2 isolate sweep's narrow bandpass (always `Bandpass`, fixed `Q` — see
+/// `SWEEP_Q` in `App.tsx`) reuse an existing shelf's freed slot whenever the sweep passed within
+/// an octave of the shelf's own `Fc`, ramping straight from a shelf into a bandpass.
+fn slot_reusable(old: &Option<(u8, i64, i64)>, band: &Band) -> bool {
+    let Some((old_kind, old_freq_milli_hz, old_q_milli)) = old else { return true };
+    let (kind, _, _) = band_key(band);
+    if kind != *old_kind {
+        return false;
+    }
     let old_hz = *old_freq_milli_hz as f64 / 1000.0;
     if !(old_hz > 0.0 && band.freq_hz > 0.0) {
         return false;
     }
-    let ratio = (band.freq_hz / old_hz).max(old_hz / band.freq_hz);
-    ratio <= MAX_REUSE_FC_RATIO
+    let fc_ratio = (band.freq_hz / old_hz).max(old_hz / band.freq_hz);
+    if fc_ratio > MAX_REUSE_FC_RATIO {
+        return false;
+    }
+    let old_q = *old_q_milli as f64 / 1000.0;
+    if !(old_q > 0.0 && band.q > 0.0) {
+        return false;
+    }
+    let q_ratio = (band.q / old_q).max(old_q / band.q);
+    q_ratio <= MAX_REUSE_Q_RATIO
 }
 
 /// Stable per-endpoint slot assignment for the live control channel.
@@ -426,14 +542,16 @@ fn fc_close_enough(old: &Option<(u8, i64, i64)>, band: &Band) -> bool {
 ///
 /// This fixes it upstream of `Cascade` rather than inside it: identity only exists here, where
 /// `cfg.bands` is still symbolic, so the reordering has to happen before it's ever flattened
-/// into raw coefficients — see `push_live`'s own doc. `Cascade`/the control channel need no
-/// changes at all: a slot whose band was dropped is represented as an explicit `None` (which
-/// `push_live` turns into `Coeffs::PASSTHROUGH`) if something *later* in the array is still
-/// live, exactly the same "fade toward identity" `start_ramp` already does for a correction that
-/// merely gets shorter — this only extends where in the array that can happen, from "the tail"
-/// to "anywhere".
+/// into raw coefficients — see `push_live`'s own doc. A slot whose band was dropped is
+/// represented as an explicit `None` (which `push_live` turns into `Coeffs::PASSTHROUGH`) if
+/// something *later* in the array is still live, exactly the same "fade toward identity"
+/// `start_ramp` already does for a correction that merely gets shorter — this only extends
+/// where in the array that can happen, from "the tail" to "anywhere". (`Cascade` itself needed
+/// no changes for *this* — reordering upstream is enough. Its later `start_crossfade` addition,
+/// for the §5.2 isolate boundary specifically, is a separate mechanism `push_live` reaches for
+/// on top of this reordering, not a change to it.)
 ///
-/// A freed slot isn't fair game for just *any* new band, either — see [`fc_close_enough`]. So a
+/// A freed slot isn't fair game for just *any* new band, either — see [`slot_reusable`]. So a
 /// slot's remembered identity survives rounds where nothing reused it (it stays fading toward
 /// passthrough, untouched), rather than being wiped back to "empty" the moment its own band
 /// drops; only [`MAX_BANDS`](dsp::MAX_BANDS)-headroom pays for that, not correctness.
@@ -441,21 +559,41 @@ fn fc_close_enough(old: &Option<(u8, i64, i64)>, band: &Band) -> bool {
 struct SlotAssignment {
     /// Index i is the identity last assigned to that slot — kept even once that band is gone
     /// and the slot is fading toward passthrough, so a later unrelated band can't silently
-    /// inherit its in-flight ramp (see [`fc_close_enough`]). `None` only for a slot that has
+    /// inherit its in-flight ramp (see [`slot_reusable`]). `None` only for a slot that has
     /// never held a band at all.
     slots: Vec<Option<(u8, i64, i64)>>,
+    /// Whether the *previous* push to this endpoint was the §5.2 isolate audition (`cfg.bands`
+    /// was exactly one `Bandpass`) — `push_live` compares this against the current push to
+    /// decide whether the boundary is being crossed (crossfade) or not (plain ramp, as ever).
+    was_isolate: bool,
+    /// The slot index holding the §5.2 isolate audition band as of the *previous* push, if any
+    /// — see [`Self::assign_isolate`]'s own doc for why this needs to be tracked explicitly
+    /// rather than left to the generic search in [`Self::assign`].
+    isolate_slot: Option<usize>,
 }
 
 impl SlotAssignment {
-    /// Reorders `bands` into slot order: a band whose identity matches a previous slot stays in
-    /// that exact slot. Everything else (genuinely new, or a duplicate identity beyond the first
-    /// match — rare, and not worth more bookkeeping to handle perfectly) reuses the lowest slot
-    /// that is both free *and* [`fc_close_enough`] to its last occupant, or opens a fresh one
-    /// past the end if none qualifies. Trailing frees are trimmed (the existing count-shrink
-    /// behaviour already covers those); a freed slot with something later still live stays as an
-    /// explicit gap — and keeps remembering what it held, so it stays off-limits to a distant
-    /// band for as long as it takes something close enough to come reclaim it.
+    /// Reorders `bands` into slot order — the §5.2 isolate audition (always exactly one
+    /// `Bandpass`) is handled separately by [`Self::assign_isolate`]; this is the general path
+    /// for everything else. A band whose identity matches a previous slot stays in that exact
+    /// slot. Everything else (genuinely new, or a duplicate identity beyond the first match —
+    /// rare, and not worth more bookkeeping to handle perfectly) reuses the lowest slot that is
+    /// both free *and* [`slot_reusable`] with its last occupant, or opens a fresh one past the
+    /// end if none qualifies. Trailing frees are trimmed (the existing count-shrink behaviour
+    /// already covers those); a freed slot with something later still live stays as an explicit
+    /// gap — and keeps remembering what it held, so it stays off-limits to a distant band for
+    /// as long as it takes something close enough to come reclaim it.
     fn assign<'a>(&mut self, bands: &'a [Band]) -> Vec<Option<&'a Band>> {
+        if let [band] = bands {
+            if band.kind == FilterKind::Bandpass {
+                return self.assign_isolate(band);
+            }
+        }
+        // An ordinary push always ends any isolate session's slot tracking — a *later* isolate
+        // press starts fresh rather than risking a stale index into a `self.slots` the generic
+        // path below is about to reshuffle for reasons that have nothing to do with isolate.
+        self.isolate_slot = None;
+
         let mut out: Vec<Option<&Band>> = vec![None; self.slots.len()];
         let mut used = vec![false; bands.len()];
 
@@ -475,7 +613,7 @@ impl SlotAssignment {
             let reuse_at = out
                 .iter()
                 .zip(self.slots.iter())
-                .position(|(occupant, old)| occupant.is_none() && fc_close_enough(old, band));
+                .position(|(occupant, old)| occupant.is_none() && slot_reusable(old, band));
             match reuse_at {
                 Some(i) => out[i] = Some(band),
                 None => out.push(Some(band)),
@@ -492,6 +630,56 @@ impl SlotAssignment {
         for (i, occupant) in out.iter().enumerate() {
             if let Some(band) = occupant {
                 self.slots[i] = Some(band_key(band));
+            }
+        }
+        out
+    }
+
+    /// The §5.2 isolate half of [`Self::assign`], kept separate because isolate's invariant is
+    /// different from an ordinary correction's: there is always at most **one** live isolate
+    /// band, and a later push must always retarget the *same* slot the previous one landed in
+    /// (if it is still [`slot_reusable`] compatible) — never fall back to the generic "any
+    /// matching slot, lowest index wins" search in [`Self::assign`].
+    ///
+    /// **The bug this fixes, reported live**: a drag that swings back near an *earlier*,
+    /// already-abandoned isolate position (having jumped elsewhere in between, opening a fresh
+    /// slot each time it did) could have that generic search reclaim the OLD, abandoned slot —
+    /// it still matches by Fc/Q, and sits at a lower index than the band's true current slot —
+    /// instead of retargeting where the band actually, audibly is right now. `Cascade` then
+    /// ramps the old, stale, already-mid-decay slot's coefficients toward the new target while
+    /// the band's real current slot silently starts fading to `PASSTHROUGH` at a *different*
+    /// index — an unpredictable jump, worse because it went unnoticed at the slot-assignment
+    /// level: the array can *shrink* when this happens (the true current slot becomes the new
+    /// trailing gap and gets trimmed), which the old array-length-based crossfade check
+    /// (`out.len() > slots_before`) read as "nothing new happened" — the opposite of the truth.
+    /// Reported as happening at "medium" drag speed, in either direction: exactly what it takes
+    /// to leave several abandoned slots behind (each big-enough jump opens one) and then swing
+    /// back near one of them, rather than either settling immediately (slow) or never revisiting
+    /// old territory at all (one continuous fast sweep).
+    ///
+    /// Explicitly never searches any slot *other* than the tracked one: reusing any slot beyond
+    /// it — even one that happens to match by Fc/Q — is exactly the class of bug this exists to
+    /// close, not a case worth optimising for.
+    fn assign_isolate<'a>(&mut self, band: &'a Band) -> Vec<Option<&'a Band>> {
+        let mut out: Vec<Option<&Band>> = vec![None; self.slots.len()];
+
+        let reuse_at = self
+            .isolate_slot
+            .filter(|&i| i < self.slots.len() && slot_reusable(&self.slots[i], band));
+        match reuse_at {
+            Some(i) => out[i] = Some(band),
+            None => out.push(Some(band)),
+        }
+        while out.last().is_some_and(Option::is_none) {
+            out.pop();
+        }
+
+        self.slots.resize(out.len(), None);
+        self.isolate_slot = None;
+        for (i, occupant) in out.iter().enumerate() {
+            if let Some(b) = occupant {
+                self.slots[i] = Some(band_key(b));
+                self.isolate_slot = Some(i);
             }
         }
         out
@@ -636,6 +824,103 @@ mod tests {
         assert_eq!(backend.config_files().len(), 2, "every endpoint must be covered");
     }
 
+    /// **The bug this guards**: `write_safe_state`'s live push must never route through the
+    /// crossfade path. Its target (`safe_state()`) always has zero bands, and
+    /// `Cascade::start_crossfade`'s secondary bank with zero bands never trips
+    /// `Cascade::process`'s dual-bank mix at all (`process_count2 == 0` is the same condition
+    /// that gates it off) — a crossfade-routed safe-state push would silently do *nothing* to
+    /// the running audio, exactly when the fail-safe's live push most needs to land. Reproduced
+    /// directly: an endpoint whose last live push was a §5.2 isolate audition
+    /// (`was_isolate == true`) crosses the isolate boundary on the very next push — which,
+    /// without `allow_crossfade: false`, would be the safe-state push itself.
+    #[test]
+    fn write_safe_state_never_uses_the_crossfade_path() {
+        let (backend, _dir) = temp_backend("safe-no-crossfade");
+        let Some(channel) = ControlChannel::create(EP_LIVE_OK) else {
+            eprintln!("skipping: could not create a Global\\ section (needs SeCreateGlobalPrivilege)");
+            return;
+        };
+        cageq_apo::control::set_sample_rate(channel.block(), 48_000);
+
+        // Put the endpoint into "last live push was isolate" state.
+        let isolate = DeviceConfig {
+            device: EP_LIVE_OK.to_string(),
+            preamp_db: 0.0,
+            filters: vec![Filter { kind: FilterType::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 }],
+        };
+        backend.apply(&[isolate]).unwrap();
+
+        let mut snap = cageq_apo::control::Snapshot::default();
+        assert!(
+            matches!(cageq_apo::control::try_read(channel.block(), &mut snap), cageq_apo::control::ReadOutcome::Updated(_)),
+            "sanity check: entering isolate must publish something readable"
+        );
+        assert!(snap.crossfade, "sanity check: entering isolate itself must still crossfade");
+
+        backend.write_safe_state().unwrap();
+
+        assert!(matches!(
+            cageq_apo::control::try_read(channel.block(), &mut snap),
+            cageq_apo::control::ReadOutcome::Updated(_)
+        ));
+        assert!(!snap.crossfade, "the safe-state push must never route through the crossfade path");
+        assert_eq!(snap.band_count, 0, "the safe state itself must still be exactly zero bands");
+    }
+
+    /// **The bug this guards**: `apply_coeffs`'s ramp is sized against how big the *response
+    /// curve* changed, and a narrow §5.2 isolate bandpass moving even a little registers as a
+    /// huge change on that metric — real drags kept landing 100-300 ms ramps against a ~70 ms
+    /// tick cadence, so the coefficients spent the whole gesture chasing the pointer rather than
+    /// tracking it (see `cageq_apo::dsp`'s
+    /// `a_coefficient_ramp_falls_behind_the_pointer_during_a_real_isolate_drag`). Every push
+    /// *within* an active isolate sweep must instead set `fast_ramp`, ramping at the fixed
+    /// `RAMP_MS` floor rather than the distance-scaled duration — but only there: entering or
+    /// leaving isolate must still crossfade, and an ordinary edit must still use the plain,
+    /// distance-scaled ramp.
+    #[test]
+    fn an_isolate_drag_continuation_ramps_fast_not_distance_scaled() {
+        const EP_FAST_RAMP: &str = "{99990004-0004-0004-0004-000000000004}";
+        let (backend, _dir) = temp_backend("isolate-drag-is-fast-ramp");
+        let Some(channel) = ControlChannel::create(EP_FAST_RAMP) else {
+            eprintln!("skipping: could not create a Global\\ section (needs SeCreateGlobalPrivilege)");
+            return;
+        };
+        cageq_apo::control::set_sample_rate(channel.block(), 48_000);
+        let mut snap = cageq_apo::control::Snapshot::default();
+
+        let isolate_at = |freq_hz: f64| DeviceConfig {
+            device: EP_FAST_RAMP.to_string(),
+            preamp_db: 0.0,
+            filters: vec![Filter { kind: FilterType::Bandpass, freq_hz, gain_db: 0.0, q: 8.0 }],
+        };
+
+        // Entering the audition crosses the boundary: crossfade, not fast-ramp.
+        backend.apply(&[isolate_at(1000.0)]).unwrap();
+        assert!(matches!(cageq_apo::control::try_read(channel.block(), &mut snap), cageq_apo::control::ReadOutcome::Updated(_)));
+        assert!(snap.crossfade, "entering isolate must still crossfade");
+        assert!(!snap.fast_ramp, "the boundary crossing itself must not also be fast-ramped");
+
+        // A continuation of the same drag (same slot, nearby frequency): fast-ramp, not the
+        // distance-scaled ramp.
+        backend.apply(&[isolate_at(1050.0)]).unwrap();
+        assert!(matches!(cageq_apo::control::try_read(channel.block(), &mut snap), cageq_apo::control::ReadOutcome::Updated(_)));
+        assert!(!snap.crossfade, "an in-drag continuation must not crossfade");
+        assert!(snap.fast_ramp, "an in-drag continuation must ramp at the fixed floor, not via the distance-scaled ramp");
+
+        // Leaving the audition crosses the boundary again: crossfade, not fast-ramp.
+        backend.apply(&[device(EP_FAST_RAMP, -6.0)]).unwrap();
+        assert!(matches!(cageq_apo::control::try_read(channel.block(), &mut snap), cageq_apo::control::ReadOutcome::Updated(_)));
+        assert!(snap.crossfade, "leaving isolate must still crossfade");
+        assert!(!snap.fast_ramp, "the exit boundary crossing itself must not also be fast-ramped");
+
+        // An ordinary (non-isolate) edit: neither flag — the plain, distance-scaled ramp is
+        // still the right tool.
+        backend.apply(&[device(EP_FAST_RAMP, -3.0)]).unwrap();
+        assert!(matches!(cageq_apo::control::try_read(channel.block(), &mut snap), cageq_apo::control::ReadOutcome::Updated(_)));
+        assert!(!snap.crossfade, "an ordinary edit must not crossfade");
+        assert!(!snap.fast_ramp, "an ordinary edit must still use the distance-scaled ramp");
+    }
+
     /// The aggregate hash has to move whenever what is applied moves — including when a
     /// device is *removed*, which a content-only hash could miss.
     #[test]
@@ -736,6 +1021,138 @@ mod tests {
         Band { kind: FilterKind::Peaking, freq_hz, gain_db, q }
     }
 
+    /// The decision `push_live` bases its crossfade-vs-ramp choice on: only a single, bare
+    /// `Bandpass` counts. Anything else — empty, more than one band, a `Bandpass` alongside
+    /// other bands (never produced by isolate's own write path, but must still not be
+    /// misidentified if it ever arrived), or a single non-`Bandpass` band — is an ordinary
+    /// correction and must ramp as it always has.
+    #[test]
+    fn only_a_single_bare_bandpass_counts_as_the_isolate_audition() {
+        let bandpass = Band { kind: FilterKind::Bandpass, freq_hz: 100.0, gain_db: 0.0, q: 8.0 };
+        assert!(is_isolate_audition(std::slice::from_ref(&bandpass)));
+
+        assert!(!is_isolate_audition(&[]), "no bands at all is not isolate");
+        assert!(!is_isolate_audition(std::slice::from_ref(&band(1000.0, 3.0, 1.0))), "an ordinary single band is not isolate");
+        assert!(!is_isolate_audition(&[bandpass, band(1000.0, 3.0, 1.0)]), "a bandpass alongside other bands is not isolate");
+        assert!(!is_isolate_audition(&[bandpass, bandpass]), "two bandpasses is not isolate either");
+    }
+
+    /// The two triggers `isolate_boundary_crossed` covers, and the two things it must leave
+    /// alone: an ordinary edit or an A/B slot switch (`is_isolate` false on both sides) never
+    /// crossfades regardless of `opened_new_slot` — that would re-litigate the already-made
+    /// decision to keep those on the ramp (see `cageq-apo::dsp`'s
+    /// `retuning_live_does_not_splatter...` for why).
+    #[test]
+    fn isolate_boundary_crossed_covers_entering_leaving_and_a_far_drag_jump() {
+        // Entering: correction -> isolate.
+        assert!(isolate_boundary_crossed(false, true, true), "entering isolate must crossfade");
+        // Leaving: isolate -> correction.
+        assert!(isolate_boundary_crossed(true, false, false), "leaving isolate must crossfade");
+        // A drag continuing, but jumping far enough to open a fresh slot instead of reusing the
+        // sweep's own one — the bug this test guards: `is_isolate` stays true throughout, so
+        // only `opened_new_slot` distinguishes this from an ordinary in-place retune.
+        assert!(
+            isolate_boundary_crossed(true, true, true),
+            "a far-enough drag jump mid-isolate must also crossfade, not just entering/leaving"
+        );
+
+        // A drag continuing with its own slot reused (the common, smooth case): no crossfade,
+        // stay on the cheap ramp.
+        assert!(!isolate_boundary_crossed(true, true, false), "an ordinary in-place drag retune must not crossfade");
+        // Never isolate on either side, regardless of whether some *other* band's slot opened
+        // fresh this round (an ordinary add-a-band edit, or an A/B switch) — out of scope here.
+        assert!(!isolate_boundary_crossed(false, false, true), "a non-isolate edit must never crossfade");
+        assert!(!isolate_boundary_crossed(false, false, false), "a non-isolate edit must never crossfade");
+    }
+
+    /// End-to-end through the actual `SlotAssignment` a drag produces: a bandpass sweeping from
+    /// 9000 Hz to 31 Hz in one throttled step (more than an octave — `slot_reusable` correctly
+    /// refuses to hand it the sweep's own slot) must be recognised as a boundary crossing, the
+    /// same live scenario reported (the click path was fixed; dragging into the low range while
+    /// still holding the button reproduced the same artefact because this case was missed).
+    #[test]
+    fn a_far_drag_jump_through_real_slot_assignment_is_recognised_as_a_boundary() {
+        let mut sa = SlotAssignment::default();
+        let entry_bandpass = Band { kind: FilterKind::Bandpass, freq_hz: 9000.0, gain_db: 0.0, q: 8.0 };
+        let was_isolate = false;
+        let is_isolate = is_isolate_audition(std::slice::from_ref(&entry_bandpass));
+        let prev_isolate_slot = sa.isolate_slot;
+        sa.assign(std::slice::from_ref(&entry_bandpass));
+        sa.was_isolate = is_isolate;
+        assert!(
+            isolate_boundary_crossed(was_isolate, is_isolate, sa.isolate_slot != prev_isolate_slot),
+            "entering must crossfade"
+        );
+
+        // The drag continues, jumping straight down to 31 Hz — well past `MAX_REUSE_FC_RATIO`.
+        let drag_bandpass = Band { kind: FilterKind::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 };
+        let was_isolate = sa.was_isolate;
+        let is_isolate = is_isolate_audition(std::slice::from_ref(&drag_bandpass));
+        let prev_isolate_slot = sa.isolate_slot;
+        sa.assign(std::slice::from_ref(&drag_bandpass));
+        let isolate_slot_changed = sa.isolate_slot != prev_isolate_slot;
+        assert!(isolate_slot_changed, "9000 Hz -> 31 Hz must not reuse the same slot");
+        assert!(
+            isolate_boundary_crossed(was_isolate, is_isolate, isolate_slot_changed),
+            "a far jump mid-drag must still be recognised as a boundary crossing"
+        );
+    }
+
+    /// **The bug this fixes, reported live**: dragging at "medium" speed, in either direction,
+    /// could still reproduce the same audible/visible sweep-and-lurch artefact even after the
+    /// crossfade fix above shipped — rarer, but the same pattern. Root cause: a drag that jumps
+    /// far enough to open a fresh slot (as above) leaves the *old* slot behind as an abandoned,
+    /// independently-fading gap — and if the drag later swings back near that old position, the
+    /// generic identity search in `SlotAssignment::assign` used to reclaim the OLD, abandoned
+    /// slot (still `slot_reusable`-compatible by Fc/Q, and sitting at a lower index) instead of
+    /// retargeting the band's actual current slot. The array can *shrink* when that happens (the
+    /// true current slot becomes the new trailing gap and gets trimmed), which the old
+    /// length-only check (`out.len() > slots_before`) read as "nothing new happened" — exactly
+    /// backwards. `assign_isolate` fixes this by tracking the live slot explicitly instead of
+    /// searching for any match.
+    #[test]
+    fn a_drag_that_swings_back_near_an_abandoned_slot_still_tracks_the_current_one() {
+        let mut sa = SlotAssignment::default();
+        let far = Band { kind: FilterKind::Bandpass, freq_hz: 9000.0, gain_db: 0.0, q: 8.0 };
+        let low = Band { kind: FilterKind::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 };
+        // Close to `far`'s old position (well within an octave), far from `low`'s.
+        let back = Band { kind: FilterKind::Bandpass, freq_hz: 8000.0, gain_db: 0.0, q: 8.0 };
+
+        let first = sa.assign(std::slice::from_ref(&far));
+        assert_eq!(first.len(), 1);
+        let far_slot = sa.isolate_slot;
+
+        let second = sa.assign(std::slice::from_ref(&low));
+        assert_eq!(second.len(), 2, "far apart, must open a new slot rather than reuse `far`'s");
+        assert!(second[far_slot.unwrap()].is_none(), "the old (far) slot must be an explicit gap now");
+        let low_slot = sa.isolate_slot;
+        assert_ne!(low_slot, far_slot, "the band's current slot must be the new one, not the old one");
+
+        // Swing back near the FIRST position — close to the old, abandoned `far` slot (8000 Hz
+        // vs. its remembered 9000 Hz — well inside `MAX_REUSE_FC_RATIO`), nowhere near where the
+        // band actually, currently is (`low`'s slot, at 31 Hz). Since `back` isn't close to the
+        // *tracked* slot either, this is a genuine new jump — it must land in a fresh slot of
+        // its own, and critically must NOT resurrect the old `far` slot just because it happens
+        // to match by Fc/Q: that slot has been independently fading since round 2, and reusing
+        // it is exactly the bug this test guards.
+        let third = sa.assign(std::slice::from_ref(&back));
+        assert!(third[far_slot.unwrap()].is_none(), "the old (far) slot must stay untouched, not get reclaimed");
+        assert!(third[low_slot.unwrap()].is_none(), "the old (low) slot must also stay an explicit gap");
+        let back_slot = sa.isolate_slot.expect("back must have landed somewhere");
+        assert_ne!(back_slot, far_slot.unwrap(), "must NOT resurrect the abandoned far slot");
+        assert_ne!(back_slot, low_slot.unwrap(), "back is not close to low either — must be a fresh slot");
+        assert_eq!(third[back_slot].map(|b| b.freq_hz), Some(8000.0), "back must land in its own, genuinely new slot");
+
+        // And the actual decision `push_live` makes off this: landing on a different slot than
+        // the previous push must still be recognised as a boundary crossing, exactly like the
+        // ordinary far-jump case — this is what makes the fix reach the crossfade path at all,
+        // not just get the bookkeeping right in isolation.
+        assert!(
+            isolate_boundary_crossed(true, true, back_slot != low_slot.unwrap()),
+            "landing on a different slot than last time must still trigger the crossfade"
+        );
+    }
+
     /// The bug this whole type exists to fix: dropping a band in the *middle* of the list must
     /// not reindex the ones after it. A plain positional diff would put `high`'s coefficients
     /// where `mid` used to be; this must instead recognise `high` and keep it exactly where it
@@ -831,6 +1248,79 @@ mod tests {
         let fourth = sa.assign(&low_reclaim_high_distant);
         assert_eq!(fourth.len(), 4, "no new slot needed — the close band reclaimed the old one");
         assert_eq!(fourth[1].unwrap().freq_hz, 900.0, "close enough to mid's old 1 kHz to reuse slot 1");
+    }
+
+    /// The bug report this test guards against: the §5.2 isolate sweep's bandpass (always
+    /// `Bandpass`, `Q` fixed at `SWEEP_Q`) passing within an octave of an existing shelf's `Fc`
+    /// must NOT reuse that shelf's freed slot — a shelf and a bandpass don't share a response
+    /// shape, so `Cascade::start_ramp` interpolating one's raw coefficients into the other's is
+    /// audible as a lurch through an unrelated filter, not a "close enough" nudge. The kind gate
+    /// must refuse this even though Fc (and here, coincidentally, nothing about Q) would pass.
+    #[test]
+    fn a_different_filter_kind_does_not_reuse_a_freed_slot_even_at_the_same_fc() {
+        let mut sa = SlotAssignment::default();
+        let low = band(100.0, 3.0, 0.7);
+        let shelf = Band { kind: FilterKind::LowShelf, freq_hz: 120.0, gain_db: 4.0, q: 0.7 };
+        let high = band(8000.0, 4.0, 0.7);
+        sa.assign(&[low, shelf, high]);
+        let low_high = [low, high];
+        sa.assign(&low_high); // drop the shelf (a middle band) — its slot fades in place, high stays put
+
+        let bandpass = Band { kind: FilterKind::Bandpass, freq_hz: 120.0, gain_db: 0.0, q: 8.0 };
+        let low_bandpass_high = [low, bandpass, high];
+        let third = sa.assign(&low_bandpass_high);
+        assert_eq!(third.len(), 4, "the bandpass must get its own slot, not the shelf's freed one");
+        assert!(third[1].is_none(), "the shelf's old slot keeps fading, untouched by a different kind");
+        assert_eq!(third[3].unwrap().kind, FilterKind::Bandpass, "the bandpass lands in a fresh slot");
+    }
+
+    /// Same kind and close `Fc`, but a bandwidth so different it isn't "the same band" either —
+    /// a broad, gentle band and a sharp, narrow one at nearly the same centre are two different
+    /// shapes, and interpolating between them sweeps through everything in between just like an
+    /// unchecked `Fc` jump would.
+    #[test]
+    fn a_wildly_different_q_does_not_reuse_a_freed_slot_even_at_the_same_fc() {
+        let mut sa = SlotAssignment::default();
+        let low = band(100.0, 3.0, 0.7);
+        let broad = band(1000.0, -2.0, 0.5);
+        let high = band(8000.0, 4.0, 0.7);
+        sa.assign(&[low, broad, high]);
+        let low_high = [low, high];
+        sa.assign(&low_high); // drop the broad band (a middle band) — its slot fades, high stays put
+
+        let narrow = band(1000.0, 1.0, 6.0); // ratio 12, well past MAX_REUSE_Q_RATIO
+        let low_narrow_high = [low, narrow, high];
+        let third = sa.assign(&low_narrow_high);
+        assert_eq!(third.len(), 4, "the narrow band must get its own slot, not the broad one's");
+        assert!(third[1].is_none(), "the broad band's old slot keeps fading, untouched");
+        assert_eq!(third[3].unwrap().q, 6.0, "the narrow band lands in a fresh slot");
+    }
+
+    /// The actual isolate scenario — a full multi-band correction (a low shelf plus peaking
+    /// bands) replaced wholesale by a single isolate bandpass. Every old band must end up an
+    /// explicit gap (fading to passthrough on its own slot), and the bandpass must land in a
+    /// brand new slot, never reusing any of them directly. Broader than
+    /// `a_different_filter_kind_does_not_reuse_a_freed_slot_even_at_the_same_fc` (which isolates
+    /// just the kind gate): this is the whole `push_live` input shape isolate actually produces.
+    #[test]
+    fn a_full_correction_yields_entirely_to_an_isolate_bandpass() {
+        let mut sa = SlotAssignment::default();
+        let shelf = Band { kind: FilterKind::LowShelf, freq_hz: 100.0, gain_db: 5.0, q: 0.7 };
+        let mid = band(1000.0, -2.0, 1.0);
+        let high = band(8000.0, 3.0, 0.7);
+        let shelf_mid_high = [shelf, mid, high];
+        sa.assign(&shelf_mid_high);
+
+        // The bandpass's Fc (150 Hz) sits well within the shelf's old Fc's reuse ratio — this is
+        // exactly the case the old Fc-only check would have handed the shelf's slot to.
+        let bandpass = Band { kind: FilterKind::Bandpass, freq_hz: 150.0, gain_db: 0.0, q: 8.0 };
+        let just_bandpass = [bandpass];
+        let second = sa.assign(&just_bandpass);
+        assert_eq!(second.len(), 4, "three old bands fade in place, the bandpass gets a 4th slot");
+        for (i, b) in second[..3].iter().enumerate() {
+            assert!(b.is_none(), "slot {i} must be an explicit gap, not reused by the bandpass");
+        }
+        assert_eq!(second[3].unwrap().kind, FilterKind::Bandpass, "the bandpass lands in a fresh slot");
     }
 
     /// Trailing frees must still shrink the array — the existing "correction gets shorter"

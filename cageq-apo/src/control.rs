@@ -42,7 +42,7 @@ pub const CONTROL_MAGIC: u32 = 0x4341_4751;
 /// Bump whenever `ControlBlock`'s layout changes size or shape — e.g. `dsp::MAX_BANDS`
 /// changing resizes `coeffs`, and an old DLL and a new app (or vice versa) disagreeing about
 /// that size must not be allowed to interpret each other's memory.
-pub const CONTROL_VERSION: u32 = 6;
+pub const CONTROL_VERSION: u32 = 8;
 
 /// Preamp bounds mirroring [`crate::config`]'s, for the same reason: attenuation is
 /// harmless, gain is a hazard, and the writer is not trusted merely because it is ours.
@@ -146,6 +146,41 @@ pub struct ControlBlock {
     /// the one being loaded. Mistaking one for the other has twice sent a hunt for DSP bugs
     /// that were already fixed.
     pub build_stamp: AtomicU64,
+    /// Nonzero: apply this update via [`crate::dsp::Cascade::start_crossfade`] rather than
+    /// [`crate::dsp::Cascade::apply_coeffs`]'s plain coefficient ramp. Inbound, seqlock-guarded
+    /// alongside `preamp_db`/`band_count`/`coeffs` — not a separate atomic like the outbound
+    /// fields above, since it is part of the same payload the writer publishes atomically.
+    ///
+    /// Set by `cageq-apo-backend::push_live` exactly when a push crosses the §5.2 isolate
+    /// boundary (a single `Bandpass`-only band list starting or ending) — see its own doc for
+    /// why a plain ramp is unsafe there: several bands independently fading toward
+    /// `PASSTHROUGH` on one shared clock can sum into a real spike, measured directly at over
+    /// +20 dB above both endpoints on a real correction. An ordinary edit or an A/B slot
+    /// switch — neither side ever `Bandpass` — always publishes 0 and keeps the ramp, which
+    /// remains the right tool for an in-place change (see `retuning_live_does_not_splatter...`
+    /// in dsp.rs for why that decision was already made and re-litigating it is out of scope
+    /// here).
+    pub crossfade: u32,
+    /// Nonzero: apply this update via [`crate::dsp::Cascade::apply_coeffs_fast`] — ramped at
+    /// the fixed [`crate::dsp`] `RAMP_MS` floor (8 ms), never the distance-scaled duration
+    /// `apply_coeffs` otherwise uses. Mutually exclusive with `crossfade` in practice (never
+    /// both set by a real writer), but not enforced as such here; the reader just checks
+    /// `crossfade` first.
+    ///
+    /// Set by `cageq-apo-backend::push_live` for every push *within* an active §5.2 isolate
+    /// sweep (i.e. `crossfade` false but the update is still a `Bandpass`-only audition) — see
+    /// `dsp::Cascade::apply_coeffs_fast`'s own doc for why: `apply_coeffs`'s ramp is sized by
+    /// [`crate::dsp::Cascade::ramp_ms_for`] against the *response-curve distance* of the change,
+    /// and a narrow, high-Q bandpass moving even a little registers as a large distance (most of
+    /// the grid flips from "on the old peak" to "off it"), so real drags — arriving roughly
+    /// every 70 ms — kept landing 100-300 ms ramps that never finished before the next tick
+    /// retargeted them. The coefficients then perpetually chased a moving pointer, falling
+    /// hundreds of percent behind and taking a further 300 ms to land *after* the drag actually
+    /// stopped — measured directly by replaying a real captured drag
+    /// (`a_coefficient_ramp_falls_behind_the_pointer_during_a_real_isolate_drag` in dsp.rs). The
+    /// fixed 8 ms floor comfortably finishes within a ~70 ms tick gap (no more chasing) while
+    /// still softening the step enough to avoid a hard click, unlike an instant, unramped jump.
+    pub fast_ramp: u32,
     /// See this struct's own doc: kept last so its size (the one thing that moves when
     /// [`MAX_BANDS`] does) never disturbs any other field's offset.
     pub coeffs: [RawCoeffs; MAX_BANDS],
@@ -157,12 +192,22 @@ pub struct ControlBlock {
 pub struct Snapshot {
     pub preamp_db: f64,
     pub band_count: usize,
+    /// See [`ControlBlock::crossfade`]'s doc.
+    pub crossfade: bool,
+    /// See [`ControlBlock::fast_ramp`]'s doc.
+    pub fast_ramp: bool,
     pub coeffs: [Coeffs; MAX_BANDS],
 }
 
 impl Default for Snapshot {
     fn default() -> Self {
-        Snapshot { preamp_db: 0.0, band_count: 0, coeffs: [Coeffs::PASSTHROUGH; MAX_BANDS] }
+        Snapshot {
+            preamp_db: 0.0,
+            band_count: 0,
+            crossfade: false,
+            fast_ramp: false,
+            coeffs: [Coeffs::PASSTHROUGH; MAX_BANDS],
+        }
     }
 }
 
@@ -276,6 +321,8 @@ pub fn try_read(block: &ControlBlock, out: &mut Snapshot) -> ReadOutcome {
         return ReadOutcome::Rejected;
     }
     let preamp = block.preamp_db;
+    let crossfade = block.crossfade != 0;
+    let fast_ramp = block.fast_ramp != 0;
 
     let mut staged = [Coeffs::PASSTHROUGH; MAX_BANDS];
     for i in 0..count {
@@ -300,6 +347,8 @@ pub fn try_read(block: &ControlBlock, out: &mut Snapshot) -> ReadOutcome {
 
     out.preamp_db = preamp;
     out.band_count = count;
+    out.crossfade = crossfade;
+    out.fast_ramp = fast_ramp;
     out.coeffs = staged;
     ReadOutcome::Updated(before)
 }
@@ -312,7 +361,13 @@ pub fn try_read(block: &ControlBlock, out: &mut Snapshot) -> ReadOutcome {
 ///
 /// Returns `false` without publishing anything if the set would be refused by [`try_read`],
 /// so a bug on the writer's side surfaces there rather than as a silently ignored update.
-pub fn publish(block: &mut ControlBlock, preamp_db: f64, coeffs: &[RawCoeffs]) -> bool {
+pub fn publish(
+    block: &mut ControlBlock,
+    preamp_db: f64,
+    coeffs: &[RawCoeffs],
+    crossfade: bool,
+    fast_ramp: bool,
+) -> bool {
     if coeffs.len() > MAX_BANDS
         || !(preamp_db.is_finite() && (MIN_PREAMP_DB..=MAX_PREAMP_DB).contains(&preamp_db))
         || !coeffs.iter().all(RawCoeffs::is_safe)
@@ -329,6 +384,8 @@ pub fn publish(block: &mut ControlBlock, preamp_db: f64, coeffs: &[RawCoeffs]) -
 
     block.preamp_db = preamp_db;
     block.band_count = coeffs.len() as u32;
+    block.crossfade = crossfade as u32;
+    block.fast_ramp = fast_ramp as u32;
     for (slot, c) in block.coeffs.iter_mut().zip(coeffs) {
         *slot = *c;
     }
@@ -355,7 +412,7 @@ mod tests {
     #[test]
     fn the_apo_can_report_a_verdict_the_writer_could_not_predict() {
         let mut b = zeroed();
-        assert!(publish(&mut b, -6.0, &[stable()]));
+        assert!(publish(&mut b, -6.0, &[stable()], false, false));
         let seq = sequence(&b);
 
         // Nothing has looked at it yet: the ack still refers to an older sequence.
@@ -365,7 +422,7 @@ mod tests {
         assert_eq!(ack(&b), (seq, ACK_APPLIED));
 
         // A later update declined by the engine.
-        assert!(publish(&mut b, -6.0, &[stable(), stable()]));
+        assert!(publish(&mut b, -6.0, &[stable(), stable()], false, false));
         let seq2 = sequence(&b);
         set_ack(&b, seq2, ACK_TOO_LOUD);
         assert_eq!(ack(&b), (seq2, ACK_TOO_LOUD));
@@ -378,6 +435,8 @@ mod tests {
             seq: AtomicU32::new(0),
             band_count: 0,
             preamp_db: 0.0,
+            crossfade: 0,
+            fast_ramp: 0,
             coeffs: [RawCoeffs::default(); MAX_BANDS],
             heartbeat: AtomicU64::new(0),
             ack: AtomicU64::new(0),
@@ -394,7 +453,7 @@ mod tests {
     #[test]
     fn publish_then_read_round_trips() {
         let mut b = zeroed();
-        assert!(publish(&mut b, -6.0, &[stable(), stable()]));
+        assert!(publish(&mut b, -6.0, &[stable(), stable()], false, false));
 
         let mut snap = Snapshot::default();
         match try_read(&b, &mut snap) {
@@ -406,6 +465,44 @@ mod tests {
         assert_eq!(snap.coeffs[0].b0, 1.02);
         // Unused slots are identity, so a shrinking set cannot leave a stale filter running.
         assert_eq!(snap.coeffs[2].b0, Coeffs::PASSTHROUGH.b0);
+        assert!(!snap.crossfade, "the default publish must not request a crossfade");
+    }
+
+    /// The `crossfade` flag itself — see `ControlBlock::crossfade`'s doc — round-trips
+    /// independently of the coefficients, and toggling it between two publishes is
+    /// distinguishable, the same way the sequence number is.
+    #[test]
+    fn the_crossfade_flag_round_trips_and_is_not_sticky() {
+        let mut b = zeroed();
+        let mut snap = Snapshot::default();
+
+        assert!(publish(&mut b, 0.0, &[stable()], true, false));
+        assert!(matches!(try_read(&b, &mut snap), ReadOutcome::Updated(_)));
+        assert!(snap.crossfade, "a crossfade publish must read back as one");
+
+        // A later ordinary publish must not leave the previous push's flag set — it is part
+        // of each publish's own payload, not a persistent mode.
+        assert!(publish(&mut b, 0.0, &[stable()], false, false));
+        assert!(matches!(try_read(&b, &mut snap), ReadOutcome::Updated(_)));
+        assert!(!snap.crossfade, "crossfade must not stick across an unrelated publish");
+    }
+
+    /// The `fast_ramp` flag — see [`ControlBlock::fast_ramp`]'s doc — round-trips independently of
+    /// `crossfade` and the coefficients, and is not sticky across an unrelated publish, the
+    /// same shape as [`the_crossfade_flag_round_trips_and_is_not_sticky`].
+    #[test]
+    fn the_fast_ramp_flag_round_trips_and_is_not_sticky() {
+        let mut b = zeroed();
+        let mut snap = Snapshot::default();
+
+        assert!(publish(&mut b, 0.0, &[stable()], false, true));
+        assert!(matches!(try_read(&b, &mut snap), ReadOutcome::Updated(_)));
+        assert!(snap.fast_ramp, "a fast-ramp publish must read back as one");
+        assert!(!snap.crossfade, "fast_ramp and crossfade are independent flags");
+
+        assert!(publish(&mut b, 0.0, &[stable()], false, false));
+        assert!(matches!(try_read(&b, &mut snap), ReadOutcome::Updated(_)));
+        assert!(!snap.fast_ramp, "fast_ramp must not stick across an unrelated publish");
     }
 
     /// A zeroed mapping is not a valid block. This is the state the memory is in before the
@@ -420,7 +517,7 @@ mod tests {
     #[test]
     fn foreign_or_future_layouts_are_refused() {
         let mut b = zeroed();
-        publish(&mut b, 0.0, &[stable()]);
+        publish(&mut b, 0.0, &[stable()], false, false);
 
         b.magic = 0xDEAD_BEEF;
         let mut snap = Snapshot::default();
@@ -436,7 +533,7 @@ mod tests {
     #[test]
     fn torn_reads_are_detected_not_half_applied() {
         let mut b = zeroed();
-        publish(&mut b, -3.0, &[stable()]);
+        publish(&mut b, -3.0, &[stable()], false, false);
         let mut snap = Snapshot::default();
 
         // Writer mid-update: seq is odd.
@@ -471,9 +568,9 @@ mod tests {
                 while !stop.load(Ordering::Relaxed) {
                     let mut g = block.lock().unwrap();
                     if flip {
-                        publish(&mut g, -3.0, &[a, a, a]);
+                        publish(&mut g, -3.0, &[a, a, a], false, false);
                     } else {
-                        publish(&mut g, -9.0, &[z]);
+                        publish(&mut g, -9.0, &[z], false, false);
                     }
                     flip = !flip;
                 }
@@ -512,7 +609,7 @@ mod tests {
         for u in unstable {
             assert!(!u.is_safe(), "accepted an unstable filter: {u:?}");
             let mut b = zeroed();
-            assert!(!publish(&mut b, 0.0, &[u]), "published an unstable filter: {u:?}");
+            assert!(!publish(&mut b, 0.0, &[u], false, false), "published an unstable filter: {u:?}");
         }
         // A real filter sits comfortably inside the triangle.
         assert!(stable().is_safe());
@@ -529,7 +626,7 @@ mod tests {
             assert!(!c.is_safe(), "accepted a1 = {bad}");
 
             let mut b = zeroed();
-            assert!(!publish(&mut b, bad, &[stable()]), "published preamp = {bad}");
+            assert!(!publish(&mut b, bad, &[stable()], false, false), "published preamp = {bad}");
         }
     }
 
@@ -538,7 +635,7 @@ mod tests {
     #[test]
     fn the_reader_does_not_trust_the_writer() {
         let mut b = zeroed();
-        publish(&mut b, 0.0, &[stable()]);
+        publish(&mut b, 0.0, &[stable()], false, false);
         let mut snap = Snapshot::default();
 
         // A count past the end of the array: the one field that could make the reader walk
@@ -564,7 +661,7 @@ mod tests {
     #[test]
     fn a_failed_read_does_not_disturb_the_previous_snapshot() {
         let mut b = zeroed();
-        publish(&mut b, -6.0, &[stable()]);
+        publish(&mut b, -6.0, &[stable()], false, false);
         let mut snap = Snapshot::default();
         assert!(matches!(try_read(&b, &mut snap), ReadOutcome::Updated(_)));
         let good = snap;
@@ -583,12 +680,12 @@ mod tests {
         let mut b = zeroed();
         let mut snap = Snapshot::default();
 
-        publish(&mut b, -1.0, &[stable()]);
+        publish(&mut b, -1.0, &[stable()], false, false);
         let ReadOutcome::Updated(first) = try_read(&b, &mut snap) else { panic!("expected Updated") };
         let ReadOutcome::Updated(again) = try_read(&b, &mut snap) else { panic!("expected Updated") };
         assert_eq!(first, again, "an unchanged block must report the same sequence");
 
-        publish(&mut b, -2.0, &[stable()]);
+        publish(&mut b, -2.0, &[stable()], false, false);
         let ReadOutcome::Updated(second) = try_read(&b, &mut snap) else { panic!("expected Updated") };
         assert_ne!(first, second, "a new publish must be distinguishable");
     }
@@ -597,8 +694,8 @@ mod tests {
     #[test]
     fn shrinking_the_set_clears_the_tail() {
         let mut b = zeroed();
-        publish(&mut b, 0.0, &[stable(), stable(), stable()]);
-        publish(&mut b, 0.0, &[stable()]);
+        publish(&mut b, 0.0, &[stable(), stable(), stable()], false, false);
+        publish(&mut b, 0.0, &[stable()], false, false);
 
         let mut snap = Snapshot::default();
         assert!(matches!(try_read(&b, &mut snap), ReadOutcome::Updated(_)));
