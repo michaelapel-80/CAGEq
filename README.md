@@ -35,6 +35,28 @@ filters without guardrails risks digital clipping or jarring level jumps.
 * **Auto-fit and hand-tuned filters stay separate but merge cleanly at runtime** — adjusting your
   own bands never loses or fights the underlying AutoEq correction.
 
+## Built-in instrumentation
+
+CAGEq ships its own oscilloscope, stereo vectorscope, and spectrum analyzer, all fed by a live
+WASAPI loopback capture of the actual (post-EQ) output — not mockups, not a generic VU meter.
+
+The spectrum analyzer in particular holds up against dedicated analyzer tools:
+
+* **Log-frequency binned**, not the linear-Hz plot most tools default to — equal screen distance
+  means equal perceived pitch, so an octave looks like an octave whether it's 55–110 Hz or
+  5.5–11 kHz.
+* **Real peak detection, not "loudest bin wins."** Peaks are picked by prominence against their
+  local valleys (so a shoulder bump riding on a bigger resonance doesn't count), gated against
+  the frame's own noise floor, and folded by harmonic series — a fundamental's own overtone
+  ladder doesn't clutter the readout competing for its own slot. Reported frequency is refined to
+  sub-bin precision by parabolic interpolation, not just "whichever of ~240 fixed bins is tallest."
+* **Peaks keep their identity from frame to frame** instead of being recomputed from nothing on
+  every tick, so the numeric readout stays legible instead of flickering every time a peak briefly
+  dips below a detection threshold.
+
+All three views share a CRT-phosphor-style persistence/bloom renderer — a trailing glow that
+decays at a real, tunable rate, closer to a real analog scope's look than a plain clear-and-redraw.
+
 ## Safety first
 
 CAGEq follows "no sound beats wrong sound": any inconsistency drops the system into a defined,

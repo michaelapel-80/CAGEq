@@ -3401,6 +3401,13 @@ function App() {
                 void openUrl("https://github.com/jaakkopasanen/AutoEq").catch(() => {});
               }}
             />,
+            <a
+              href="https://www.gnu.org/licenses/gpl-3.0.html"
+              onClick={(e) => {
+                e.preventDefault();
+                void openUrl("https://www.gnu.org/licenses/gpl-3.0.html").catch(() => {});
+              }}
+            />,
           ]}
         />
       </footer>

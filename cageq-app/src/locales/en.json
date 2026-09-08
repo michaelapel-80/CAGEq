@@ -332,6 +332,6 @@
   },
 
   "footer": {
-    "text": "Headphone corrections and target curves from <0>AutoEq</0> by Jaakko Pasanen, MIT-licensed. CAGEq is an independent project, not affiliated with AutoEq."
+    "text": "Headphone corrections and target curves from <0>AutoEq</0> by Jaakko Pasanen, MIT-licensed. CAGEq is an independent project, not affiliated with AutoEq — itself licensed under the <1>GNU GPL v3.0 or later</1>."
   }
 }
