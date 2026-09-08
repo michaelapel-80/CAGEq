@@ -12,6 +12,9 @@ and the click-free live editing around it are what make either one actually usab
 Loosely inspired by [AQUA](https://github.com/h39s/AQUA), but an independent implementation with
 a deliberately different stack — not a fork, no shared code.
 
+![The main correction view: an EQ curve against a live post-EQ spectrum backdrop, level/LUFS
+meters, filter-band editor, and A/B/Dry comparison controls.](docs/screenshot.png)
+
 ## The problem
 
 Getting a good headphone correction curve is a solved problem (thanks, AutoEq). Comparing curves
