@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CAGEq",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "identifier": "com.cageq.desktop",
   "build": {
     "beforeDevCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/check-apo-staleness.ps1 & npm run dev",

@@ -8,7 +8,9 @@ PyInstaller (numpy/scipy/matplotlib/autoeq), so the target machine needs **no Py
 ## For end users (one-click)
 
 1. **Run `CAGEq_<version>_x64-setup.exe`.** It installs CAGEq and bootstraps the
-   Microsoft Edge WebView2 runtime if missing (Windows 11 already has it).
+   Microsoft Edge WebView2 runtime if missing (Windows 11 already has it). The installer isn't
+   code-signed (no certificate), so Windows SmartScreen will show an "unknown publisher"
+   warning the first time — "More info" → "Run anyway" to proceed.
 2. Launch CAGEq and pick your output device. CAGEq needs an audio engine attached to that
    device before **Apply** does anything audible (filter.md §5.3c) — **installing Equalizer
    APO is no longer required**, there are two options:

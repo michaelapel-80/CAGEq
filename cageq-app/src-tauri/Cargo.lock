@@ -354,11 +354,11 @@ dependencies = [
 
 [[package]]
 name = "cageq-apo"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "cageq-apo-backend"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "cageq-apo",
  "cageq-backend",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-app"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "cageq-apo-backend",
  "cageq-core",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-backend"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "thiserror 2.0.19",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-config-writer"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "cageq-backend",
  "serde",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "cageq-backend",
  "cageq-config-writer",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-monitor"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "ebur128",
  "realfft",
@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-sidecar"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-watchdog"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "cageq-sidecar",
  "serde_json",

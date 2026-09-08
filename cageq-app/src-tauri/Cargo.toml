@@ -1,6 +1,6 @@
 [package]
 name = "cageq-app"
-version = "0.7.0"
+version = "0.8.0"
 description = "CAGEq — loudness-neutral A/B/Dry headphone EQ correction"
 authors = ["Michael Apel"]
 license = "GPL-3.0-or-later"
