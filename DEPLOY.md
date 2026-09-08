@@ -36,6 +36,13 @@ APO" below). Launching CAGEq twice focuses the existing window (single instance)
 
 ## For maintainers (building the installer)
 
+**Automated:** pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which does exactly the steps below on a `windows-2022` GitHub-hosted runner and publishes the
+resulting installer to that tag's Release. `workflow_dispatch` runs the same pipeline manually
+(installer available as a workflow artifact) without publishing anything, for testing the
+pipeline itself. What follows is that same process by hand — useful for local testing, or if the
+automated one ever needs debugging.
+
 The frozen sidecar (~177 MB) is a build artifact — gitignored, not committed. Rebuild it
 whenever `sidecar_dsp.py` or its deps change, then build the app:
 

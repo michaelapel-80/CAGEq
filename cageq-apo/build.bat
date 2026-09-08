@@ -27,7 +27,17 @@ rem rather than RUSTFLAGS so the flag applies to this crate alone.
 if errorlevel 1 ( echo [cageq-apo] cargo build failed & exit /b 1 )
 
 rem 2) The C++ shim, linked against it.
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
+rem
+rem Located via vswhere rather than a hardcoded edition path (this used to hardcode
+rem ...\2022\Community\..., which only exists if that happens to be the installed edition —
+rem GitHub Actions' windows-2022/windows-latest runners ship Enterprise, so a fixed
+rem Community path fails there outright, silently to anyone who hadn't hit it locally).
+rem vswhere ships with every VS installer regardless of edition, at this fixed path.
+set VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe
+if not exist "%VSWHERE%" ( echo [cageq-apo] vswhere.exe not found at "%VSWHERE%" - is Visual Studio installed? & exit /b 1 )
+for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSINSTALL=%%i
+if not defined VSINSTALL ( echo [cageq-apo] no VS install found with the C++ toolset - install the "Desktop development with C++" workload & exit /b 1 )
+call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 ( echo [cageq-apo] vcvars64 failed & exit /b 1 )
 
 if not exist build mkdir build
