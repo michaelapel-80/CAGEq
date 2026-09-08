@@ -475,9 +475,11 @@ struct ApoSetupDto {
     /// A registration can point at a deleted file: that looks fine in the registry and fails
     /// silently at load, so the UI has to tell it apart from "not registered".
     dll_present: bool,
-    /// Whether the registered DLL is byte-for-byte the one shipped with this build — `false`
-    /// means an app update shipped a newer `CAGEqApo.dll` that was never installed, so the old
-    /// one is still what's actually running. See `SetupStatus::dll_current`'s own doc.
+    /// Whether what is registered is the up-to-date DLL at the expected install location —
+    /// `false` either because an app update shipped a newer `CAGEqApo.dll` that was never
+    /// installed (the old one is still what's actually running), or because the registration
+    /// points somewhere other than the expected install path entirely (silently never loads at
+    /// all — see `SetupStatus::dll_current`'s own doc for exactly how that happens).
     dll_current: bool,
     /// `DisableProtectedAudioDG`. Without it the APO cannot load at all.
     gate_open: bool,
@@ -501,6 +503,16 @@ struct ApoSetupDto {
     /// Whether the elevated helper is actually installed beside the app. Without it no step
     /// can be performed, and saying so beats a failure per button press.
     helper_available: bool,
+    /// What the *live* control channel for `endpoint` looks like right now, when it's worth
+    /// asking at all — `null` with no endpoint selected, or whenever CAGEq's own engine isn't
+    /// even the active backend (there is no CAGEq channel to ask about then). Everything above
+    /// this field comes from `HKLM` alone, which is exactly the blind spot this closes: a
+    /// registration and an attachment can both read as entirely correct there while the DLL
+    /// silently fails to load — see `cageq_apo_backend::setup::LiveChannelStatus`'s own doc for
+    /// the real bug that motivated this. One of `"no_channel"` (nothing playing, *or* the APO
+    /// failed to load — the UI cannot tell those apart on its own, only the user knows whether
+    /// audio is expected to be flowing right now), `"stalled"`, or `"processing"`.
+    live_channel: Option<&'static str>,
 }
 
 /// Read the APO setup state. No elevation, no prompt.
@@ -522,6 +534,21 @@ fn apo_setup_status(
     } else {
         false
     };
+    // Only meaningful when CAGEq's own engine is actually the active backend — there is no
+    // CAGEqApo control channel to ask about otherwise, and checking anyway would just report
+    // "no channel" for a reason that has nothing to do with whether the APO itself is healthy.
+    // Takes up to `HEARTBEAT_SAMPLE_WINDOW` to answer (a live heartbeat comparison, not a
+    // one-shot read — see that constant's own doc), so this only runs when it can say something
+    // real.
+    let live_channel = if active_backend_is_apo {
+        endpoint.as_deref().map(|e| match setup::live_channel_status(e) {
+            setup::LiveChannelStatus::NoChannel => "no_channel",
+            setup::LiveChannelStatus::Stalled => "stalled",
+            setup::LiveChannelStatus::Processing => "processing",
+        })
+    } else {
+        None
+    };
     ApoSetupDto {
         registered_dll: s.registered_dll.as_ref().map(|p| p.display().to_string()),
         dll_present: s.dll_present,
@@ -534,6 +561,7 @@ fn apo_setup_status(
         next_step: next.as_ref().map(|a| a.argv().join(" ")),
         next_step_description: next.as_ref().map(|a| a.describe()),
         helper_available: apo_helper_path(&app).is_some(),
+        live_channel,
     }
 }
 

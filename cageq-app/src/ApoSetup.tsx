@@ -36,6 +36,14 @@ export type ApoSetupStatus = {
   next_step: string | null;
   next_step_description: string | null;
   helper_available: boolean;
+  /** What the *live* control channel looks like right now — `null` with no endpoint selected,
+   *  or whenever CAGEq's own engine isn't the active backend at all. Everything else in this
+   *  type comes from the registry alone, which is exactly the blind spot this closes: a
+   *  registration and an attachment can both read as entirely correct there while the DLL
+   *  silently fails to load (see the Rust side's `LiveChannelStatus` for the real incident that
+   *  motivated this) — `"no_channel"` also just means nothing is playing right now, which the
+   *  UI cannot tell apart from that failure on its own. */
+  live_channel: "no_channel" | "stalled" | "processing" | null;
 };
 
 type Props = {
@@ -104,8 +112,17 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  // While open, keep polling rather than fetching once — `live_channel` is the reason: it's a
+  // live heartbeat comparison (see the Rust side's `LiveChannelStatus`), so a one-shot fetch on
+  // open would freeze whatever it happened to catch instead of letting someone watch it flip to
+  // "processing" the moment they start playback, which is exactly the confirmation this field
+  // exists to give. Stops the moment the dialog closes — nobody is looking, and every tick costs
+  // a live heartbeat sample.
   useEffect(() => {
-    if (open) void refresh();
+    if (!open) return;
+    void refresh();
+    const id = window.setInterval(() => void refresh(), 1500);
+    return () => window.clearInterval(id);
   }, [open, refresh]);
 
   // Attaching is inherently per-device, so there is nothing to configure without one selected
@@ -202,7 +219,16 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
               {status === null ? (
                 <p>{t("apoSetup.loading")}</p>
               ) : settled ? (
-                <p className="ok">{t("apoSetup.active", { device: endpointName ?? "" })}</p>
+                <>
+                  <p className="ok">{t("apoSetup.active", { device: endpointName ?? "" })}</p>
+                  {/* The registry-only checks above can all read "done" while the DLL silently
+                      failed to load — see `ApoSetupStatus.live_channel`'s own doc. This is the
+                      one thing on this whole card that reflects the *live* channel rather than
+                      HKLM, so it's shown even in the otherwise-quiet settled state. */}
+                  {status.live_channel === "processing" && <p className="ok">{t("apoSetup.liveProcessing")}</p>}
+                  {status.live_channel === "stalled" && <p className="warn">{t("apoSetup.liveStalled")}</p>}
+                  {status.live_channel === "no_channel" && <p>{t("apoSetup.liveNoChannel")}</p>}
+                </>
               ) : (
                 <>
                   <p>{t("apoSetup.intro")}</p>
@@ -249,6 +275,16 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
                 is — the whole point of pinning it here rather than wherever the text above
                 happens to end. */}
             <div className="row apo-modal-actions" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
+              {/* Every registry-level check can read "done" while the live channel never came
+                  up (see `live_channel`'s own doc) — `settled` alone offers no way back into the
+                  checklist above, so this is the direct fix rather than making someone detach
+                  and reattach to get there. `register` is always safe to re-run: it unconditionally
+                  re-copies the DLL and re-registers, whatever state it finds. */}
+              {status !== null && settled && status.live_channel !== null && status.live_channel !== "processing" && (
+                <button type="button" disabled={busy || !status.helper_available} onClick={() => void run("register")}>
+                  {busy ? t("apoSetup.working") : t("apoSetup.retryRegister")}
+                </button>
+              )}
               {status !== null && settled && (
                 <button type="button" disabled={busy} onClick={() => void run(`detach ${endpointId}`)}>
                   {t("apoSetup.detach")}
