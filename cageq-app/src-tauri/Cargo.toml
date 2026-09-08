@@ -1,8 +1,9 @@
 [package]
 name = "cageq-app"
 version = "0.7.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "CAGEq — loudness-neutral A/B/Dry headphone EQ correction"
+authors = ["Michael Apel"]
+license = "GPL-3.0-or-later"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

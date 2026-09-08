@@ -28,3 +28,4 @@ members = [
 # product/bundle version that `getVersion()` surfaces in the UI). Bump all together per release.
 [workspace.package]
 version = "0.7.0"
+license = "GPL-3.0-or-later"
