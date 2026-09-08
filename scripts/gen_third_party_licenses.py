@@ -20,11 +20,26 @@ Run from the repo root, in order:
     (cd cageq-app && npx --yes license-checker --production --json \\
         --out ../npm_licenses.json)
 
-    # 3. Python — the sidecar's own venv, not the system Python.
-    cd cageq-sidecar && .venv/Scripts/python -m pip install pip-licenses
-    .venv/Scripts/python -m piplicenses --format=json --with-license-file \\
-        --no-license-path --with-urls > ../python_licenses.json
-    cd ..
+    # 3. Python — install pip-licenses somewhere OTHER than the sidecar's own venv (a
+    #    scratch/system Python) and point it at that venv with --python, rather than
+    #    installing into it directly. Installing pip-licenses into the sidecar's venv itself
+    #    once genuinely contaminated a real release build: it drags in prettytable + wcwidth
+    #    + tomli as its own dependencies, PyInstaller's analysis doesn't know those weren't
+    #    really autoeq's, and they silently rode along into the frozen sidecar.exe.
+    python -m pip install --quiet pip-licenses   # any Python except the sidecar's venv
+    python -m piplicenses --python cageq-sidecar/.venv/Scripts/python.exe --with-system \\
+        --format=json --with-license-file --no-license-path --with-urls \\
+        > python_licenses.json
+    # --with-system: pip-licenses hides "system" packages (pip, setuptools, ...) by default.
+    # setuptools genuinely ships in the frozen output (confirmed via _internal/setuptools-
+    # *.dist-info and xref-cageq-sidecar.html — apparently a NumPy/PyInstaller compatibility
+    # shim); pip itself doesn't and is filtered back out below, in PY_BUILD_ONLY.
+
+    # Cross-check periodically that this list still matches what actually gets bundled
+    # (PyInstaller's static analysis can drop things pip installed but nothing imports, the
+    # way it does for matplotlib's own dependency chain — see PY_MATPLOTLIB_ONLY below):
+    #   ./scripts/build-sidecar.ps1
+    #   grep -c '"<package>' cageq-sidecar/build/cageq-sidecar/xref-cageq-sidecar.html
 
     # 4. Merge.
     python scripts/gen_third_party_licenses.py
@@ -52,11 +67,21 @@ NPM_SHIPPED = {
     "scheduler", "use-sync-external-store",
 }
 
-# PyInstaller's own build-time dependencies (Windows PE analysis, packaging
-# metadata, etc.) — needed to *produce* the frozen sidecar.exe, not present or
-# executing inside it. PyInstaller itself stays (its bootloader is compiled
-# into the output — see the note attached to it below).
-PY_BUILD_ONLY = {"altgraph", "pefile", "pyinstaller-hooks-contrib", "pywin32-ctypes"}
+# Two different reasons a venv-installed package doesn't end up in the frozen sidecar.exe,
+# both verified against a real build (`grep`-ing build/cageq-sidecar/xref-cageq-sidecar.html
+# and checking sidecar/cageq-sidecar/_internal directly — pip list / requirements.txt alone
+# describe the venv, not what PyInstaller actually traced and bundled):
+#
+# * PyInstaller's own build-time dependencies (Windows PE analysis, packaging metadata) —
+#   needed to *produce* cageq-sidecar.exe, never imported by it. PyInstaller itself stays
+#   (its bootloader is compiled into the output — see the note attached to it below).
+# * matplotlib's own dependency chain — build-sidecar.ps1 explicitly excludes matplotlib
+#   itself (sidecar_dsp.py stubs it in sys.modules before `import autoeq`, so it's never
+#   really imported, but static analysis can't always see through that trick), and once
+#   matplotlib is gone, nothing else reaches contourpy/cycler/fonttools/kiwisolver/
+#   python-dateutil/six either — they exist purely to serve it.
+PY_BUILD_ONLY = {"altgraph", "pefile", "pyinstaller-hooks-contrib", "pywin32-ctypes", "pip"}
+PY_MATPLOTLIB_ONLY = {"matplotlib", "contourpy", "cycler", "fonttools", "kiwisolver", "python-dateutil", "six"}
 
 PYINSTALLER_NOTE = (
     "PyInstaller's bootloader (not its build-time tooling) is compiled into "
@@ -163,7 +188,7 @@ def python_section():
     groups = {}
     for pkg in data:
         name = pkg["Name"]
-        if name in PY_BUILD_ONLY:
+        if name in PY_BUILD_ONLY or name in PY_MATPLOTLIB_ONLY:
             continue
         text = pkg.get("LicenseText") or ""
         key = text if text.strip() else f"__nolicensetext__:{pkg['License']}"
