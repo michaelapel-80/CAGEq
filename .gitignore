@@ -13,3 +13,10 @@ Thumbs.db
 # Staged APO artifacts for bundling — built by cageq-app/scripts/build-apo.ps1, same as the
 # frozen sidecar. Build outputs, not sources.
 cageq-app/src-tauri/apo/
+
+# Internal architecture/decision log (ADD) — working doc for the maintainer, not meant for a
+# public repo. Kept on disk, deliberately untracked; its own history was scrubbed from this
+# repo (see the commit removing it from tracking). The ~99 "filter.md §X.Y" references left in
+# code comments are breadcrumbs to this file for local development, not links a public reader
+# needs to follow.
+/filter.md
