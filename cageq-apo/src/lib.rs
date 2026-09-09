@@ -63,7 +63,7 @@ use std::ffi::c_void;
 /// Compared against `install_dir()`'s own `CAGEqApo.version` marker file (written by
 /// `register`, read by `status` — see both their own docs) instead of the DLL's bytes, so
 /// staleness now means "an intentional version bump", not "recompiled".
-pub const APO_VERSION: u32 = 4;
+pub const APO_VERSION: u32 = 5;
 
 /// Per-instance state. One of these exists per APO instance (per endpoint, per mode),
 /// created at `LockForProcess` and destroyed at `UnlockForProcess`.
@@ -122,15 +122,12 @@ impl CageqApo {
             // sum into a real spike (measured, on a real correction, at +22 dB above both
             // endpoints), which a level crossfade between two already-valid signals cannot.
             //
-            // `snap.fast_ramp` — see `control::ControlBlock::fast_ramp`'s doc — routes a push
-            // *within* an active isolate sweep through `apply_coeffs_fast` instead: the plain
-            // ramp's distance scaling reads the narrow bandpass's own frequency move as a huge
-            // change and hands back a ramp far longer than the gap between drag ticks, so the
-            // coefficients never catch up to the pointer for the length of the drag.
+            // Otherwise `apply_coeffs`'s own ramp handles the timing on its own — see
+            // `dsp::Cascade::start_ramp`'s doc: a request arriving while the cascade is already
+            // mid-ramp truncates to the fixed floor automatically, no separate signal needed
+            // from the writer to say "this one's urgent."
             let ok = if snap.crossfade {
                 self.cascade.start_crossfade(&snap.coeffs[..snap.band_count], snap.preamp_db)
-            } else if snap.fast_ramp {
-                self.cascade.apply_coeffs_fast(&snap.coeffs[..snap.band_count], snap.preamp_db)
             } else {
                 self.cascade.apply_coeffs(&snap.coeffs[..snap.band_count], snap.preamp_db)
             };

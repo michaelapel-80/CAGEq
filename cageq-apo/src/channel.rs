@@ -259,26 +259,14 @@ impl ControlChannel {
     /// plain coefficient ramp; the writer (`cageq-apo-backend::push_live`) sets it exactly for
     /// a §5.2 isolate boundary crossing.
     ///
-    /// `fast_ramp` — see [`crate::control::ControlBlock::fast_ramp`]'s doc — tells the reading
-    /// side to apply this update via [`crate::dsp::Cascade::apply_coeffs_fast`] (the fixed
-    /// [`crate::dsp`]-floor ramp) instead of the distance-scaled `apply_coeffs`; the writer sets
-    /// it for every push *within* an active isolate sweep (mutually exclusive with `crossfade`
-    /// in practice, both never true at once).
-    ///
     /// Returns `false` without publishing if the set would be refused on the reading side
     /// (see [`crate::control::publish`]), so a writer bug surfaces here rather than as an
     /// update that silently never applies.
-    pub fn publish(
-        &self,
-        preamp_db: f64,
-        coeffs: &[crate::control::RawCoeffs],
-        crossfade: bool,
-        fast_ramp: bool,
-    ) -> bool {
+    pub fn publish(&self, preamp_db: f64, coeffs: &[crate::control::RawCoeffs], crossfade: bool) -> bool {
         // SAFETY: the view is ours and correctly sized; `control::publish` is the only writer
         // and orders its stores so a concurrent reader sees a consistent block or none.
         let block = unsafe { &mut *self.view };
-        crate::control::publish(block, preamp_db, coeffs, crossfade, fast_ramp)
+        crate::control::publish(block, preamp_db, coeffs, crossfade)
     }
 
     /// The APO's heartbeat counter, so a writer can tell whether audio is actually being
@@ -361,7 +349,7 @@ mod tests {
         let stable = RawCoeffs { b0: 1.02, b1: -1.9, b2: 0.89, a1: -1.9, a2: 0.91 };
         // SAFETY: single-threaded test; the view is ours and correctly sized.
         let block = unsafe { &mut *(ch.view) };
-        assert!(control::publish(block, -6.0, &[stable, stable], false, false));
+        assert!(control::publish(block, -6.0, &[stable, stable], false));
 
         match control::try_read(ch.block(), &mut snap) {
             ReadOutcome::Updated(_) => {}
@@ -379,7 +367,7 @@ mod tests {
         let id = test_endpoint();
         let Some(first) = ControlChannel::create(&id) else { return };
         let stable = RawCoeffs { b0: 1.02, b1: -1.9, b2: 0.89, a1: -1.9, a2: 0.91 };
-        assert!(control::publish(unsafe { &mut *first.view }, -9.0, &[stable], false, false));
+        assert!(control::publish(unsafe { &mut *first.view }, -9.0, &[stable], false));
 
         // A second attach while the first is still open maps the same section.
         let Some(second) = ControlChannel::create(&id) else { return };

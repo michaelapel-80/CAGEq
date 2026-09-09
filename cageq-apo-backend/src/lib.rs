@@ -237,17 +237,18 @@ impl CageqApoBackend {
             entry.was_isolate = is_isolate;
             (out, crossfade)
         };
-        // Every push *within* an active isolate sweep (not itself a boundary crossing) ramps at
-        // the fixed `RAMP_MS` floor instead of `apply_coeffs`'s distance-scaled duration — see
-        // `cageq_apo::dsp::Cascade::apply_coeffs_fast`'s own doc: that scaling reads the
-        // sweep's narrow bandpass moving even a little as a huge change, so real drags (ticking
-        // roughly every 70 ms) kept landing 100-300 ms ramps that never finished before the
-        // next tick replaced them — the coefficients spent the whole gesture chasing the
-        // pointer instead of tracking it (measured directly: up to ~18x behind — see
-        // `a_coefficient_ramp_falls_behind_the_pointer_during_a_real_isolate_drag` in
-        // `cageq-apo::dsp`, replaying a real captured drag). The fixed 8 ms floor comfortably
-        // finishes within a ~70 ms tick gap while still softening the step against a hard click.
-        let fast_ramp = is_isolate && !crossfade;
+        // Every push *within* an active isolate sweep (not itself a boundary crossing) is a
+        // plain `apply_coeffs` call, same as any other in-place edit — `Cascade::start_ramp`
+        // handles the timing on its own (see its own doc): a request arriving within
+        // `GESTURE_GAP_MS` of the last one truncates to the `RAMP_MS` floor automatically, no
+        // signal needed from here to say "this one's part of a fast gesture." A narrow, high-Q
+        // isolate bandpass moving even a little used to read as a huge change on the plain
+        // ramp's distance-scaled duration, so real drags (ticking roughly every 70 ms) kept
+        // landing 100-300 ms ramps that never finished before the next tick replaced them — the
+        // coefficients spent the whole gesture chasing the pointer instead of tracking it
+        // (measured directly: up to ~18x behind — see `cageq-apo::dsp`'s
+        // `set_bands_tracks_the_pointer_closely_through_a_real_isolate_drag`, replaying a real
+        // captured drag).
         let coeffs: Vec<RawCoeffs> = assigned
             .iter()
             .map(|slot| {
@@ -269,7 +270,7 @@ impl CageqApoBackend {
         // config file was written either way, which is the durable record of what the user
         // asked for, but the caller decides whether a refusal is worth surfacing (`apply_one`
         // does).
-        let published = channel.publish(cfg.preamp_db, &coeffs, crossfade, fast_ramp);
+        let published = channel.publish(cfg.preamp_db, &coeffs, crossfade);
         Ok(if published { PushOutcome::Published } else { PushOutcome::Refused })
     }
 }
@@ -867,21 +868,18 @@ mod tests {
         assert_eq!(snap.band_count, 0, "the safe state itself must still be exactly zero bands");
     }
 
-    /// **The bug this guards**: `apply_coeffs`'s ramp is sized against how big the *response
-    /// curve* changed, and a narrow §5.2 isolate bandpass moving even a little registers as a
-    /// huge change on that metric — real drags kept landing 100-300 ms ramps against a ~70 ms
-    /// tick cadence, so the coefficients spent the whole gesture chasing the pointer rather than
-    /// tracking it (see `cageq_apo::dsp`'s
-    /// `a_coefficient_ramp_falls_behind_the_pointer_during_a_real_isolate_drag`). Every push
-    /// *within* an active isolate sweep must instead set `fast_ramp`, ramping at the fixed
-    /// `RAMP_MS` floor rather than the distance-scaled duration — but only there: entering or
-    /// leaving isolate must still crossfade, and an ordinary edit must still use the plain,
-    /// distance-scaled ramp.
+    /// End-to-end through the real wire: entering and leaving the §5.2 isolate audition must
+    /// cross the wire as a crossfade; a continuation of the same drag (same slot, nearby
+    /// frequency) and an ordinary edit must not. (What a continuation's ramp actually *does*
+    /// with its timing — truncating to the `RAMP_MS` floor instead of chasing the
+    /// distance-scaled duration — is `cageq_apo::dsp::Cascade::start_ramp`'s own concern now,
+    /// decided entirely from its own recent-request history with no signal needed from here;
+    /// see that method's own doc and `set_bands_tracks_the_pointer_closely_through_a_real_isolate_drag`.)
     #[test]
-    fn an_isolate_drag_continuation_ramps_fast_not_distance_scaled() {
-        const EP_FAST_RAMP: &str = "{99990004-0004-0004-0004-000000000004}";
-        let (backend, _dir) = temp_backend("isolate-drag-is-fast-ramp");
-        let Some(channel) = ControlChannel::create(EP_FAST_RAMP) else {
+    fn isolate_boundary_crossings_cross_the_wire_as_a_crossfade() {
+        const EP_ISOLATE_WIRE: &str = "{99990004-0004-0004-0004-000000000004}";
+        let (backend, _dir) = temp_backend("isolate-boundary-wire");
+        let Some(channel) = ControlChannel::create(EP_ISOLATE_WIRE) else {
             eprintln!("skipping: could not create a Global\\ section (needs SeCreateGlobalPrivilege)");
             return;
         };
@@ -889,36 +887,30 @@ mod tests {
         let mut snap = cageq_apo::control::Snapshot::default();
 
         let isolate_at = |freq_hz: f64| DeviceConfig {
-            device: EP_FAST_RAMP.to_string(),
+            device: EP_ISOLATE_WIRE.to_string(),
             preamp_db: 0.0,
             filters: vec![Filter { kind: FilterType::Bandpass, freq_hz, gain_db: 0.0, q: 8.0 }],
         };
 
-        // Entering the audition crosses the boundary: crossfade, not fast-ramp.
+        // Entering the audition crosses the boundary.
         backend.apply(&[isolate_at(1000.0)]).unwrap();
         assert!(matches!(cageq_apo::control::try_read(channel.block(), &mut snap), cageq_apo::control::ReadOutcome::Updated(_)));
-        assert!(snap.crossfade, "entering isolate must still crossfade");
-        assert!(!snap.fast_ramp, "the boundary crossing itself must not also be fast-ramped");
+        assert!(snap.crossfade, "entering isolate must crossfade");
 
-        // A continuation of the same drag (same slot, nearby frequency): fast-ramp, not the
-        // distance-scaled ramp.
+        // A continuation of the same drag (same slot, nearby frequency) must not.
         backend.apply(&[isolate_at(1050.0)]).unwrap();
         assert!(matches!(cageq_apo::control::try_read(channel.block(), &mut snap), cageq_apo::control::ReadOutcome::Updated(_)));
         assert!(!snap.crossfade, "an in-drag continuation must not crossfade");
-        assert!(snap.fast_ramp, "an in-drag continuation must ramp at the fixed floor, not via the distance-scaled ramp");
 
-        // Leaving the audition crosses the boundary again: crossfade, not fast-ramp.
-        backend.apply(&[device(EP_FAST_RAMP, -6.0)]).unwrap();
+        // Leaving the audition crosses the boundary again.
+        backend.apply(&[device(EP_ISOLATE_WIRE, -6.0)]).unwrap();
         assert!(matches!(cageq_apo::control::try_read(channel.block(), &mut snap), cageq_apo::control::ReadOutcome::Updated(_)));
-        assert!(snap.crossfade, "leaving isolate must still crossfade");
-        assert!(!snap.fast_ramp, "the exit boundary crossing itself must not also be fast-ramped");
+        assert!(snap.crossfade, "leaving isolate must crossfade");
 
-        // An ordinary (non-isolate) edit: neither flag — the plain, distance-scaled ramp is
-        // still the right tool.
-        backend.apply(&[device(EP_FAST_RAMP, -3.0)]).unwrap();
+        // An ordinary (non-isolate) edit must not.
+        backend.apply(&[device(EP_ISOLATE_WIRE, -3.0)]).unwrap();
         assert!(matches!(cageq_apo::control::try_read(channel.block(), &mut snap), cageq_apo::control::ReadOutcome::Updated(_)));
         assert!(!snap.crossfade, "an ordinary edit must not crossfade");
-        assert!(!snap.fast_ramp, "an ordinary edit must still use the distance-scaled ramp");
     }
 
     /// The aggregate hash has to move whenever what is applied moves — including when a

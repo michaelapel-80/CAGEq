@@ -161,7 +161,7 @@ fn main() {
             }
         }
     }
-    if ch.publish(preamp_db, &coeffs, false, false) {
+    if ch.publish(preamp_db, &coeffs, false) {
         println!("published: preamp {preamp_db:.1} dB, {} band(s) @ {ASSUMED_RATE} Hz", coeffs.len());
 
         // Wait for the APO's verdict rather than assuming success. `publish` only checks what

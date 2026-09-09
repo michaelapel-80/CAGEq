@@ -122,6 +122,26 @@ const RAMP_RATE_DB_PER_SEC: f64 = 40.0;
 /// slow morph as unusable for A/B as an instant jump, just in the other direction).
 const RAMP_MAX_MS: f64 = 300.0;
 
+/// How long after a request [`Cascade::start_ramp`] still treats the *next* one as continuing
+/// the same gesture — truncated to [`RAMP_MS`] — rather than a fresh, standalone edit that earns
+/// its own full [`Cascade::ramp_ms_for`] duration.
+///
+/// **Why this exists at all, separately from `ramp_left > 0`.** Once a request truncates to the
+/// `RAMP_MS` floor, that ramp finishes in 8 ms — far sooner than the next tick of an ongoing
+/// drag (isolate: ~70 ms; an ordinary tone drag: ~17 ms), so `ramp_left` alone reads the cascade
+/// as settled again well before the gesture that is still moving the pointer actually ends. Left
+/// alone, that means every *other* tick lands back on the `ramp_left == 0` branch and gets handed
+/// a fresh full-length ramp it has no time to finish before the next tick retargets it anyway —
+/// reintroducing exactly the chase this mechanism exists to close, just on alternating ticks
+/// instead of every one (measured directly: 96% lag at some tick, replaying a real drag, with
+/// only the `ramp_left` check in place). This cooldown is refreshed by *every* request — first or
+/// truncated alike — so a continuing gesture stays in truncated mode for its whole duration, and
+/// only a genuine pause longer than this reads as the gesture actually ending.
+///
+/// Comfortably above both real cadences above (with headroom for scheduling jitter), short
+/// enough that a real pause is recognised almost immediately.
+const GESTURE_GAP_MS: f64 = 150.0;
+
 /// How long a crossfade to or from dry takes, in milliseconds.
 ///
 /// **Equalizer APO's own value, read from its GPL source** rather than inferred from a
@@ -309,6 +329,12 @@ pub struct Cascade {
     /// call from [`Cascade::ramp_ms_for`], not a fixed constant: a live-drag-sized nudge gets
     /// [`RAMP_MS`]'s floor, a whole-slot swap gets proportionally longer, up to [`RAMP_MAX_MS`].
     ramp_frames: u32,
+    /// Frames left before [`Cascade::start_ramp`] will treat the *next* request as a fresh,
+    /// standalone edit again rather than a continuation of the current gesture — see
+    /// [`GESTURE_GAP_MS`]'s own doc for why this has to outlive `ramp_left` itself.
+    cooldown_left: u32,
+    /// [`GESTURE_GAP_MS`] in frames, precomputed like `cross_fade_frames`/`dry_fade_frames`.
+    gesture_gap_frames: u32,
     /// Bands the target uses. Becomes `process_count` once a ramp completes.
     band_count: usize,
     /// Bands the sample loop actually walks. During a ramp this is the larger of the old and
@@ -385,14 +411,6 @@ pub struct Cascade {
     /// (cold) delay registers get a head start settling before they carry any weight in the
     /// output, rather than joining the fade already ringing.
     cross_preroll_left: u32,
-    /// A `start_crossfade` call that arrived while the *current* fade already carries real
-    /// weight (`cross_fade_left > 0`) — too late to repoint `coeffs2` in place without stepping
-    /// its contribution to the output instantly. Held here instead of applied immediately; the
-    /// frame the in-flight fade lands, [`Cascade::advance_cross`] starts a fresh crossfade
-    /// toward it. `None` when nothing is queued. `(band count, coefficients, preamp dB)` — a
-    /// fixed-size payload, not a second `Vec`, so queuing one costs nothing on the real-time
-    /// path.
-    pending_crossfade: Option<(usize, [Coeffs; MAX_BANDS], f64)>,
 }
 
 impl Cascade {
@@ -421,6 +439,8 @@ impl Cascade {
             // never divided against while ramp_left is 0, but kept a sane, in-range number
             // rather than 0 on principle.
             ramp_frames: ((RAMP_MS / 1000.0) * sample_rate).round().max(1.0) as u32,
+            cooldown_left: 0,
+            gesture_gap_frames: ((GESTURE_GAP_MS / 1000.0) * sample_rate).round().max(1.0) as u32,
             band_count: 0,
             process_count: 0,
             state: vec![BiquadState::default(); channels * MAX_BANDS],
@@ -450,35 +470,45 @@ impl Cascade {
             // exactly the same shape of transition.
             cross_fade_frames: ((DRY_FADE_MS / 1000.0) * sample_rate).round().max(1.0) as u32,
             cross_preroll_left: 0,
-            pending_crossfade: None,
         }
     }
 
-    /// Begin moving the coefficients towards `target`, paced by [`Cascade::ramp_ms_for`] —
-    /// [`RAMP_MS`] for a small change, longer for a large one, up to [`RAMP_MAX_MS`].
+    /// Begin moving the coefficients towards `target`. Every call lands immediately —
+    /// **nothing here ever defers or queues** — but how long the move takes to finish depends
+    /// on whether this is the first word on where it should go, or a continuation of a gesture
+    /// already under way:
     ///
-    /// Retargeting mid-ramp is fine and expected — a drag produces a stream of these — because
-    /// the new ramp starts from wherever the coefficients have actually reached, not from the
-    /// previous target. There is no discontinuity at a retarget.
+    ///   * If neither a ramp is in flight nor a request landed within [`GESTURE_GAP_MS`]
+    ///     (`self.cooldown_left == 0`), this is genuinely the *first* word, and gets paced by
+    ///     [`Cascade::ramp_ms_for`] — [`RAMP_MS`] for a small change, longer for a large one, up
+    ///     to [`RAMP_MAX_MS`]. A single, uninterrupted retune benefits from that smoothing.
+    ///   * Otherwise, this call is retargeting something already moving (or that only just
+    ///     finished moving, still within the same gesture) — not stating an original intent —
+    ///     and the channel's contract is to answer it *now*, not to keep smoothing towards
+    ///     whatever the previous request asked for. The remaining move is truncated to the fixed
+    ///     [`RAMP_MS`] floor, from wherever the coefficients have actually reached (not the
+    ///     previous target).
+    ///
+    /// **Why `cooldown_left`, not just `ramp_left > 0`.** A truncated ramp finishes in 8 ms —
+    /// far sooner than the next tick of an ongoing drag (isolate: ~70 ms; an ordinary tone drag:
+    /// ~17 ms) — so `ramp_left` alone reads the cascade as settled again well before the gesture
+    /// that is still moving the pointer actually ends. Checked alone, that reintroduces the
+    /// chase this exists to close on every *other* tick instead of every one: each lands back on
+    /// the "first request" branch and is handed a fresh full-length ramp it has no time to
+    /// finish before the next tick retargets it anyway (measured directly: 96% lag at some tick,
+    /// replaying a real drag, with only `ramp_left` checked). `cooldown_left` is refreshed by
+    /// every request, first or truncated alike, so a continuing gesture stays in truncated mode
+    /// for its whole length — a narrow high-Q retune otherwise reads as a *large* change on
+    /// `ramp_distance_db` even for a small move, which is what made this matter in the first
+    /// place: real isolate-drag ticks (~70 ms apart) kept landing 100-300 ms ramps, falling up to
+    /// ~18x behind the pointer over the length of a drag before this fix
+    /// (`set_bands_tracks_the_pointer_closely_through_a_real_isolate_drag`). Real-time
+    /// responsiveness wins over how smooth any one still-in-flight transition looks.
+    ///
+    /// There is no discontinuity at a retarget either way: the ramp always starts from wherever
+    /// the coefficients currently sit, never from the previous target.
     fn start_ramp(&mut self, target: &[Coeffs], new_count: usize, preamp_db: f64) {
-        self.point_ramp_at(target, new_count, preamp_db);
-        // Sized to how different `start` and `target` actually are, not a fixed length — see
-        // this method's own doc for why a whole-slot swap needs far more than a live drag's
-        // 8 ms. Computed from `start`/`target` themselves (just assigned above), the same
-        // per-sample-independent one-shot cost `would_be_too_loud` already pays on every
-        // `apply_coeffs`/`set_bands` call, so this is not new real-time-path risk, just more of
-        // the same affordable kind.
-        let ms = Self::ramp_ms_for(self.ramp_distance_db());
-        self.ramp_frames = ((ms / 1000.0) * self.sample_rate).round().max(1.0) as u32;
-        self.ramp_left = self.ramp_frames;
-    }
-
-    /// The part of [`Cascade::start_ramp`] and [`Cascade::apply_coeffs_fast`] that is
-    /// identical: point `start`/`target`/the preamp ramp at the new values and widen
-    /// `process_count` so a band going away fades to identity instead of vanishing. Leaves
-    /// `ramp_frames`/`ramp_left` for the caller, since sizing the ramp itself is the one thing
-    /// the two disagree about.
-    fn point_ramp_at(&mut self, target: &[Coeffs], new_count: usize, preamp_db: f64) {
+        let interrupting = self.ramp_left > 0 || self.cooldown_left > 0;
         // From wherever the preamp has actually reached, not from the previous target, so a
         // switch that interrupts a ramp still moves continuously.
         self.preamp_from_db = 20.0 * self.preamp.log10();
@@ -492,6 +522,20 @@ impl Cascade {
         // the step this is here to remove.
         self.process_count = self.process_count.max(new_count);
         self.band_count = new_count;
+        // Sized to how different `start` and `target` actually are, not a fixed length — see
+        // this method's own doc for why a whole-slot swap needs far more than a live drag's
+        // 8 ms — unless this continues an already-moving gesture, in which case the floor always
+        // wins regardless of distance (see this method's own doc). Computed from `start`/
+        // `target` themselves (just assigned above), the same per-sample-independent one-shot
+        // cost `would_be_too_loud` already pays on every `apply_coeffs`/`set_bands` call, so
+        // this is not new real-time-path risk, just more of the same affordable kind.
+        let ms = if interrupting { RAMP_MS } else { Self::ramp_ms_for(self.ramp_distance_db()) };
+        self.ramp_frames = ((ms / 1000.0) * self.sample_rate).round().max(1.0) as u32;
+        self.ramp_left = self.ramp_frames;
+        // Refreshed on every request, not just interrupting ones: the whole point is that a
+        // gesture's own first request also counts towards keeping it "current" for whatever
+        // comes right after.
+        self.cooldown_left = self.gesture_gap_frames;
     }
 
     /// How far apart `start` and `target` are, combined response in dB, RMS over [`Cascade::grid`].
@@ -638,29 +682,26 @@ impl Cascade {
     /// inaudible (`cross_mix` pinned at 0), before the fade itself starts moving — settling
     /// its delay registers on real signal rather than joining the fade already ringing.
     ///
-    /// **Retargeting mid-preroll is safe and immediate**: `cross_mix` is still pinned at
-    /// `cross_from` (zero weight in the output), so repointing `coeffs2` there changes nothing
-    /// anyone can hear yet — the same "don't restart, just redirect" rule `start_ramp` follows
-    /// for its own retargets.
+    /// **Every call lands immediately — nothing here defers or queues, mid-preroll or
+    /// mid-fade.** `coeffs2` is a flat assignment (no interpolation of its own), so retargeting
+    /// it while `cross_mix` already carries real weight steps the secondary bank's contribution
+    /// to the output at that instant — a smaller-scale version of the very discontinuity this
+    /// mechanism exists to avoid. An earlier version queued a mid-fade retarget instead, landing
+    /// the in-flight fade on its old target first and only then starting a fresh one toward the
+    /// newest — correctness-over-responsiveness, and the wrong tradeoff for a control channel: a
+    /// fast, repeated §5.2 isolate drag could still reproduce the reported sweep-and-lurch
+    /// artefact, because the *response* to the newest request was being delayed behind one that
+    /// was already stale. The channel's contract is real-time response over how smooth any one
+    /// still-in-flight transition looks — see [`Cascade::start_ramp`]'s own doc, which makes the
+    /// same trade for the plain ramp. The resulting step is bounded by [`Cascade::cross_mix`]
+    /// (small early in the fade, when a retarget is most likely; the fade is nearly landed, and
+    /// the step correspondingly smaller, by the time it carries most of its weight) and is one
+    /// sample, not a sustained artefact.
     ///
-    /// **Retargeting mid-*fade* is different and cannot use that same rule.** `start_ramp`'s
-    /// retarget is safe because it continues *from wherever `coeffs` currently is* — a
-    /// continuous quantity. `coeffs2` is not: it is a flat assignment, no interpolation of its
-    /// own, so overwriting it while `cross_mix` already carries real weight would step the
-    /// secondary bank's contribution to the output instantly — a smaller-scale version of
-    /// exactly the discontinuity this whole mechanism exists to avoid, and the reason a fast,
-    /// repeated §5.2 isolate drag could still reproduce the reported artefact even after the
-    /// crossfade itself shipped. So a mid-fade call is **queued** in
-    /// [`Cascade::pending_crossfade`] instead of applied: the current fade is left to land on
-    /// whatever it already committed to, and [`Cascade::advance_cross`] starts a fresh
-    /// crossfade toward the newest target the moment it does. A later call before that happens
-    /// simply replaces the queued one — only the most recent target during a fast drag ever
-    /// matters, matching the drag's own coalescing throttle upstream (`requestApply`).
-    ///
-    /// Returns `false` — changing nothing (queued or otherwise) — if `target` would exceed
-    /// [`MAX_BANDS`] or the combination would be too loud, the same checks
-    /// [`Cascade::apply_coeffs`] makes (whose signature this deliberately mirrors: coefficients
-    /// straight through, count implied by the slice length).
+    /// Returns `false` — changing nothing — if `target` would exceed [`MAX_BANDS`] or the
+    /// combination would be too loud, the same checks [`Cascade::apply_coeffs`] makes (whose
+    /// signature this deliberately mirrors: coefficients straight through, count implied by the
+    /// slice length).
     pub fn start_crossfade(&mut self, target: &[Coeffs], preamp_db: f64) -> bool {
         if target.len() > MAX_BANDS || !preamp_db.is_finite() {
             return false;
@@ -670,16 +711,7 @@ impl Cascade {
             return false;
         }
 
-        if self.cross_fade_left > 0 {
-            let mut coeffs = [Coeffs::PASSTHROUGH; MAX_BANDS];
-            for i in 0..MAX_BANDS {
-                coeffs[i] = target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH);
-            }
-            self.pending_crossfade = Some((target.len(), coeffs, preamp_db));
-            return true;
-        }
-
-        let fresh = self.cross_mix == 0.0 && self.cross_preroll_left == 0;
+        let fresh = self.cross_mix == 0.0 && self.cross_preroll_left == 0 && self.cross_fade_left == 0;
         for i in 0..MAX_BANDS {
             self.coeffs2[i] = target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH);
         }
@@ -694,9 +726,11 @@ impl Cascade {
             self.cross_fade_left = 0; // gated behind the pre-roll below
             self.cross_preroll_left = self.cross_fade_frames;
         }
-        // This call supersedes anything still queued from an earlier mid-fade retarget — it
-        // is itself now the newest intention.
-        self.pending_crossfade = None;
+        // A retarget mid-preroll or mid-fade leaves `cross_mix`/`cross_fade_left`/
+        // `cross_preroll_left` exactly where they are — only `coeffs2`/`process_count2`/
+        // `preamp2` (the *target* of the blend) moved. The blend keeps advancing on whatever
+        // schedule it was already on, now carrying it towards the new target instead of the old
+        // one.
         true
     }
 
@@ -715,14 +749,6 @@ impl Cascade {
         if self.cross_fade_left == 0 {
             self.cross_mix = self.cross_to;
             self.promote_secondary();
-            // A retarget that arrived mid-fade (see `start_crossfade`'s doc) was queued rather
-            // than applied — this fade has now landed, `cross_mix` is freshly 0, so it is safe
-            // to start immediately. Recursion depth is one: `promote_secondary` just reset
-            // everything this call checks, so this new call always lands on the `fresh` branch,
-            // never back into the queue-again path.
-            if let Some((count, coeffs, preamp_db)) = self.pending_crossfade.take() {
-                self.start_crossfade(&coeffs[..count], preamp_db);
-            }
             return;
         }
         let t = 1.0 - self.cross_fade_left as f64 / self.cross_fade_frames as f64;
@@ -775,15 +801,15 @@ impl Cascade {
         self.dry_fade_left = 0;
         self.process_count = self.band_count;
         self.ramp_left = 0;
-        // A pending crossfade (see `start_crossfade`) takes priority over the lines above: it
+        self.cooldown_left = 0;
+        // A crossfade in flight (see `start_crossfade`) takes priority over the lines above: it
         // represents the more recent instruction, and lands the secondary bank straight into
-        // place rather than leaving it queued to fade in on its own schedule later.
+        // place rather than leaving it to fade in on its own schedule later.
         if self.process_count2 > 0 {
             self.promote_secondary();
         }
         self.cross_fade_left = 0;
         self.cross_preroll_left = 0;
-        self.pending_crossfade = None; // abandoned along with everything else in flight
     }
 
     /// Is a coefficient ramp currently running?
@@ -939,44 +965,6 @@ impl Cascade {
         true
     }
 
-    /// Apply new coefficients ramped at the fixed [`RAMP_MS`] floor — never longer, regardless
-    /// of how far apart old and new are — for a fast-moving §5.2 isolate audition drag, where
-    /// the filter must keep up with the pointer instead of chasing it through
-    /// [`Cascade::ramp_ms_for`]'s distance-scaled duration.
-    ///
-    /// **Why `apply_coeffs`'s ramp is the wrong tool here.** That duration is sized against the
-    /// *response-curve distance* between old and new (`ramp_distance_db`), RMS over a uniform
-    /// log-spaced grid — a fine proxy for "is this a nudge or a whole new curve" when the bands
-    /// involved are the moderate-Q peaking/shelf filters a real correction uses. It breaks down
-    /// for the isolate audition's narrow Q≈8 bandpass: moving its centre frequency even a
-    /// little flips most of the grid from "on the old peak" to "off it," so the metric reads a
-    /// small, perceptually continuous move as a large jump and hands back a 100–300 ms ramp.
-    /// Real drags retarget roughly every 70 ms, so that ramp never finished before the next
-    /// tick replaced it — the coefficients spent the whole gesture chasing a moving pointer,
-    /// measured (replaying a real captured drag) falling up to ~18× behind the requested
-    /// frequency and taking a further 300 ms to land *after* the drag actually stopped. That is
-    /// the reported "sweep and lurch," confirmed by
-    /// `a_coefficient_ramp_falls_behind_the_pointer_during_a_real_isolate_drag`.
-    ///
-    /// **Why a fixed 8 ms ramp, not an instant step.** `RAMP_MS` was already sized for exactly
-    /// this shape of update (see its own doc: "a live tone drag produces them at roughly
-    /// 60 Hz... so the ramp finishes between edits") — it is short enough to comfortably finish
-    /// within a ~70 ms isolate tick (no chasing), while still softening the step enough to avoid
-    /// a hard click. An unconditional step straight to target would remove that softening for
-    /// no benefit, since 8 ms already fits the cadence.
-    pub fn apply_coeffs_fast(&mut self, coeffs: &[Coeffs], preamp_db: f64) -> bool {
-        if coeffs.len() > MAX_BANDS || !preamp_db.is_finite() {
-            return false;
-        }
-        let preamp = db_to_gain(preamp_db);
-        if !preamp.is_finite() || self.would_be_too_loud(coeffs, preamp) {
-            return false;
-        }
-        self.point_ramp_at(coeffs, coeffs.len(), preamp_db);
-        self.ramp_frames = ((RAMP_MS / 1000.0) * self.sample_rate).round().max(1.0) as u32;
-        self.ramp_left = self.ramp_frames;
-        true
-    }
 
     /// Set the preamp in dB (negative attenuates), matching EqAPO's `Preamp:` line.
     ///
@@ -1057,6 +1045,9 @@ impl Cascade {
             if self.ramp_left > 0 {
                 self.advance_ramp();
             }
+            if self.cooldown_left > 0 {
+                self.cooldown_left -= 1;
+            }
             if self.cross_preroll_left > 0 || self.cross_fade_left > 0 {
                 self.advance_cross();
             }
@@ -1112,6 +1103,9 @@ impl Cascade {
             // it between channels of the same frame would put them fractionally out of step.
             if self.ramp_left > 0 {
                 self.advance_ramp();
+            }
+            if self.cooldown_left > 0 {
+                self.cooldown_left -= 1;
             }
             if self.dry_fade_left > 0 {
                 self.advance_dry();
@@ -2578,6 +2572,76 @@ mod tests {
         );
     }
 
+    /// The core mechanism directly: a request stays "continuing a gesture" — truncated to
+    /// [`RAMP_MS`] — for [`GESTURE_GAP_MS`] after the *previous* request, not just while a ramp
+    /// is still physically in flight. A `RAMP_MS`-floor ramp finishes in 8 ms, far short of a
+    /// real drag's own cadence, so checking `ramp_left` alone would let the very next retarget
+    /// read the cascade as settled again and hand it a fresh full-length ramp — see
+    /// `start_ramp`'s own doc for the measured bug this closes. Only a gap that genuinely
+    /// exceeds `GESTURE_GAP_MS` earns the full duration again.
+    #[test]
+    fn a_retarget_stays_truncated_through_the_whole_gesture_gap() {
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&realistic_correction(3.0)));
+        c.settle();
+
+        // First substantive retarget: settled, so this earns the full distance-scaled ramp. A
+        // large jump (not the drag-sized 0.2 dB nudge `a_drag_sized_single_band_edit_still_hits_the_floor`
+        // shows sitting at the floor already), so it genuinely exercises the "first request"
+        // branch rather than one that would truncate to the floor on its own merits anyway.
+        assert!(c.set_bands(&realistic_correction(9.0)));
+        let first_ms = Cascade::ramp_ms_for(c.ramp_distance_db());
+        assert!(first_ms > RAMP_MS + 0.01, "sanity check: this edit must not already sit at the floor");
+        assert_eq!(c.ramp_frames, ((first_ms / 1000.0) * FS).round().max(1.0) as u32);
+
+        // Only a few ms into that (long) first ramp — nowhere near enough for it to land —
+        // standing in for "the next drag tick arrives well before the previous request's own
+        // ramp would have finished," as a real fast drag does.
+        let mut out = [0.0f32; 1];
+        for _ in 0..((RAMP_MS / 1000.0 * FS).round() as usize + 10) {
+            c.process(&[0.1], &mut out, 1);
+        }
+
+        // Retarget again while the first ramp is still very much in flight: this must
+        // truncate, on `ramp_left > 0` alone.
+        assert!(c.set_bands(&realistic_correction(9.4)));
+        assert_eq!(
+            c.ramp_frames,
+            ((RAMP_MS / 1000.0) * FS).round().max(1.0) as u32,
+            "an interrupting retarget must truncate to the floor"
+        );
+
+        // Now let *that* truncated ramp fully land — comfortably inside GESTURE_GAP_MS.
+        for _ in 0..((RAMP_MS / 1000.0 * FS).round() as usize + 10) {
+            c.process(&[0.1], &mut out, 1);
+        }
+        assert!(!c.is_ramping(), "sanity check: the floor-length ramp must have already landed");
+
+        // The cascade is settled (`ramp_left == 0`) but still within `GESTURE_GAP_MS` of the
+        // last request — this retarget must STILL truncate, which is the entire point of
+        // `cooldown_left` existing alongside `ramp_left`.
+        assert!(c.set_bands(&realistic_correction(9.6)));
+        assert_eq!(
+            c.ramp_frames,
+            ((RAMP_MS / 1000.0) * FS).round().max(1.0) as u32,
+            "a retarget arriving within GESTURE_GAP_MS of the last one must still truncate, even though no ramp was in flight"
+        );
+
+        // Let the gesture actually end: wait past GESTURE_GAP_MS with no further requests.
+        for _ in 0..((GESTURE_GAP_MS / 1000.0 * FS).round() as usize + 10) {
+            c.process(&[0.1], &mut out, 1);
+        }
+
+        // A genuinely fresh request now earns the full duration again.
+        assert!(c.set_bands(&realistic_correction(3.0)));
+        let later_ms = Cascade::ramp_ms_for(c.ramp_distance_db());
+        assert_eq!(
+            c.ramp_frames,
+            ((later_ms / 1000.0) * FS).round().max(1.0) as u32,
+            "a request arriving after a genuine pause must earn the full duration again"
+        );
+    }
+
     /// Retargeting mid-ramp — what a drag produces — must start from where the coefficients
     /// actually are, not jump to the abandoned target first.
     #[test]
@@ -2920,7 +2984,6 @@ mod tests {
         let second = [coefficients(&Band { kind: FilterKind::Bandpass, freq_hz: 8000.0, gain_db: 0.0, q: 8.0 }, FS)];
         assert!(c.start_crossfade(&second, 0.0));
         assert_eq!(c.coeffs2[0].b0, second[0].b0, "the secondary bank must repoint immediately — nothing to defer");
-        assert!(c.pending_crossfade.is_none(), "a pre-roll retarget has nothing to queue");
 
         // Must still land cleanly — no NaN/instability, and it does eventually finish.
         let mut frames = 0;
@@ -2934,15 +2997,17 @@ mod tests {
         assert_eq!(c.coeffs[0].b0, second[0].b0, "must have landed on the retargeted band, not the first one");
     }
 
-    /// The bug a fast, repeated §5.2 isolate drag could still reproduce even after the
-    /// crossfade itself shipped: a retarget that arrives once the fade is already **audible**
-    /// (`cross_mix > 0`) must NOT overwrite `coeffs2` in place — that steps the secondary
-    /// bank's own contribution to the output instantly, a smaller-scale version of exactly the
-    /// discontinuity this whole mechanism exists to avoid. It must be queued instead, land on
-    /// whatever the in-flight fade already committed to, and only then start a fresh crossfade
-    /// toward the newest target.
+    /// **The channel's contract**: a retarget that arrives once the fade is already
+    /// **audible** (`cross_mix > 0`) must redirect the secondary bank *immediately*, not queue
+    /// behind whatever the in-flight fade already committed to. An earlier version queued this
+    /// case specifically to avoid stepping the secondary bank's own contribution to the output —
+    /// but that meant the newest request's effect was delayed until the stale one finished,
+    /// which is backwards for a live control channel: real-time response wins over how smooth
+    /// any one still-in-flight transition looks (see `start_crossfade`'s own doc). The bounded
+    /// step this accepts is small in practice — early in the fade, when a retarget is most
+    /// likely, `cross_mix` itself is still small, so the secondary bank barely contributes yet.
     #[test]
-    fn retargeting_mid_fade_is_deferred_lands_first_then_chases_the_newest_target() {
+    fn retargeting_mid_fade_redirects_immediately_without_queueing() {
         let mut c = Cascade::new(1, FS);
         assert!(c.set_bands(&real_isolate_correction()));
         c.settle();
@@ -2951,7 +3016,7 @@ mod tests {
         assert!(c.start_crossfade(&first, 0.0));
 
         // Clear the pre-roll entirely, then run into the audible fade so `cross_mix` is
-        // genuinely non-zero — the exact condition a naive in-place retarget would step.
+        // genuinely non-zero — the exact condition a naive queued retarget used to special-case.
         let mut out = [0.0f32; 1];
         while c.cross_preroll_left > 0 {
             c.process(&[0.1], &mut out, 1);
@@ -2960,38 +3025,25 @@ mod tests {
             c.process(&[0.1], &mut out, 1);
         }
         assert!(c.cross_fade_left > 0, "should be mid-fade");
-        assert!(c.cross_mix > 0.0, "should already carry real weight");
-        let coeffs2_before = c.coeffs2[0];
+        let mix_at_retarget = c.cross_mix;
+        assert!(mix_at_retarget > 0.0, "should already carry real weight");
 
         let second = [coefficients(&Band { kind: FilterKind::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 }, FS)];
         assert!(c.start_crossfade(&second, 0.0));
-        assert_eq!(c.coeffs2[0].b0, coeffs2_before.b0, "coeffs2 must not move while it carries real weight");
-        assert!(c.pending_crossfade.is_some(), "the retarget must be queued instead of applied");
+        assert_eq!(c.coeffs2[0].b0, second[0].b0, "the secondary bank must redirect immediately — nothing to queue");
+        assert_eq!(c.cross_mix, mix_at_retarget, "the blend's own progress must not reset on a retarget");
+        assert!(c.cross_fade_left > 0, "the in-flight fade continues on its existing schedule");
 
-        // The first fade must land on what it already committed to — `first`, not `second` —
-        // and a fresh crossfade toward `second` must begin the very same frame.
-        let mut landed_on_first = false;
-        for _ in 0..2000 {
-            c.process(&[0.1], &mut out, 1);
-            assert!(out[0].is_finite(), "must never go unstable");
-            if !landed_on_first && c.process_count == 1 && c.coeffs[0].b0 == first[0].b0 {
-                landed_on_first = true;
-                assert!(c.process_count2 > 0, "a fresh crossfade toward the queued target must start immediately");
-                assert_eq!(c.coeffs2[0].b0, second[0].b0, "the queued target must be the one that starts fading in next");
-                break;
-            }
-        }
-        assert!(landed_on_first, "the first fade must land on what it already committed to");
-
-        // ...and it must go on to land on the queued target too.
+        // It must land only on the newest target — never on `first`, which was superseded
+        // before it ever took effect.
         let mut frames = 0;
         while c.process_count2 > 0 {
             c.process(&[0.1], &mut out, 1);
-            assert!(out[0].is_finite());
+            assert!(out[0].is_finite(), "must never go unstable");
             frames += 1;
-            assert!(frames < 100_000, "the queued crossfade never landed");
+            assert!(frames < 100_000, "the crossfade never landed");
         }
-        assert_eq!(c.coeffs[0].b0, second[0].b0, "must eventually land on the queued (second) target");
+        assert_eq!(c.coeffs[0].b0, second[0].b0, "must land on the retargeted (second) band, not the superseded first one");
     }
 
     /// The actual tick sequence and inter-tick timing captured live from a reported
@@ -3030,14 +3082,30 @@ mod tests {
             .1
     }
 
-    /// The bug: `apply_coeffs`'s ramp is sized by [`Cascade::ramp_ms_for`] against the
-    /// response-curve distance of the change, which reads a narrow Q≈8 bandpass's frequency
-    /// move as far larger than it perceptually is — real isolate-drag ticks arrive roughly
-    /// every 70 ms, but this hands back 100-300 ms ramps, so the coefficients spend the whole
-    /// drag chasing a moving target rather than tracking it. Confirms the regression is real
-    /// before proving the fix below closes it.
+    /// The bug this closes: `start_ramp`'s duration used to always be `ramp_ms_for`'s
+    /// distance-scaled figure, with no notion of "already busy" — every retarget, however soon
+    /// after the last one, recomputed a fresh full-length ramp. A narrow Q≈8 bandpass reads
+    /// even a small frequency move as a large response-curve distance, so real isolate-drag
+    /// ticks (arriving roughly every 70 ms) kept landing 100-300 ms ramps that never finished
+    /// before the next tick replaced them — the coefficients fell up to ~18x behind the pointer
+    /// over the length of a real captured drag, replayed here via the ordinary public
+    /// `set_bands` — no special-cased "fast" entry point, just `start_ramp`'s own contract:
+    /// only a request arriving while the cascade is genuinely settled (no ramp in flight *and*
+    /// no request within `GESTURE_GAP_MS`) gets the full duration; anything that continues an
+    /// already-moving gesture truncates to the `RAMP_MS` floor instead of restarting a fresh
+    /// full-length one.
+    ///
+    /// Measures, for each tick, whether the cascade actually reached *that* tick's own
+    /// requested frequency by the time the *next* one arrived — not whether it had already
+    /// heard about a not-yet-sent future request, which even flawless instant application
+    /// could not satisfy and would only measure how big consecutive ticks' own steps happen to
+    /// be. A retarget that arrives more than [`GESTURE_GAP_MS`] after the previous one is
+    /// legitimately treated as a fresh "first" request (there are two such gaps in this real
+    /// drag — the very start, and one genuine 230 ms pause partway through) and may not finish
+    /// within the following tick's gap; every retarget that continues an already-moving
+    /// gesture must.
     #[test]
-    fn a_coefficient_ramp_falls_behind_the_pointer_during_a_real_isolate_drag() {
+    fn set_bands_tracks_the_pointer_closely_through_a_real_isolate_drag() {
         let q = 8.0;
         let mut c = Cascade::new(1, FS);
         assert!(c.set_bands(&[Band {
@@ -3051,66 +3119,42 @@ mod tests {
         let scan: Vec<f64> = (0..800).map(|i| 20.0 * 1000.0f64.powf(i as f64 / 799.0)).collect();
         let (input, mut output) = ([0.0f32; 1], [0.0f32; 1]);
         let mut max_lag_pct = 0.0f64;
-        for &(elapsed_ms, freq_hz) in &REAL_DRAG_TICKS[1..] {
-            for _ in 0..(elapsed_ms as f64 / 1000.0 * FS).round() as usize {
+        for i in 1..REAL_DRAG_TICKS.len() {
+            let (gap_before, freq_hz) = REAL_DRAG_TICKS[i];
+            assert!(c.set_bands(&[Band { kind: FilterKind::Bandpass, freq_hz, gain_db: 0.0, q }]));
+            // How long this tick gets to settle before the next one arrives (or, for the last
+            // tick, nothing — that's covered by the settle-tail check below instead).
+            let gap_after = REAL_DRAG_TICKS.get(i + 1).map_or(0, |&(g, _)| g);
+            for _ in 0..(gap_after as f64 / 1000.0 * FS).round() as usize {
                 c.process(&input, &mut output, 1);
             }
             let lag_pct = 100.0 * (freq_hz - peak_freq(&c, &scan)).abs() / freq_hz;
-            max_lag_pct = max_lag_pct.max(lag_pct);
-            assert!(c.set_bands(&[Band { kind: FilterKind::Bandpass, freq_hz, gain_db: 0.0, q }]));
+            // This tick itself arrived long enough after the previous one to legitimately be
+            // treated as a fresh "first" request (full, un-truncated duration) — allowed to
+            // still be mid-ramp when the next tick arrives. Anything closer behind the
+            // previous tick is continuing an already-moving gesture and must land in time.
+            if (gap_before as f64) <= GESTURE_GAP_MS {
+                max_lag_pct = max_lag_pct.max(lag_pct);
+            }
         }
         let mut settle_frames = 0;
         while c.is_ramping() {
             c.process(&input, &mut output, 1);
             settle_frames += 1;
         }
-        assert!(
-            max_lag_pct > 100.0,
-            "expected the known chase-the-pointer lag (>100% behind at some tick), got only {max_lag_pct:.1}%"
+        eprintln!(
+            "max lag on a continuing tick: {max_lag_pct:.1}%; settle tail after last tick: {:.1} ms",
+            settle_frames as f64 / FS * 1000.0
         );
         assert!(
-            settle_frames as f64 / FS * 1000.0 > 100.0,
-            "expected a long settle tail after the drag stops (RAMP_MAX_MS territory), got only \
+            max_lag_pct < 10.0,
+            "expected every gesture-continuing tick to land within its own gap, got {max_lag_pct:.1}% behind at some tick"
+        );
+        assert!(
+            settle_frames as f64 / FS * 1000.0 < 20.0,
+            "expected a short settle tail after the drag stops (near the RAMP_MS floor, not RAMP_MAX_MS), got \
              {:.1} ms",
             settle_frames as f64 / FS * 1000.0
         );
-    }
-
-    /// The fix: [`Cascade::apply_coeffs_fast`] applied on every tick of the same real drag
-    /// always ramps at the fixed [`RAMP_MS`] (8 ms) floor, never the distance-scaled duration —
-    /// short enough to land well before the next tick arrives (the shortest real gap in this
-    /// drag is ~70 ms), so the filter never falls behind the pointer the way the plain ramp did.
-    #[test]
-    fn apply_coeffs_fast_lands_well_before_the_next_tick_through_the_same_drag() {
-        let q = 8.0;
-        let mut c = Cascade::new(1, FS);
-        let first = coefficients(
-            &Band { kind: FilterKind::Bandpass, freq_hz: REAL_DRAG_TICKS[0].1, gain_db: 0.0, q },
-            FS,
-        );
-        assert!(c.apply_coeffs_fast(&[first], 0.0));
-
-        let scan: Vec<f64> = (0..800).map(|i| 20.0 * 1000.0f64.powf(i as f64 / 799.0)).collect();
-        let (input, mut output) = ([0.0f32; 1], [0.0f32; 1]);
-        for &(elapsed_ms, freq_hz) in &REAL_DRAG_TICKS[1..] {
-            let target = coefficients(&Band { kind: FilterKind::Bandpass, freq_hz, gain_db: 0.0, q }, FS);
-            assert!(c.apply_coeffs_fast(&[target], 0.0));
-            assert!(c.is_ramping(), "a fast apply still ramps, just at the fixed floor");
-            assert_eq!(c.ramp_frames, ((RAMP_MS / 1000.0) * FS).round() as u32, "must always use the fixed floor, never the distance-scaled duration");
-
-            // Run out the gap until the next tick — RAMP_MS (8ms) is far shorter than any real
-            // gap in this drag (shortest is ~70ms), so the ramp must have fully landed by then.
-            for _ in 0..(elapsed_ms as f64 / 1000.0 * FS).round() as usize {
-                c.process(&input, &mut output, 1);
-            }
-            assert!(!c.is_ramping(), "the fixed 8ms ramp must have finished well within the tick gap");
-            let actual = peak_freq(&c, &scan);
-            // The scan grid is discrete (800 log-spaced points), so "exact" means within one
-            // grid step, not bit-identical to the requested frequency.
-            assert!(
-                (freq_hz - actual).abs() / freq_hz < 0.01,
-                "tick {freq_hz}Hz: actual peak {actual:.1}Hz, expected to have landed by the next tick"
-            );
-        }
     }
 }
