@@ -245,8 +245,9 @@
     "final": "Finale Lautstärke",
     "finalSub": "Übersteuerungssicher",
     "basePregain": "Basis-Pre-Gain",
+    "ispHeadroom": "True-Peak-Headroom",
     "comparisonDesc": "Jede Kurve wirkt gleich laut, damit A/B-Vergleiche die Klangfarbe beurteilen, nicht den Pegel.",
-    "finalDesc": "Maximale clipping-freie Lautstärke – Basis-Pre-Gain und Lautheitsausgleich sind deaktiviert.",
+    "finalDesc": "Maximale Lautstärke, abzüglich eines kleinen True-Peak-Puffers – Basis-Pre-Gain und Lautheitsausgleich sind deaktiviert. Ein Sample-Strom bei 0 dBFS kann zwischen den Samples auf manchen DACs trotzdem lauter ausschlagen (Intersample-Peaks); der Puffer oben schützt davor.",
     "confirmToggle": "Vor Wechsel zu Finaler Lautstärke bestätigen"
   },
 

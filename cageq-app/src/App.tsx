@@ -44,7 +44,7 @@ type Status = {
   sidecar: string;
 };
 type LoudnessMode = "Comparison" | "FinalVolume";
-type LoudnessSettings = { base_pregain_db: number; mode: LoudnessMode };
+type LoudnessSettings = { base_pregain_db: number; isp_headroom_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 type SlotName = "A" | "B" | "Dry";
 // Mirrors biquad's FilterKind. "Bandpass" only ever appears in the §5.2 isolate *result* (drawn on
@@ -952,13 +952,18 @@ function App() {
   // clobbered. `loudnessRef` feeds the apply the latest settings without a stale closure.
   const loudnessRef = useRef(loudness);
   loudnessRef.current = loudness;
-  // Commit a settled base-pre-gain change (PreampField owns the live editing + debounce, so this only
-  // fires when the user settles): update App state once and apply. The response updates the chart
-  // (`result`), never the field.
-  function commitBasePregain(db: number) {
+  // Commit a settled headroom-slider change (PreampField owns the live editing + debounce, so
+  // this only fires when the user settles). One slider slot edits `base_pregain_db` in
+  // Comparison and `isp_headroom_db` in FinalVolume — two independent numbers for two
+  // unrelated purposes (see `LoudnessSettings`'s own doc in cageq-core), routed by whichever
+  // mode is active right now, not by anything the caller passes in. Updates App state once and
+  // applies; the response updates the chart (`result`), never the field.
+  function commitHeadroomField(db: number) {
     const base = loudnessRef.current;
     if (!base) return;
-    const next: LoudnessSettings = { ...base, base_pregain_db: Math.max(-40, Math.min(0, Math.round(db))) };
+    const clamped = Math.max(-40, Math.min(0, Math.round(db)));
+    const next: LoudnessSettings =
+      base.mode === "Comparison" ? { ...base, base_pregain_db: clamped } : { ...base, isp_headroom_db: clamped };
     setLoudness(next);
     loudnessRef.current = next;
     invoke<LoudnessUpdate>("set_loudness", { settings: next })
@@ -3099,13 +3104,13 @@ function App() {
                   <span className="ld-mode-s">{tr("loudness.finalSub")}</span>
                 </button>
               </div>
-              <label className="row" style={{ opacity: loudness.mode === "Comparison" ? 1 : 0.4, fontSize: "0.85em" }}>
-                {tr("loudness.basePregain")}
+              <label className="row" style={{ fontSize: "0.85em" }}>
+                {loudness.mode === "Comparison" ? tr("loudness.basePregain") : tr("loudness.ispHeadroom")}
                 <PreampField
-                  value={loudness.base_pregain_db}
-                  disabled={loudness.mode !== "Comparison"}
-                  ariaLabel={tr("loudness.basePregain")}
-                  onCommit={commitBasePregain}
+                  value={loudness.mode === "Comparison" ? loudness.base_pregain_db : loudness.isp_headroom_db}
+                  disabled={false}
+                  ariaLabel={loudness.mode === "Comparison" ? tr("loudness.basePregain") : tr("loudness.ispHeadroom")}
+                  onCommit={commitHeadroomField}
                 />
                 dB
               </label>

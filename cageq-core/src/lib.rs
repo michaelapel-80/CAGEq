@@ -114,28 +114,61 @@ pub struct Applied {
 /// typical curves and the §4.2 ceiling only trips on genuinely extreme ones.
 pub const DEFAULT_BASE_PREGAIN_DB: f64 = -9.0;
 
+/// filter.md §4.2-ISP default true-peak headroom for [`LoudnessMode::FinalVolume`], in dB.
+/// A sample stream sitting exactly at 0 dBFS can still reconstruct, on a real DAC, to an
+/// analog waveform that peaks *above* 0 dBFS between samples — the "inter-sample peak" a
+/// sample-peak-only "never clip" claim doesn't cover (`cageq-monitor`'s `testtone --isp`
+/// reproduces this on demand; its `ISP_MAX_OVER_DB` is the same 3.0103 dB textbook figure).
+/// -1 dB doesn't eliminate ISP, but covers the large majority of real program material —
+/// anything that still overs past a 1 dB buffer already has bigger problems than inter-sample
+/// clipping. Deliberately much smaller than [`DEFAULT_BASE_PREGAIN_DB`]: that -9 dB buffer is
+/// for A/B comfort, this one is purely DAC reconstruction margin, and the two have no reason
+/// to share a magnitude just because they share a UI slot (see [`LoudnessSettings`]'s own doc).
+pub const DEFAULT_ISP_HEADROOM_DB: f64 = -1.0;
+
 /// filter.md §4.0 loudness mode — the "Vergleichsmodus ↔ Finale Lautstärke" toggle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoudnessMode {
     /// A/B-fair: base pre-gain + §4.1 loudness match, capped by the §4.2 ceiling.
     /// Every curve ends up equally loud so comparisons judge timbre, not level.
     Comparison,
-    /// Maximum clipping-free level (peak at 0 dBFS): no comfort buffer, no loudness
-    /// match — AQUA's default. Loudest safe playback for actual listening.
+    /// Maximum clipping-free level, less a small §4.2-ISP true-peak buffer
+    /// (`isp_headroom_db`): sample peak sits at `isp_headroom_db` dBFS rather than exactly 0,
+    /// since a sample stream at 0 dBFS can still reconstruct to an analog peak above it
+    /// between samples. No A/B comfort buffer, no loudness match. Loudest safe playback for
+    /// actual listening.
     FinalVolume,
 }
 
 /// filter.md §4.0 user loudness settings: the base pre-gain and which mode is active.
+///
+/// `base_pregain_db` and `isp_headroom_db` are two independent numbers that happen to share
+/// one UI slider slot (only one is ever editable at a time, gated by `mode`) rather than one
+/// shared field, because they serve unrelated purposes with unrelated right-sized defaults —
+/// -9 dB of A/B comfort buffer in Comparison vs. -1 dB of DAC true-peak margin in FinalVolume.
+/// Sharing a single number would mean either losing the user's chosen value on every mode
+/// switch, or carrying an inappropriate magnitude from one mode's purpose into the other's.
+///
+/// `#[serde(default)]`: settings.json files saved before `isp_headroom_db` existed lack that
+/// key — falling back per-missing-field to [`Default::default`] keeps them loading instead of
+/// failing at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LoudnessSettings {
     /// §4.0 base pre-gain (user headroom), in dB. Applies in [`LoudnessMode::Comparison`].
     pub base_pregain_db: f64,
+    /// §4.2-ISP true-peak headroom, in dB (≤ 0). Applies in [`LoudnessMode::FinalVolume`].
+    pub isp_headroom_db: f64,
     pub mode: LoudnessMode,
 }
 
 impl Default for LoudnessSettings {
     fn default() -> Self {
-        LoudnessSettings { base_pregain_db: DEFAULT_BASE_PREGAIN_DB, mode: LoudnessMode::Comparison }
+        LoudnessSettings {
+            base_pregain_db: DEFAULT_BASE_PREGAIN_DB,
+            isp_headroom_db: DEFAULT_ISP_HEADROOM_DB,
+            mode: LoudnessMode::Comparison,
+        }
     }
 }
 
@@ -198,8 +231,9 @@ struct Preamp {
 /// Compose the final preamp from the curve quantities and the user's loudness
 /// settings (filter.md §4.0 + §4.2).
 ///
-/// [`LoudnessMode::FinalVolume`]: maximum clipping-free level — `Preamp = -G_max_peak`
-/// (peak at 0 dBFS), no buffer, no loudness match; the ceiling can't be "overridden"
+/// [`LoudnessMode::FinalVolume`]: maximum clipping-free level, less a small §4.2-ISP buffer —
+/// `Preamp = -G_max_peak + isp_headroom_db` (`isp_headroom_db` ≤ 0, so this only ever lowers
+/// the level) — no A/B comfort buffer, no loudness match; the ceiling can't be "overridden"
 /// so there's nothing to warn about.
 ///
 /// [`LoudnessMode::Comparison`]:
@@ -210,10 +244,17 @@ struct Preamp {
 /// ```
 /// When the ceiling binds (`G_max_allowed < G_target`) `base_pregain_db` cancels and
 /// `Preamp_final == -G_max_peak` — the comfort buffer is spent to stay just below
-/// 0 dBFS rather than needlessly quiet. The never-clip guarantee holds in both modes.
+/// 0 dBFS rather than needlessly quiet.
+///
+/// The never-*sample*-clip guarantee (`Preamp_final <= -G_max_peak` exactly) holds in both
+/// modes, unconditionally. It is not a never-*true*-peak-clip guarantee: a sample stream at
+/// or below 0 dBFS can still reconstruct, on a real DAC, to an analog peak above 0 dBFS
+/// between samples (inter-sample peaks — see `cageq-monitor`'s `testtone --isp`). Only
+/// [`LoudnessMode::FinalVolume`]'s `isp_headroom_db` buffer addresses that, and only up to
+/// however many dB it reserves — real, unusually hot program material can still exceed it.
 fn compose_preamp(g_target_db: f64, g_max_peak_db: f64, s: &LoudnessSettings) -> Preamp {
     let (db, clipping_warning) = match s.mode {
-        LoudnessMode::FinalVolume => (-g_max_peak_db, false),
+        LoudnessMode::FinalVolume => (-g_max_peak_db + s.isp_headroom_db, false),
         LoudnessMode::Comparison => {
             let base = s.base_pregain_db;
             let g_max_allowed = -g_max_peak_db - base;
@@ -946,7 +987,11 @@ mod tests {
     }
 
     fn comparison(base: f64) -> LoudnessSettings {
-        LoudnessSettings { base_pregain_db: base, mode: LoudnessMode::Comparison }
+        LoudnessSettings { base_pregain_db: base, ..Default::default() }
+    }
+
+    fn final_volume(isp_headroom_db: f64) -> LoudnessSettings {
+        LoudnessSettings { isp_headroom_db, mode: LoudnessMode::FinalVolume, ..Default::default() }
     }
 
     #[test]
@@ -992,20 +1037,41 @@ mod tests {
         // Comparison: it gets the base pre-gain, so it's level-matched with A/B.
         let cmp = compose_preamp(0.0, 0.0, &comparison(DEFAULT_BASE_PREGAIN_DB));
         approx(cmp.db, DEFAULT_BASE_PREGAIN_DB);
-        // FinalVolume: max clipping-free = 0 dB — and formatted "0.0", not "-0.0".
-        let fin = compose_preamp(0.0, 0.0, &LoudnessSettings { base_pregain_db: -9.0, mode: LoudnessMode::FinalVolume });
+        // FinalVolume: max clipping-free = 0 dB with isp_headroom_db zeroed out here so this
+        // test isolates the negative-zero formatting question from the ISP headroom feature
+        // (which has its own tests below) — and formatted "0.0", not "-0.0".
+        let fin = compose_preamp(0.0, 0.0, &final_volume(0.0));
         approx(fin.db, 0.0);
         assert_eq!(format!("{:.1}", fin.db), "0.0", "negative zero must not leak through");
     }
 
     #[test]
     fn final_volume_is_max_clipping_free_ignoring_buffer_and_match() {
-        // FinalVolume: peak sits exactly at 0 dBFS, base pre-gain and loudness target
-        // are both ignored, and there is no ceiling override to warn about.
-        let s = LoudnessSettings { base_pregain_db: -9.0, mode: LoudnessMode::FinalVolume };
+        // FinalVolume: peak sits exactly at 0 dBFS (isp_headroom_db zeroed out — its own effect
+        // is covered separately below), base pre-gain and loudness target are both ignored, and
+        // there is no ceiling override to warn about.
+        let s = LoudnessSettings { base_pregain_db: -40.0, ..final_volume(0.0) }; // absurd base_pregain — must have zero effect
         let p = compose_preamp(-4.0, 6.0, &s);
         approx(p.db, -6.0); // -G_max_peak, regardless of base_pregain / G_target
         assert!(!p.clipping_warning);
+    }
+
+    #[test]
+    fn final_volume_applies_isp_headroom_on_top_of_the_ceiling() {
+        // FinalVolume: isp_headroom_db subtracts from the ceiling (a small true-peak buffer);
+        // base_pregain_db stays ignored, same as above — a different knob for a different
+        // purpose that just happens to share the same UI slot (see `LoudnessSettings`'s doc).
+        let s = LoudnessSettings { base_pregain_db: -40.0, ..final_volume(-1.0) };
+        let p = compose_preamp(-4.0, 6.0, &s);
+        approx(p.db, -7.0); // -G_max_peak (-6) + isp_headroom (-1)
+        assert!(!p.clipping_warning);
+    }
+
+    #[test]
+    fn default_isp_headroom_is_minus_one_db() {
+        approx(DEFAULT_ISP_HEADROOM_DB, -1.0);
+        let p = compose_preamp(0.0, 0.0, &final_volume(DEFAULT_ISP_HEADROOM_DB));
+        approx(p.db, -1.0);
     }
 
     fn fit(device: &str) -> CalcResult {

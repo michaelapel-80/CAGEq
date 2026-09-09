@@ -267,14 +267,17 @@ fn loudness_increase_ramps_but_decrease_is_direct() {
     let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
     // Small base pre-gain so the Comparison->Final increase is a quick ~1 dB ramp.
-    core.set_loudness(LoudnessSettings { base_pregain_db: -1.0, mode: LoudnessMode::Comparison });
+    core.set_loudness(LoudnessSettings { base_pregain_db: -1.0, ..Default::default() });
     core.apply(CalcRequest::for_device("DAC")).expect("apply"); // stub is flat -> preamp -1.0
     assert!(tmp.cageq().contains("Preamp: -1.0 dB"), "{}", tmp.cageq());
     let after_apply = core.applied_count();
 
     // Comparison -> FinalVolume raises volume (-1 -> 0 dB): ramped over several writes,
-    // landing exactly on 0.
-    core.update_loudness(LoudnessSettings { base_pregain_db: -1.0, mode: LoudnessMode::FinalVolume })
+    // landing exactly on 0. isp_headroom_db zeroed out — this test is about ramp-vs-direct
+    // behavior on a mode switch, not the ISP headroom feature (which has its own coverage in
+    // cageq-core/src/lib.rs), and the default -1 dB headroom would turn this into a zero-dB,
+    // no-op transition instead of the 1 dB ramp the test is built around.
+    core.update_loudness(LoudnessSettings { base_pregain_db: -1.0, isp_headroom_db: 0.0, mode: LoudnessMode::FinalVolume })
         .expect("something active")
         .expect("ramp ok");
     assert!(tmp.cageq().contains("Preamp: 0.0 dB"), "{}", tmp.cageq());
@@ -283,7 +286,7 @@ fn loudness_increase_ramps_but_decrease_is_direct() {
     let after_ramp = core.applied_count();
 
     // FinalVolume -> Comparison lowers volume (0 -> -1 dB): direct, one write.
-    core.update_loudness(LoudnessSettings { base_pregain_db: -1.0, mode: LoudnessMode::Comparison })
+    core.update_loudness(LoudnessSettings { base_pregain_db: -1.0, ..Default::default() })
         .expect("something active")
         .expect("direct ok");
     assert!(tmp.cageq().contains("Preamp: -1.0 dB"), "{}", tmp.cageq());
@@ -295,7 +298,7 @@ fn base_pregain_edit_in_comparison_is_direct_not_ramped() {
     let tmp = TempDir::new("pregain");
     let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
-    core.set_loudness(LoudnessSettings { base_pregain_db: -12.0, mode: LoudnessMode::Comparison });
+    core.set_loudness(LoudnessSettings { base_pregain_db: -12.0, ..Default::default() });
     core.apply(CalcRequest::for_device("DAC")).expect("apply"); // stub is flat -> preamp -12.0
     assert!(tmp.cageq().contains("Preamp: -12.0 dB"), "{}", tmp.cageq());
     let after_apply = core.applied_count();
@@ -303,7 +306,7 @@ fn base_pregain_edit_in_comparison_is_direct_not_ramped() {
     // Raising the base pre-gain a lot (-12 -> 0, +12 dB louder) but *staying in Comparison* is
     // interactive editing, not the §7.5 Final-volume switch — it must write directly (one write),
     // not ramp over ~2 s of blocking writes (which stalled the UI while holding the arrow).
-    core.update_loudness(LoudnessSettings { base_pregain_db: 0.0, mode: LoudnessMode::Comparison })
+    core.update_loudness(LoudnessSettings { base_pregain_db: 0.0, ..Default::default() })
         .expect("something active")
         .expect("direct ok");
     assert!(tmp.cageq().contains("Preamp: 0.0 dB"), "{}", tmp.cageq());

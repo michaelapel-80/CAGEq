@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use cageq_core::{
     Applied, AudioDevice, BackendError, CalcRequest, Capabilities, Core, CoreError, CurvePoint,
-    DEFAULT_BASE_PREGAIN_DB, DeviceConfig, EqApoBackend, EqBackend, Filter, Health,
-    LoudnessSettings, Sidecar, Slot, StartupDecision, WatchdogConfig, detect_eqapo_config_dir,
-    list_render_devices,
+    DEFAULT_BASE_PREGAIN_DB, DEFAULT_ISP_HEADROOM_DB, DeviceConfig, EqApoBackend, EqBackend,
+    Filter, Health, LoudnessSettings, Sidecar, Slot, StartupDecision, WatchdogConfig,
+    detect_eqapo_config_dir, list_render_devices,
 };
 use serde_json::{json, Map, Value};
 use tauri::State;
@@ -859,10 +859,10 @@ struct LoudnessUpdate {
     applied: Option<ApplyResult>,
 }
 
-/// Set the §4.0 loudness settings (base pre-gain + Comparison/FinalVolume mode),
-/// persist them, and re-apply the current config so the change takes effect
-/// immediately. Base pre-gain is clamped to attenuation only (−40..0 dB): a positive
-/// value would be a boost, which the safety model must never allow.
+/// Set the §4.0 loudness settings (base pre-gain, §4.2-ISP headroom, and the
+/// Comparison/FinalVolume mode), persist them, and re-apply the current config so the change
+/// takes effect immediately. Both dB fields are clamped to attenuation only (−40..0 dB): a
+/// positive value would be a boost, which the safety model must never allow.
 #[tauri::command]
 fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<LoudnessUpdate, String> {
     match state.inner() {
@@ -873,7 +873,12 @@ fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<Lou
             } else {
                 DEFAULT_BASE_PREGAIN_DB
             };
-            let settings = LoudnessSettings { base_pregain_db: base, mode: settings.mode };
+            let isp_headroom = if settings.isp_headroom_db.is_finite() {
+                settings.isp_headroom_db.clamp(-40.0, 0.0)
+            } else {
+                DEFAULT_ISP_HEADROOM_DB
+            };
+            let settings = LoudnessSettings { base_pregain_db: base, isp_headroom_db: isp_headroom, mode: settings.mode };
             update_settings(|s| s.loudness = settings); // persist without wiping the selection
             // update_loudness sets the settings and pushes them live — ramping a volume
             // increase (§7.5), or writing directly for a decrease. Blocks for the ramp.
@@ -1559,7 +1564,7 @@ mod tests {
         let comparison = preamp_line(&std::fs::read_to_string(dir.join("cageq.txt")).unwrap());
 
         // Switch to FinalVolume and re-apply the same config.
-        core.set_loudness(LoudnessSettings { base_pregain_db: -9.0, mode: LoudnessMode::FinalVolume });
+        core.set_loudness(LoudnessSettings { base_pregain_db: -9.0, mode: LoudnessMode::FinalVolume, ..Default::default() });
         core.reapply().expect("something was applied").expect("reapply ok");
         let final_vol = preamp_line(&std::fs::read_to_string(dir.join("cageq.txt")).unwrap());
 
@@ -1578,7 +1583,7 @@ mod tests {
 
         assert_eq!(load_settings_from(&path).loudness, LoudnessSettings::default(), "missing -> defaults");
 
-        let want = LoudnessSettings { base_pregain_db: -6.0, mode: LoudnessMode::FinalVolume };
+        let want = LoudnessSettings { base_pregain_db: -6.0, isp_headroom_db: -2.0, mode: LoudnessMode::FinalVolume };
         let selection = Selection { headphone: Some("measurements/x.csv".into()), target: Some("targets/y.csv".into()) };
         save_settings_to(
             &path,
@@ -1607,9 +1612,15 @@ mod tests {
             Some("Warm & Relaxed"),
             "library blob should round-trip"
         );
-        // A missing field (old settings.json) defaults the confirm flag ON.
+        // A missing field (old settings.json) defaults the confirm flag ON, and — predating
+        // isp_headroom_db entirely — defaults that field too rather than failing to load.
         std::fs::write(&path, r#"{"loudness":{"base_pregain_db":-9.0,"mode":"Comparison"}}"#).unwrap();
-        assert!(load_settings_from(&path).confirm_final_volume, "missing confirm flag defaults to true");
+        let reloaded = load_settings_from(&path);
+        assert!(reloaded.confirm_final_volume, "missing confirm flag defaults to true");
+        assert_eq!(
+            reloaded.loudness.isp_headroom_db, DEFAULT_ISP_HEADROOM_DB,
+            "missing isp_headroom_db (pre-existing settings.json) should default, not fail to load"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

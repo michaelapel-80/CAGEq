@@ -245,8 +245,9 @@
     "final": "Final volume",
     "finalSub": "clipping safe",
     "basePregain": "Base pre-gain",
+    "ispHeadroom": "True-peak headroom",
     "comparisonDesc": "Every curve ends up equally loud, so A/B comparisons judge timbre, not level.",
-    "finalDesc": "Maximum clipping-free volume — base pre-gain and loudness match are disabled.",
+    "finalDesc": "Maximum volume, less a small true-peak buffer — base pre-gain and loudness match are disabled. A sample stream at 0 dBFS can still peak louder than that between samples on some DACs (inter-sample peaks); the buffer above guards against it.",
     "confirmToggle": "Confirm before switching to Final volume"
   },
 
