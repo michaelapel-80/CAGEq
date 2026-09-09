@@ -86,18 +86,45 @@ jobs:
         working-directory: cageq-app
         run: npm ci
 
+      # A version bump touches only Cargo.toml/tauri.conf.json, not any Rust source — on a
+      # cache restore-keys fallback (the exact Cargo.lock-hash key misses because the lock file
+      # just changed, so this falls back to whatever was cached under the previous release),
+      # cargo can decide the cageq-app crate itself doesn't need rebuilding and its build
+      # script — which is what actually embeds the version tauri.conf.json now names — never
+      # reruns, silently leaving a *previous* release's bundle in place. `cargo clean -p` only
+      # drops this one crate's own artifacts, not its (slow-to-build) dependencies, so this
+      # costs one relink, not a full rebuild — a release build should never trade that for
+      # risking a stale-versioned installer.
+      - name: Force a fresh build of the app crate itself
+        shell: pwsh
+        working-directory: cageq-app/src-tauri
+        run: cargo clean -p cageq-app --release
+
+      # Removes any bundle output a cache restore-keys fallback (see the step above) may have
+      # carried over from a previous release, so "Locate the installer" below can only ever
+      # find what this build just produced — never a leftover from an older version.
+      - name: Clean stale bundle output
+        shell: pwsh
+        run: Remove-Item -Recurse -Force "cageq-app\src-tauri\target\release\bundle" -ErrorAction SilentlyContinue
+
       - name: Build the installer
         working-directory: cageq-app
         run: npm run tauri build -- --bundles nsis
 
       # --- 4. Locate + publish. Globbed rather than hardcoding the version, so a version bump
-      # in tauri.conf.json never needs a matching edit here. ---
+      # in tauri.conf.json never needs a matching edit here — but verified against that same
+      # version afterwards, so a stale artifact (see the cache note above) fails the build
+      # loudly instead of shipping silently under the wrong name.
       - name: Locate the installer
         id: installer
         shell: pwsh
         run: |
+          $expected = (Get-Content "cageq-app\src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json).version
           $exe = Get-ChildItem -Path "cageq-app\src-tauri\target\release\bundle\nsis\*.exe" | Select-Object -First 1
           if (-not $exe) { throw "no NSIS installer found under src-tauri\target\release\bundle\nsis" }
+          if ($exe.Name -notlike "*_${expected}_*") {
+            throw "installer '$($exe.Name)' does not match tauri.conf.json's version ($expected) - stale build artifact?"
+          }
           "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
           "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
 
