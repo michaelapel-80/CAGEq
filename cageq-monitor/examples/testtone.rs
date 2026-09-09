@@ -19,10 +19,31 @@
 //!   cargo run -p cageq-monitor --example testtone -- --seconds 10     # auto-stop w/ fade-out
 //!   cargo run -p cageq-monitor --example testtone -- --device "Phonitor"  # match by name
 //!   cargo run -p cageq-monitor --example testtone -- --sine 12000 --rate 44100  # test Windows' resampler
+//!   cargo run -p cageq-monitor --example testtone -- --isp 3.0103 --unsafe  # +3 dBTP true-peak over
 //!
-//! `--sine`/`--square`/`--triangle`/`--sawtooth`/`--pulse`/`--pink`/`--white` are all mutually
-//! exclusive (one signal at a time); omitting every one of them plays pink noise, same as passing
-//! `--pink` explicitly. Pink and white noise are also the calibrated pair for the Monitor pane's
+//! `--sine`/`--square`/`--triangle`/`--sawtooth`/`--pulse`/`--pink`/`--white`/`--isp` are all
+//! mutually exclusive (one signal at a time); omitting every one of them plays pink noise, same as
+//! passing `--pink` explicitly.
+//!
+//! `--isp <db-over>` is a different kind of test signal from the rest: not a spectrum-shape check,
+//! but a *true-peak* one. Every other signal here is judged purely by its sample values, but a
+//! sample stream at or below 0 dBFS can still reconstruct, on a real DAC, to an analog waveform
+//! that peaks *above* 0 dBFS between samples — the "inter-sample peak" (ISP) a true-peak meter
+//! catches and a sample-peak meter can't. `--isp` builds the textbook example: a sine at exactly
+//! Fs/4 with a 45°-phase offset, so consecutive samples land at ±sin(45°) = ±1/√2 while the
+//! continuous waveform's own peak — sitting exactly at the midpoint between two samples, by
+//! construction — reaches ±1. That's a factor of √2 between sample peak and true peak, i.e.
+//! 20·log10(√2) = 10·log10(2) ≈ 3.0103 dB, exactly and independent of level or which (correctly
+//! bandlimited) reconstruction filter the DAC uses — every one of them reproduces the same
+//! original sinusoid. `<db-over>` is how far above 0 dBFS the *true* peak should land (0..=3.0103,
+//! clamped); the sample-domain level needed to hit it (`db-over - 3.0103`, always ≤ 0 dBFS) is
+//! derived automatically and `--level` is ignored. Real mastered/clipped material can occasionally
+//! exceed 3.0103 dB of ISP, but that's this generator's ceiling: the largest overshoot a single
+//! pure tone can produce deterministically, reconstruction-filter-agnostic. See ITU-R BS.1770
+//! Annex 2 / EBU Tech 3341 for the same construction used as the standard true-peak-meter
+//! calibration example.
+//!
+//! Pink and white noise are also the calibrated pair for the Monitor pane's
 //! spectrum *display* (not just the source-referred EQ check above): pink noise's power spectral
 //! density is -3dB/octave by definition (equal energy per octave — the textbook reason it's used
 //! as a reference signal at all), so it should read as a straight, flat-DIAGONAL line log-log;
@@ -50,6 +71,11 @@
 //! and it fades in (and out, with --seconds) — so even with EQ boosts stacked on top it can't
 //! blast. `--unsafe` lifts both clamps for a deliberate full-scale (0 dBFS) torture test. Ctrl+C
 //! stops it (abrupt; use --seconds for a clean fade-out).
+//!
+//! `--isp` always requires `--unsafe`: even at its gentlest (`--isp 0`, a true peak sitting right
+//! at 0 dBTP) the sample-domain level it needs is -3.0103 dBFS — already past the default -3 dBFS
+//! ceiling — and every `--isp` value above 0 needs a sample level closer to 0 dBFS still. There's
+//! no in-between "safe" `--isp` setting the way there is for the other signals.
 
 #[cfg(windows)]
 #[derive(Clone, Copy)]
@@ -159,17 +185,29 @@ impl Waveform {
     }
 }
 
-/// The one signal actually being played — a tuned waveform (needs a frequency) or untuned noise
-/// (doesn't). Unified into one type, rather than a separate `Option` per category, so the CLI's
-/// mutual-exclusivity check (`set_signal` below) covers all of them with one rule: exactly one
-/// signal, whatever kind, per run.
+/// The one signal actually being played — a tuned waveform (needs a frequency), untuned noise
+/// (doesn't), or the fixed `Isp` true-peak-over construction (needs a dB target instead of a
+/// frequency — its frequency is always Fs/4, not a free parameter). Unified into one type, rather
+/// than a separate `Option` per category, so the CLI's mutual-exclusivity check (`set_signal`
+/// below) covers all of them with one rule: exactly one signal, whatever kind, per run.
 #[cfg(windows)]
 #[derive(Clone, Copy)]
 enum Signal {
     Tone(Waveform, f64),
     Pink,
     White,
+    /// True-peak-over torture test (file header doc): a fixed Fs/4, 45°-phase sine, parameterised
+    /// by how many dB above 0 dBFS the *reconstructed* peak should reach (clamped to
+    /// `0.0..=ISP_MAX_OVER_DB`). No frequency to pick — Fs/4 is what makes the construction exact.
+    Isp(f64),
 }
+
+/// The exact dB the true (reconstructed) peak sits above the sample peak for `Signal::Isp`'s Fs/4,
+/// 45°-phase-offset construction — see the file header doc for the derivation (it's 20·log10(√2) =
+/// 10·log10(2)). Also the largest true-peak overshoot `--isp` can be asked for, since this
+/// construction is the deterministic maximum a single pure tone gives you.
+#[cfg(windows)]
+const ISP_MAX_OVER_DB: f64 = 3.0103;
 
 /// Next white-noise sample in `[-1, 1]`, xorshift-driven (no `rand` dependency needed) — shared by
 /// `Signal::White` directly and `Signal::Pink` (which filters this same source).
@@ -202,7 +240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // erroring.
         let mut set_signal = |sig: Signal| -> Result<(), Box<dyn std::error::Error>> {
             if signal.is_some() {
-                return Err("only one of --sine/--square/--triangle/--sawtooth/--pulse/--pink/--white may be given".into());
+                return Err("only one of --sine/--square/--triangle/--sawtooth/--pulse/--pink/--white/--isp may be given".into());
             }
             signal = Some(sig);
             Ok(())
@@ -215,6 +253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--pulse" => set_signal(Signal::Tone(Waveform::Pulse, args.next().ok_or("--pulse needs a frequency")?.parse()?))?,
             "--pink" => set_signal(Signal::Pink)?,
             "--white" => set_signal(Signal::White)?,
+            "--isp" => set_signal(Signal::Isp(args.next().ok_or("--isp needs a dB-over-0-dBFS true-peak target (0..=3.0103)")?.parse()?))?,
             "--level" => level_dbfs = args.next().ok_or("--level needs a value")?.parse()?,
             "--seconds" => seconds = Some(args.next().ok_or("--seconds needs a value")?.parse()?),
             "--device" => device_match = Some(args.next().ok_or("--device needs a name")?),
@@ -226,7 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (0 dBFS) torture test. Opt-in and deliberate — mind your ears and gear.
             "--unsafe" => unsafe_mode = true,
             "-h" | "--help" => {
-                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth|--pulse <hz>] [--pink|--white] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
+                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth|--pulse <hz>] [--pink|--white] [--isp <db-over> --unsafe] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
                 return Ok(());
             }
             other => return Err(format!("unknown arg: {other}").into()),
@@ -234,23 +273,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // No signal flag at all still means pink noise — same as it always has, just now also
     // reachable explicitly via --pink.
-    let signal = signal.unwrap_or(Signal::Pink);
+    let mut signal = signal.unwrap_or(Signal::Pink);
     if let Some(r) = rate_override {
         if !(8_000..=768_000).contains(&r) {
             return Err(format!("--rate {r} is out of the 8000..=768000 range").into());
         }
     }
+    // §ISP: derive the sample-domain level from the requested true-peak overshoot (file header
+    // doc), and refuse outright without --unsafe — there is no "safe" --isp setting (see the
+    // safety doc above), so this is checked before the generic ceiling logic even gets a chance
+    // to just clamp it down to something quieter and silently defeat the whole point.
+    if let Signal::Isp(requested_over) = signal {
+        if !unsafe_mode {
+            return Err("--isp requires --unsafe — it deliberately drives the sample peak up near 0 dBFS to construct a true-peak-over (see the file header doc)".into());
+        }
+        let over = requested_over.clamp(0.0, ISP_MAX_OVER_DB);
+        if (over - requested_over).abs() > 1e-9 {
+            eprintln!(
+                "[testtone] --isp {requested_over} is outside 0..={ISP_MAX_OVER_DB:.4} (the exact max for this construction) — clamping to {over:.4}."
+            );
+        }
+        // Reassign with the clamped value so every downstream use (status line, wavetable) sees
+        // the same number `level_dbfs` below was actually derived from.
+        //
+        // `level_dbfs` is set to `over` directly, NOT `over - ISP_MAX_OVER_DB` (an earlier,
+        // wrong version of this did the latter). The table already carries the ±1/√2 amplitude
+        // from the 45° phase offset, and the continuous sine's own peak is exactly the applied
+        // *gain* regardless of which points get sampled — so gain-in-dB (`level_dbfs`) IS the
+        // true peak in dBTP, directly, with no further offset. It's the discrete SAMPLE peak
+        // that sits 3.0103 dB *below* `level_dbfs` (computed just for the log line below), not
+        // the other way round. Confirmed against `--isp 3.0103 --unsafe`: `level_dbfs` = 3.0103
+        // → gain = √2 → sample peak = √2 · (1/√2) = 1.0 (exactly 0 dBFS, the textbook case) →
+        // true peak = √2 · 1.0 = +3.0103 dBTP, matching the request.
+        signal = Signal::Isp(over);
+        level_dbfs = over as f32;
+        let sample_peak_dbfs = over - ISP_MAX_OVER_DB;
+        eprintln!(
+            "[testtone] --isp: true (reconstructed) peak targeted at {over:.4} dBTP, sample peak {sample_peak_dbfs:.4} dBFS; --level is ignored for this signal."
+        );
+    }
     // Clamp the level below full scale so a boosted EQ can't drive it into a blast — unless the
-    // caller opts into a full-scale (0 dBFS) torture test with --unsafe.
+    // caller opts into a full-scale (0 dBFS) torture test with --unsafe. `--isp` is exempt: its
+    // own clamp above (`0.0..=ISP_MAX_OVER_DB`) already bounds it, and there `level_dbfs` is the
+    // *true*-peak target, which legitimately sits above 0 dBFS while the sample values it
+    // actually produces never do (they top out at exactly 0 dBFS right at `--isp 3.0103`, per
+    // the derivation above) — clamping it the same way as every other signal would silently
+    // force every `--isp` request back down to the 0 dBTP boundary case, which is the exact bug
+    // this exemption fixes.
     let level_ceil_dbfs: f32 = if unsafe_mode { 0.0 } else { -3.0 };
     if unsafe_mode {
         eprintln!("[testtone] --unsafe: full-scale (0 dBFS) allowed and the per-sample limiter is off — mind your ears/gear.");
     }
-    if level_dbfs > level_ceil_dbfs {
+    let is_isp = matches!(signal, Signal::Isp(_));
+    if !is_isp && level_dbfs > level_ceil_dbfs {
         eprintln!("[testtone] level {level_dbfs} dBFS is above the {level_ceil_dbfs} dBFS ceiling — clamping.");
         level_dbfs = level_ceil_dbfs;
     }
-    let gain = 10f32.powf(level_dbfs.clamp(-80.0, level_ceil_dbfs) / 20.0);
+    let gain = 10f32.powf((if is_isp { level_dbfs } else { level_dbfs.clamp(-80.0, level_ceil_dbfs) }) / 20.0);
     // Final per-sample ceiling: ~-1 dBFS normally (keeps pink/EQ peaks off the clip rail), full
     // scale under --unsafe so a 0 dBFS sine passes through untouched.
     let sample_ceil: f32 = if unsafe_mode { 1.0 } else { 0.891 };
@@ -320,6 +399,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Signal::Tone(wf, hz) => eprintln!("[testtone] {hz} Hz {} @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}", wf.name()),
         Signal::Pink => eprintln!("[testtone] pink noise @ ~{level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
         Signal::White => eprintln!("[testtone] white noise @ ~{level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
+        Signal::Isp(over) => eprintln!(
+            "[testtone] ISP torture: Fs/4 45°-phase sine, sample peak {:.4} dBFS → true peak {over:.4} dBTP, source {rate} Hz / {channels} ch{resample}",
+            over - ISP_MAX_OVER_DB
+        ),
     }
     eprintln!("[testtone] Ctrl+C to stop.");
 
@@ -353,10 +436,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // exist (its own per-sample rounding error, amplified by k at the top harmonics, was a real —
     // if much smaller — Gibbs-ringing drift bug fixed earlier this session): a table built once
     // and then walked by plain integer index has no accumulated error to drift in the first place.
-    let table_len = if tone_hz > 0.0 { ((rate as f64 / tone_hz as f64).round() as usize).max(1) } else { 1 };
+    // `Signal::Isp` isn't built from `tone_hz`/`k_max` above at all — it's fixed at exactly 4
+    // samples/cycle (Fs/4, by construction, not by rounding — see the file header doc for why the
+    // frequency can't be anything else) with a 45° phase offset baked into the table, so it reuses
+    // `Waveform::Sine`'s own `sin()` rather than needing a shape of its own.
+    let table_len = match signal {
+        Signal::Tone(..) if tone_hz > 0.0 => ((rate as f64 / tone_hz as f64).round() as usize).max(1),
+        Signal::Isp(_) => 4,
+        _ => 1,
+    };
     let table: Vec<f32> = (0..table_len)
         .map(|i| match signal {
             Signal::Tone(wf, _) => wf.sample(std::f64::consts::TAU * (i as f64) / (table_len as f64), k_max),
+            Signal::Isp(_) => Waveform::Sine.sample(
+                std::f64::consts::TAU * (i as f64) / (table_len as f64) + std::f64::consts::FRAC_PI_4,
+                1,
+            ),
             _ => 0.0,
         })
         .collect();
@@ -397,7 +492,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mono = match signal {
-                Signal::Tone(..) => {
+                Signal::Tone(..) | Signal::Isp(_) => {
                     let s = table[table_idx] * gain;
                     table_idx += 1;
                     if table_idx >= table_len {
