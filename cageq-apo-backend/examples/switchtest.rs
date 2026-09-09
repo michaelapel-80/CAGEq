@@ -96,13 +96,13 @@ fn main() {
 
     let at_dry = t0.elapsed();
     // Dry as the app commands it: no filters, and the preamp the Dry slot carries.
-    if !ch.publish(-9.0, &[]) {
+    if !ch.publish(-9.0, &[], false) {
         eprintln!("publishing dry was refused");
     }
     std::thread::sleep(hold);
 
     let at_wet = t0.elapsed();
-    if !ch.publish(wet_preamp, &wet) {
+    if !ch.publish(wet_preamp, &wet, false) {
         eprintln!("restoring the correction was refused");
     }
     std::thread::sleep(hold);

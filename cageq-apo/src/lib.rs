@@ -63,7 +63,7 @@ use std::ffi::c_void;
 /// Compared against `install_dir()`'s own `CAGEqApo.version` marker file (written by
 /// `register`, read by `status` — see both their own docs) instead of the DLL's bytes, so
 /// staleness now means "an intentional version bump", not "recompiled".
-pub const APO_VERSION: u32 = 1;
+pub const APO_VERSION: u32 = 5;
 
 /// Per-instance state. One of these exists per APO instance (per endpoint, per mode),
 /// created at `LockForProcess` and destroyed at `UnlockForProcess`.
@@ -116,7 +116,21 @@ impl CageqApo {
 
         if let control::ReadOutcome::Updated(seq) = control::try_read(block, &mut self.snapshot) {
             let snap = self.snapshot;
-            let ok = self.cascade.apply_coeffs(&snap.coeffs[..snap.band_count], snap.preamp_db);
+            // `snap.crossfade` — see `control::ControlBlock::crossfade`'s doc — routes a §5.2
+            // isolate boundary crossing through `start_crossfade` instead of the plain ramp:
+            // several bands independently fading toward `PASSTHROUGH` on one shared clock can
+            // sum into a real spike (measured, on a real correction, at +22 dB above both
+            // endpoints), which a level crossfade between two already-valid signals cannot.
+            //
+            // Otherwise `apply_coeffs`'s own ramp handles the timing on its own — see
+            // `dsp::Cascade::start_ramp`'s doc: a request arriving while the cascade is already
+            // mid-ramp truncates to the fixed floor automatically, no separate signal needed
+            // from the writer to say "this one's urgent."
+            let ok = if snap.crossfade {
+                self.cascade.start_crossfade(&snap.coeffs[..snap.band_count], snap.preamp_db)
+            } else {
+                self.cascade.apply_coeffs(&snap.coeffs[..snap.band_count], snap.preamp_db)
+            };
             // Either way the sequence counts as seen: a set that is too loud will not become
             // acceptable by being re-examined every buffer, and re-checking it forever would
             // put the loudness guard on the audio path in perpetuity.
