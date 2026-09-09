@@ -477,6 +477,55 @@ pub fn status() -> SetupStatus {
     SetupStatus::default()
 }
 
+/// What the live control channel for one endpoint looks like *right now* — the thing
+/// [`status`] cannot see at all, because it only ever reads `HKLM`. A registration and an
+/// attachment can both be entirely correct there and the channel still never appear, if the DLL
+/// itself failed to load — the exact bug a rogue registration pointing at a dev build path
+/// (instead of [`installed_dll`], see [`registered_at_expected_location`]'s own doc) produced:
+/// `status()` reported everything fine, and nothing anywhere said the control channel had never
+/// come up. This is what closes that gap without needing a throwaway diagnostic CLI to find out
+/// by hand — see `cageq-apo/examples/push.rs`'s own `--watch` mode, which this mirrors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveChannelStatus {
+    /// No `Global\CAGEqApo_<id>` section exists. Ordinary and expected whenever nothing is
+    /// playing on that endpoint — the APO creates the section at `LockForProcess` and it dies
+    /// with the stream, so this is *not* on its own evidence of a problem. If audio *is*
+    /// playing there and this still reads `NoChannel`, the APO failed to load.
+    NoChannel,
+    /// The section exists, but its heartbeat did not advance across a short sample window —
+    /// the APO instance exists but is not (yet, or any more) actually processing frames.
+    Stalled,
+    /// The section exists and its heartbeat is advancing: the APO is genuinely processing
+    /// audio through this endpoint right now.
+    Processing,
+}
+
+/// How long to wait between the two heartbeat samples [`live_channel_status`] takes — long
+/// enough to see at least one buffer tick at any realistic audio format (a 512-sample buffer at
+/// 44.1 kHz is ~11 ms; this leaves generous margin against a larger buffer or a slow poll
+/// tick), short enough that a status poll stays responsive.
+#[cfg(windows)]
+const HEARTBEAT_SAMPLE_WINDOW: std::time::Duration = std::time::Duration::from_millis(80);
+
+#[cfg(windows)]
+pub fn live_channel_status(endpoint_id: &str) -> LiveChannelStatus {
+    let Ok(channel) = cageq_apo::channel::ControlChannel::open(endpoint_id) else {
+        return LiveChannelStatus::NoChannel;
+    };
+    let before = channel.heartbeat();
+    std::thread::sleep(HEARTBEAT_SAMPLE_WINDOW);
+    if channel.heartbeat() > before {
+        LiveChannelStatus::Processing
+    } else {
+        LiveChannelStatus::Stalled
+    }
+}
+
+#[cfg(not(windows))]
+pub fn live_channel_status(_endpoint_id: &str) -> LiveChannelStatus {
+    LiveChannelStatus::NoChannel
+}
+
 // ---------------------------------------------------------------------------
 // Performing an action — runs *inside the elevated helper*
 // ---------------------------------------------------------------------------
