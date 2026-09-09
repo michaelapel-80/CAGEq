@@ -77,6 +77,12 @@ pub enum ApoBackendError {
     LivePushRefused(String),
 }
 
+/// How long a config file's write waits for the endpoint's edits to go quiet before it
+/// actually happens — see [`CageqApoBackend::queue_write`]'s own doc for why it waits at all.
+/// Well past the app's own ~60-70 ms live-edit coalescing cadence (so ordinary dragging never
+/// triggers a mid-drag write), short enough that "settled" reads as immediate to a person.
+const WRITE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Applies filters through CAGEq's own APO. Holds the directory corrections live in;
 /// everything else is derived from an endpoint id.
 ///
@@ -85,10 +91,34 @@ pub enum ApoBackendError {
 /// takes `&self`, so this is the interior mutability that needs, and the app already shares one
 /// `CageqApoBackend` behind an `Arc` rather than cloning it — nothing actually needed `Clone`,
 /// which a bare `Mutex` field can't derive anyway.
+///
+/// Endpoint id -> `(safe_epoch at queue time, rendered text)`. The epoch is what lets a flush
+/// refuse a write that has been superseded by a safe-state trip since it was queued — see
+/// [`CageqApoBackend::queue_write`] and [`CageqApoBackend::write_safe_state`].
+type PendingMap = std::collections::HashMap<String, (u64, String)>;
+
+/// `pending`/`write_tx`: the debounced half of persistence — see [`CageqApoBackend::queue_write`].
 #[derive(Debug)]
 pub struct CageqApoBackend {
     config_dir: PathBuf,
     slots: std::sync::Mutex<std::collections::HashMap<String, SlotAssignment>>,
+    /// Endpoint id -> the exact text that endpoint's file will have once the debounced writer
+    /// catches up. Overlaid on top of whatever is already on disk wherever the two disagree —
+    /// see [`CageqApoBackend::effective_endpoint_ids`] and [`CageqApoBackend::applied_hash`],
+    /// both of which need "what was just applied", not "what has physically hit the disk yet".
+    pending: std::sync::Arc<std::sync::Mutex<PendingMap>>,
+    /// Bumped by [`EqBackend::write_safe_state`], before it does anything else. Every
+    /// `queue_write` stamps its entry with whatever this reads *at the time it is queued*, and
+    /// a flush refuses to write any entry stamped with an older epoch than this reads *at flush
+    /// time* — closing a real race: a live edit's queued write landing debounced, *after* a
+    /// watchdog trip, would otherwise silently overwrite the safe state that trip just wrote.
+    /// Shared with the background writer via the same `Arc` `pending` already needs.
+    safe_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Wakes the background writer thread on every [`CageqApoBackend::queue_write`] — it
+    /// doesn't matter *what* is sent, only that something was; see that thread's own doc for
+    /// how the debounce itself works. Dropping this (with `CageqApoBackend` itself) is what
+    /// tells the thread to flush one last time and exit.
+    write_tx: std::sync::mpsc::Sender<()>,
 }
 
 impl Default for CageqApoBackend {
@@ -101,7 +131,23 @@ impl CageqApoBackend {
     /// Target `config_dir` — normally `%ProgramData%\CAGEq\apo` via [`Default`]. Injectable
     /// so tests can drive a temp directory rather than the machine's real configuration.
     pub fn new(config_dir: impl Into<PathBuf>) -> Self {
-        CageqApoBackend { config_dir: config_dir.into(), slots: std::sync::Mutex::new(std::collections::HashMap::new()) }
+        let config_dir = config_dir.into();
+        let pending = std::sync::Arc::new(std::sync::Mutex::new(PendingMap::new()));
+        let safe_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (write_tx, write_rx) = std::sync::mpsc::channel::<()>();
+        spawn_debounced_writer(
+            config_dir.clone(),
+            std::sync::Arc::clone(&pending),
+            std::sync::Arc::clone(&safe_epoch),
+            write_rx,
+        );
+        CageqApoBackend {
+            config_dir,
+            slots: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending,
+            safe_epoch,
+            write_tx,
+        }
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -125,19 +171,70 @@ impl CageqApoBackend {
         paths
     }
 
+    /// Every endpoint id that has a correction right now, on disk or still queued — see
+    /// [`CageqApoBackend::queue_write`]. Neither source alone is enough: a brand-new endpoint
+    /// whose very first write hasn't landed yet has no file at all. Used where "what was just
+    /// applied" means specifically *persisted or about-to-be* content — [`Self::applied_hash`].
+    fn effective_endpoint_ids(&self) -> Vec<String> {
+        let mut ids: std::collections::HashSet<String> = self
+            .config_files()
+            .iter()
+            .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+            .collect();
+        ids.extend(self.pending.lock().unwrap().keys().cloned());
+        let mut ids: Vec<String> = ids.into_iter().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Every endpoint [`EqBackend::write_safe_state`] must cover — broader than
+    /// [`Self::effective_endpoint_ids`]: it also includes every endpoint `push_live` has *ever*
+    /// live-pushed to this session (`self.slots`'s keys), even one whose very first correction
+    /// was a §5.2 isolate audition and so was never written or queued at all (isolate is
+    /// live-only by design — see `is_isolate_filters`'s own doc). Audio can be live on that
+    /// endpoint, running the boosted narrow bandpass isolate pushes, with nothing in
+    /// `effective_endpoint_ids` to show for it; a watchdog trip landing at that exact moment
+    /// must not skip silencing it just because no *file-worthy* correction ever existed there.
+    fn endpoints_needing_safe_state(&self) -> Vec<String> {
+        let mut ids: std::collections::HashSet<String> = self.effective_endpoint_ids().into_iter().collect();
+        ids.extend(self.slots.lock().unwrap().keys().cloned());
+        let mut ids: Vec<String> = ids.into_iter().collect();
+        ids.sort();
+        ids
+    }
+
     /// Hash of everything currently applied, across every endpoint.
     ///
     /// One hash for many files, because settings.json remembers exactly one per §3.0. Built
     /// from filename *and* content so that adding, removing or renaming a device's correction
     /// all register as a change — content alone would miss a file being deleted when another
     /// identical one exists.
+    ///
+    /// Reads a queued-but-not-yet-flushed endpoint's *pending* text rather than its (older, or
+    /// absent) file — this is what makes [`EqBackend::apply`]'s returned hash describe what was
+    /// just applied rather than what has physically hit disk yet. At startup, before anything
+    /// in this session has queued a write, `pending` is empty and this reduces to reading disk
+    /// exactly as it always did — which is exactly what [`EqBackend::startup_decision`] needs.
     fn applied_hash(&self) -> String {
+        // The endpoint list first, on its own: `effective_endpoint_ids` takes `pending`'s lock
+        // itself, and `self.pending`'s `Mutex` is not re-entrant — holding it across that call
+        // would deadlock this thread against itself.
+        let ids = self.effective_endpoint_ids();
+        let pending = self.pending.lock().unwrap();
+        // A pending entry stamped older than the *current* safe-state epoch is stale — it was
+        // superseded by a safe-state trip since it was queued (see `safe_epoch`'s own doc) and
+        // will never actually be written (`flush_batch` drops it on the same check). Trusting
+        // it here would report the hash of a correction that is not, and will not become, what
+        // is on disk — falling back to disk instead is what actually landed, or will.
+        let current_epoch = self.safe_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let mut hasher = Sha256::new();
-        for path in self.config_files() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                hasher.update(name.as_bytes());
-            }
-            if let Ok(body) = fs::read_to_string(&path) {
+        for id in ids {
+            hasher.update(format!("{id}.cfg").as_bytes());
+            let body = match pending.get(&id) {
+                Some((epoch, text)) if *epoch >= current_epoch => Some(text.clone()),
+                _ => fs::read_to_string(config::config_path_in(&self.config_dir, &id)).ok(),
+            };
+            if let Some(body) = body {
                 hasher.update(strip_hash_line(&body).as_bytes());
             }
         }
@@ -145,15 +242,24 @@ impl CageqApoBackend {
     }
 
     /// Write one endpoint's correction, and push it live if the APO is running there.
+    /// Write one endpoint's correction, and push it live if the APO is running there.
+    ///
+    /// **Except for the §5.2 isolate audition, which is live-only — never written to disk, not
+    /// even queued.** It is transient monitoring state, not "the correction": persisting it
+    /// would leave the *audition* as what §3.0's startup check resumes into next launch if
+    /// CAGEq crashed mid-drag, not the real correction underneath it.
     fn apply_one(&self, cfg: &DeviceConfig) -> Result<(), ApoBackendError> {
         let id = config::normalize_endpoint_id(&cfg.device)
             .ok_or_else(|| ApoBackendError::BadEndpointId(cfg.device.clone()))?;
         let apo_config = to_apo_config(cfg);
 
-        self.write_config(&id, &apo_config)?;
-        // No channel simply means nothing is playing on that endpoint — the file above is the
-        // whole job in that case, and the APO will read it when it next locks. A genuine
-        // refusal is different: the file is saved either way, but the live engine has
+        if !is_isolate_filters(&cfg.filters) {
+            self.queue_write(&id, &apo_config);
+        }
+        // No channel simply means nothing is playing on that endpoint — the queued write is
+        // the whole job in that case, and the APO will read the file it eventually becomes at
+        // its next `LockForProcess`; for isolate specifically, nothing to audition against
+        // means nothing to do at all. A genuine refusal is different: the live engine has
         // explicitly declined to run this correction (see `LivePushRefused`'s own doc for why
         // that's worth surfacing rather than swallowing — this used to be indistinguishable
         // from the benign "no channel" case, both discarded the same way, silently).
@@ -163,11 +269,75 @@ impl CageqApoBackend {
         }
     }
 
+    /// Render `apo_config` exactly as [`CageqApoBackend::write_config`] would, hash line and
+    /// all — shared so the debounced and the direct-write paths can never drift into producing
+    /// different bytes for the same input.
+    fn render_with_hash(apo_config: &ApoConfig) -> String {
+        let body = config::render(apo_config);
+        format!("{HASH_PREFIX}{}\n{body}", short_hex(&Sha256::digest(body.as_bytes())))
+    }
+
+    /// Queue `apo_config` to be written for `id` once the endpoint's edits go quiet
+    /// ([`WRITE_DEBOUNCE`]), instead of writing it — `fs::write` + `fs::rename` — on this call.
+    ///
+    /// **Why defer at all.** The config file exists purely for restart persistence (see this
+    /// module's own doc) — nothing about *live* editing needs it; that is the control channel's
+    /// job, and it is already fast (an in-memory push, no disk touched). Before this, every
+    /// single throttled push — including every isolate-style live drag tick — paid a
+    /// synchronous file write before the frame it was answering could even finish, serialized
+    /// behind the app's own one-write-at-a-time gate: on a fast or erratic drag that backlog
+    /// visibly and audibly compounded into multi-second lag. Batching every rapid edit down to
+    /// one write, timed to when the user has actually stopped, removes that disk round trip
+    /// from the live-edit path entirely — the ordinary case (someone actively tuning a filter)
+    /// now touches disk once they pause, not once per frame.
+    ///
+    /// The write itself happens on a dedicated background thread (spawned in [`Self::new`]),
+    /// not on whatever thread calls this — so this call is a map insert and a channel send,
+    /// both effectively free, and returns immediately regardless of the debounce window or
+    /// however slow the eventual disk write turns out to be.
+    ///
+    /// **What this does not weaken.** `applied_hash`/`effective_endpoint_ids` read `pending`
+    /// directly, so nothing that depends on "what was just applied" (§3.0's resume hash, the
+    /// safe-state writer covering every live endpoint) can observe a gap just because the
+    /// physical write hasn't happened yet — see both their own docs. The one real trade-off is
+    /// an abrupt process kill inside the debounce window losing the last unsettled edit; a
+    /// clean exit does not have to (see [`CageqApoBackend::flush_pending`]).
+    fn queue_write(&self, id: &str, apo_config: &ApoConfig) {
+        let text = Self::render_with_hash(apo_config);
+        // Stamped with the epoch *now*, so a flush that happens after a later safe-state trip
+        // can recognise this entry as pre-dating it — see `safe_epoch`'s own doc.
+        let epoch = self.safe_epoch.load(std::sync::atomic::Ordering::SeqCst);
+        self.pending.lock().unwrap().insert(id.to_string(), (epoch, text));
+        // The receiver can only be gone if `self` itself is mid-drop; either way there is
+        // nothing to do about a failed send here, and `Drop`'s own final flush (via the
+        // channel disconnecting) covers the pending entry regardless.
+        let _ = self.write_tx.send(());
+    }
+
+    /// Write out everything currently queued right now, synchronously, without waiting for
+    /// [`WRITE_DEBOUNCE`] to elapse on its own. Two callers: tests (which need deterministic
+    /// timing rather than a real sleep) and a clean app shutdown, so the very last edit before
+    /// closing isn't left to a debounce window the process may not stay alive to finish.
+    ///
+    /// Reports the first failure encountered (matching the old, synchronous `write_config`'s
+    /// contract as closely as a batch operation can), but does not stop at it — every other
+    /// endpoint in the batch still gets its own attempt, and whichever ones fail (for any
+    /// reason, including having been superseded by a safe-state trip since they were queued —
+    /// see [`Self::safe_epoch`]) are put back into `pending` rather than silently dropped, so
+    /// the next flush (debounced or explicit) retries them instead of losing the edit outright.
+    pub fn flush_pending(&self) -> Result<(), ApoBackendError> {
+        let epoch = self.safe_epoch.load(std::sync::atomic::Ordering::SeqCst);
+        let (failed, first_err) = flush_batch(&self.config_dir, epoch, drain(&self.pending));
+        requeue(&self.pending, failed);
+        match first_err {
+            None => Ok(()),
+            Some(e) => Err(e),
+        }
+    }
+
     fn write_config(&self, id: &str, apo_config: &ApoConfig) -> Result<(), ApoBackendError> {
         let path = config::config_path_in(&self.config_dir, id);
-        let body = config::render(apo_config);
-        let text = format!("{HASH_PREFIX}{}\n{body}", short_hex(&Sha256::digest(body.as_bytes())));
-        write_atomic(&path, &text)
+        write_atomic(&path, &Self::render_with_hash(apo_config))
     }
 
     /// Push a correction down the live control channel, if one is open.
@@ -219,6 +389,17 @@ impl CageqApoBackend {
     }
 }
 
+/// Flushes whatever is still queued when the backend goes away, so a clean app shutdown never
+/// loses the last unsettled edit to [`WRITE_DEBOUNCE`]'s window — the background writer would
+/// eventually catch it too (its own `Disconnected` arm does the same flush), but that thread
+/// outliving process shutdown by even a few hundred ms is not something to rely on. Effectively
+/// a no-op in the ordinary case and a safety net only if a `queue_write` call raced this one.
+impl Drop for CageqApoBackend {
+    fn drop(&mut self) {
+        let _ = self.flush_pending();
+    }
+}
+
 impl EqBackend for CageqApoBackend {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -249,16 +430,31 @@ impl EqBackend for CageqApoBackend {
     }
 
     fn write_safe_state(&self) -> Result<(), BackendError> {
-        // Silences every endpoint CAGEq has a correction for — which is exactly the set it
-        // can affect, so enumerating audio devices (which can fail) is not needed on a path
-        // that has to be as close to infallible as possible.
+        // Silences every endpoint CAGEq has a correction for — which is exactly the set it can
+        // affect, so enumerating audio devices (which can fail) is not needed on a path that
+        // has to be as close to infallible as possible. `endpoints_needing_safe_state`, not
+        // `config_files`, so neither an endpoint whose very first correction is still sitting
+        // in `pending` (never yet reached disk — see `queue_write`) nor one whose *only* live
+        // push ever was a §5.2 isolate audition (deliberately never written or queued at all —
+        // see `is_isolate_filters`'s own doc, and that method's own doc) is missed just because
+        // neither has a file yet; a watchdog trip can arrive at any moment, including
+        // immediately after a live edit or mid-isolate-drag.
         //
+        // Bumped *before* touching anything else: every `queue_write` from here on stamps its
+        // entry with the new epoch, and every entry already queued keeps the old one — which is
+        // exactly the distinction the debounced flush needs (`flush_batch`) to refuse writing a
+        // pre-trip edit over the safe state this call is about to write, however that edit's
+        // queue and this trip happen to interleave in real time. `applied_hash` makes the same
+        // check on the read side, so a stale entry lingering in `pending` afterwards (nothing
+        // here removes it — the epoch alone is enough) cannot be mistaken for what is on disk
+        // either.
+        self.safe_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let safe = safe_state();
         // Both halves matter: the file makes the safe state survive a restart, and the live
         // push makes it take effect *now*, which is the entire point of a watchdog fail-safe.
-        // Waiting for the next `LockForProcess` would be no fail-safe at all.
-        let safe = safe_state();
-        for path in self.config_files() {
-            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        // Waiting for the next `LockForProcess` would be no fail-safe at all. Written directly
+        // (not queued) — a fail-safe has to land now, not after a debounce window.
+        for id in &self.endpoints_needing_safe_state() {
             self.write_config(id, &safe).map_err(BackendError::backend)?;
             let _ = self.push_live(id, &safe);
         }
@@ -367,6 +563,17 @@ pub enum PushOutcome {
     /// too many bands, an unsafe/unstable coefficient, or an out-of-range preamp). The
     /// previous correction is still running; nothing was left half-applied.
     Refused,
+}
+
+/// Is `filters` the §5.2 isolate audition — a bandpass-only substitute for the real correction,
+/// used to hear one filter's region in isolation? Always exactly one `Bandpass` band; anything
+/// else (an ordinary correction, a shelf/peaking band alone, two bandpasses) is not. Works over
+/// `cageq_backend::Filter`/`FilterType` rather than the APO's own `Band`/`FilterKind` because
+/// `apply_one` sees `cfg.filters` *before* `to_apo_config` converts it — a second copy rather
+/// than a shared one, the same tradeoff [`band_key`]'s own doc already makes for this exact
+/// pair of types.
+fn is_isolate_filters(filters: &[Filter]) -> bool {
+    filters.len() == 1 && filters[0].kind == FilterType::Bandpass
 }
 
 /// Identity of a band for [`SlotAssignment`] — same reasoning as `cageq-core::morph::key()`
@@ -525,6 +732,101 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), ApoBackendError> {
     fs::rename(&tmp, path).map_err(fail)
 }
 
+/// Take everything currently queued in one atomic step, leaving `pending` empty. Used by both
+/// the background writer (on its debounce timeout) and [`CageqApoBackend::flush_pending`] — the
+/// mutex means only one of them can ever actually drain a given entry, so the two can race each
+/// other harmlessly (whichever gets there first does the work; the other finds nothing left)
+/// rather than double-writing or losing one.
+fn drain(pending: &std::sync::Mutex<PendingMap>) -> Vec<(String, (u64, String))> {
+    pending.lock().unwrap().drain().collect()
+}
+
+/// Put entries back into `pending` for the next flush to retry — used after a batch comes back
+/// with genuine I/O failures (see [`flush_batch`]). `or_insert`, not a blind overwrite: a fresh
+/// `queue_write` for the same id may have landed *while* this batch was in flight, and that
+/// newer content must win over the stale content that just failed to write, not be clobbered by
+/// it.
+fn requeue(pending: &std::sync::Mutex<PendingMap>, failed: Vec<(String, (u64, String))>) {
+    if failed.is_empty() {
+        return;
+    }
+    let mut p = pending.lock().unwrap();
+    for (id, entry) in failed {
+        p.entry(id).or_insert(entry);
+    }
+}
+
+/// Write every `(endpoint id, (epoch, rendered text))` pair to its config file — except an
+/// entry stamped with an epoch older than `current_epoch`, which is dropped **silently, not as
+/// a failure**: it was legitimately superseded by a safe-state trip since it was queued (see
+/// [`CageqApoBackend::safe_epoch`]'s own doc), and writing it now would undo the safe state that
+/// trip just wrote.
+///
+/// Continues past a genuine write failure rather than stopping at the first one — a transient
+/// failure for one endpoint (an antivirus scan holding the file, say) must not also block every
+/// other endpoint's write. Failed entries are returned for the caller to [`requeue`] rather than
+/// losing them outright; the first failure's error is returned too, so at least one still
+/// surfaces somewhere instead of vanishing into a background thread with nothing watching it.
+fn flush_batch(
+    config_dir: &Path,
+    current_epoch: u64,
+    batch: Vec<(String, (u64, String))>,
+) -> (Vec<(String, (u64, String))>, Option<ApoBackendError>) {
+    let mut failed = Vec::new();
+    let mut first_err = None;
+    for (id, (epoch, text)) in batch {
+        if epoch < current_epoch {
+            continue;
+        }
+        if let Err(e) = write_atomic(&config::config_path_in(config_dir, &id), &text) {
+            eprintln!("[cageq-apo-backend] failed to write config for {id}: {e}");
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+            failed.push((id, (epoch, text)));
+        }
+    }
+    (failed, first_err)
+}
+
+/// The debounced writer itself: sleeps between pokes from [`CageqApoBackend::queue_write`], and
+/// only actually touches disk once [`WRITE_DEBOUNCE`] has passed with no new poke — see that
+/// method's own doc for why deferring at all is worth doing. One thread per `CageqApoBackend`,
+/// spawned in [`CageqApoBackend::new`]; torn down (after one final flush) when `write_tx` is
+/// dropped alongside the backend.
+fn spawn_debounced_writer(
+    config_dir: PathBuf,
+    pending: std::sync::Arc<std::sync::Mutex<PendingMap>>,
+    safe_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    rx: std::sync::mpsc::Receiver<()>,
+) {
+    std::thread::spawn(move || loop {
+        match rx.recv_timeout(WRITE_DEBOUNCE) {
+            // Fresh activity. Nothing to do but loop back into `recv_timeout` — restarting the
+            // debounce window is *implicit* in calling it again from here rather than from a
+            // remembered deadline.
+            Ok(()) => continue,
+            // Quiet for the full window: whatever is queued has settled — write it.
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let epoch = safe_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                let (failed, _) = flush_batch(&config_dir, epoch, drain(&pending));
+                requeue(&pending, failed);
+            }
+            // The backend was dropped. Its `Drop` impl already flushed synchronously before
+            // `write_tx` went away, so this is very likely a no-op — but if a `queue_write`
+            // call raced the drop, this is the last chance to catch what it queued.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Nothing will ever read `pending` again after this, so a failure here (unlike
+                // the timeout arm above) has no next attempt to be requeued for — this really
+                // is the last chance.
+                let epoch = safe_epoch.load(std::sync::atomic::Ordering::SeqCst);
+                let _ = flush_batch(&config_dir, epoch, drain(&pending));
+                return;
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,6 +838,7 @@ mod tests {
     // the same process — reusing EP/EP2 here would race whichever other test runs alongside.
     const EP_LIVE_REFUSED: &str = "{99990001-0001-0001-0001-000000000001}";
     const EP_LIVE_OK: &str = "{99990002-0002-0002-0002-000000000002}";
+    const EP_LIVE_ISOLATE_ONLY: &str = "{99990003-0003-0003-0003-000000000003}";
 
     /// A private directory per test, so these never touch the machine's real corrections.
     fn temp_backend(tag: &str) -> (CageqApoBackend, PathBuf) {
@@ -565,6 +868,7 @@ mod tests {
     fn what_the_backend_writes_the_apo_can_read_back() {
         let (backend, dir) = temp_backend("roundtrip");
         backend.apply(&[device(EP, -9.5)]).unwrap();
+        backend.flush_pending().unwrap(); // the write is debounced; force it to land now
 
         let path = config::config_path_in(&dir, EP);
         let text = fs::read_to_string(&path).expect("config file should exist");
@@ -577,12 +881,211 @@ mod tests {
         assert_eq!(parsed.bands[1].kind, FilterKind::HighShelf);
     }
 
+    /// The generalised version of the isolate fix: it was never really about isolate
+    /// specifically — *any* rapid sequence of live edits used to pay a synchronous file write
+    /// per push. An ordinary (non-isolate) `apply` must not touch disk immediately either; only
+    /// once it settles (`flush_pending`, standing in for the real debounce window landing on
+    /// its own) should the file actually appear.
+    #[test]
+    fn an_ordinary_apply_does_not_write_the_file_before_it_settles() {
+        let (backend, dir) = temp_backend("ordinary-debounced");
+        backend.apply(&[device(EP, -6.0)]).unwrap();
+
+        assert!(
+            !config::config_path_in(&dir, EP).exists(),
+            "the write must not have landed yet — it should still be debounced"
+        );
+
+        backend.flush_pending().unwrap();
+        assert!(
+            config::config_path_in(&dir, EP).exists(),
+            "once settled (flushed), the write must actually land"
+        );
+    }
+
+    /// The safety-critical half of the same change: a watchdog trip can land at any moment,
+    /// including the instant after a live edit whose write hasn't reached disk yet — even, for
+    /// a brand-new endpoint, before it has ever had a file at all. `write_safe_state` must still
+    /// cover it, not just whatever `config_files` (disk only) happens to already show.
+    #[test]
+    fn write_safe_state_covers_an_endpoint_whose_write_is_still_only_pending() {
+        let (backend, dir) = temp_backend("safe-covers-pending");
+        backend.apply(&[device(EP, -6.0)]).unwrap();
+        assert!(
+            !config::config_path_in(&dir, EP).exists(),
+            "sanity check: the write really hasn't landed yet"
+        );
+
+        backend.write_safe_state().unwrap();
+
+        let text = fs::read_to_string(config::config_path_in(&dir, EP))
+            .expect("write_safe_state must cover a pending-only endpoint, not just files on disk");
+        let parsed = config::parse(&text).expect("safe state must still parse");
+        assert!(parsed.bands.is_empty(), "safe state should carry no filters");
+        assert_eq!(parsed.preamp_db, -120.0, "safe state must silence, not neutralise");
+    }
+
+    /// The bug this guards: an endpoint whose very *first* live push was a §5.2 isolate
+    /// audition never enters `pending` at all (isolate is deliberately live-only — see
+    /// `is_isolate_filters`'s own doc) and has no file either, so `effective_endpoint_ids`
+    /// alone would never see it — even though audio is genuinely running the boosted narrow
+    /// bandpass on that endpoint right now (hence a real live channel, like the other
+    /// live-channel tests in this file — `self.slots` is only ever populated once `push_live`
+    /// gets far enough to reach it, which needs a channel to actually be open). A watchdog trip
+    /// landing at that moment must still silence it.
+    #[test]
+    fn write_safe_state_covers_an_endpoint_whose_only_push_was_isolate() {
+        let (backend, dir) = temp_backend("safe-covers-isolate-only");
+        let Some(channel) = ControlChannel::create(EP_LIVE_ISOLATE_ONLY) else {
+            eprintln!("skipping: could not create a Global\\ section (needs SeCreateGlobalPrivilege)");
+            return;
+        };
+        cageq_apo::control::set_sample_rate(channel.block(), 48_000);
+
+        let isolate = DeviceConfig {
+            device: EP_LIVE_ISOLATE_ONLY.to_string(),
+            preamp_db: 0.0,
+            filters: vec![Filter { kind: FilterType::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 }],
+        };
+        backend.apply(&[isolate]).unwrap();
+        assert!(
+            !config::config_path_in(&dir, EP_LIVE_ISOLATE_ONLY).exists(),
+            "sanity check: isolate must not have written or queued anything"
+        );
+
+        backend.write_safe_state().unwrap();
+
+        let text = fs::read_to_string(config::config_path_in(&dir, EP_LIVE_ISOLATE_ONLY)).expect(
+            "write_safe_state must cover an endpoint whose only push was isolate, not just \
+             endpoints that already had a file-worthy correction",
+        );
+        let parsed = config::parse(&text).expect("safe state must still parse");
+        assert!(parsed.bands.is_empty(), "safe state should carry no filters");
+        assert_eq!(parsed.preamp_db, -120.0, "safe state must silence, not neutralise");
+    }
+
+    /// **The bug this guards**: a live edit racing a watchdog trip must never let its (now
+    /// stale, pre-failure) content overwrite the safe state a moment later, once the debounced
+    /// writer finally gets to it. `write_safe_state` deliberately does not clear `pending` — the
+    /// epoch stamp alone (`safe_epoch`) must be enough to keep a stale entry from ever landing.
+    #[test]
+    fn write_safe_state_wins_over_a_stale_pending_write_even_if_one_lingers() {
+        let (backend, dir) = temp_backend("safe-beats-stale-pending");
+        // Queued but not yet flushed — this is the race: a live edit already in flight when the
+        // watchdog fires.
+        backend.apply(&[device(EP, -6.0)]).unwrap();
+
+        backend.write_safe_state().unwrap();
+        // The stale entry is still sitting in `pending` — nothing removed it. If the epoch
+        // guard did not exist, this flush would overwrite the safe state just written above.
+        assert!(backend.pending.lock().unwrap().contains_key(EP), "sanity check: the stale entry must still be queued");
+        backend.flush_pending().unwrap();
+
+        let text = fs::read_to_string(config::config_path_in(&dir, EP)).unwrap();
+        let parsed = config::parse(&text).expect("must still parse");
+        assert!(parsed.bands.is_empty(), "the stale pending write must not have overwritten the safe state");
+        assert_eq!(parsed.preamp_db, -120.0, "the safe state must survive the stale write");
+    }
+
+    /// The pure mechanism behind the test above, isolated: `flush_batch` must silently skip
+    /// (not write, not report as a failure) any entry stamped with an epoch older than the
+    /// current one, and must still write everything stamped at or after it.
+    #[test]
+    fn flush_batch_skips_entries_older_than_the_current_epoch() {
+        let dir = std::env::temp_dir()
+            .join(format!("cageq-apo-backend-{}-flush-batch-epoch", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let batch = vec![
+            ("stale-id".to_string(), (0u64, "stale content".to_string())),
+            ("fresh-id".to_string(), (5u64, "fresh content".to_string())),
+        ];
+        let (failed, err) = flush_batch(&dir, 5, batch);
+        assert!(failed.is_empty(), "neither entry should count as a *failure*");
+        assert!(err.is_none());
+        assert!(!dir.join("stale-id.cfg").exists(), "an epoch-stale entry must not be written");
+        assert!(dir.join("fresh-id.cfg").exists(), "a current-epoch entry must still be written");
+    }
+
+    /// **The bug this guards**: before this, a write that failed (a transient disk/AV issue,
+    /// say) was silently dropped — `queue_write` cannot fail at all, and the old
+    /// `write_config`'s `Result` no longer reaches anyone once the write is debounced. A failed
+    /// entry must be put back into `pending` so the next flush retries it, not lost outright.
+    #[test]
+    fn a_failed_write_is_requeued_not_lost() {
+        let (backend, dir) = temp_backend("failed-write-requeue");
+        backend.apply(&[device(EP, -6.0)]).unwrap();
+
+        // Sabotage the write: put a directory exactly where `write_atomic`'s own temp file
+        // needs to go, so `fs::write` fails predictably.
+        let tmp_path = config::config_path_in(&dir, EP).with_extension("cfg.tmp");
+        fs::create_dir_all(&tmp_path).unwrap();
+
+        assert!(backend.flush_pending().is_err(), "the write must fail while the tmp path is a directory");
+        assert!(
+            backend.pending.lock().unwrap().contains_key(EP),
+            "a failed write must be requeued, not lost"
+        );
+
+        // Clear the obstruction and retry: the requeued entry must actually land.
+        fs::remove_dir(&tmp_path).unwrap();
+        backend.flush_pending().unwrap();
+        assert!(
+            config::config_path_in(&dir, EP).exists(),
+            "the requeued write must succeed once retried"
+        );
+    }
+
+    /// The bug this guards: every isolate drag tick used to pay a synchronous file write
+    /// before the live push even started, serialized behind the app's own one-write-at-a-time
+    /// gate — compounding into multi-second lag on a fast drag. The §5.2 isolate audition
+    /// (always exactly one `Bandpass`, see `FilterKind::Bandpass`'s own doc) must never touch
+    /// the config file at all, live channel or not.
+    #[test]
+    fn the_isolate_audition_never_writes_the_config_file() {
+        let (backend, dir) = temp_backend("isolate-no-write");
+        let isolate = DeviceConfig {
+            device: EP.to_string(),
+            preamp_db: 0.0,
+            filters: vec![Filter { kind: FilterType::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 }],
+        };
+        backend.apply(&[isolate]).unwrap();
+
+        assert!(
+            !config::config_path_in(&dir, EP).exists(),
+            "an isolate-only apply must never create the config file"
+        );
+    }
+
+    /// The other half of the same guard: an isolate apply must not silently *stop* writing an
+    /// endpoint's real, already-persisted correction — only the isolate push itself is
+    /// live-only, an ordinary apply right after it must still behave exactly as before.
+    #[test]
+    fn an_ordinary_apply_after_an_isolate_one_still_writes_the_file() {
+        let (backend, dir) = temp_backend("isolate-then-ordinary");
+        let isolate = DeviceConfig {
+            device: EP.to_string(),
+            preamp_db: 0.0,
+            filters: vec![Filter { kind: FilterType::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 }],
+        };
+        backend.apply(&[isolate]).unwrap();
+        backend.apply(&[device(EP, -6.0)]).unwrap();
+        backend.flush_pending().unwrap(); // the write is debounced; force it to land now
+
+        let text = fs::read_to_string(config::config_path_in(&dir, EP))
+            .expect("the real correction must be written once isolate ends");
+        let parsed = config::parse(&text).expect("the APO's own parser must accept it");
+        assert_eq!(parsed.bands.len(), 2, "the real two-band correction, not the isolate bandpass");
+    }
+
     /// The device id is normalised, so a bare GUID and a braced one address one endpoint
     /// rather than quietly producing two corrections that fight each other.
     #[test]
     fn endpoint_ids_are_normalised_and_bad_ones_refused() {
         let (backend, dir) = temp_backend("ids");
         backend.apply(&[device("6CAFE423-CDE5-4EC1-A1E2-E3FCEC778349", -3.0)]).unwrap();
+        backend.flush_pending().unwrap(); // the write is debounced; force it to land now
         assert!(config::config_path_in(&dir, EP).exists(), "should have normalised to {EP}");
         assert_eq!(backend.config_files().len(), 1);
 
@@ -596,6 +1099,7 @@ mod tests {
         assert_eq!(backend.startup_decision(None).unwrap(), StartupDecision::FirstRun);
 
         let hash = backend.apply(&[device(EP, -6.0)]).unwrap();
+        backend.flush_pending().unwrap(); // the write is debounced; force it to land now
         assert_eq!(
             backend.startup_decision(Some(&hash)).unwrap(),
             StartupDecision::ResumeTrusted,
@@ -650,6 +1154,7 @@ mod tests {
 
         let two = backend.apply(&[device(EP, -7.0), device(EP2, -7.0)]).unwrap();
         assert_ne!(changed, two, "adding a device must change the hash");
+        backend.flush_pending().unwrap(); // must be off disk, and out of `pending`, to remove
 
         // Removing a device's file must not read as unchanged.
         fs::remove_file(config::config_path_in(&dir, EP2)).unwrap();
@@ -674,6 +1179,7 @@ mod tests {
         let (backend, _dir) = temp_backend("flat");
         let flat = DeviceConfig { device: EP.to_string(), preamp_db: 0.0, filters: vec![] };
         let hash = backend.apply(&[flat]).unwrap();
+        backend.flush_pending().unwrap(); // the write is debounced; force it to land now
         assert_eq!(
             backend.startup_decision(Some(&hash)).unwrap(),
             StartupDecision::ResumeTrusted,
