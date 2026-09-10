@@ -134,6 +134,24 @@ jobs:
           name: ${{ steps.installer.outputs.name }}
           path: ${{ steps.installer.outputs.path }}
 
+      # v0.8.1 shipped with two installers attached to one release (a stray, wrongly-named 0.8.0
+      # build sitting alongside the real 0.8.1 one) — traced to a re-run against the same tag
+      # (the first attempt shipped a stale-versioned installer, caught and fixed, then re-run):
+      # `action-gh-release` below attaches to whatever release already exists for this tag rather
+      # than replacing it, so the second run's correct asset landed *next to* the first run's
+      # wrong one instead of instead of it. Deleting any existing release for this tag first makes
+      # every publish a clean slate regardless of how many times this workflow ever runs against
+      # it — `gh release delete` errors when there's nothing to delete (the normal, first-time
+      # case), which the trailing `exit 0` swallows on purpose.
+      - name: Remove any existing release for this tag (idempotent publish)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "${{ github.ref_name }}" --yes --repo "${{ github.repository }}"
+          exit 0
+
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
