@@ -43,6 +43,22 @@ type Status = {
   config_source: string;
   sidecar: string;
 };
+// `invoke("status")` returns a fresh object every call, so a naive `setStatus(await invoke(...))`
+// on the 3s poll below re-renders the whole (large) App tree every 3s even when nothing in it
+// actually changed — measured live in the profiler as a recurring >25ms render against ~1ms
+// normal ones. `Status` is flat primitives, so a field-by-field compare is cheap and lets the
+// poll's `setStatus` call return the *same* object when unchanged, which React treats as a no-op.
+function statusEqual(a: Status, b: Status): boolean {
+  return (
+    a.startup === b.startup &&
+    a.health === b.health &&
+    a.health_kind === b.health_kind &&
+    a.recoveries === b.recoveries &&
+    a.config_dir === b.config_dir &&
+    a.config_source === b.config_source &&
+    a.sidecar === b.sidecar
+  );
+}
 type LoudnessMode = "Comparison" | "FinalVolume";
 type LoudnessSettings = { base_pregain_db: number; isp_headroom_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
@@ -884,10 +900,14 @@ function App() {
     return () => window.clearTimeout(id);
   }, [restored, library]);
 
-  // Poll status so the fail-safe banner reflects live watchdog health (trip/recover).
+  // Poll status so the fail-safe banner reflects live watchdog health (trip/recover). Skips the
+  // state update (and so the re-render) when the poll comes back identical to what's already
+  // shown — see `statusEqual`'s own doc for why that matters here specifically.
   useEffect(() => {
     const id = setInterval(() => {
-      invoke<Status>("status").then(setStatus).catch(() => {});
+      invoke<Status>("status")
+        .then((next) => setStatus((prev) => (prev && statusEqual(prev, next) ? prev : next)))
+        .catch(() => {});
     }, 3000);
     return () => clearInterval(id);
   }, []);
