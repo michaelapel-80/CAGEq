@@ -23,8 +23,18 @@ import type { ScopeEq } from "./Vectorscope";
 // first) — a log-frequency curve rather than a dwelling point/beam was the one content shape this
 // hadn't been tried against yet; confirmed live to fit better than expected, enabled by default
 // with its own tuned numbers rather than Vectorscope's/TimeScope's.
-type Params = { trailTau: number; tail: number; glow: number; bloom: number; haze: number; undistort: boolean };
-const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true };
+// `harmonicFold` gates `findPeaks`'s step 3 (see that function's own doc) — decluttering the
+// readout of a harmonic series down to its fundamental is the right default for real program
+// material (a mains hum's ladder, an instrument's own overtones), but it actively hides the thing
+// a harmonic-rich test signal (`testtone`'s --square/--triangle/--sawtooth/--pulse, or the in-app
+// generator) exists to show off: testtone.rs's own header doc says a clean --square readout
+// "should show *only* clean odd harmonics" — folding does the opposite, collapsing all of them
+// down to just the fundamental. Off by default: `trackPeaks`'s per-peak identity/hold already
+// covers the frame-to-frame *stability* folding used to help with, so folding's remaining job is
+// pure decluttering, which isn't the right default now that reading individual harmonics is a
+// real, common use of this view.
+type Params = { trailTau: number; tail: number; glow: number; bloom: number; haze: number; undistort: boolean; harmonicFold: boolean };
+const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true, harmonicFold: false };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation, and
@@ -255,14 +265,15 @@ function harmonicOf(f: number, root: number): boolean {
  *  none at all when the whole frame is at or below the noise floor, local maxima prominent enough
  *  to be a real peak rather than FFT noise, loud enough to be real content rather than noise-floor
  *  ripple (`PEAK_MAX_RANGE_DB`), spaced far enough apart that they aren't all just one resonance's
- *  shoulder, and — of the peaks left standing — not an integer-ratio harmonic of a lower one that's
- *  also present (`harmonicOf`): a fundamental's own ladder folds into it rather than each partial
- *  spending a slot competing on its own. Returns the *largest* qualifying peaks, then reorders them
+ *  shoulder, and — of the peaks left standing, when `foldHarmonics` is on — not an integer-ratio
+ *  harmonic of a lower one that's also present (`harmonicOf`): a fundamental's own ladder folds
+ *  into it rather than each partial spending a slot competing on its own (off by default — see
+ *  `Params.harmonicFold`'s own doc). Returns the *largest* qualifying peaks, then reorders them
  *  to ascending frequency —
  *  picking by magnitude and presenting by frequency are different steps on purpose, so a strong
  *  low-frequency hum and a quieter but still-qualifying high note both land in the order a reader
  *  scans the axis, not loudest-first. */
-function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { i: number; v: number }[] {
+function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number, foldHarmonics: boolean): { i: number; v: number }[] {
   if (n < 3) return [];
   let loudest = -Infinity;
   for (let i = 0; i < n; i++) if (v[i] > loudest) loudest = v[i];
@@ -323,7 +334,7 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number): { 
   const roots: { i: number; v: number }[] = [];
   for (const c of byFreqAsc) {
     const f = binHz(c.i);
-    if (!roots.some((r) => harmonicOf(f, binHz(r.i)))) roots.push(c);
+    if (!foldHarmonics || !roots.some((r) => harmonicOf(f, binHz(r.i)))) roots.push(c);
   }
   // 4) Greedy pick by magnitude, skipping anything too close (in octaves) to an already-picked
   // peak — otherwise one broad resonance's own ripples could fill every remaining slot.
@@ -777,7 +788,7 @@ export function SpectrumScope({
         const lnF0 = Math.log(s.f_min);
         const lnSpan = Math.log(s.f_max) - lnF0;
         const binHz = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * lnSpan);
-        const peaks = findPeaks(vScratch, n, binHz);
+        const peaks = findPeaks(vScratch, n, binHz, p.harmonicFold);
         if (peaks.length) {
           markCtx.strokeStyle = PEAK_MARK_COLOR;
           markCtx.lineWidth = Math.max(1, H / REF_SIZE) * 1.5;
@@ -1027,6 +1038,14 @@ export function SpectrumScope({
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
               <span className="vs-tune-label">{t("scope.undistort")}</span>
               <input type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
+            </label>
+            <label className="vs-tune-row vs-tune-check" title={t("scope.harmonicFoldHint")}>
+              <span className="vs-tune-label">{t("scope.harmonicFold")}</span>
+              <input
+                type="checkbox"
+                checked={params.harmonicFold}
+                onChange={(e) => set("harmonicFold", e.currentTarget.checked)}
+              />
             </label>
           </div>
         )}

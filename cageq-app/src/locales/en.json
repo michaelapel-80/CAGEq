@@ -136,6 +136,8 @@
     "rotate": "Rotate",
     "undistort": "Undistort",
     "undistortHint": "Inverse-filter the loopback to show the pre-EQ image (for oscilloscope music with correction on)",
+    "harmonicFold": "Fold",
+    "harmonicFoldHint": "Collapse a signal's harmonics into its fundamental in the peak readout — off by default so a test tone's individual harmonics (square/triangle/sawtooth/pulse) show up as their own peaks",
     "undistortHintSpectrum": "Undo the applied filters and preamp to show the pre-EQ spectrum, not the post-EQ capture",
     "modeLr": "L/R",
     "modeMix": "Mix",
