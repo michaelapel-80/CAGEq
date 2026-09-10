@@ -188,7 +188,7 @@
     "uacHint": "Windows will ask for administrator permission.",
     "active": "CAGEq is set up to process audio on {{device}} itself. Equalizer APO is not involved.",
     "liveProcessing": "✓ It's actively processing audio on this device right now.",
-    "liveStalled": "⚠ Connected, but not currently processing audio — try restarting playback, or re-registering below.",
+    "liveStalled": "Connected, but not currently processing audio. That's normal if nothing is playing on this device right now — but if something IS playing and you don't hear the correction, try restarting playback or re-registering below.",
     "liveNoChannel": "Not currently receiving audio. That's normal if nothing is playing on this device right now — but if something IS playing and you don't hear the correction, the engine failed to load. Try re-registering below.",
     "retryRegister": "Try re-registering",
     "detach": "Stop using CAGEq's audio engine on this device",

@@ -188,7 +188,7 @@
     "uacHint": "Windows fragt nach Administratorrechten.",
     "active": "CAGEq ist eingerichtet, das Audio auf {{device}} selbst zu verarbeiten. Equalizer APO ist nicht beteiligt.",
     "liveProcessing": "✓ Verarbeitet gerade aktiv Audio auf diesem Gerät.",
-    "liveStalled": "⚠ Verbunden, verarbeitet aber gerade kein Audio — Wiedergabe neu starten oder unten neu registrieren.",
+    "liveStalled": "Verbunden, verarbeitet aber gerade kein Audio. Das ist normal, wenn auf diesem Gerät nichts abgespielt wird — läuft aber etwas und die Korrektur ist nicht zu hören, Wiedergabe neu starten oder unten neu registrieren.",
     "liveNoChannel": "Empfängt gerade kein Audio. Das ist normal, wenn auf diesem Gerät nichts abgespielt wird — läuft aber etwas und die Korrektur ist nicht zu hören, konnte die Engine nicht geladen werden. Unten neu registrieren.",
     "retryRegister": "Neu registrieren",
     "detach": "CAGEqs Audio-Engine für dieses Gerät nicht mehr verwenden",

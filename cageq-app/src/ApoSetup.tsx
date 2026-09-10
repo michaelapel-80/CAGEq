@@ -226,7 +226,7 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
                       one thing on this whole card that reflects the *live* channel rather than
                       HKLM, so it's shown even in the otherwise-quiet settled state. */}
                   {status.live_channel === "processing" && <p className="ok">{t("apoSetup.liveProcessing")}</p>}
-                  {status.live_channel === "stalled" && <p className="warn">{t("apoSetup.liveStalled")}</p>}
+                  {status.live_channel === "stalled" && <p>{t("apoSetup.liveStalled")}</p>}
                   {status.live_channel === "no_channel" && <p>{t("apoSetup.liveNoChannel")}</p>}
                 </>
               ) : (
