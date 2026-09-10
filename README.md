@@ -43,6 +43,12 @@ filters without guardrails risks digital clipping or jarring level jumps.
 CAGEq ships its own oscilloscope, stereo vectorscope, spectrum analyzer, and level/LUFS meters,
 all fed by a live WASAPI loopback capture of the actual (post-EQ) output — not mockups.
 
+By default, the oscilloscope, vectorscope, and spectrum analyzer don't show that raw capture —
+they inverse-filter it back to the pre-EQ source image ("undistort"), so e.g. steady pink noise
+still reads flat no matter how aggressive the correction is; each has its own toggle to switch to
+the raw post-EQ signal instead. The meters are the one exception and always show the real post-EQ
+output, since that's what actually needs measuring for safety.
+
 The level meter (phosphor-beam rendered, like the scopes) carries true-peak (BS.1770 oversampled —
 catches inter-sample overs a plain sample-peak read misses) and true-RMS marks, and a BS.1770
 momentary/short-term LUFS meter sits beside it, making the auto-loudness compensation this app is
@@ -91,13 +97,23 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──JSON-R
   its curated target-curve database) instead of reimplementing it in Rust/JS. Not latency-critical
   — the actual real-time audio path lives entirely in the two engines above.
 * **Why Rust/Tauri:** a lean native WebView2 shell instead of a bundled Chromium (Electron), plus
-  a fail-safe watchdog independent of Python. Honestly: no component here strictly needs Rust's
-  performance for what it actually does.
-* **Why a second, custom audio engine alongside Equalizer APO:** Equalizer APO works well but
-  its config-reload crossfade has a measurable cold-start bloom on every edit. CAGEq's own APO
-  keeps filter state across edits and ramps coefficients live over a control channel instead,
-  trading a one-time elevated setup step for a cleaner edit-to-edit transition. Equalizer APO
-  remains fully supported for anyone who already uses it or wants its other features.
+  a fail-safe watchdog independent of Python. The orchestrator itself doesn't need Rust's
+  performance to do its job — but two other components in this same Rust codebase have their own
+  reasons: the spectrum analyzer's FFT runs on [`rustfft`](https://github.com/ejmahler/RustFFT),
+  which benchmarks itself against FFTW and claims to match or beat it; and CAGEq's own APO runs
+  inside `audiodg.exe`'s real-time audio callback, where missing a deadline means an audible
+  glitch rather than a slow UI — though it leans on a fair amount of `unsafe` to interop with its
+  C++ COM shim, so it isn't a clean memory-safety win either.
+* **Why a second, custom audio engine alongside Equalizer APO:** the whole point of this app is a
+  meaningful A/B. Equalizer APO's config-reload crossfade puts a bloom on every switch, not just
+  every edit — not a hard click, but measurable, and audible with real program material. Read
+  naively, it can pass for an actual difference between A and B when there is none, undermining
+  the exact comparison CAGEq exists to make trustworthy. CAGEq's own APO keeps filter state across
+  switches and ramps coefficients live over a control channel instead, making A/B/Dry switching
+  close to fully transparent. A cleaner single-edit transition comes along for free, but
+  transparent switching is the actual reason for the one-time elevated setup step it costs.
+  Equalizer APO remains fully supported for anyone who already uses it or wants its other
+  features.
 
 Windows-only today (via Equalizer APO / a custom Windows Audio Processing Object), though the
 data model, DSP math, and most of the UI are platform-agnostic — a port would mean swapping the
