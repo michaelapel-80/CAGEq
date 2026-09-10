@@ -14,6 +14,8 @@
 
 use serde::Serialize;
 
+pub mod signal;
+
 /// One meter reading, pushed to the UI ~20×/s. Plain data, so it's platform-independent.
 #[derive(Clone, Debug, Serialize)]
 pub struct MeterUpdate {
@@ -387,18 +389,16 @@ mod windows_impl {
         }
     }
 
-    /// A safe, self-terminating pink-noise player — the render counterpart to the loopback. The
-    /// app's self-test plays this out the endpoint (through EqAPO) while the loopback captures the
-    /// result, to prove end-to-end that the EQ chain is actually applying corrections. Level is
-    /// fixed low (audible but safe) and faded in; the caller stops it when the measurement is done.
+    /// A self-terminating render (playback) signal, one of two flavors: [`start`](Self::start), a
+    /// safe fixed pink-noise player (the render counterpart to the loopback — the app's Self-test
+    /// plays this through EqAPO while the loopback captures the result, to prove end-to-end that
+    /// the EQ chain is actually applying corrections), or [`start_generator`](Self::start_generator),
+    /// the general-purpose test-tone generator behind the in-app window. Either way, level is
+    /// faded in and the caller stops it when done.
     pub struct TestSignal {
         stop: Arc<AtomicBool>,
         handle: Option<JoinHandle<()>>,
     }
-
-    /// Self-test playback level — audible but conservative (extra headroom over the -3 dBFS the dev
-    /// `testtone` example allows, since this plays on real users' devices through their EQ).
-    const TEST_SIGNAL_DBFS: f32 = -18.0;
 
     impl TestSignal {
         /// Start pink noise on `endpoint_id` (or the default render endpoint) until [`stop`].
@@ -420,6 +420,27 @@ mod windows_impl {
             self.shutdown();
         }
 
+        /// Start the general-purpose test-tone generator (the in-app window, `cageq-app`'s
+        /// `start_test_generator` command) on `endpoint_id` (or the default render endpoint)
+        /// until [`stop`](Self::stop). Independent render path from `start`'s fixed self-test
+        /// pink noise — see `render_generator`'s own doc for why they're not merged.
+        pub fn start_generator(
+            endpoint_id: Option<String>,
+            params: crate::signal::GeneratorParams,
+        ) -> Result<TestSignal, String> {
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_thread = stop.clone();
+            let handle = thread::Builder::new()
+                .name("cageq-testgenerator".into())
+                .spawn(move || {
+                    if let Err(e) = render_generator(endpoint_id, params, &stop_thread) {
+                        eprintln!("[cageq-monitor] test generator ended: {e}");
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(TestSignal { stop, handle: Some(handle) })
+        }
+
         fn shutdown(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
             if let Some(h) = self.handle.take() {
@@ -434,8 +455,9 @@ mod windows_impl {
         }
     }
 
-    /// Render faded-in pink noise out the endpoint at [`TEST_SIGNAL_DBFS`] until `stop`. Shared-mode
-    /// render, so it passes through EqAPO like any app's audio (the whole point of the self-test).
+    /// Render faded-in pink noise out the endpoint at [`crate::signal::SAFE_PLAYBACK_CEILING_DBFS`]
+    /// until `stop`. Shared-mode render, so it passes through EqAPO like any app's audio (the
+    /// whole point of the self-test).
     fn render_pink(endpoint_id: Option<String>, stop: &AtomicBool) -> Result<(), Box<dyn Error>> {
         initialize_mta().ok()?;
         let enumerator = DeviceEnumerator::new()?;
@@ -451,7 +473,7 @@ mod windows_impl {
         audio_client.initialize_client(&desired, &Direction::Render, &mode)?;
         let render = audio_client.get_audiorenderclient()?;
 
-        let gain = 10f32.powf(TEST_SIGNAL_DBFS / 20.0);
+        let gain = 10f32.powf(crate::signal::SAFE_PLAYBACK_CEILING_DBFS / 20.0);
         let fade = (0.12 * rate as f32) as u64; // 120 ms fade-in — no startup pop
         audio_client.start_stream()?;
 
@@ -487,6 +509,112 @@ mod windows_impl {
                 render.write_to_device(frames, &buf, None)?;
             }
         }
+        let _ = audio_client.stop_stream();
+        Ok(())
+    }
+
+    /// Render `params.signal` out the endpoint until `stop`, honoring `params.seconds` as an
+    /// auto-stop with a fade-out. Mirrors `testtone.rs`'s own main loop (device/format/stream
+    /// setup, fade in/out envelope, wavetable indexing for `Tone`/`Isp`, `PinkNoise` for
+    /// `Pink`/`White`) but stop-flag-driven instead of Ctrl+C-driven, and silent (no `eprintln!`
+    /// diagnostics — those are CLI-only concerns `testtone.rs` keeps for itself).
+    ///
+    /// Kept independent from [`render_pink`] rather than generalizing that function to cover both:
+    /// `render_pink` backs the app's Self-test feature (real users rely on its exact fixed
+    /// behavior — pink noise, -18 dBFS, no seconds/rate/level parameters), and threading a much
+    /// larger parameter surface through it risks changing that behavior by accident. Two render
+    /// loops sharing `resolve_device`/`safe_buffer_hns` (device/buffer setup) and, for the new
+    /// path only, `crate::signal`'s synthesis (see that module's own doc for why *that* part is
+    /// shared) is a smaller blast radius than one loop trying to serve both.
+    fn render_generator(
+        endpoint_id: Option<String>,
+        params: crate::signal::GeneratorParams,
+        stop: &AtomicBool,
+    ) -> Result<(), Box<dyn Error>> {
+        use crate::signal::{build_wavetable, PinkNoise, Signal};
+
+        initialize_mta().ok()?;
+        let enumerator = DeviceEnumerator::new()?;
+        let device = resolve_device(&enumerator, &endpoint_id)?;
+        let mut audio_client = device.get_iaudioclient()?;
+        let mix = audio_client.get_mixformat()?;
+        let mix_rate = mix.get_samplespersec();
+        let channels = mix.get_nchannels();
+        // Source rate: the device mix rate unless forced — when it differs, AUTOCONVERT below
+        // makes the engine resample up/down to the mix rate (the whole point of `rate_override`).
+        let rate = params.rate_override.unwrap_or(mix_rate);
+        let desired = WaveFormat::new(32, 32, &SampleType::Float, rate as usize, channels as usize, None);
+        let block_align = desired.get_blockalign() as usize;
+        let mode = StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: safe_buffer_hns(&audio_client)? };
+        audio_client.initialize_client(&desired, &Direction::Render, &mode)?;
+        let render = audio_client.get_audiorenderclient()?;
+
+        let gain = 10f32.powf(params.level_dbfs / 20.0);
+        let total_frames: Option<u64> = params.seconds.map(|s| (s * rate as f32) as u64);
+        let fade_frames = (0.12 * rate as f32) as u64; // 120 ms fade in/out — kills startup/stop pops
+        let table = build_wavetable(params.signal, rate);
+        let table_len = table.len();
+        let mut table_idx: usize = 0;
+        let mut noise = PinkNoise::new();
+
+        audio_client.start_stream()?;
+        let mut frame: u64 = 0;
+        let mut buf: Vec<u8> = Vec::new();
+        'play: while !stop.load(Ordering::Relaxed) {
+            if let Some(total) = total_frames {
+                if frame >= total {
+                    break;
+                }
+            }
+            let space = audio_client.get_available_space_in_frames()? as usize;
+            if space == 0 {
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            buf.clear();
+            for _ in 0..space {
+                if stop.load(Ordering::Relaxed) {
+                    break 'play;
+                }
+                if let Some(total) = total_frames {
+                    if frame >= total {
+                        break;
+                    }
+                }
+                let mut env = if frame < fade_frames { frame as f32 / fade_frames as f32 } else { 1.0 };
+                if let Some(total) = total_frames {
+                    let rem = total.saturating_sub(frame);
+                    if rem < fade_frames {
+                        env = env.min(rem as f32 / fade_frames as f32);
+                    }
+                }
+                let mono = match params.signal {
+                    Signal::Tone { .. } | Signal::Isp { .. } => {
+                        let s = table[table_idx] * gain;
+                        table_idx += 1;
+                        if table_idx >= table_len {
+                            table_idx = 0;
+                        }
+                        s
+                    }
+                    Signal::White => noise.next_white() * gain,
+                    Signal::Pink => noise.next_pink() * gain,
+                };
+                let s = (mono * env).clamp(-params.sample_ceil, params.sample_ceil);
+                let bytes = s.to_le_bytes();
+                for _ in 0..channels {
+                    buf.extend_from_slice(&bytes);
+                }
+                frame += 1;
+            }
+            let frames = buf.len() / block_align;
+            if frames > 0 {
+                render.write_to_device(frames, &buf, None)?;
+            }
+        }
+
+        // Let the last buffer drain before tearing down, so a --seconds fade-out is actually heard.
+        thread::sleep(Duration::from_millis(200));
         let _ = audio_client.stop_stream();
         Ok(())
     }
@@ -1349,6 +1477,13 @@ mod stub {
 
     impl TestSignal {
         pub fn start(_endpoint_id: Option<String>) -> Result<TestSignal, String> {
+            Err("test-signal playback is only available on Windows".to_string())
+        }
+
+        pub fn start_generator(
+            _endpoint_id: Option<String>,
+            _params: crate::signal::GeneratorParams,
+        ) -> Result<TestSignal, String> {
             Err("test-signal playback is only available on Windows".to_string())
         }
 

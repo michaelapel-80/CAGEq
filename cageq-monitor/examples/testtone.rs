@@ -6,6 +6,13 @@
 //! reconstruction is correct (a flat source stays flat under any EQ). A sine is the calibrated
 //! spot-check for bin position/level (also EQ-invariant, for the same reason).
 //!
+//! The actual signal synthesis (`Waveform`, `Signal`, the wavetable builder, `ISP_MAX_OVER_DB`)
+//! lives in `cageq_monitor::signal` — shared with the in-app test-tone generator window
+//! (`cageq-app`'s `start_test_generator` command) so the two "drivers" can't independently drift
+//! against each other. This file keeps only what's CLI-specific: arg parsing, the
+//! `--unsafe`/level-ceiling policy, `eprintln!` diagnostics, and the interactive render loop
+//! (Ctrl+C-driven, with a `--seconds` auto-stop).
+//!
 //! Run it alongside CAGEq (it plays, the app captures):
 //!   cargo run -p cageq-monitor --example testtone                     # pink noise, -20 dBFS
 //!   cargo run -p cageq-monitor --example testtone -- --pink           # same, explicit
@@ -78,153 +85,10 @@
 //! no in-between "safe" `--isp` setting the way there is for the other signals.
 
 #[cfg(windows)]
-#[derive(Clone, Copy)]
-enum Waveform {
-    Sine,
-    Square,
-    Triangle,
-    Sawtooth,
-    Pulse,
-}
-
-// Duty cycle for `--pulse` — the fraction of each period the pulse is "high". Fixed rather than a
-// CLI parameter (unlike the other shapes, which need only a frequency): narrow enough to give a
-// genuinely rich, near-flat harmonic spectrum (this is the whole point of a pulse train over a
-// square wave — see `Waveform::sample`'s own doc), not so narrow the fundamental's own amplitude
-// gets awkwardly small relative to the noise floor at a sane playback level.
-#[cfg(windows)]
-const PULSE_DUTY: f64 = 0.1;
-
-#[cfg(windows)]
-impl Waveform {
-    fn name(self) -> &'static str {
-        match self {
-            Waveform::Sine => "sine",
-            Waveform::Square => "square",
-            Waveform::Triangle => "triangle",
-            Waveform::Sawtooth => "sawtooth",
-            Waveform::Pulse => "pulse",
-        }
-    }
-
-    /// One sample of this shape at phase `theta` (radians, any real value — `sin` wraps it),
-    /// summing harmonics 1..=`k_max` at each shape's textbook Fourier amplitude. Peak amplitude is
-    /// ~1 (plus a few percent of Gibbs overshoot right at an edge for square/sawtooth, same as any
-    /// finite-harmonic approximation of a discontinuous waveform — left to the caller's existing
-    /// `gain`/`sample_ceil` handling, exactly like a sine's own ~1 peak already is).
-    ///
-    /// `theta`/the internal accumulation are `f64`, not `f32`, though the return value (and every
-    /// other signal in this file) is `f32` throughout — the caller's own per-sample phase wrapping
-    /// already keeps `theta` itself bounded and precise (see `phase`'s own doc), but each harmonic
-    /// here evaluates `sin(k * theta)`/`cos(k * theta)`, which *multiplies* whatever rounding error
-    /// `theta` carries by `k` before the trig call. That error is utterly invisible in the
-    /// fundamental's own shape but, for a rich signal with a large `k_max` (a narrow-duty pulse
-    /// train can run into the hundreds), it's amplified enough by the top harmonics to visibly
-    /// drift the Gibbs ringing's fine structure cycle-to-cycle even though the edge itself sits
-    /// rock-stable — reported live, comparing a triggered scope trace across frames. `f32`'s ~7
-    /// decimal digits of precision aren't enough headroom once multiplied by a few hundred; `f64`'s
-    /// ~15-16 are, for any `k_max` this ever produces.
-    fn sample(self, theta: f64, k_max: u32) -> f32 {
-        const FRAC_4_PI: f64 = 4.0 / std::f64::consts::PI;
-        const FRAC_2_PI: f64 = 2.0 / std::f64::consts::PI;
-        const FRAC_8_PI2: f64 = 8.0 / (std::f64::consts::PI * std::f64::consts::PI);
-        (match self {
-            Waveform::Sine => theta.sin(),
-            // Odd harmonics only, amplitude 1/k — the textbook square-wave series.
-            Waveform::Square => {
-                let mut acc = 0.0f64;
-                let mut k = 1u32;
-                while k <= k_max {
-                    acc += (k as f64 * theta).sin() / k as f64;
-                    k += 2;
-                }
-                acc * FRAC_4_PI
-            }
-            // All harmonics, amplitude 1/k, alternating sign — the textbook (rising) sawtooth series.
-            Waveform::Sawtooth => {
-                let mut acc = 0.0f64;
-                let mut sign = 1.0f64;
-                for k in 1..=k_max {
-                    acc += sign * (k as f64 * theta).sin() / k as f64;
-                    sign = -sign;
-                }
-                acc * FRAC_2_PI
-            }
-            // Odd harmonics only, amplitude 1/k² (converges much faster than square/sawtooth — no
-            // audible discontinuity in the waveform itself, just a slope change, so far less Gibbs
-            // ringing and a visibly steeper roll-off on screen: -12 dB/octave vs -6).
-            Waveform::Triangle => {
-                let mut acc = 0.0f64;
-                let mut k = 1u32;
-                let mut sign = 1.0f64;
-                while k <= k_max {
-                    acc += sign * (k as f64 * theta).sin() / (k as f64 * k as f64);
-                    sign = -sign;
-                    k += 2;
-                }
-                acc * FRAC_8_PI2
-            }
-            // All harmonics, amplitude 2*d*sinc(k*d) (`d` = PULSE_DUTY) — the textbook Fourier
-            // series of a DC-free bipolar rectangular pulse train (high +1 for a `d` fraction of
-            // the period, low -d/(1-d) for the rest, so it stays zero-mean without a separate DC
-            // term to drop). Unlike square/triangle/sawtooth, nothing here cancels every other
-            // harmonic or rolls off with k — a narrow duty cycle gives a genuinely rich, close-to-
-            // flat harmonic amplitude envelope out to the cutoff (the sinc envelope's first null
-            // sits at k ≈ 1/d, well past k_max for a narrow-enough duty cycle), the reason a pulse
-            // train earns its own signal here rather than just being a narrower square wave.
-            Waveform::Pulse => {
-                let mut acc = 0.0f64;
-                for k in 1..=k_max {
-                    let x = k as f64 * PULSE_DUTY;
-                    let sinc = if x < 1e-6 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
-                    acc += (k as f64 * theta).cos() * sinc;
-                }
-                acc * (2.0 * PULSE_DUTY)
-            }
-        }) as f32
-    }
-}
-
-/// The one signal actually being played — a tuned waveform (needs a frequency), untuned noise
-/// (doesn't), or the fixed `Isp` true-peak-over construction (needs a dB target instead of a
-/// frequency — its frequency is always Fs/4, not a free parameter). Unified into one type, rather
-/// than a separate `Option` per category, so the CLI's mutual-exclusivity check (`set_signal`
-/// below) covers all of them with one rule: exactly one signal, whatever kind, per run.
-#[cfg(windows)]
-#[derive(Clone, Copy)]
-enum Signal {
-    Tone(Waveform, f64),
-    Pink,
-    White,
-    /// True-peak-over torture test (file header doc): a fixed Fs/4, 45°-phase sine, parameterised
-    /// by how many dB above 0 dBFS the *reconstructed* peak should reach (clamped to
-    /// `0.0..=ISP_MAX_OVER_DB`). No frequency to pick — Fs/4 is what makes the construction exact.
-    Isp(f64),
-}
-
-/// The exact dB the true (reconstructed) peak sits above the sample peak for `Signal::Isp`'s Fs/4,
-/// 45°-phase-offset construction — see the file header doc for the derivation (it's 20·log10(√2) =
-/// 10·log10(2)). Also the largest true-peak overshoot `--isp` can be asked for, since this
-/// construction is the deterministic maximum a single pure tone gives you.
-#[cfg(windows)]
-const ISP_MAX_OVER_DB: f64 = 3.0103;
-
-/// Next white-noise sample in `[-1, 1]`, xorshift-driven (no `rand` dependency needed) — shared by
-/// `Signal::White` directly and `Signal::Pink` (which filters this same source).
-#[cfg(windows)]
-fn white_sample(rng: &mut u32) -> f32 {
-    *rng ^= *rng << 13;
-    *rng ^= *rng >> 17;
-    *rng ^= *rng << 5;
-    (*rng as f32 / u32::MAX as f32) * 2.0 - 1.0
-}
-
-#[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use cageq_monitor::signal::{build_wavetable, ISP_MAX_OVER_DB, PinkNoise, Signal, Waveform};
     use std::time::Duration;
-    use wasapi::{
-        initialize_mta, Direction, SampleType, StreamMode, WaveFormat,
-    };
+    use wasapi::{initialize_mta, Direction, SampleType, StreamMode, WaveFormat};
 
     // --- args (dependency-free parsing) ------------------------------------------------------
     let mut signal: Option<Signal> = None;
@@ -246,14 +110,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         };
         match a.as_str() {
-            "--sine" => set_signal(Signal::Tone(Waveform::Sine, args.next().ok_or("--sine needs a frequency")?.parse()?))?,
-            "--square" => set_signal(Signal::Tone(Waveform::Square, args.next().ok_or("--square needs a frequency")?.parse()?))?,
-            "--triangle" => set_signal(Signal::Tone(Waveform::Triangle, args.next().ok_or("--triangle needs a frequency")?.parse()?))?,
-            "--sawtooth" => set_signal(Signal::Tone(Waveform::Sawtooth, args.next().ok_or("--sawtooth needs a frequency")?.parse()?))?,
-            "--pulse" => set_signal(Signal::Tone(Waveform::Pulse, args.next().ok_or("--pulse needs a frequency")?.parse()?))?,
+            "--sine" => set_signal(Signal::Tone { waveform: Waveform::Sine, hz: args.next().ok_or("--sine needs a frequency")?.parse()? })?,
+            "--square" => set_signal(Signal::Tone { waveform: Waveform::Square, hz: args.next().ok_or("--square needs a frequency")?.parse()? })?,
+            "--triangle" => set_signal(Signal::Tone { waveform: Waveform::Triangle, hz: args.next().ok_or("--triangle needs a frequency")?.parse()? })?,
+            "--sawtooth" => set_signal(Signal::Tone { waveform: Waveform::Sawtooth, hz: args.next().ok_or("--sawtooth needs a frequency")?.parse()? })?,
+            "--pulse" => set_signal(Signal::Tone { waveform: Waveform::Pulse, hz: args.next().ok_or("--pulse needs a frequency")?.parse()? })?,
             "--pink" => set_signal(Signal::Pink)?,
             "--white" => set_signal(Signal::White)?,
-            "--isp" => set_signal(Signal::Isp(args.next().ok_or("--isp needs a dB-over-0-dBFS true-peak target (0..=3.0103)")?.parse()?))?,
+            "--isp" => set_signal(Signal::Isp { db_over: args.next().ok_or("--isp needs a dB-over-0-dBFS true-peak target (0..=3.0103)")?.parse()? })?,
             "--level" => level_dbfs = args.next().ok_or("--level needs a value")?.parse()?,
             "--seconds" => seconds = Some(args.next().ok_or("--seconds needs a value")?.parse()?),
             "--device" => device_match = Some(args.next().ok_or("--device needs a name")?),
@@ -283,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // doc), and refuse outright without --unsafe — there is no "safe" --isp setting (see the
     // safety doc above), so this is checked before the generic ceiling logic even gets a chance
     // to just clamp it down to something quieter and silently defeat the whole point.
-    if let Signal::Isp(requested_over) = signal {
+    if let Signal::Isp { db_over: requested_over } = signal {
         if !unsafe_mode {
             return Err("--isp requires --unsafe — it deliberately drives the sample peak up near 0 dBFS to construct a true-peak-over (see the file header doc)".into());
         }
@@ -305,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // the other way round. Confirmed against `--isp 3.0103 --unsafe`: `level_dbfs` = 3.0103
         // → gain = √2 → sample peak = √2 · (1/√2) = 1.0 (exactly 0 dBFS, the textbook case) →
         // true peak = √2 · 1.0 = +3.0103 dBTP, matching the request.
-        signal = Signal::Isp(over);
+        signal = Signal::Isp { db_over: over };
         level_dbfs = over as f32;
         let sample_peak_dbfs = over - ISP_MAX_OVER_DB;
         eprintln!(
@@ -324,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if unsafe_mode {
         eprintln!("[testtone] --unsafe: full-scale (0 dBFS) allowed and the per-sample limiter is off — mind your ears/gear.");
     }
-    let is_isp = matches!(signal, Signal::Isp(_));
+    let is_isp = matches!(signal, Signal::Isp { .. });
     if !is_isp && level_dbfs > level_ceil_dbfs {
         eprintln!("[testtone] level {level_dbfs} dBFS is above the {level_ceil_dbfs} dBFS ceiling — clamping.");
         level_dbfs = level_ceil_dbfs;
@@ -396,74 +260,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fade_frames = (0.12 * rate as f32) as u64; // 120 ms fade in/out — kills startup/stop pops
     let resample = if rate != mix_rate { format!(" → resampled to {mix_rate} Hz by Windows") } else { String::new() };
     match signal {
-        Signal::Tone(wf, hz) => eprintln!("[testtone] {hz} Hz {} @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}", wf.name()),
+        Signal::Tone { waveform, hz } => eprintln!("[testtone] {hz} Hz {} @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}", waveform.name()),
         Signal::Pink => eprintln!("[testtone] pink noise @ ~{level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
         Signal::White => eprintln!("[testtone] white noise @ ~{level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"),
-        Signal::Isp(over) => eprintln!(
-            "[testtone] ISP torture: Fs/4 45°-phase sine, sample peak {:.4} dBFS → true peak {over:.4} dBTP, source {rate} Hz / {channels} ch{resample}",
-            over - ISP_MAX_OVER_DB
+        Signal::Isp { db_over } => eprintln!(
+            "[testtone] ISP torture: Fs/4 45°-phase sine, sample peak {:.4} dBFS → true peak {db_over:.4} dBTP, source {rate} Hz / {channels} ch{resample}",
+            db_over - ISP_MAX_OVER_DB
         ),
     }
     eprintln!("[testtone] Ctrl+C to stop.");
 
-    // Signal state.
-    let mut frame: u64 = 0;
-    let mut rng: u32 = 0x2545_f491; // xorshift white-noise source (no rand dependency needed)
-    let (mut b0, mut b1, mut b2) = (0f32, 0f32, 0f32); // Paul Kellet economy pink-noise filter
-    let tone_hz = if let Signal::Tone(_, hz) = signal { hz } else { 0.0 };
-    // Highest harmonic to sum, kept a few percent below true Nyquist rather than right up against
-    // it — see the file header doc for why band-limiting matters here at all (a naive square/
-    // triangle/sawtooth has harmonics to infinity, which would alias back down and contaminate the
-    // very spectrum this tool exists to let you check against a known-correct shape).
-    let k_max: u32 = if tone_hz > 0.0 { (((rate as f64 * 0.48) / tone_hz).floor().max(1.0)) as u32 } else { 1 };
-    // Precomputed one-period wavetable, not a per-sample phase accumulator: `Waveform::sample`'s
-    // own harmonic sum costs O(k_max) trig calls *per sample* — for a rich signal at a high rate
-    // (a narrow-duty pulse train's k_max can run into the thousands at, say, 384 kHz — 2 trig
-    // calls per harmonic, so ~1.4 *billion* calls/sec at 384 kHz/100 Hz) that's well past what any
-    // single core sustains in real time, reported live as audible breakup specifically on
-    // --pulse/--square/--sawtooth (never --sine, which has no harmonic loop at all) at high rates.
-    // Paying that O(k_max) cost once per *period* instead of once per *sample* removes the problem
-    // at its root rather than just capping k_max and losing legitimate harmonic content.
-    //
-    // The table holds exactly `round(rate/tone_hz)` samples, `theta` spanning exactly one full 2π
-    // cycle across them — that makes it tile with zero discontinuity at the wraparound by
-    // construction, not by luck: sample 0 and the (never-materialized) sample at `table_len` are
-    // the same phase, so looping the index is exactly equivalent to continuing the accumulator.
-    // The one real cost: the actual frequency played becomes `rate / table_len`, not the literal
-    // requested Hz — a sub-Hz rounding (e.g. ~0.002 Hz off at 384 kHz/97 Hz) irrelevant for a test
-    // signal, and no worse than the rounding any sampled representation of a non-integer-period
-    // tone already implied. This also removes the previous f64 phase-accumulator's own reason to
-    // exist (its own per-sample rounding error, amplified by k at the top harmonics, was a real —
-    // if much smaller — Gibbs-ringing drift bug fixed earlier this session): a table built once
-    // and then walked by plain integer index has no accumulated error to drift in the first place.
-    // `Signal::Isp` isn't built from `tone_hz`/`k_max` above at all — it's fixed at exactly 4
-    // samples/cycle (Fs/4, by construction, not by rounding — see the file header doc for why the
-    // frequency can't be anything else) with a 45° phase offset baked into the table, so it reuses
-    // `Waveform::Sine`'s own `sin()` rather than needing a shape of its own.
-    let table_len = match signal {
-        Signal::Tone(..) if tone_hz > 0.0 => ((rate as f64 / tone_hz as f64).round() as usize).max(1),
-        Signal::Isp(_) => 4,
-        _ => 1,
-    };
-    let table: Vec<f32> = (0..table_len)
-        .map(|i| match signal {
-            Signal::Tone(wf, _) => wf.sample(std::f64::consts::TAU * (i as f64) / (table_len as f64), k_max),
-            Signal::Isp(_) => Waveform::Sine.sample(
-                std::f64::consts::TAU * (i as f64) / (table_len as f64) + std::f64::consts::FRAC_PI_4,
-                1,
-            ),
-            _ => 0.0,
-        })
-        .collect();
+    // Wavetable (Tone/Isp) — built once, walked by index; Pink/White are generated per-sample
+    // below via `PinkNoise` instead (see `build_wavetable`'s own doc for why they don't share
+    // this). Both come from `cageq_monitor::signal` now — see this file's header doc for why.
+    let table = build_wavetable(signal, rate);
+    let table_len = table.len();
     let mut table_idx: usize = 0;
+    let mut noise = PinkNoise::new();
 
-    // Deliberately after the (potentially slow — see the table's own doc) wavetable build above,
-    // not before: starting the stream first would leave the freshly-opened device buffer starving
-    // while the table computes, an instant underrun/glitch right at startup instead of the
-    // steady-state one this whole precomputation exists to avoid.
+    // Deliberately after the (potentially slow — see `build_wavetable`'s own doc) wavetable build
+    // above, not before: starting the stream first would leave the freshly-opened device buffer
+    // starving while the table computes, an instant underrun/glitch right at startup instead of
+    // the steady-state one this whole precomputation exists to avoid.
     audio_client.start_stream()?;
     let mut buf: Vec<u8> = Vec::new();
 
+    let mut frame: u64 = 0;
     'play: loop {
         if let Some(total) = total_frames {
             if frame >= total {
@@ -492,7 +314,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mono = match signal {
-                Signal::Tone(..) | Signal::Isp(_) => {
+                Signal::Tone { .. } | Signal::Isp { .. } => {
                     let s = table[table_idx] * gain;
                     table_idx += 1;
                     if table_idx >= table_len {
@@ -500,16 +322,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     s
                 }
-                Signal::White => white_sample(&mut rng) * gain,
-                Signal::Pink => {
-                    // Paul Kellet's economy pink filter over the same white source.
-                    let white = white_sample(&mut rng);
-                    b0 = 0.99765 * b0 + white * 0.0990460;
-                    b1 = 0.96300 * b1 + white * 0.2965164;
-                    b2 = 0.57000 * b2 + white * 1.0526913;
-                    // Sum + direct term, normalised (~unit amplitude) then scaled to the level.
-                    (b0 + b1 + b2 + white * 0.1848) * 0.11 * gain
-                }
+                Signal::White => noise.next_white() * gain,
+                Signal::Pink => noise.next_pink() * gain,
             };
             let s = (mono * env).clamp(-sample_ceil, sample_ceil);
             let bytes = s.to_le_bytes();

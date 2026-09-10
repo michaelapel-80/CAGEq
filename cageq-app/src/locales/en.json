@@ -199,6 +199,39 @@
     "staleNotice": "CAGEq's own audio engine is running an outdated build. Open Engine above and continue to update it.",
     "staleDismiss": "Dismiss"
   },
+
+  "toneGen": {
+    "title": "Test tone generator",
+    "intro": "Plays a known signal out a device so you can check it by ear, meter, or scope — useful for diagnosing a DAC, a resampler, or true-peak headroom.",
+    "signal": "Signal",
+    "waveform": {
+      "Sine": "Sine",
+      "Square": "Square",
+      "Triangle": "Triangle",
+      "Sawtooth": "Sawtooth",
+      "Pulse": "Pulse train",
+      "Pink": "Pink noise",
+      "White": "White noise",
+      "Isp": "ISP torture (true-peak over)"
+    },
+    "frequency": "Frequency",
+    "dbOver": "True-peak target",
+    "ispHint": "How far above 0 dBFS the reconstructed (true) peak should land, 0..{{max}} dBTP — the sample-domain level needed is derived for you.",
+    "level": "Level",
+    "ceiling": "ceiling {{db}} dBFS",
+    "device": "Output device",
+    "advanced": "Advanced",
+    "rateOverride": "Source rate override",
+    "rateOverridePlaceholder": "device rate",
+    "seconds": "Auto-stop after",
+    "secondsPlaceholder": "until stopped",
+    "unsafe": "Unsafe (allow full scale)",
+    "unsafeWarning": "⚠ Allows up to 0 dBFS and unlocks the ISP signal. Mind your ears and gear.",
+    "play": "Play",
+    "stop": "Stop",
+    "launcher": "Test tone…",
+    "launcherTitle": "Open the test-tone generator in its own window"
+  },
   "foreignConfig": {
     "notice": "config.txt has {{count}} other active filter line(s) that stack on top of every CAGEq correction.",
     "review": "Review",

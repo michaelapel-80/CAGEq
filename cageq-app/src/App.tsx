@@ -1433,6 +1433,28 @@ function App() {
     });
   }
 
+  // Open the test-tone generator into its own window (index.html#tone → ToneWindow) — no
+  // viewer-refcounting needed here unlike the scope pop-out: playback state lives entirely in the
+  // backend's TestSignalState, not a stream subscription this window needs counted. Focuses the
+  // existing one instead of spawning a duplicate.
+  async function openToneWindow() {
+    const existing = await WebviewWindow.getByLabel("tone");
+    if (existing) {
+      await existing.setFocus();
+      return;
+    }
+    const w = new WebviewWindow("tone", {
+      url: "index.html#tone",
+      title: "CAGEq — Test Tone Generator",
+      width: 420,
+      height: 620,
+      minWidth: 360,
+      minHeight: 480,
+      resizable: true,
+    });
+    w.once("tauri://error", (e) => setError(String(e.payload)));
+  }
+
   // Finding #1: detect foreign config.txt directives once the backend is up (read-only).
   useEffect(() => {
     if (loading) return;
@@ -3084,6 +3106,9 @@ function App() {
                   style={{ fontSize: "0.8em", marginLeft: "auto" }}
                 >
                   {tr("selfTest.button")}
+                </button>
+                <button type="button" onClick={openToneWindow} title={tr("toneGen.launcherTitle")} style={{ fontSize: "0.8em" }}>
+                  {tr("toneGen.launcher")}
                 </button>
               </div>
               <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.5em 0 0" }}>{tr("compare.shortcuts")}</p>

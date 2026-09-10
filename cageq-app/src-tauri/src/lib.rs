@@ -759,6 +759,72 @@ fn start_test_signal(device: Option<String>, state: State<TestSignalState>) -> R
     Ok(())
 }
 
+/// What the tone-generator window (`cageq-app/src/ToneWindow.tsx`) asks for. Not trusted as-is —
+/// `start_test_generator` re-derives/clamps everything server-side exactly like `testtone.rs`'s
+/// own CLI does, the same "never trust the frontend alone" posture as every other safety-relevant
+/// input in this app.
+#[derive(serde::Deserialize)]
+struct GeneratorRequest {
+    device: Option<String>,
+    signal: cageq_monitor::signal::Signal,
+    /// The window's requested level (dBFS for every signal but `Isp`, where — see
+    /// `cageq_monitor::signal::GeneratorParams`'s own doc — it's the true-peak target directly).
+    level_dbfs: f32,
+    rate_override: Option<u32>,
+    seconds: Option<f32>,
+    unsafe_mode: bool,
+}
+
+/// Start the general-purpose test-tone generator (the in-app window) on `device`, replacing
+/// whatever's already playing there — including the Self-test signal, since both share one
+/// `TestSignalState` slot (correct: only one thing should ever be rendering to an output at once).
+#[tauri::command]
+fn start_test_generator(req: GeneratorRequest, state: State<TestSignalState>) -> Result<(), String> {
+    use cageq_monitor::signal::{GeneratorParams, ISP_MAX_OVER_DB, SAFE_PLAYBACK_CEILING_DBFS, Signal};
+
+    // Mostly mirrors testtone.rs's own policy (file header doc there): Isp always requires
+    // unsafe_mode (no "safe" Isp setting exists); Isp's own db_over is separately clamped to
+    // 0.0..=ISP_MAX_OVER_DB and, for Isp, `level_dbfs` becomes that clamped target directly
+    // (not offset from it — see GeneratorParams's own doc on why that sign matters). One
+    // deliberate difference from the CLI: the non-unsafe level ceiling here is
+    // SAFE_PLAYBACK_CEILING_DBFS (-18 dBFS, the same threshold Self-test's fixed pink noise
+    // uses), not testtone.rs's -3 dBFS — -3 dBFS is fine for a tool you have to open a terminal
+    // to run, but this window is a GUI default anyone can reach by clicking around, so it gets
+    // the more conservative "safe for a real user's device" number instead.
+    let is_isp = matches!(req.signal, Signal::Isp { .. });
+    if is_isp && !req.unsafe_mode {
+        return Err("Isp requires unsafe_mode".to_string());
+    }
+    let signal = if let Signal::Isp { db_over } = req.signal {
+        Signal::Isp { db_over: db_over.clamp(0.0, ISP_MAX_OVER_DB) }
+    } else {
+        req.signal
+    };
+    let level_ceil_dbfs: f32 = if req.unsafe_mode { 0.0 } else { SAFE_PLAYBACK_CEILING_DBFS };
+    let level_dbfs = if let Signal::Isp { db_over } = signal {
+        db_over as f32
+    } else if req.level_dbfs.is_finite() {
+        req.level_dbfs.clamp(-80.0, level_ceil_dbfs)
+    } else {
+        -20.0
+    };
+    let sample_ceil: f32 = if req.unsafe_mode { 1.0 } else { 0.891 };
+    let params = GeneratorParams {
+        signal,
+        level_dbfs,
+        rate_override: req.rate_override.filter(|r| (8_000..=768_000).contains(r)),
+        seconds: req.seconds,
+        sample_ceil,
+    };
+
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(existing) = guard.take() {
+        existing.stop();
+    }
+    *guard = Some(cageq_monitor::TestSignal::start_generator(req.device, params)?);
+    Ok(())
+}
+
 /// Stop the self-test signal (idempotent — no-op if nothing is playing).
 #[tauri::command]
 fn stop_test_signal(state: State<TestSignalState>) -> Result<(), String> {
@@ -1388,6 +1454,15 @@ pub fn run() {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 use tauri::Manager;
                 drop_subs(&window.state::<StreamSubs>(), window.label());
+                // Backend-side guarantee that closing the tone-generator window always stops
+                // playback, independent of whether that window's own React cleanup gets to run
+                // (per the comment above, it may not) — the frontend's own stop-on-close is a
+                // nicety, this is the actual safety net.
+                if window.label() == "tone" {
+                    if let Ok(mut guard) = window.state::<TestSignalState>().0.lock() {
+                        guard.take();
+                    }
+                }
             }
         })
         .setup(|app| {
@@ -1432,6 +1507,7 @@ pub fn run() {
             subscribe_scope,
             stream_heartbeat,
             start_test_signal,
+            start_test_generator,
             stop_test_signal,
             open_output_settings,
             list_targets,

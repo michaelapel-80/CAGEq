@@ -199,6 +199,39 @@
     "staleNotice": "CAGEqs eigene Audio-Engine läuft in einer veralteten Version. Über den Engine-Button oben aktualisieren.",
     "staleDismiss": "Ausblenden"
   },
+
+  "toneGen": {
+    "title": "Testton-Generator",
+    "intro": "Spielt ein bekanntes Signal auf einem Gerät ab, damit es sich per Ohr, Meter oder Scope prüfen lässt — nützlich zur Diagnose eines DACs, eines Resamplers oder des True-Peak-Headrooms.",
+    "signal": "Signal",
+    "waveform": {
+      "Sine": "Sinus",
+      "Square": "Rechteck",
+      "Triangle": "Dreieck",
+      "Sawtooth": "Sägezahn",
+      "Pulse": "Pulsfolge",
+      "Pink": "Rosa Rauschen",
+      "White": "Weißes Rauschen",
+      "Isp": "ISP-Torturetest (True-Peak-Über)"
+    },
+    "frequency": "Frequenz",
+    "dbOver": "True-Peak-Ziel",
+    "ispHint": "Wie weit über 0 dBFS der rekonstruierte (wahre) Peak liegen soll, 0..{{max}} dBTP — der nötige Pegel im Sample-Bereich wird automatisch berechnet.",
+    "level": "Pegel",
+    "ceiling": "Obergrenze {{db}} dBFS",
+    "device": "Ausgabegerät",
+    "advanced": "Erweitert",
+    "rateOverride": "Quell-Samplerate erzwingen",
+    "rateOverridePlaceholder": "Geräterate",
+    "seconds": "Auto-Stopp nach",
+    "secondsPlaceholder": "bis gestoppt",
+    "unsafe": "Unsicher (Vollaussteuerung erlauben)",
+    "unsafeWarning": "⚠ Erlaubt bis zu 0 dBFS und schaltet das ISP-Signal frei. Auf Ohren und Geräte achten.",
+    "play": "Abspielen",
+    "stop": "Stopp",
+    "launcher": "Testton…",
+    "launcherTitle": "Testton-Generator in eigenem Fenster öffnen"
+  },
   "foreignConfig": {
     "notice": "config.txt enthält {{count}} weitere aktive Filterzeile(n), die sich über jede CAGEq-Korrektur stapeln.",
     "review": "Prüfen",
