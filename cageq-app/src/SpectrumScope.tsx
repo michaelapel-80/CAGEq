@@ -176,6 +176,14 @@ const PEAK_MIN_PROMINENCE_DB = 6;
 // closer to how far apart two features need to be before a reader would call them separate peaks
 // rather than texture on one bump.
 const PEAK_MIN_SEPARATION_OCTAVES = 1;
+// Under the high-res analyzer toggle, live-tuned down to a quarter octave — the backend's own
+// resolution genuinely improves there (cageq-monitor's decimation_spike.rs measured a 40/60 Hz
+// pair, 0.58 octaves apart, going from a 7.67 dB dip at the default window to 57.81 dB at
+// high-res — cleanly, distinctly resolved, not just less merged), so the readout's own minimum
+// spacing was needlessly hiding real, already-resolved close content at the default's 1-octave
+// gate. Not derived from that measurement by a formula — chosen by ear/eye against the live
+// readout, same as the other perceptual constants on this page.
+const PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES = 0.25;
 // How far (dB) below the loudest content in the current frame a candidate may sit and still count
 // as a real peak, not noise-floor texture. PEAK_MIN_PROMINENCE_DB alone isn't enough down at the
 // noise floor: it only asks "is this bump taller than its immediate valleys", and a floor's natural
@@ -188,6 +196,18 @@ const PEAK_MIN_SEPARATION_OCTAVES = 1;
 // it, so a "peak" back there is true content the ear can't use, not a false one worth relaxing the
 // gate for. 30dB keeps the readout to what's actually perceptually relevant.
 const PEAK_MAX_RANGE_DB = 30;
+// This app's own original value, before the 30dB perceptual tightening above — brought back
+// specifically for the high-res toggle. Two things push the other way at high-res, both raising
+// the odds of a false rejection rather than a false accept: (1) genuinely narrow real content
+// reads more accurately (less diluted by the width-matched Gaussian averaging it in with
+// near-silent neighbours — see `gaussian_power`'s own ~19dB-droop doc in cageq-monitor) at higher
+// resolution, so it can legitimately measure further below the loudest thing than the coarser
+// window's own, more-inflated reading of the same content did; (2) less inter-hop temporal
+// smoothing survives at high-res (`SPEC_TAU_SECS` in cageq-monitor is deliberately a fixed
+// absolute time, not scaled to the longer hop — see that constant's own doc for why scaling it
+// was tried and reverted), so a real, quiet, transient partial is likelier to get momentarily cut
+// off by a tighter gate. Live-tuned, not derived, like `PEAK_MAX_RANGE_DB` itself originally was.
+const PEAK_MAX_RANGE_DB_HIGH_RES = 60;
 // A candidate within this many partials of a lower, already-established peak still counts as
 // belonging to that peak's harmonic series (see `harmonicOf`) — a mains hum's 50/100/150/200 Hz
 // ladder or a sawtooth's n*f0 shouldn't compete for their own readout slots once the fundamental
@@ -206,12 +226,13 @@ const HARMONIC_TOLERANCE_CENTS = 45;
 const PEAK_PLACEHOLDER_HZ = "--- Hz";
 const PEAK_PLACEHOLDER_DB = "--- dB";
 // How close (in octaves) a candidate has to land to a tracked peak's last-known frequency to count
-// as "the same peak, still there" rather than an unrelated one — see `trackPeaks`. Half
-// `PEAK_MIN_SEPARATION_OCTAVES`, the minimum gap `findPeaks` already guarantees between two
-// genuinely distinct peaks, so this can never mistake one still-qualifying peak for another one
-// that also survived this frame; it only has to be loose enough to track a real peak's own frame-
-// to-frame jitter (bin quantisation, a slow glide/vibrato), which is far smaller than that gap.
-const PEAK_TRACK_MATCH_OCTAVES = PEAK_MIN_SEPARATION_OCTAVES / 2;
+// as "the same peak, still there" rather than an unrelated one — see `trackPeaks`, which takes
+// this as a parameter (half of whichever `PEAK_MIN_SEPARATION_OCTAVES*` is active — resolution-
+// dependent since that minimum gap now is too, see its own doc) rather than a fixed constant here.
+// Half the minimum gap `findPeaks` already guarantees between two genuinely distinct peaks means
+// this can never mistake one still-qualifying peak for another one that also survived this frame;
+// it only has to be loose enough to track a real peak's own frame-to-frame jitter (bin
+// quantisation, a slow glide/vibrato), which is far smaller than that gap.
 // How long a tracked peak survives after nothing matches it before it's actually dropped — long
 // enough to bridge an ordinary flicker right at a detection threshold (prominence, the noise gate,
 // octave separation — a real peak sitting near any of those can wink out for a frame or two without
@@ -273,7 +294,14 @@ function harmonicOf(f: number, root: number): boolean {
  *  picking by magnitude and presenting by frequency are different steps on purpose, so a strong
  *  low-frequency hum and a quieter but still-qualifying high note both land in the order a reader
  *  scans the axis, not loudest-first. */
-function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number, foldHarmonics: boolean): { i: number; v: number }[] {
+function findPeaks(
+  v: Float64Array,
+  n: number,
+  binHz: (i: number) => number,
+  foldHarmonics: boolean,
+  minSeparationOctaves: number,
+  maxRangeDb: number,
+): { i: number; v: number }[] {
   if (n < 3) return [];
   let loudest = -Infinity;
   for (let i = 0; i < n; i++) if (v[i] > loudest) loudest = v[i];
@@ -320,7 +348,7 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number, fol
   // statistical ripple (see PEAK_MAX_RANGE_DB's doc) — this can, since it's relative to the loudest
   // thing actually in the frame (computed at the top, step 0) rather than each candidate's own
   // immediate neighbours.
-  const audible = prominent.filter((c) => loudest - c.v <= PEAK_MAX_RANGE_DB);
+  const audible = prominent.filter((c) => loudest - c.v <= maxRangeDb);
   // 3) Harmonic folding: scanning low-to-high frequency, a candidate that's an integer multiple of
   // an already-established root (`harmonicOf`) is absorbed into that root's family instead of
   // becoming a root itself — so only the *lowest* member of each detected harmonic series ever
@@ -343,7 +371,7 @@ function findPeaks(v: Float64Array, n: number, binHz: (i: number) => number, fol
   for (const c of roots) {
     if (picked.length >= PEAK_COUNT) break;
     const f = binHz(c.i);
-    if (picked.some((p) => Math.abs(Math.log2(f / binHz(p.i))) < PEAK_MIN_SEPARATION_OCTAVES)) continue;
+    if (picked.some((p) => Math.abs(Math.log2(f / binHz(p.i))) < minSeparationOctaves)) continue;
     picked.push(c);
   }
   // 5) Presented by frequency, not the magnitude order they were picked in. Interpolated last,
@@ -390,6 +418,7 @@ function trackPeaks(
   peaks: { i: number; v: number }[],
   binHz: (i: number) => number,
   now: number,
+  matchOctaves: number,
 ): TrackedPeak[] {
   const candidateHz = peaks.map((p) => binHz(p.i));
   const used = new Array(peaks.length).fill(false);
@@ -399,7 +428,7 @@ function trackPeaks(
   // peaks that both drifted toward the same gap don't race for whichever candidate they see first.
   for (const t of tracked) {
     let best = -1;
-    let bestDist = PEAK_TRACK_MATCH_OCTAVES;
+    let bestDist = matchOctaves;
     for (let k = 0; k < peaks.length; k++) {
       if (used[k]) continue;
       const dist = Math.abs(Math.log2(candidateHz[k] / t.hz));
@@ -534,6 +563,11 @@ export function SpectrumScope({
   const cursorDbRef = useRef<HTMLSpanElement | null>(null);
   const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-spectrum-params", DEFAULTS);
   const [tuning, setTuning] = useState(false);
+  // Read by the imperative rAF loop below, not React state directly — same pattern as
+  // `sampleRateRef`. Drives `findPeaks`/`trackPeaks`'s resolution-dependent octave separation
+  // (see `PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES`'s own doc for why it's tighter at high-res).
+  const highResRef = useRef(highRes);
+  highResRef.current = highRes;
   const paramsRef = useRef(params);
   paramsRef.current = params;
   // Refreshed every render, read fresh each frame inside the mount-once rAF loop below — same
@@ -797,7 +831,9 @@ export function SpectrumScope({
         const lnF0 = Math.log(s.f_min);
         const lnSpan = Math.log(s.f_max) - lnF0;
         const binHz = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * lnSpan);
-        const peaks = findPeaks(vScratch, n, binHz, p.harmonicFold);
+        const minSeparationOctaves = highResRef.current ? PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES : PEAK_MIN_SEPARATION_OCTAVES;
+        const maxRangeDb = highResRef.current ? PEAK_MAX_RANGE_DB_HIGH_RES : PEAK_MAX_RANGE_DB;
+        const peaks = findPeaks(vScratch, n, binHz, p.harmonicFold, minSeparationOctaves, maxRangeDb);
         if (peaks.length) {
           markCtx.strokeStyle = PEAK_MARK_COLOR;
           markCtx.lineWidth = Math.max(1, H / REF_SIZE) * 1.5;
@@ -824,7 +860,7 @@ export function SpectrumScope({
         if (now - lastReadout > READOUT_INTERVAL_MS) {
           lastReadout = now;
           hadPeak = peaks.length > 0;
-          tracked = trackPeaks(tracked, peaks, binHz, now);
+          tracked = trackPeaks(tracked, peaks, binHz, now, minSeparationOctaves / 2);
           for (let j = 0; j < PEAK_COUNT; j++) {
             const slot = peakSlotRefs.current[j];
             const hzSpan = peakHzRefs.current[j];

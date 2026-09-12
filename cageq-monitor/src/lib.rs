@@ -314,12 +314,26 @@ mod windows_impl {
     /// dB floor for empty/silent spectrum bins.
     const SPEC_FLOOR: f32 = -120.0;
     /// Power-spectrum smoothing time constant (seconds) — just enough to settle pure FFT/windowing
-    /// noise across a couple of hops (~43 ms each, see fft_hop), not to steady the display over
-    /// time: that's the front-end's job now (canvas phosphor persistence, plus interpolating
-    /// between spectrum events instead of snapping). A slower constant here used to add its own
-    /// multi-hop lag *underneath* the front-end's persistence — two decays compounding into a
-    /// sluggish "slow fall" that no front-end tuning could get out from under, since it was baked
-    /// into the values themselves before they ever left the sidecar.
+    /// noise across a couple of hops (~43 ms each at the default window, see fft_hop), not to
+    /// steady the display over time: that's the front-end's job now (canvas phosphor persistence,
+    /// plus interpolating between spectrum events instead of snapping). A slower constant here
+    /// used to add its own multi-hop lag *underneath* the front-end's persistence — two decays
+    /// compounding into a sluggish "slow fall" that no front-end tuning could get out from under,
+    /// since it was baked into the values themselves before they ever left the sidecar.
+    ///
+    /// **Deliberately a fixed number of seconds, not a fraction of the hop** — tried the latter
+    /// (`SPEC_TAU_HOPS = 0.469`, reproducing this exact 0.02s/43ms ratio at the default window,
+    /// scaling proportionally at `HIGH_RES_FFT_SIZE`'s ~171 ms hop) on the reasoning that it kept
+    /// the *relative* damping-per-hop constant across window sizes, the same principle that
+    /// correctly governs `GAUSSIAN_FLOOR_SIGMA_BINS`. Reverted after live use: at high-res that
+    /// works out to an ≈80 ms time constant, and it "feels incredibly slow" — perceived
+    /// sluggishness tracks *absolute* response latency, not a ratio to the update cadence, unlike
+    /// the Gaussian floor's case (there, the physical thing being covered — the Hann window's own
+    /// sidelobe spacing — itself shrinks in Hz as the window lengthens, so scaling proportionally
+    /// is physically correct; here, nothing about human time-perception scales with FFT hop size).
+    /// The fixed 0.02s does mean *less* relative smoothing at high-res (barely more than one raw
+    /// hop's own noise gets through, confirmed live as "slightly steppy... but still felt ok") —
+    /// an accepted tradeoff, steppy-but-responsive beating smooth-but-laggy.
     const SPEC_TAU_SECS: f32 = 0.02;
     /// Spectrum emit cadence — 60 fps, matching the level meter. The FFT is heavier than the
     /// meter but the fold + emit is cheap enough that the full rate reads noticeably smoother.
