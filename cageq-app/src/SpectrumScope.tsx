@@ -211,8 +211,21 @@ const PEAK_MAX_RANGE_DB_HIGH_RES = 60;
 // A candidate within this many partials of a lower, already-established peak still counts as
 // belonging to that peak's harmonic series (see `harmonicOf`) — a mains hum's 50/100/150/200 Hz
 // ladder or a sawtooth's n*f0 shouldn't compete for their own readout slots once the fundamental
-// they ride on is already shown. No real instrument's audible partials go much past this.
-const HARMONIC_MAX_N = 16;
+// they ride on is already shown.
+//
+// 1000 — the display's own [20 Hz, 20 kHz] range (cageq-monitor's SPEC_F_MIN/SPEC_F_MAX) already
+// bounds any real candidate's own n to at most `f_max/f_min` for the lowest possible root, so this
+// is a backstop tied to that actual ceiling, not the "no real instrument's audible partials go
+// much past this" guess an earlier, much smaller value (16) rested on. That guess broke on a
+// 50 Hz square wave with the high-res toggle + Fold both on: 850/1050/1250 Hz are its genuine
+// 17th/21st/25th (odd, as a square wave's are) harmonics, all rejected by a 16-partial cap and
+// left to compete for their own slots instead of folding into the 50 Hz root — a low fundamental
+// alone spans far more than 16 partials before running out of display range, no rich synthetic
+// content or anything-past-a-typical-instrument's-timbre required. The remaining guard against a
+// coincidental false fold at a large n is `HARMONIC_TOLERANCE_CENTS` (below) plus `findPeaks`'
+// own prominence/audibility gates already having run first — this cap is a sanity backstop against
+// the range ever changing, not the thing actually doing the rejecting in practice.
+const HARMONIC_MAX_N = 1000;
 // How far (in cents — 1200ths of an octave, the standard log-pitch unit) a candidate may drift from
 // an exact integer multiple and still count as that harmonic, rather than an unrelated peak that
 // happens to land nearby. Cents rather than a flat Hz or percent tolerance for the same reason
