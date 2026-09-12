@@ -473,6 +473,99 @@ fn width_mult_smooths_dense_high_frequency_content() {
     }
 }
 
+/// Asked directly after `HIGH_RES_FFT_SIZE` (32768, 4x `BASE_FFT_SIZE`) shipped as an opt-in
+/// analyzer toggle: does `GAUSSIAN_FLOOR_SIGMA_BINS`/`GAUSSIAN_WIDTH_MULT` (2.0/1.2 in production)
+/// need re-tuning for it, or was `floor_sweep_preserves_low_frequency_resolution`'s 8192-only
+/// verification silently invalidated by the new size?
+///
+/// Dimensional argument for why not, checked here rather than just trusted: both constants are
+/// expressed in *padded-bin* units, and so is `ranges` (the local decimation ratio driving the
+/// width-matching term) — `bin_hz = rate/padded_size` already accounts for whichever size is
+/// active. The floor specifically exists to cover the analysis window's own Hann-sidelobe-null
+/// spacing (see `floor_sweep_preserves_low_frequency_resolution`'s doc), and for ANY window shape
+/// that spacing is a FIXED number of the window's own natural bins regardless of N — only its
+/// width in *Hz* shrinks as the window gets longer (∝ 1/duration), which is exactly how the floor,
+/// expressed in the same bin-count unit, tracks it automatically. Concretely: at 8192 (≈171 ms),
+/// `GAUSSIAN_FLOOR_SIGMA_BINS`'s 2.0 padded bins ≈ 2.0 × (48000/32768) ≈ 2.9 Hz; at 32768 (≈683
+/// ms), the same 2.0 padded bins ≈ 2.0 × (48000/131072) ≈ 0.73 Hz — a 4x smaller floor in Hz,
+/// exactly matching the Hann mainlobe's own 4x narrower width at 4x the duration. Same ratio,
+/// same relative behavior, no re-tuning implied.
+///
+/// Repeats the original test's tightest case (40/60 Hz, 0.58 octave) at the new size, with the
+/// unchanged production floor/width_mult, rather than just re-deriving the argument above.
+#[test]
+fn floor_holds_up_unchanged_at_high_res_window() {
+    let analysis_size = 32768usize; // HIGH_RES_FFT_SIZE
+    let padded = analysis_size * ZERO_PAD_FACTOR;
+    let n_lin = padded / 2 + 1;
+    let bin_hz = RATE / padded as f32;
+
+    let ratio = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_BINS as f32 - 1.0));
+    let half = ratio.sqrt();
+    let ranges: Vec<(f32, f32)> = (0..N_LOG_BINS)
+        .map(|i| {
+            let fc = SPEC_F_MIN * ratio.powi(i as i32);
+            let lo = ((fc / half) / bin_hz).max(0.0);
+            let hi = ((fc * half) / bin_hz).min((n_lin - 1) as f32);
+            (lo, hi)
+        })
+        .collect();
+
+    // Same construction as `real_tones_linear_power` above, parameterised by `analysis_size`
+    // instead of that function's hardcoded 8192 — duplicated rather than reused so this test
+    // stands alone against whichever size is passed, not entangled with the other tests' fixed
+    // configuration.
+    let tone_power = |freqs: &[f64]| -> Vec<f32> {
+        let rate = RATE as usize;
+        let window: Vec<f32> = (0..analysis_size)
+            .map(|n| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * n as f32 / analysis_size as f32).cos())
+            .collect();
+        let mut in_buf = vec![0.0f32; padded];
+        let steps: Vec<f64> = freqs.iter().map(|&f| 2.0 * std::f64::consts::PI * f / rate as f64).collect();
+        let mut phases = vec![0.0f64; freqs.len()];
+        for i in 0..analysis_size {
+            let mut s = 0.0f64;
+            for (p, step) in phases.iter_mut().zip(steps.iter()) {
+                s += 0.5 * p.sin() / freqs.len() as f64;
+                *p += step;
+            }
+            in_buf[i] = s as f32 * window[i];
+        }
+        let mut planner = realfft::RealFftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(padded);
+        let mut out_buf = fft.make_output_vec();
+        let mut scratch = fft.make_scratch_vec();
+        fft.process_with_scratch(&mut in_buf, &mut out_buf, &mut scratch).unwrap();
+        out_buf.iter().map(|c| c.norm_sqr()).collect()
+    };
+
+    let resolved = |db: &[f32], f1: f32, f2: f32| -> Option<f32> {
+        let i1 = ((f1 / SPEC_F_MIN).ln() / ratio.ln()).round() as usize;
+        let i2 = ((f2 / SPEC_F_MIN).ln() / ratio.ln()).round() as usize;
+        let (lo, hi) = (i1.min(i2), i1.max(i2));
+        if hi <= lo + 1 {
+            return None; // tones map to adjacent/same bins — not meaningful at this spacing
+        }
+        let peak1 = db[lo.saturating_sub(2)..=(lo + 2).min(db.len() - 1)].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let peak2 = db[hi.saturating_sub(2)..=(hi + 2).min(db.len() - 1)].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let valley = db[lo..=hi].iter().cloned().fold(f32::INFINITY, f32::min);
+        Some(peak1.min(peak2) - valley) // dip depth below the lower peak — bigger is more resolved
+    };
+
+    let power = tone_power(&[40.0, 60.0]);
+    let db: Vec<f32> = ranges
+        .iter()
+        .map(|&(lo, hi)| {
+            // 2.0 / 1.2 — GAUSSIAN_FLOOR_SIGMA_BINS / GAUSSIAN_WIDTH_MULT, unchanged from production.
+            let p = reduce_gaussian_tuned(&power, lo, hi, 2.0, 1.2);
+            if p > 0.0 { 10.0 * p.log10() } else { -120.0 }
+        })
+        .collect();
+    let dip = resolved(&db, 40.0, 60.0).expect("40/60Hz should map to distinct log bins");
+    println!("40/60Hz dip at analysis_size={analysis_size} (high-res): {dip:.2} dB (8192-baseline dip was 7.67 dB)");
+    assert!(dip > 1.0, "40/60Hz should stay clearly resolved (>1dB dip) at the high-res window too, got {dip:.2} dB");
+}
+
 /// TEST 1 — checks the (wrong, see the file header VERDICT) "boxcar lets far-away energy leak in"
 /// theory directly: an isolated impulse well outside a log bin's own [lo, hi). Result: the box
 /// shows exactly 0 (it has no response outside its own hard edge, by construction — there's no

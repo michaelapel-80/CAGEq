@@ -112,10 +112,15 @@ function parseAccent(hex: string): [number, number, number] {
 
 export function Meter({
   deviceId,
+  specHighRes,
   plotBox,
   onSampleRate,
 }: {
   deviceId: string;
+  /** The spectrum analyzer's window-size toggle (App.tsx-owned, SpectrumScope's tune panel edits
+   *  it) — backend-side, not just a display setting, so changing it restarts the monitor here the
+   *  same way a device change already does (see `start_monitor`'s own doc). */
+  specHighRes: boolean;
   /** Rendered chart plot-area box (px) so the bars match the chart's Y extent (top gridline → X
    *  axis) instead of stretching past it. Null until measured → bars just fill the column. */
   plotBox: { top: number; height: number } | null;
@@ -151,7 +156,7 @@ export function Meter({
     });
     (async () => {
       try {
-        await invoke("start_monitor", { device: deviceId || null });
+        await invoke("start_monitor", { device: deviceId || null, highResSpectrum: specHighRes });
         setErr(null);
       } catch (e) {
         setErr(String(e));
@@ -163,7 +168,7 @@ export function Meter({
       invoke("stop_monitor").catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceId]);
+  }, [deviceId, specHighRes]);
 
   // Level bar's beam canvas — sized by measuring its own container, matching Vectorscope's own
   // ResizeObserver + devicePixelRatio convention (the bar's height is dynamic, driven by `plotBox`

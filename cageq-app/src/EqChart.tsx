@@ -251,6 +251,8 @@ export function EqChart({
   phase,
   nodes,
   spectrumRef,
+  highRes,
+  onHighResChange,
   eqBands,
   preampDb = 0,
   sampleRate,
@@ -273,6 +275,13 @@ export function EqChart({
    *  the canvas effect below owns its own rAF loop and reads the ref directly, the same pattern
    *  Vectorscope uses for its sample stream. */
   spectrumRef?: RefObject<SpectrumData | null>;
+  /** The backend's analysis window size for the (one, shared) loopback spectrum — same setting
+   *  SpectrumScope's tune panel exposes, App.tsx-owned since changing it restarts the monitor
+   *  (see that component's identically-named props for the full doc). Both views' checkboxes
+   *  just read/write this one shared flag, since there's only ever one backend Spectrum active
+   *  at a time regardless of which view happens to be on screen. */
+  highRes?: boolean;
+  onHighResChange?: (v: boolean) => void;
   /** The applied filter cascade (AutoEq fit + custom). Its magnitude response is removed from
    *  the post-EQ capture per bin so the backdrop shows the **pre-filter** source spectrum. */
   eqBands?: Band[];
@@ -1303,6 +1312,12 @@ export function EqChart({
               }}
             />
           </label>
+          {onHighResChange && (
+            <label className="vs-tune-row vs-tune-check" title={t("scope.highResHint")}>
+              <span className="vs-tune-label">{t("scope.highRes")}</span>
+              <input type="checkbox" checked={!!highRes} onChange={(e) => onHighResChange(e.currentTarget.checked)} />
+            </label>
+          )}
         </div>
       )}
 

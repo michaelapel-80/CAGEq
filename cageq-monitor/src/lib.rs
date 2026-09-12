@@ -223,16 +223,43 @@ mod windows_impl {
     ///
     /// This is the *real* window length, not the FFT transform length — see `ZERO_PAD_FACTOR`
     /// below for why those are no longer the same number.
+    ///
+    /// The default, not the only option — see [`HIGH_RES_FFT_SIZE`] for the tradeoff a larger
+    /// window buys (and, just as important, doesn't cost).
     const BASE_FFT_SIZE: usize = 8192;
-    /// The real, windowed analysis block (`BASE_FFT_SIZE`-derived) is transformed at this many
-    /// times its own length — the rest of the FFT's input is zeros. This is NOT the same thing as
-    /// more resolution: resolution (how well two close tones can be told apart) is fixed by the
-    /// analysis window's time *duration*, unaffected by this. Zero-padding instead *interpolates*
-    /// the transform of that same finite window more finely — a finite-duration signal has a
-    /// well-defined continuous Fourier transform, and the unpadded FFT only ever samples it
-    /// coarsely; padding computes more exact samples of that identical continuous function, not
-    /// new/approximated information. This is the standard technique real-time spectrum analyzers
-    /// use to look smooth without a longer (higher-latency) window.
+    /// Opt-in alternative to [`BASE_FFT_SIZE`] (the app's "high-res spectrum" toggle,
+    /// `Spectrum::new`'s `base_fft_size` argument) — 4x the window, ≈683 ms at ≤48 kHz, ≈0.73 Hz
+    /// raw bins instead of ≈2.9 Hz (both at [`ZERO_PAD_FACTOR`]).
+    ///
+    /// Not a CPU tradeoff the way it looks: total FFT cost/sec is `O(M log M) × hops/sec` where
+    /// `M = analysis_size × ZERO_PAD_FACTOR` and `hops/sec = rate / (analysis_size /
+    /// FFT_OVERLAP_DIV)` — `analysis_size` cancels out of the leading factor and only survives
+    /// inside the `log`, so 4x the window costs roughly +13% total CPU, not +400% (baseline is
+    /// ~0.3% of one core, per [`CAPTURE_RATE_CAP`]'s own measurement — CPU was never the
+    /// constraint here, at either size). `FFT_OVERLAP_DIV` is a genuinely different knob: more
+    /// overlap buys smoother/faster-updating output at whichever resolution is already chosen,
+    /// linearly in CPU — it cannot buy more resolution itself (that's fixed by window *duration*
+    /// alone, a Fourier uncertainty-principle floor, not an implementation gap `ZERO_PAD_FACTOR`
+    /// or overlap can paper over).
+    ///
+    /// The actual price is smearing content that changes within the window's own duration —
+    /// fine for hunting a stationary headphone/room resonance, worse for anything transient (a
+    /// fast sweep, a percussive test tone) — which is exactly why this is an opt-in toggle
+    /// (defaulting off) rather than replacing `BASE_FFT_SIZE` outright: tried as the default for
+    /// a session, judged "neither here nor there" against ordinary program material, where the
+    /// smearing cost is paid on *everything*, all the time, for a resolution win that only
+    /// matters when specifically hunting a narrow low-frequency feature.
+    const HIGH_RES_FFT_SIZE: usize = 32768;
+    /// The real, windowed analysis block (whichever of the two sizes above is active) is
+    /// transformed at this many times its own length — the rest of the FFT's input is zeros.
+    /// This is NOT the same thing as more resolution: resolution (how well two close tones can
+    /// be told apart) is fixed by the analysis window's time *duration*, unaffected by this.
+    /// Zero-padding instead *interpolates* the transform of that same finite window more finely
+    /// — a finite-duration signal has a well-defined continuous Fourier transform, and the
+    /// unpadded FFT only ever samples it coarsely; padding computes more exact samples of that
+    /// identical continuous function, not new/approximated information. This is the standard
+    /// technique real-time spectrum analyzers use to look smooth without a longer (higher-
+    /// latency) window.
     ///
     /// Concretely: 5.9 Hz bins (BASE_FFT_SIZE alone) let the 240 *log*-spaced display bins outrun
     /// the linear FFT's own resolution below ~200 Hz — several adjacent display bins there end up
@@ -344,9 +371,15 @@ mod windows_impl {
         /// `scope_viewers` is a shared count of open vectorscope views (inline + pop-out window);
         /// the loopback only accumulates and emits the (heavier) `scope` stream while it's > 0, so
         /// nothing's serialized when no one is watching the scope.
+        ///
+        /// `high_res_spectrum` selects [`HIGH_RES_FFT_SIZE`] over [`BASE_FFT_SIZE`] for the
+        /// spectrum analyzer (see that constant's own doc for the tradeoff) — fixed for this
+        /// monitor's lifetime, so changing it means restarting the monitor, same as a device
+        /// change already does.
         pub fn start<F, G, H>(
             endpoint_id: Option<String>,
             scope_viewers: Arc<AtomicUsize>,
+            high_res_spectrum: bool,
             on_update: F,
             on_spectrum: G,
             on_scope: H,
@@ -361,7 +394,9 @@ mod windows_impl {
             let handle = thread::Builder::new()
                 .name("cageq-loopback".into())
                 .spawn(move || {
-                    if let Err(e) = capture_loop(endpoint_id, &stop_thread, &scope_viewers, on_update, on_spectrum, on_scope) {
+                    if let Err(e) =
+                        capture_loop(endpoint_id, &stop_thread, &scope_viewers, high_res_spectrum, on_update, on_spectrum, on_scope)
+                    {
                         // A failed monitor simply yields no updates; surface why for debugging.
                         eprintln!("[cageq-monitor] capture ended: {e}");
                     }
@@ -773,13 +808,16 @@ mod windows_impl {
     }
 
     impl Spectrum {
-        fn new(rate: u32) -> Self {
-            // Scale the real analysis window up with the rate so its *duration* (≈171 ms) stays
-            // constant: analysis_size = BASE × next_pow2(round(rate / 48 kHz)). 48 k→8192,
-            // 96 k→16384, 192 k→32768 (44.1/88.2/176.4 round to the same multiples). Keeps the true
-            // (unpadded) resolution identical across devices instead of coarsening at high rates.
+        /// `base_fft_size` is [`BASE_FFT_SIZE`] normally, or [`HIGH_RES_FFT_SIZE`] under the
+        /// app's high-res toggle — see the latter's own doc for what that trades away.
+        fn new(rate: u32, base_fft_size: usize) -> Self {
+            // Scale the real analysis window up with the rate so its *duration* (≈171 ms at the
+            // default base size) stays constant: analysis_size = base × next_pow2(round(rate /
+            // 48 kHz)). At BASE_FFT_SIZE: 48 k→8192, 96 k→16384, 192 k→32768 (44.1/88.2/176.4
+            // round to the same multiples). Keeps the true (unpadded) resolution identical across
+            // devices instead of coarsening at high rates.
             let mult = ((rate as f32 / BASE_RATE).round().max(1.0) as usize).next_power_of_two();
-            let analysis_size = BASE_FFT_SIZE * mult;
+            let analysis_size = base_fft_size * mult;
             let fft_hop = analysis_size / FFT_OVERLAP_DIV;
             // The FFT is planned and run at ZERO_PAD_FACTOR times the real window — see that
             // constant's doc for why this is an interpolation of the same window's transform, not
@@ -998,6 +1036,7 @@ mod windows_impl {
         endpoint_id: Option<String>,
         stop: &AtomicBool,
         scope_viewers: &AtomicUsize,
+        high_res_spectrum: bool,
         on_update: F,
         on_spectrum: G,
         on_scope: H,
@@ -1016,7 +1055,7 @@ mod windows_impl {
         // until the user toggled it off/on), tear down and reopen: get_mixformat re-reads the new
         // rate and the loudness state is rebuilt for it, so a rate change self-heals.
         while !stop.load(Ordering::Relaxed) {
-            if let Err(e) = run_session(&endpoint_id, stop, scope_viewers, &on_update, &on_spectrum, &on_scope) {
+            if let Err(e) = run_session(&endpoint_id, stop, scope_viewers, high_res_spectrum, &on_update, &on_spectrum, &on_scope) {
                 eprintln!("[cageq-monitor] reopening capture after: {e}");
                 // Show the UI an idle state during the gap, then back off before reopening.
                 on_update(MeterUpdate {
@@ -1066,6 +1105,7 @@ mod windows_impl {
         endpoint_id: &Option<String>,
         stop: &AtomicBool,
         scope_viewers: &AtomicUsize,
+        high_res_spectrum: bool,
         on_update: &F,
         on_spectrum: &G,
         on_scope: &H,
@@ -1109,7 +1149,7 @@ mod windows_impl {
         )
         .map_err(|e| format!("ebur128 init: {e:?}"))?;
 
-        let mut spectrum = Spectrum::new(rate);
+        let mut spectrum = Spectrum::new(rate, if high_res_spectrum { HIGH_RES_FFT_SIZE } else { BASE_FFT_SIZE });
 
         audio_client.start_stream()?;
 
@@ -1337,7 +1377,7 @@ mod windows_impl {
         #[test]
         fn pure_tone_lobe_is_monotonic_each_side_of_peak() {
             let rate = 48_000u32;
-            let mut spec = Spectrum::new(rate);
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE);
             let freq = 60.0f32;
             let amp = 0.5f32;
             let total_samples = rate as usize * 2; // 2s — well past SPEC_TAU_SECS settling
@@ -1396,7 +1436,7 @@ mod windows_impl {
         #[test]
         fn peak_db_recovers_a_full_scale_tone_that_db_droops() {
             let rate = 48_000u32;
-            let mut spec = Spectrum::new(rate);
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE);
             let freq = 12_000.0f32;
             let amp = 1.0f32;
             let total_samples = rate as usize * 2; // 2s — well past SPEC_TAU_SECS settling
@@ -1457,6 +1497,7 @@ mod stub {
         pub fn start<F, G, H>(
             _endpoint_id: Option<String>,
             _scope_viewers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            _high_res_spectrum: bool,
             _on_update: F,
             _on_spectrum: G,
             _on_scope: H,

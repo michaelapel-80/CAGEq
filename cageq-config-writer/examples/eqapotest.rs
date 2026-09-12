@@ -41,7 +41,7 @@ fn main() {
     // environment is safe.
     unsafe { std::env::set_var("CAGEQ_RECORD", &out) };
     let idle = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let monitor = match cageq_monitor::Monitor::start(None, idle, |_| {}, |_| {}, |_| {}) {
+    let monitor = match cageq_monitor::Monitor::start(None, idle, false, |_| {}, |_| {}, |_| {}) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("could not start the loopback recorder: {e}");

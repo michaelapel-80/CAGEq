@@ -556,6 +556,15 @@ function App() {
     localStorage.setItem("cageq-theme", theme);
   }, [theme]);
   const cycleTheme = () => setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
+  // Spectrum analyzer window size — off (the default, ~171 ms window) or the high-res toggle
+  // (~683 ms, see cageq-monitor's HIGH_RES_FFT_SIZE doc for the resolution/smearing tradeoff).
+  // Backend-side, not just a display setting, so it lives here (not SpectrumScope's own tune
+  // panel state) and Meter — which owns the monitor's start/stop lifecycle — has to know about
+  // it too, the same way it already does for `deviceId`.
+  const [specHighRes, setSpecHighRes] = useState<boolean>(() => localStorage.getItem("cageq-spec-highres") === "1");
+  useEffect(() => {
+    localStorage.setItem("cageq-spec-highres", specHighRes ? "1" : "0");
+  }, [specHighRes]);
   // Live post-EQ spectrum (loopback FFT) drawn on the chart. The Meter component owns start/stop
   // of the capture; here we just subscribe to the spectrum stream it produces (a Channel-backed
   // bus, see streams.ts — not `listen` events, whose per-event webview eval churned WebView2's
@@ -2829,7 +2838,12 @@ function App() {
                         fs={sampleRate ?? undefined}
                       />
                     ) : spectrumView ? (
-                      <SpectrumScope legendHost={legendHost} sampleRate={sampleRate ?? undefined} />
+                      <SpectrumScope
+                        legendHost={legendHost}
+                        sampleRate={sampleRate ?? undefined}
+                        highRes={specHighRes}
+                        onHighResChange={setSpecHighRes}
+                      />
                     ) : (
                       <EqChart
                         series={chartSeries}
@@ -2837,6 +2851,8 @@ function App() {
                         refs={chartRefs}
                         phase={chartPhase}
                         spectrumRef={spectrumRef}
+                        highRes={specHighRes}
+                        onHighResChange={setSpecHighRes}
                         eqBands={selfTest?.phase === "running" ? undefined : dryActive || isolateAudition ? [] : result.filters}
                         preampDb={result?.preamp_db ?? 0}
                         sampleRate={sampleRate ?? undefined}
@@ -2867,7 +2883,7 @@ function App() {
                   </div>
                     {/* §5.3c post-EQ meters beside the chart (loopback, post-EQ) — always on. */}
                     <div className="meter-col">
-                      <Meter deviceId={deviceId} plotBox={plotBox} onSampleRate={setSampleRate} />
+                      <Meter deviceId={deviceId} specHighRes={specHighRes} plotBox={plotBox} onSampleRate={setSampleRate} />
                     </div>
                   </div>
                   {/* Full-width host for the chart legend (portaled from the chart) — spans under

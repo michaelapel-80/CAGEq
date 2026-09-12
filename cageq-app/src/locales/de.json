@@ -138,6 +138,8 @@
     "undistortHint": "Loopback invers filtern, um das Bild vor der EQ-Korrektur zu zeigen (für Oszilloskop-Musik bei aktiver Korrektur)",
     "harmonicFold": "Falten",
     "harmonicFoldHint": "Fasst die Obertöne eines Signals im Peak-Readout mit dem Grundton zusammen — standardmäßig aus, damit die einzelnen Obertöne eines Testtons (Rechteck/Dreieck/Sägezahn/Puls) als eigene Peaks erscheinen",
+    "highRes": "Hochauflösend",
+    "highResHint": "Ein 4x längeres Analysefenster: bessere Auflösung im Bass, auf Kosten der Verschmierung von allem, was sich schneller als das Fenster selbst ändert (~683 ms statt ~171 ms) — startet den Analyzer beim Umschalten neu",
     "undistortHintSpectrum": "Angewendete Filter und Vorverstärkung rückgängig machen, um das Spektrum vor der EQ-Korrektur statt der Aufnahme danach zu zeigen",
     "modeLr": "L/R",
     "modeMix": "Mix",

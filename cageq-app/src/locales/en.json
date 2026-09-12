@@ -138,6 +138,8 @@
     "undistortHint": "Inverse-filter the loopback to show the pre-EQ image (for oscilloscope music with correction on)",
     "harmonicFold": "Fold",
     "harmonicFoldHint": "Collapse a signal's harmonics into its fundamental in the peak readout — off by default so a test tone's individual harmonics (square/triangle/sawtooth/pulse) show up as their own peaks",
+    "highRes": "High-res",
+    "highResHint": "A 4x longer analysis window: better low-frequency resolution, at the cost of smearing anything that changes faster than the window itself (~683 ms vs ~171 ms) — restarts the analyzer when toggled",
     "undistortHintSpectrum": "Undo the applied filters and preamp to show the pre-EQ spectrum, not the post-EQ capture",
     "modeLr": "L/R",
     "modeMix": "Mix",

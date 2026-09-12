@@ -470,6 +470,8 @@ function trackPeaks(
 export function SpectrumScope({
   legendHost,
   sampleRate,
+  highRes,
+  onHighResChange,
 }: {
   /** The peak readout renders (via portal) into this element instead of inline below the tube —
    *  same mechanism, and the same element, as EqChart's own `legendHost` (App.tsx's
@@ -482,6 +484,13 @@ export function SpectrumScope({
    *  isn't cosmetic (the undistort correction's biquad math depends on it). Falls back to
    *  `biquad.ts`'s default 48 kHz only when genuinely unknown. */
   sampleRate?: number;
+  /** The backend's analysis window size — App.tsx-owned (not this component's own tune-panel
+   *  params) because changing it means restarting the loopback monitor, which `Meter` owns; the
+   *  checkbox rendered here just reads/writes App.tsx's state via these two props. See
+   *  cageq-monitor's `HIGH_RES_FFT_SIZE` doc for what it actually trades (resolution for temporal
+   *  smearing, not CPU — CPU cost either way is negligible). */
+  highRes?: boolean;
+  onHighResChange?: (v: boolean) => void;
 }) {
   const { t } = useTranslation();
   // Ref'd on `.vs-screen` (the CRT box itself), not the outer wrap — the wrap also hosts the
@@ -1047,6 +1056,12 @@ export function SpectrumScope({
                 onChange={(e) => set("harmonicFold", e.currentTarget.checked)}
               />
             </label>
+            {onHighResChange && (
+              <label className="vs-tune-row vs-tune-check" title={t("scope.highResHint")}>
+                <span className="vs-tune-label">{t("scope.highRes")}</span>
+                <input type="checkbox" checked={!!highRes} onChange={(e) => onHighResChange(e.currentTarget.checked)} />
+              </label>
+            )}
           </div>
         )}
       </div>
