@@ -119,6 +119,14 @@ Windows-only today (via Equalizer APO / a custom Windows Audio Processing Object
 data model, DSP math, and most of the UI are platform-agnostic — a port would mean swapping the
 Windows-specific audio engine, not restructuring the rest.
 
+Windows-on-Arm isn't natively built or tested, but should already work today via the Equalizer
+APO backend and its own ARM64 build: CAGEq there only ever writes `config.txt`, never loads
+anything into `audiodg.exe` itself, and the rest of the app (Tauri shell, Python sidecar) isn't
+real-time-critical code, so running under Windows' x64 emulation should be a non-issue. CAGEq's
+own custom APO is the one piece that doesn't work there — it loads in-process into `audiodg.exe`,
+which is genuinely architecture-matched on Arm, so it would need an actual native ARM64 build
+(and, unverified either way: neither path has been run on real Arm hardware).
+
 Built with heavy AI assistance (Claude) across the whole stack, not just the frontend — worth
 saying plainly rather than leaving it to be inferred. In practice that means the DSP math is
 checked against an analytic ground truth rather than just listened to, corners of the Windows
