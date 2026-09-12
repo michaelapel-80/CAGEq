@@ -51,6 +51,61 @@ pub mod dsp;
 
 use std::ffi::c_void;
 
+/// RAII guard that forces flush-to-zero + denormals-are-zero on this thread's SSE unit for its
+/// scope, restoring whatever was there before on drop.
+///
+/// [`cageq_apo_process`] has no silence detection of its own — that lives entirely in
+/// [`cageq_apo_process_silence`], gated on the host's own `BUFFER_SILENT` flag. But a *live*
+/// stream can feed genuine at-or-near-zero samples through `process` without ever tripping that
+/// flag (a paused or muted source, true digital silence between tracks, a fade-out that reaches
+/// exact zero) — completely ordinarily as far as the host is concerned. An IIR's own delay
+/// registers then decay smoothly toward zero along the way, passing *through* the denormal range
+/// rather than landing on `process_silence`'s `SILENCE_EPS` shortcut (which sits many orders of
+/// magnitude above where denormals actually start, so that path never encounters them at all —
+/// see its own doc). Denormal arithmetic falls back to microcode on x86 and is 10-100x slower
+/// than normal float math: a quiet passage or a paused stream would otherwise quietly tax
+/// audiodg's real-time thread for as long as it lasted. Two MXCSR bit writes, no allocation, no
+/// locking, no branching on content — safe under the real-time contract above.
+struct DenormalGuard {
+    #[cfg(target_arch = "x86_64")]
+    saved_mxcsr: u32,
+}
+
+// `core::arch::x86_64::{_mm_getcsr, _mm_setcsr}` exist but are deprecated (unsound: the compiler
+// can't see that they affect every later float op, so it's free to reorder around them) — raw
+// `stmxcsr`/`ldmxcsr`, as the deprecation notice itself recommends, is what's used here instead.
+#[cfg(target_arch = "x86_64")]
+fn read_mxcsr() -> u32 {
+    let mut val: u32 = 0;
+    unsafe { std::arch::asm!("stmxcsr [{0}]", in(reg) &mut val, options(nostack, preserves_flags)) };
+    val
+}
+
+#[cfg(target_arch = "x86_64")]
+fn write_mxcsr(val: u32) {
+    unsafe { std::arch::asm!("ldmxcsr [{0}]", in(reg) &val, options(nostack, preserves_flags, readonly)) };
+}
+
+impl DenormalGuard {
+    #[cfg(target_arch = "x86_64")]
+    fn engage() -> Self {
+        let saved = read_mxcsr();
+        write_mxcsr(saved | 0x8040); // bit 15 (FTZ) | bit 6 (DAZ)
+        DenormalGuard { saved_mxcsr: saved }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    fn engage() -> Self {
+        DenormalGuard {}
+    }
+}
+
+impl Drop for DenormalGuard {
+    fn drop(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        write_mxcsr(self.saved_mxcsr);
+    }
+}
+
 /// This build's behaviour version — bump by hand whenever a change to this crate (or
 /// `cageq-apo-backend`, which drives it) is something a user should actually be prompted to
 /// update for: DSP math, the config file format, `control::CONTROL_VERSION`, ramp timing, and
@@ -63,7 +118,7 @@ use std::ffi::c_void;
 /// Compared against `install_dir()`'s own `CAGEqApo.version` marker file (written by
 /// `register`, read by `status` — see both their own docs) instead of the DLL's bytes, so
 /// staleness now means "an intentional version bump", not "recompiled".
-pub const APO_VERSION: u32 = 5;
+pub const APO_VERSION: u32 = 6;
 
 /// Per-instance state. One of these exists per APO instance (per endpoint, per mode),
 /// created at `LockForProcess` and destroyed at `UnlockForProcess`.
@@ -375,6 +430,10 @@ pub unsafe extern "C" fn cageq_apo_process(
     if handle.is_null() || input.is_null() || output.is_null() {
         return;
     }
+    // See `DenormalGuard`'s own doc: this path (unlike `cageq_apo_process_silence`) has no
+    // epsilon check of its own, so a live stream idling at or near zero would otherwise decay
+    // the cascade's delay registers straight into denormal range and leave them there.
+    let _flush_denormals = DenormalGuard::engage();
     let apo = unsafe { &mut *(handle as *mut CageqApo) };
     apo.poll_channel();
     let count = (frames as usize).saturating_mul(apo.channels as usize);
@@ -496,6 +555,21 @@ pub unsafe extern "C" fn cageq_apo_sample_rate(handle: *mut c_void) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `cageq_apo_process` relies on `DenormalGuard` to keep a quiet live stream from decaying
+    /// the cascade's registers into denormal range (see that struct's own doc for why
+    /// `process_silence`'s epsilon check doesn't cover this path) — verified directly against
+    /// MXCSR rather than by timing, which would be flaky.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn denormal_guard_sets_ftz_daz_and_restores_previous_mxcsr() {
+        let before = read_mxcsr();
+        {
+            let _g = DenormalGuard::engage();
+            assert_eq!(read_mxcsr() & 0x8040, 0x8040, "FTZ|DAZ should both be set while engaged");
+        }
+        assert_eq!(read_mxcsr(), before, "MXCSR should be back to its prior value once the guard drops");
+    }
 
     /// The FFI contract, exercised the way the shim actually drives it.
     #[test]
