@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// The filter shapes CAGEq fits and applies. Deliberately the *whole* set the app uses:
-/// a custom backend only has to implement these four, which is what makes replacing
+/// a custom backend only has to implement these five, which is what makes replacing
 /// EqualizerAPO tractable at all (it implements a great deal more that CAGEq never asks
 /// for — graphic EQ, convolution, expressions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +51,12 @@ pub enum FilterType {
     HighShelf,
     /// No gain (unity-peak); used only by the §5.2 "isolate" audition.
     Bandpass,
+    /// Pivots the spectrum around `freq_hz`: cut below, boost above (or vice versa for a
+    /// negative `gain_db`), `gain_db` the *total* span between the two asymptotes. Not a
+    /// biquad of its own — see [`expand_tilts`], which every backend/curve consumer must
+    /// run before matching on `FilterType`, since neither EqualizerAPO nor the RBJ
+    /// cookbook has a native single-stage tilt.
+    Tilt,
 }
 
 /// One parametric band. All four fields are the standard RBJ-biquad parameters, so any
@@ -61,6 +67,29 @@ pub struct Filter {
     pub freq_hz: f64,
     pub gain_db: f64,
     pub q: f64,
+}
+
+/// Expand every [`FilterType::Tilt`] into the pair of complementary shelves that
+/// actually realise it — a low shelf cut and a high shelf boost of equal-and-opposite
+/// magnitude, pivoting at the same `freq_hz` — and pass every other filter through
+/// unchanged. Every match on [`FilterType`] downstream of the domain layer (a backend's
+/// wire format, the RBJ coefficient math, the chart's curve composition) must call this
+/// first: none of those have — or need — a native single-stage tilt, since this
+/// substitution is exact and reuses shelf math they already implement.
+///
+/// Callers can call this unconditionally; a filter list with no `Tilt` in it round-trips
+/// through unchanged (aside from being cloned into a new `Vec`).
+pub fn expand_tilts(filters: &[Filter]) -> Vec<Filter> {
+    let mut out = Vec::with_capacity(filters.len());
+    for f in filters {
+        if f.kind == FilterType::Tilt {
+            out.push(Filter { kind: FilterType::LowShelf, freq_hz: f.freq_hz, gain_db: -f.gain_db / 2.0, q: f.q });
+            out.push(Filter { kind: FilterType::HighShelf, freq_hz: f.freq_hz, gain_db: f.gain_db / 2.0, q: f.q });
+        } else {
+            out.push(*f);
+        }
+    }
+    out
 }
 
 /// One device's managed configuration. Deserializable so the sidecar's
@@ -360,5 +389,48 @@ mod tests {
     fn unsupported_names_the_missing_capability() {
         let e = BackendError::Unsupported("foreign-config disabling");
         assert!(e.to_string().contains("foreign-config disabling"));
+    }
+
+    #[test]
+    fn expand_tilts_passes_non_tilt_filters_through_unchanged() {
+        let f = Filter { kind: FilterType::Peaking, freq_hz: 1000.0, gain_db: 3.0, q: 1.4 };
+        let out = expand_tilts(&[f]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, FilterType::Peaking);
+        assert_eq!(out[0].freq_hz, 1000.0);
+        assert_eq!(out[0].gain_db, 3.0);
+        assert_eq!(out[0].q, 1.4);
+    }
+
+    #[test]
+    fn expand_tilts_splits_into_complementary_shelves() {
+        let tilt = Filter { kind: FilterType::Tilt, freq_hz: 500.0, gain_db: 6.0, q: 0.9 };
+        let out = expand_tilts(&[tilt]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].kind, FilterType::LowShelf);
+        assert_eq!(out[0].freq_hz, 500.0);
+        assert_eq!(out[0].gain_db, -3.0);
+        assert_eq!(out[0].q, 0.9);
+        assert_eq!(out[1].kind, FilterType::HighShelf);
+        assert_eq!(out[1].freq_hz, 500.0);
+        assert_eq!(out[1].gain_db, 3.0);
+        assert_eq!(out[1].q, 0.9);
+    }
+
+    #[test]
+    fn expand_tilts_preserves_order_and_mixes_kinds() {
+        let filters = [
+            Filter { kind: FilterType::Peaking, freq_hz: 100.0, gain_db: 1.0, q: 1.0 },
+            Filter { kind: FilterType::Tilt, freq_hz: 2000.0, gain_db: -4.0, q: 0.7 },
+            Filter { kind: FilterType::Bandpass, freq_hz: 300.0, gain_db: 0.0, q: 2.0 },
+        ];
+        let out = expand_tilts(&filters);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].kind, FilterType::Peaking);
+        assert_eq!(out[1].kind, FilterType::LowShelf);
+        assert_eq!(out[1].gain_db, 2.0);
+        assert_eq!(out[2].kind, FilterType::HighShelf);
+        assert_eq!(out[2].gain_db, -2.0);
+        assert_eq!(out[3].kind, FilterType::Bandpass);
     }
 }

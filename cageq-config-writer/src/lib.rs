@@ -87,6 +87,7 @@ fn eqapo_token(kind: FilterType) -> &'static str {
         FilterType::LowShelf => "LSC",
         FilterType::HighShelf => "HSC",
         FilterType::Bandpass => "BP",
+        FilterType::Tilt => unreachable!("expand_tilts runs before eqapo_token is ever called"),
     }
 }
 
@@ -497,7 +498,8 @@ fn render_device_block(cfg: &DeviceConfig) -> String {
     // peaking filters in optimiser-convergence order, which reads as an arbitrary
     // jumble in the file. Sorting makes the preview stable and readable — and later
     // merges custom filters (§3.4) into the same low->high list.
-    let mut filters: Vec<&Filter> = cfg.filters.iter().collect();
+    let expanded = cageq_backend::expand_tilts(&cfg.filters);
+    let mut filters: Vec<&Filter> = expanded.iter().collect();
     filters.sort_by(|a, b| a.freq_hz.total_cmp(&b.freq_hz));
     for (i, f) in filters.iter().enumerate() {
         // A bandpass carries no gain (unity-peak), and EqAPO's BP line takes only Fc + Q.

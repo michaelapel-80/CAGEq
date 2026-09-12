@@ -585,11 +585,13 @@ fn is_safe_state(cfg: ApoConfig) -> bool {
     cfg.bands.is_empty() && cfg.preamp_db <= -119.9
 }
 
-/// Translate the neutral domain type into the APO's own.
+/// Translate the neutral domain type into the APO's own. Expands any `Tilt` filter into
+/// its constituent shelf pair first (`cageq_backend::expand_tilts`) — the engine's own
+/// `FilterKind` has no tilt of its own, by construction: see `expand_tilts`'s doc.
 pub fn to_apo_config(cfg: &DeviceConfig) -> ApoConfig {
     ApoConfig {
         preamp_db: cfg.preamp_db,
-        bands: cfg.filters.iter().map(to_band).collect(),
+        bands: cageq_backend::expand_tilts(&cfg.filters).iter().map(to_band).collect(),
     }
 }
 
@@ -600,6 +602,7 @@ fn to_band(f: &Filter) -> Band {
             FilterType::LowShelf => FilterKind::LowShelf,
             FilterType::HighShelf => FilterKind::HighShelf,
             FilterType::Bandpass => FilterKind::Bandpass,
+            FilterType::Tilt => unreachable!("expand_tilts runs before to_band is ever called"),
         },
         freq_hz: f.freq_hz,
         gain_db: f.gain_db,

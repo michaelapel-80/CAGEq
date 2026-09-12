@@ -11,8 +11,30 @@
  * frame (filter.md §5.2 performance rule: a drag recomputes only the additive curve).
  */
 
-export type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass";
+export type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass" | "Tilt";
 export type Band = { kind: FilterKind; freq_hz: number; gain_db: number; q: number };
+
+/**
+ * Expand every `Tilt` band into the complementary shelf pair that actually realises it
+ * — a low-shelf cut and a high-shelf boost of equal-and-opposite magnitude, pivoting at
+ * the same `freq_hz` — passing every other band through unchanged. Mirrors
+ * `cageq_backend::expand_tilts` (Rust); {@link coefficients} has no tilt formula of its
+ * own, by the same reasoning as that function's doc: neither EqualizerAPO nor the RBJ
+ * cookbook has a native single-stage tilt, so every entry point below that walks a
+ * `Band[]` calls this first instead.
+ */
+export function expandTilts(bands: Band[]): Band[] {
+  const out: Band[] = [];
+  for (const b of bands) {
+    if (b.kind === "Tilt") {
+      out.push({ kind: "LowShelf", freq_hz: b.freq_hz, gain_db: -b.gain_db / 2, q: b.q });
+      out.push({ kind: "HighShelf", freq_hz: b.freq_hz, gain_db: b.gain_db / 2, q: b.q });
+    } else {
+      out.push(b);
+    }
+  }
+  return out;
+}
 
 /** Sample rate the filters are defined against (matches the sidecar's `fs` default). */
 export const FS = 48000;
@@ -29,7 +51,11 @@ function coefficients(kind: FilterKind, fc: number, gainDb: number, q: number, f
   const sqrtA = Math.sqrt(a);
 
   let a0: number, a1: number, a2: number, b0: number, b1: number, b2: number;
-  if (kind === "Bandpass") {
+  if (kind === "Tilt") {
+    // No native tilt formula, by construction — see expandTilts's doc. Every real call
+    // site expands first; landing here means one didn't.
+    throw new Error("coefficients() called with Tilt — expandTilts must run first");
+  } else if (kind === "Bandpass") {
     // RBJ band-pass, 0 dB peak (gain ignored — the §5.2 isolate audition uses unity peak).
     a0 = 1 + alpha;
     a1 = -(-2 * cosw) / a0;
@@ -98,7 +124,7 @@ export function stepBiquad(c: BiquadCoeffs, s: BiquadState, x: number): number {
 export type InverseCascade = { coeffs: BiquadCoeffs[]; stateL: BiquadState[]; stateR: BiquadState[]; gain: number };
 
 export function buildInverseCascade(filters: Band[], preampDb: number, fs: number): InverseCascade {
-  const coeffs = filters.map((b) => inverseBiquadCoeffs(b, fs)).reverse(); // undo in reverse order
+  const coeffs = expandTilts(filters).map((b) => inverseBiquadCoeffs(b, fs)).reverse(); // undo in reverse order
   return { coeffs, stateL: coeffs.map(zeroState), stateR: coeffs.map(zeroState), gain: Math.pow(10, preampDb / 20) };
 }
 
@@ -211,7 +237,7 @@ export function filterResponseDb(band: Band, freqs: Float64Array, fs = FS): Floa
 /** The composed EQ curve: every band summed (a biquad cascade adds in dB). */
 export function composedCurveDb(bands: Band[], freqs: Float64Array, fs = FS): Float64Array {
   const total = new Float64Array(freqs.length);
-  for (const band of bands) {
+  for (const band of expandTilts(bands)) {
     const r = filterResponseDb(band, freqs, fs);
     for (let i = 0; i < total.length; i++) total[i] += r[i];
   }
@@ -226,7 +252,7 @@ export function composedCurveDb(bands: Band[], freqs: Float64Array, fs = FS): Fl
  *  the negation of what `coefficients()` returns (that helper pre-negates them, a0 = 1). */
 export function phaseDeg(bands: Band[], freqs: Float64Array, fs = FS): Float64Array {
   const out = new Float64Array(freqs.length);
-  for (const band of bands) {
+  for (const band of expandTilts(bands)) {
     const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);
     const a1t = -a1;
     const a2t = -a2;
@@ -254,7 +280,7 @@ export function phaseDeg(bands: Band[], freqs: Float64Array, fs = FS): Float64Ar
 export function impulseResponse(bands: Band[], n = 480, fs = FS): Float64Array {
   let sig = new Float64Array(n);
   sig[0] = 1;
-  for (const band of bands) {
+  for (const band of expandTilts(bands)) {
     const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);
     const a1t = -a1;
     const a2t = -a2;

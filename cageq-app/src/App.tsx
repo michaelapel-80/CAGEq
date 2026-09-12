@@ -64,8 +64,8 @@ type LoudnessSettings = { base_pregain_db: number; isp_headroom_db: number; mode
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 type SlotName = "A" | "B" | "Dry";
 // Mirrors biquad's FilterKind. "Bandpass" only ever appears in the §5.2 isolate *result* (drawn on
-// the chart), never as an editable band — the grid cycles just Peaking/LowShelf/HighShelf.
-type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass";
+// the chart), never as an editable band — the grid cycles Peaking/LowShelf/HighShelf/Tilt.
+type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass" | "Tilt";
 type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean; enabled?: boolean; macro?: string };
 // §3.4 custom EQ is split into three per-slot **stages** — organizational groups of bands
 // that all sum into the one biquad cascade (EqAPO flattens everything; the Rust core still

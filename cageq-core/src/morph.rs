@@ -160,6 +160,7 @@ fn coefficients(band: &Filter) -> [f64; 6] {
                 -alpha / a0,
             )
         }
+        FilterType::Tilt => unreachable!("curve_db_on expands tilts before calling coefficients"),
     };
     [1.0, a1, a2, b0, b1, b2]
 }
@@ -173,9 +174,14 @@ pub(crate) fn curve_db(bands: &[Filter]) -> Vec<f64> {
 /// The same curve on an arbitrary frequency grid. Split out so a cross-language test can
 /// evaluate it on exactly the grid it feeds the reference Python (`peq.py`) and compare
 /// point-for-point — the guard against the three biquad copies drifting apart.
+///
+/// Expands any `Tilt` band into its constituent shelf pair first
+/// (`cageq_backend::expand_tilts`) — `coefficients()` has no tilt formula of its own, by
+/// construction: see `expand_tilts`'s doc.
 pub(crate) fn curve_db_on(bands: &[Filter], freqs: &[f64]) -> Vec<f64> {
+    let expanded = cageq_backend::expand_tilts(bands);
     let mut total = vec![0.0; freqs.len()];
-    for band in bands {
+    for band in &expanded {
         let [a0, a1, a2, b0, b1, b2] = coefficients(band);
         let (a1, a2) = (-a1, -a2); // AutoEq flips these back before evaluating
         let b_sum = (b0 + b1 + b2).powi(2);
@@ -226,6 +232,7 @@ fn key(f: &Filter) -> (u8, i64, i64) {
         FilterType::HighShelf => 1,
         FilterType::Peaking => 2,
         FilterType::Bandpass => 3,
+        FilterType::Tilt => 4,
     };
     (kind, (f.freq_hz * 1000.0).round() as i64, (f.q * 1000.0).round() as i64)
 }
@@ -372,6 +379,25 @@ mod tests {
         approx(c[i.unwrap().0], 6.0, 0.05);
         // ...and it decays to nothing far away.
         approx(c[0], 0.0, 0.05);
+    }
+
+    /// A `Tilt` band's curve must equal the complementary shelf pair it expands to
+    /// (`cageq_backend::expand_tilts`) — not a new curve shape of its own — and settle
+    /// near `-gain/2`/`+gain/2` well below/above its pivot.
+    #[test]
+    fn tilt_curve_matches_its_expanded_shelf_pair_and_settles_at_the_asymptotes() {
+        let tilt = vec![Filter { kind: FilterType::Tilt, freq_hz: 1000.0, gain_db: 6.0, q: 0.9 }];
+        let shelves = vec![
+            Filter { kind: FilterType::LowShelf, freq_hz: 1000.0, gain_db: -3.0, q: 0.9 },
+            Filter { kind: FilterType::HighShelf, freq_hz: 1000.0, gain_db: 3.0, q: 0.9 },
+        ];
+        let c_tilt = curve_db(&tilt);
+        let c_shelves = curve_db(&shelves);
+        for (a, b) in c_tilt.iter().zip(&c_shelves) {
+            approx(*a, *b, 1e-9);
+        }
+        approx(c_tilt[0], -3.0, 0.5); // well below 1 kHz (grid starts at 20 Hz)
+        approx(*c_tilt.last().unwrap(), 3.0, 0.5); // well above (grid ends at 20 kHz)
     }
 
     /// Loudness of a flat curve is exactly level-neutral, and a broadband boost is

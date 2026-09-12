@@ -32,6 +32,11 @@
 /// sounding like two independent fades). Doubled from 32 once that policy shipped, because 32
 /// was already tight against ordinary fragmentation even before slots could be held back on
 /// `Fc` grounds. `set_bands` refuses more rather than silently truncating a correction.
+///
+/// A `Tilt` band (`cageq_backend::FilterType::Tilt`) costs two of these slots, not one — it
+/// arrives here already expanded into its constituent shelf pair (`expand_tilts`). Worst
+/// case, the UI's 20-band limit filled entirely with tilts is 40 slots, still comfortably
+/// under this cap.
 pub const MAX_BANDS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -69,7 +69,7 @@ export type ToneGridProps = {
   onIsolate?: (index: number) => void;
 };
 
-const KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf"];
+const KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf", "Tilt"];
 const GAIN_MIN = -20;
 const GAIN_MAX = 20;
 // Gain's tint ramps logarithmically from this floor (dB) up to full at ±GAIN_MAX — the same
@@ -116,14 +116,18 @@ const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 const tint = (c: string, amt: number): CSSProperties => ({ color: `color-mix(in srgb, var(--fg), ${c} ${Math.round(amt)}%)` });
 
 /** A tiny pictogram of each filter's shape, so the kind reads at a glance (memory: curve
- *  icons, not "PK/LS/HS" text). Click cycles Peaking → LowShelf → HighShelf. */
+ *  icons, not "PK/LS/HS" text). Click cycles Peaking → LowShelf → HighShelf → Tilt. */
 function KindGlyph({ kind }: { kind: FilterKind }) {
   const d =
     kind === "Peaking"
       ? "M2,11 L7,11 L10,3 L13,11 L18,11"
       : kind === "LowShelf"
         ? "M2,4 L8,4 L11,10 L18,10"
-        : "M2,10 L8,10 L11,4 L18,4";
+        : kind === "HighShelf"
+          ? "M2,10 L8,10 L11,4 L18,4"
+          // Tilt: a straight diagonal pivoting through the middle — cut on one side, boost
+          // on the other — distinct from the shelves' flat-then-corner shape.
+          : "M2,11 L18,3";
   return (
     <svg viewBox="0 0 20 14" width="20" height="14" aria-hidden="true">
       <path d={d} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" />
@@ -344,7 +348,9 @@ export function ToneGrid({
             </label>
 
             {readOnly ? (
-              <span className="tg-fixed">{f.kind === "Peaking" ? "PK" : f.kind === "LowShelf" ? "LS" : "HS"}</span>
+              <span className="tg-fixed">
+                {f.kind === "Peaking" ? "PK" : f.kind === "LowShelf" ? "LS" : f.kind === "HighShelf" ? "HS" : f.kind === "Tilt" ? "TL" : "BP"}
+              </span>
             ) : f.fixed ? (
               <span className="tg-fixed" title={t("bands.fixedTitle", { macro: macroLabel })}>
                 {macroLabel}

@@ -264,22 +264,36 @@ def _target_raw(params, grid):
     return np.zeros(len(grid))
 
 
+def _peq_filter(cls, f, fs, fc, gain, q):
+    # Wide bounds so the user's exact values aren't clamped to optimiser limits.
+    return cls(f, fs, fc=fc, q=q, gain=gain, min_fc=1.0, max_fc=24000.0,
+               min_q=0.01, max_q=100.0, min_gain=-60.0, max_gain=60.0)
+
+
 def _custom_filters(params, f, fs):
     """Parse the user's custom filters (filter.md §3.4) into EqAPO-shaped dicts plus
     their combined response in dB on grid `f`. Each is an AutoEq PEQ filter (same
     biquad model as the fit), so it composes additively with the AutoEq bands; the
-    combined curve then drives the §4.1 loudness match and §4.2 clipping ceiling."""
+    combined curve then drives the §4.1 loudness match and §4.2 clipping ceiling.
+
+    `Tilt` has no AutoEq PEQ class of its own — pivots the spectrum around `freq_hz`,
+    realised the same way every other consumer does (`cageq_backend::expand_tilts` /
+    biquad.ts's `expandTilts`): a low-shelf cut plus a high-shelf boost of equal and
+    opposite magnitude, `gain_db` split across them, at the same corner/Q. Only the
+    *curve* is expanded here — the echoed dict stays the single Tilt entry the caller
+    sent, so the band round-trips as one control, not two."""
     out, curve = [], np.zeros(len(f))
     for cf in params.get("custom_filters") or []:
         kind = cf.get("kind")
-        cls = _CUSTOM_FILTER_CLASSES.get(kind)
-        if cls is None:
-            raise ValueError(f"unknown custom filter kind: {kind!r}")
         fc, gain, q = float(cf["freq_hz"]), float(cf["gain_db"]), float(cf["q"])
-        # Wide bounds so the user's exact values aren't clamped to optimiser limits.
-        filt = cls(f, fs, fc=fc, q=q, gain=gain, min_fc=1.0, max_fc=24000.0,
-                   min_q=0.01, max_q=100.0, min_gain=-60.0, max_gain=60.0)
-        curve = curve + filt.fr
+        if kind == "Tilt":
+            curve = curve + _peq_filter(autoeq_peq.LowShelf, f, fs, fc, -gain / 2.0, q).fr
+            curve = curve + _peq_filter(autoeq_peq.HighShelf, f, fs, fc, gain / 2.0, q).fr
+        else:
+            cls = _CUSTOM_FILTER_CLASSES.get(kind)
+            if cls is None:
+                raise ValueError(f"unknown custom filter kind: {kind!r}")
+            curve = curve + _peq_filter(cls, f, fs, fc, gain, q).fr
         out.append({"kind": kind, "freq_hz": round(fc, 2), "gain_db": round(gain, 2), "q": round(q, 4)})
     return out, curve
 
