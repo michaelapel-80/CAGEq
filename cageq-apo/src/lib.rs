@@ -51,7 +51,7 @@ pub mod dsp;
 
 use std::ffi::c_void;
 
-/// RAII guard that forces flush-to-zero + denormals-are-zero on this thread's SSE unit for its
+/// RAII guard that forces flush-to-zero + denormals-are-zero on this thread's FP unit for its
 /// scope, restoring whatever was there before on drop.
 ///
 /// [`cageq_apo_process`] has no silence detection of its own — that lives entirely in
@@ -62,13 +62,23 @@ use std::ffi::c_void;
 /// registers then decay smoothly toward zero along the way, passing *through* the denormal range
 /// rather than landing on `process_silence`'s `SILENCE_EPS` shortcut (which sits many orders of
 /// magnitude above where denormals actually start, so that path never encounters them at all —
-/// see its own doc). Denormal arithmetic falls back to microcode on x86 and is 10-100x slower
-/// than normal float math: a quiet passage or a paused stream would otherwise quietly tax
-/// audiodg's real-time thread for as long as it lasted. Two MXCSR bit writes, no allocation, no
-/// locking, no branching on content — safe under the real-time contract above.
+/// see its own doc). Denormal arithmetic falls back to a slow microcoded/trapped path on both
+/// x86 and Arm and is 10-100x slower than normal float math: a quiet passage or a paused stream
+/// would otherwise quietly tax audiodg's real-time thread for as long as it lasted. A couple of
+/// register writes, no allocation, no locking, no branching on content — safe under the
+/// real-time contract above.
+///
+/// x86_64 (MXCSR) and aarch64 (FPCR) each get their own real implementation below; anything
+/// else is a documented no-op rather than a build failure. **Aspirational, not exercised**: this
+/// crate has no actual Windows-on-Arm build today (the C++ shim links the SDK's x64-only
+/// `AudioBaseProcessingObjectV140.lib`, and CI only ever runs on an x64 runner) — added ahead of
+/// that so the fix is complete if/when that ever changes, not because it's verified on real
+/// aarch64 hardware.
 struct DenormalGuard {
     #[cfg(target_arch = "x86_64")]
-    saved_mxcsr: u32,
+    saved: u32,
+    #[cfg(target_arch = "aarch64")]
+    saved: u64,
 }
 
 // `core::arch::x86_64::{_mm_getcsr, _mm_setcsr}` exist but are deprecated (unsound: the compiler
@@ -86,14 +96,36 @@ fn write_mxcsr(val: u32) {
     unsafe { std::arch::asm!("ldmxcsr [{0}]", in(reg) &val, options(nostack, preserves_flags, readonly)) };
 }
 
+// Aarch64's FPCR has one flush-to-zero bit (`FZ`, bit 24) covering both directions at once —
+// unlike x86, which splits "denormal input treated as zero" (DAZ) from "denormal output flushed
+// to zero" (FTZ) into two separate bits. `FZ16` (bit 19, half-precision) doesn't apply — nothing
+// here ever touches `f16`.
+#[cfg(target_arch = "aarch64")]
+fn read_fpcr() -> u64 {
+    let val: u64;
+    unsafe { std::arch::asm!("mrs {0}, fpcr", out(reg) val, options(nomem, nostack, preserves_flags)) };
+    val
+}
+
+#[cfg(target_arch = "aarch64")]
+fn write_fpcr(val: u64) {
+    unsafe { std::arch::asm!("msr fpcr, {0}", in(reg) val, options(nomem, nostack, preserves_flags)) };
+}
+
 impl DenormalGuard {
     #[cfg(target_arch = "x86_64")]
     fn engage() -> Self {
         let saved = read_mxcsr();
         write_mxcsr(saved | 0x8040); // bit 15 (FTZ) | bit 6 (DAZ)
-        DenormalGuard { saved_mxcsr: saved }
+        DenormalGuard { saved }
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    fn engage() -> Self {
+        let saved = read_fpcr();
+        write_fpcr(saved | (1 << 24)); // FZ
+        DenormalGuard { saved }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     fn engage() -> Self {
         DenormalGuard {}
     }
@@ -102,7 +134,9 @@ impl DenormalGuard {
 impl Drop for DenormalGuard {
     fn drop(&mut self) {
         #[cfg(target_arch = "x86_64")]
-        write_mxcsr(self.saved_mxcsr);
+        write_mxcsr(self.saved);
+        #[cfg(target_arch = "aarch64")]
+        write_fpcr(self.saved);
     }
 }
 
@@ -569,6 +603,19 @@ mod tests {
             assert_eq!(read_mxcsr() & 0x8040, 0x8040, "FTZ|DAZ should both be set while engaged");
         }
         assert_eq!(read_mxcsr(), before, "MXCSR should be back to its prior value once the guard drops");
+    }
+
+    /// Same guard, the aarch64 side (`FPCR.FZ`, bit 24) — see `DenormalGuard`'s own doc for why
+    /// this exists without a real Windows-on-Arm build to run it on yet.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn denormal_guard_sets_fz_and_restores_previous_fpcr() {
+        let before = read_fpcr();
+        {
+            let _g = DenormalGuard::engage();
+            assert_eq!(read_fpcr() & (1 << 24), 1 << 24, "FZ should be set while engaged");
+        }
+        assert_eq!(read_fpcr(), before, "FPCR should be back to its prior value once the guard drops");
     }
 
     /// The FFI contract, exercised the way the shim actually drives it.
