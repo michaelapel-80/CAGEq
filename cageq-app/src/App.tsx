@@ -871,6 +871,19 @@ function App() {
             tg.targets.find((t) => t.name.toLowerCase() === "harman over-ear 2018") ??
             tg.targets.find((t) => /^harman over-ear 2018\b/i.test(t.name));
           setTargetPath(savedTarget ?? harman?.path ?? tg.targets[0]?.path ?? "");
+
+          // Dry has no "inputs" of its own (the branch above never runs for it), but it still
+          // needs `result` set from the actual applied (pass-through) state — every instrument
+          // besides the meters reads off `result`, so without this it stays empty until the
+          // user happens to touch a slot (which is what switchSlot's own activate_slot call,
+          // below, does for every OTHER path that changes the active slot).
+          if (resume?.activeSlot === "Dry" && useDev) {
+            try {
+              setResult(await invoke<ApplyResult>("activate_slot", { slot: "Dry" }));
+            } catch (e) {
+              setError(String(e));
+            }
+          }
         }
       } catch (e) {
         setError(String(e));
