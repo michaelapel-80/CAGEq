@@ -311,8 +311,16 @@ mod windows_impl {
     const N_LOG_BINS: usize = 240;
     const SPEC_F_MIN: f32 = 20.0;
     const SPEC_F_MAX: f32 = 20_000.0;
-    /// dB floor for empty/silent spectrum bins.
-    const SPEC_FLOOR: f32 = -120.0;
+    /// dB floor for empty/silent spectrum bins — just a `log(0)`/finite-number guard, not a claim
+    /// about where the analyzer's own precision runs out. Both charts clip their drawing to a
+    /// fixed, independent -90 dBFS (`SPEC_TOP_DB - SPEC_DYN` in `SpectrumScope.tsx`/`EqChart.tsx`),
+    /// so nothing this deep is ever visible in the drawn curve, peak markers, or `findPeaks`' own
+    /// silence gate — this floor only bounds `db`/`peak_db`'s numeric value, and is set deliberately
+    /// far below the visible range so the hover/peak readout can report a genuine sub-floor
+    /// measurement (e.g. `peak_db`'s undiluted per-bin reading, which correctly scales with the
+    /// real analysis window via FFT processing gain for incoherent content — see `max_power`'s
+    /// doc) instead of being clamped to a number that looks like a limit but isn't one.
+    const SPEC_FLOOR: f32 = -210.0;
     /// Power-spectrum smoothing time constant (seconds) — just enough to settle pure FFT/windowing
     /// noise across a couple of hops (~43 ms each at the default window, see fft_hop), not to
     /// steady the display over time: that's the front-end's job now (canvas phosphor persistence,
