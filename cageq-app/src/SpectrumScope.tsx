@@ -23,8 +23,16 @@ import type { ScopeEq } from "./Vectorscope";
 // first) — a log-frequency curve rather than a dwelling point/beam was the one content shape this
 // hadn't been tried against yet; confirmed live to fit better than expected, enabled by default
 // with its own tuned numbers rather than Vectorscope's/TimeScope's.
-type Params = { trailTau: number; tail: number; glow: number; bloom: number; haze: number; undistort: boolean };
-const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true };
+// `linear` picks SpectrumUpdate's linear-axis bins (`db_lin`/`peak_db_lin`, constant-Hz spacing)
+// over the default log ones — pure per-viewer display choice, unlike `highRes`/`harmonicFold`
+// (App.tsx-owned, since those are enforced by the one shared backend monitor): the backend always
+// computes both, so two open views can independently pick their own axis with no coordination
+// needed at all. Off by default — log is still the right axis for reading a tonal correction
+// against perception/octaves, which is what this view is used for most of the time; linear is the
+// occasional, deliberate choice for reading a harmonic series as the evenly-*spaced* comb it
+// actually is (mains hum, a motor, this app's own square/sawtooth/pulse test signals).
+type Params = { trailTau: number; tail: number; glow: number; bloom: number; haze: number; undistort: boolean; linear: boolean };
+const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true, linear: false };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation, and
@@ -45,13 +53,17 @@ const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze:
 // twice now.
 const TAU_REF = 0.1;
 
-function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number, sampleRate: number | undefined): Float64Array {
+function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number, sampleRate: number | undefined, linear: boolean): Float64Array {
   const arr = new Float64Array(n);
   if (eq.filters.length) {
-    const lnF0 = Math.log(s.f_min);
-    const lnF1 = Math.log(s.f_max);
     const bf = new Float64Array(n);
-    for (let i = 0; i < n; i++) bf[i] = Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
+    if (linear) {
+      for (let i = 0; i < n; i++) bf[i] = s.f_min + (i / (n - 1)) * (s.f_max - s.f_min);
+    } else {
+      const lnF0 = Math.log(s.f_min);
+      const lnF1 = Math.log(s.f_max);
+      for (let i = 0; i < n; i++) bf[i] = Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
+    }
     const curve = composedCurveDb(eq.filters, bf, sampleRate);
     for (let i = 0; i < n; i++) arr[i] = curve[i] + eq.preampDb;
   } else {
@@ -61,26 +73,29 @@ function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number, sampleR
 }
 
 /** Cache for the per-bin correction curve (filter response + preamp, dB): rebuilt only when the
- *  EQ, bin layout, or sample rate actually changes, not on every 60 fps frame, and retargeted
- *  through a `FadingCurve` (biquad.ts) rather than swapped outright — snapping it the instant
- *  the EQ changes used to manufacture a one-frame jump in the drawn trace that isn't in the real
- *  (crossfaded) audio at all, see `apo-switch-artifacts` memory, "NOT a bug". `sampleRate` isn't
- *  cosmetic either: a biquad's response depends on it via the bilinear transform, and this used
- *  to silently assume `biquad.ts`'s default 48 kHz regardless of the device's real rate. */
-type CorrCache = { filters: ScopeEq["filters"] | null; preampDb: number; sampleRate: number | undefined; curve: FadingCurve };
-function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: SpectrumData, sampleRate: number | undefined, dtMs: number): Float64Array {
+ *  EQ, bin layout, axis mode, or sample rate actually changes, not on every 60 fps frame, and
+ *  retargeted through a `FadingCurve` (biquad.ts) rather than swapped outright — snapping it the
+ *  instant the EQ changes used to manufacture a one-frame jump in the drawn trace that isn't in
+ *  the real (crossfaded) audio at all, see `apo-switch-artifacts` memory, "NOT a bug". `sampleRate`
+ *  isn't cosmetic either: a biquad's response depends on it via the bilinear transform, and this
+ *  used to silently assume `biquad.ts`'s default 48 kHz regardless of the device's real rate.
+ *  `linear` needs its own explicit tracking, not just `curve.to.length`: `N_LIN_BINS`/`N_LOG_BINS`
+ *  happen to match today, so a bin-count check alone wouldn't notice the axis mode changing under
+ *  an unchanged length — the two curves have different *values* at the same length. */
+type CorrCache = { filters: ScopeEq["filters"] | null; preampDb: number; sampleRate: number | undefined; linear: boolean; curve: FadingCurve };
+function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: SpectrumData, sampleRate: number | undefined, dtMs: number, linear: boolean): Float64Array {
   const c = cache.current;
-  const n = s.db.length;
-  if (!c || c.curve.to.length !== n) {
-    const to = computeCorrectionCurve(eq, s, n, sampleRate);
-    cache.current = { filters: eq.filters, preampDb: eq.preampDb, sampleRate, curve: retargetFadingCurve(null, to) };
+  const n = linear ? s.db_lin.length : s.db.length;
+  if (!c || c.curve.to.length !== n || c.linear !== linear) {
+    const to = computeCorrectionCurve(eq, s, n, sampleRate, linear);
+    cache.current = { filters: eq.filters, preampDb: eq.preampDb, sampleRate, linear, curve: retargetFadingCurve(null, to) };
     return to;
   }
   if (c.filters !== eq.filters || c.preampDb !== eq.preampDb || c.sampleRate !== sampleRate) {
     c.filters = eq.filters;
     c.preampDb = eq.preampDb;
     c.sampleRate = sampleRate;
-    c.curve = retargetFadingCurve(c.curve, computeCorrectionCurve(eq, s, n, sampleRate));
+    c.curve = retargetFadingCurve(c.curve, computeCorrectionCurve(eq, s, n, sampleRate, linear));
   }
   return stepFadingCurve(c.curve, dtMs);
 }
@@ -113,6 +128,10 @@ const F_MAX = 20000;
 // The classic 1-2-5 sequence — same set EqChart's own `GRID_HZ` uses, so the two charts' grids
 // read as the same axis rather than two different conventions.
 const FREQ_TICKS = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+// Evenly-spaced round numbers for `linear` mode instead — the 1-2-5 sequence above reads oddly
+// non-uniform on a linear axis (bunched at the low end, exactly the thing linear mode exists to
+// avoid). 2 kHz steps across the same [F_MIN, F_MAX] range.
+const FREQ_TICKS_LIN = [20, 2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000];
 
 // hermiteTangent/traceSmooth moved to spline.ts — EqChart's spectrum backdrop grew the same
 // per-bin-staircase-visible-as-jagged problem this trace solved and now shares the fix.
@@ -422,8 +441,9 @@ export function SpectrumScope({
     };
   }, []);
 
-  // Static graticule: a few dBFS reference lines + one vertical guide per FREQ_TICKS entry (the
-  // classic 1-2-5 sequence — matches EqChart's own grid). Redrawn only on resize.
+  // Static graticule: a few dBFS reference lines + one vertical guide per tick (log: the classic
+  // 1-2-5 sequence, matching EqChart's own grid; linear: evenly-spaced round numbers instead, see
+  // FREQ_TICKS_LIN's own doc). Redrawn on resize or when the axis mode itself changes.
   useEffect(() => {
     const cv = gridRef.current;
     const ctx = cv?.getContext("2d");
@@ -445,8 +465,10 @@ export function SpectrumScope({
     }
     const lnMin = Math.log(F_MIN);
     const lnSpan = Math.log(F_MAX) - lnMin;
-    for (const hz of FREQ_TICKS) {
-      const x = ((Math.log(hz) - lnMin) / lnSpan) * W;
+    const ticks = params.linear ? FREQ_TICKS_LIN : FREQ_TICKS;
+    const tickX = (hz: number) => (params.linear ? ((hz - F_MIN) / (F_MAX - F_MIN)) * W : ((Math.log(hz) - lnMin) / lnSpan) * W);
+    for (const hz of ticks) {
+      const x = tickX(hz);
       ctx.moveTo(x, plotTop);
       ctx.lineTo(x, plotBot);
     }
@@ -455,15 +477,15 @@ export function SpectrumScope({
     ctx.fillStyle = `rgba(${ar},${ag},${ab},0.5)`;
     ctx.font = `${Math.round(H * 0.045)}px system-ui, sans-serif`;
     ctx.textBaseline = "bottom";
-    for (const hz of FREQ_TICKS) {
-      const x = ((Math.log(hz) - lnMin) / lnSpan) * W;
-      // FREQ_TICKS' own extremes (F_MIN/F_MAX) land exactly on the plot's edges — centring their
-      // label there would run it half off-canvas, so those two anchor to the inside edge instead;
-      // everything in between still centres on its gridline as before.
+    for (const hz of ticks) {
+      const x = tickX(hz);
+      // The tick set's own extremes (F_MIN/F_MAX) land exactly on the plot's edges — centring
+      // their label there would run it half off-canvas, so those two anchor to the inside edge
+      // instead; everything in between still centres on its gridline as before.
       ctx.textAlign = hz === F_MIN ? "left" : hz === F_MAX ? "right" : "center";
       ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : `${hz}`, x, H - 2);
     }
-  }, [resW, resH]);
+  }, [resW, resH, params.linear]);
 
   // The main trace + its phosphor trail. This frame's line is drawn into a scratch 2D canvas and
   // handed to the shared half-float accumulator (phosphor.ts), which owns the decay and the
@@ -571,7 +593,7 @@ export function SpectrumScope({
       ctx.globalCompositeOperation = "lighter";
 
       const s = curRef.current;
-      const n = s?.db.length ?? 0;
+      const n = (p.linear ? s?.db_lin.length : s?.db.length) ?? 0;
       // Marks layer (peak crosses + the hover cursor below) is a plain, non-accumulating 2D canvas
       // — cleared and fully redrawn every frame regardless of signal state, unlike the phosphor
       // trail above. That's new as of the cursor: crosses alone only ever needed this while a
@@ -582,7 +604,7 @@ export function SpectrumScope({
       // 2D context has no decay of its own the way the trail canvas does.
       markCtx.clearRect(0, 0, W, H);
       if (n >= 2 && s && s.signal) {
-        const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s, sampleRateRef.current, dt * 1000) : null;
+        const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s, sampleRateRef.current, dt * 1000, p.linear) : null;
         const key = `${plotTop}|${plotBot}|${ar},${ag},${ab}|${p.glow}`;
         if (key !== gradKey) {
           gradKey = key;
@@ -608,10 +630,15 @@ export function SpectrumScope({
         // the backend's Gaussian reduction essentially never produces two adjacent bins with the
         // exact same value the way the old `max`-based one routinely did, so there's no "tied run"
         // left to collapse or preserve the shape of.
+        const srcDb = p.linear ? s.db_lin : s.db;
+        const srcPeakDb = p.linear ? s.peak_db_lin : s.peak_db;
         for (let i = 0; i < n; i++) {
-          vScratch[i] = corr ? s.db[i] - corr[i] : s.db[i];
-          pScratch[i] = corr ? s.peak_db[i] - corr[i] : s.peak_db[i];
+          vScratch[i] = corr ? srcDb[i] - corr[i] : srcDb[i];
+          pScratch[i] = corr ? srcPeakDb[i] - corr[i] : srcPeakDb[i];
           const frac = Math.max(0, Math.min(1, (vScratch[i] - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
+          // Bin index maps straight to pixel X in both axis modes — bins are already
+          // uniformly spaced along whichever axis is active (log or linear); only the
+          // bin-to-Hz mapping used elsewhere (peak crosses, the hover cursor, the grid) differs.
           xScratch[i] = (i / (n - 1)) * W;
           yScratch[i] = plotBot - frac * (plotBot - plotTop);
         }
@@ -630,25 +657,27 @@ export function SpectrumScope({
         // Peak crosses: recomputed and redrawn every frame (not throttled — see below), so they
         // track the live trace exactly as fluidly as the trace itself does. (Layer already cleared
         // above, unconditionally.) Peaks themselves are backend-computed (`s.peaks`,
-        // `cageq-monitor::find_peaks`, on the raw linear spectrum) — this used to run client-side
-        // on `vScratch` (the log-binned, Gaussian-smoothed curve), which produced wildly wrong
-        // frequencies at the top of the spectrum; see that function's own doc. `lnF0`/`lnSpan`
-        // invert the same log-frequency axis the curve itself is drawn on, to place an
-        // already-resolved Hz value on the canvas.
+        // `cageq-monitor::find_peaks`, on the raw linear spectrum, independent of either display
+        // axis) — this used to run client-side on `vScratch` (the log-binned, Gaussian-smoothed
+        // curve), which produced wildly wrong frequencies at the top of the spectrum; see that
+        // function's own doc. `hzToFrac` inverts whichever axis the curve itself is drawn on (log
+        // or linear — see `Params.linear`'s doc) to place an already-resolved Hz value on the
+        // canvas.
         const lnF0 = Math.log(s.f_min);
         const lnSpan = Math.log(s.f_max) - lnF0;
+        const hzToFrac = (hz: number) => (p.linear ? (hz - s.f_min) / (s.f_max - s.f_min) : (Math.log(hz) - lnF0) / lnSpan);
         // The backend has no notion of "undistort" — its peaks are always the raw, post-EQ
         // spectrum's own. When undistort is on, the drawn curve subtracts `corr` (the EQ's own
         // response) to show the reconstructed pre-EQ signal, so a raw peak's *level* is adjusted
-        // to match here too — interpolated into `corr`'s log bins the same way the hover cursor's
-        // own dB readout is, below. This is a display-level correction only: which frequencies
-        // the backend picked as peaks was already decided on the uncorrected spectrum, a
+        // to match here too — interpolated into `corr`'s bins the same way the hover cursor's own
+        // dB readout is, below. This is a display-level correction only: which frequencies the
+        // backend picked as peaks was already decided on the uncorrected spectrum, a
         // simplification accepted because a real EQ correction curve is broad and smooth relative
         // to genuine peaks, not something that plausibly manufactures or hides one.
         const rawPeaks = s.peaks ?? [];
         const peaks = corr
           ? rawPeaks.map((pk) => {
-              const fi = Math.max(0, Math.min(n - 1, ((Math.log(pk.hz) - lnF0) / lnSpan) * (n - 1)));
+              const fi = Math.max(0, Math.min(n - 1, hzToFrac(pk.hz) * (n - 1)));
               const i0 = Math.floor(fi);
               const i1 = Math.min(n - 1, i0 + 1);
               const t = fi - i0;
@@ -662,7 +691,7 @@ export function SpectrumScope({
           markCtx.beginPath();
           for (const pk of peaks) {
             const frac = Math.max(0, Math.min(1, (pk.db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
-            const x = ((Math.log(pk.hz) - lnF0) / lnSpan) * W;
+            const x = hzToFrac(pk.hz) * W;
             const y = plotBot - frac * (plotBot - plotTop);
             markCtx.moveTo(x - r, y);
             markCtx.lineTo(x + r, y);
@@ -744,9 +773,9 @@ export function SpectrumScope({
         markCtx.lineTo(x, plotBot);
         markCtx.stroke();
 
-        const lnMin = Math.log(F_MIN);
-        const lnSpan = Math.log(F_MAX) - lnMin;
-        const hz = Math.exp(lnMin + hoverFrac * lnSpan);
+        const hz = p.linear
+          ? F_MIN + hoverFrac * (F_MAX - F_MIN)
+          : Math.exp(Math.log(F_MIN) + hoverFrac * (Math.log(F_MAX) - Math.log(F_MIN)));
         let dbText = PEAK_PLACEHOLDER_DB;
         if (n >= 2 && s && s.signal) {
           // Linear interpolation between the two bins straddling the cursor — reads the underlying
@@ -902,6 +931,10 @@ export function SpectrumScope({
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
               <span className="vs-tune-label">{t("scope.undistort")}</span>
               <input type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
+            </label>
+            <label className="vs-tune-row vs-tune-check" title={t("scope.linearHint")}>
+              <span className="vs-tune-label">{t("scope.linear")}</span>
+              <input type="checkbox" checked={params.linear} onChange={(e) => set("linear", e.currentTarget.checked)} />
             </label>
             {onHarmonicFoldChange && (
               <label className="vs-tune-row vs-tune-check" title={t("scope.harmonicFoldHint")}>

@@ -68,6 +68,16 @@ pub struct SpectrumUpdate {
     /// hover cursor) — as a curve it would be a poor density estimator (biased high, noisy) for
     /// broadband material, which is exactly why it's a second field and not a `db` replacement.
     pub peak_db: Vec<f32>,
+    /// `db`/`peak_db`'s exact counterparts on a *linear*-frequency axis instead (constant-Hz
+    /// spacing spanning the same [`f_min`, `f_max`], `N_LIN_BINS` bins — see that constant's own
+    /// doc). For SpectrumScope's optional linear-axis mode: a harmonic series reads as an
+    /// evenly-*spaced* comb there, unlike on the log axis, where it bunches at the bottom and
+    /// spreads at the top. Computed unconditionally (cheap relative to the log reduction, whose
+    /// cost is dominated by its widest, high-frequency Gaussian windows — a linear axis has no
+    /// such widening) rather than gated behind a toggle, so EqChart (always log) and
+    /// SpectrumScope (either) can each just read whichever fields they want.
+    pub db_lin: Vec<f32>,
+    pub peak_db_lin: Vec<f32>,
     /// `false` when the endpoint produced no audio this window (same silence test as
     /// [`MeterUpdate::signal`]). The analyzer view blanks its beam on this instead of painting the
     /// idle-decay sweep: without it, the ~35 dB/s slide to the floor is *actively redrawn* into
@@ -323,6 +333,12 @@ mod windows_impl {
     const FFT_OVERLAP_DIV: usize = 4;
     /// Number of log-frequency display bins spanning [SPEC_F_MIN, SPEC_F_MAX].
     const N_LOG_BINS: usize = 240;
+    /// Number of *linear*-frequency display bins spanning the same [SPEC_F_MIN, SPEC_F_MAX] range
+    /// — `SpectrumUpdate::db_lin`/`peak_db_lin`, for SpectrumScope's optional linear-axis mode
+    /// (constant-Hz spacing, unlike `N_LOG_BINS`'s constant-*percentage* spacing — better for
+    /// reading a harmonic series as the evenly-spaced comb it actually is). Matches `N_LOG_BINS`
+    /// for a first cut; purely a display-resolution knob, independently tunable later.
+    const N_LIN_BINS: usize = 240;
     const SPEC_F_MIN: f32 = 20.0;
     const SPEC_F_MAX: f32 = 20_000.0;
     /// dB floor for empty/silent spectrum bins — just a `log(0)`/finite-number guard, not a claim
@@ -1066,6 +1082,7 @@ mod windows_impl {
         accum: VecDeque<f32>,      // mono sample accumulator
         avg_power: Vec<f32>,       // smoothed linear power per (padded, interpolated) FFT bin
         ranges: Vec<(f32, f32)>, // per log bin: exact (fractional) linear-bin span — see `gaussian_power`
+        ranges_lin: Vec<(f32, f32)>, // per linear-axis bin: same, constant-Hz spacing instead
         smoothing: f32,            // power-average coefficient per hop
         power_scale: f32,          // |X|² -> normalized power so a full-scale sine reads ~0 dBFS
         bin_hz: f32,               // Hz per linear (padded) FFT bin — uniform, unlike a log bin's
@@ -1124,6 +1141,16 @@ mod windows_impl {
                 let hi = ((fc * half) / bin_hz).min((n_lin - 1) as f32);
                 ranges.push((lo, hi));
             }
+            // Same idea, constant-Hz width instead of constant-percentage: each bin owns the
+            // half-width window around its own evenly-spaced centre.
+            let lin_bin_width = (SPEC_F_MAX - SPEC_F_MIN) / (N_LIN_BINS as f32 - 1.0);
+            let mut ranges_lin = Vec::with_capacity(N_LIN_BINS);
+            for i in 0..N_LIN_BINS {
+                let fc = SPEC_F_MIN + lin_bin_width * i as f32;
+                let lo = ((fc - lin_bin_width / 2.0) / bin_hz).max(0.0);
+                let hi = ((fc + lin_bin_width / 2.0) / bin_hz).min((n_lin - 1) as f32);
+                ranges_lin.push((lo, hi));
+            }
 
             let smoothing = 1.0 - (-(fft_hop as f32 / rate as f32) / SPEC_TAU_SECS).exp();
             // Amplitude normalization: a full-scale sine at a bin centre gives |X| = S1/2 (window
@@ -1147,6 +1174,7 @@ mod windows_impl {
                 accum: VecDeque::new(),
                 avg_power: vec![0.0; n_lin],
                 ranges,
+                ranges_lin,
                 smoothing,
                 power_scale,
                 bin_hz,
@@ -1193,20 +1221,22 @@ mod windows_impl {
             }
         }
 
-        /// Collapse the averaged power onto log bins (dB).
-        fn snapshot(&mut self, signal: bool) -> SpectrumUpdate {
-            let mut db = Vec::with_capacity(N_LOG_BINS);
-            let mut peak_db = Vec::with_capacity(N_LOG_BINS);
-            for &(lo, hi) in self.ranges.iter() {
-                // Gaussian-weighted integral of linear power across the log bin's own span, not
+        /// Collapse `avg_power` onto `ranges` (dB) — shared by both the log and linear axis
+        /// reductions in `snapshot`, which differ only in how `ranges` itself was built
+        /// (`Spectrum::new`'s `ranges` vs `ranges_lin`); this half doesn't know or care which.
+        fn reduce(avg_power: &[f32], power_scale: f32, ranges: &[(f32, f32)]) -> (Vec<f32>, Vec<f32>) {
+            let mut db = Vec::with_capacity(ranges.len());
+            let mut peak_db = Vec::with_capacity(ranges.len());
+            for &(lo, hi) in ranges {
+                // Gaussian-weighted integral of linear power across the bin's own span, not
                 // the single loudest sample in it — see `gaussian_power`'s doc for the full case
                 // history (this replaced `.fold(max)`, then a rectangular/boxcar sum, in that
                 // order; both are in git history if the reasoning against either is ever needed
                 // again). Verified against synthetic ground truth before landing here — see
                 // `cageq-monitor/tests/decimation_spike.rs`, kept.
-                let power = gaussian_power(&self.avg_power, lo, hi);
+                let power = gaussian_power(avg_power, lo, hi);
                 let cur = if power > 0.0 {
-                    (10.0 * (power * self.power_scale).log10()).max(SPEC_FLOOR)
+                    (10.0 * (power * power_scale).log10()).max(SPEC_FLOOR)
                 } else {
                     SPEC_FLOOR
                 };
@@ -1214,14 +1244,21 @@ mod windows_impl {
 
                 // Same span, but the true (undiluted) level — see `peak_db`'s own doc on
                 // `SpectrumUpdate` for why this is a second reduction rather than reusing `power`.
-                let pk = max_power(&self.avg_power, lo, hi);
+                let pk = max_power(avg_power, lo, hi);
                 let pk_cur = if pk > 0.0 {
-                    (10.0 * (pk * self.power_scale).log10()).max(SPEC_FLOOR)
+                    (10.0 * (pk * power_scale).log10()).max(SPEC_FLOOR)
                 } else {
                     SPEC_FLOOR
                 };
                 peak_db.push(round_to(pk_cur, 1));
             }
+            (db, peak_db)
+        }
+
+        /// Collapse the averaged power onto both the log and linear display bins (dB).
+        fn snapshot(&mut self, signal: bool) -> SpectrumUpdate {
+            let (db, peak_db) = Self::reduce(&self.avg_power, self.power_scale, &self.ranges);
+            let (db_lin, peak_db_lin) = Self::reduce(&self.avg_power, self.power_scale, &self.ranges_lin);
             let peaks = find_peaks(
                 &self.avg_power,
                 self.power_scale,
@@ -1230,7 +1267,16 @@ mod windows_impl {
                 self.min_sep_octaves,
                 self.max_range_db,
             );
-            SpectrumUpdate { db, peak_db, signal, f_min: SPEC_F_MIN, f_max: SPEC_F_MAX, peaks }
+            SpectrumUpdate {
+                db,
+                peak_db,
+                db_lin,
+                peak_db_lin,
+                signal,
+                f_min: SPEC_F_MIN,
+                f_max: SPEC_F_MAX,
+                peaks,
+            }
         }
     }
 

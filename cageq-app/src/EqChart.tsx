@@ -77,10 +77,15 @@ export type PhaseCurve = { id: string; bands: Band[]; color: string; label: stri
  *  average — the shape to draw vs. the number to read off a peak or the cursor, see
  *  SpectrumScope.tsx's `pScratch` for why the two disagree on purpose. `peaks` is separate again:
  *  already-resolved (Hz, dB) spectral peaks found backend-side on the raw linear spectrum
- *  (`cageq-monitor::find_peaks`) — SpectrumScope's own readout/markers, not drawn here. */
+ *  (`cageq-monitor::find_peaks`) — SpectrumScope's own readout/markers, not drawn here. `db_lin`/
+ *  `peak_db_lin` are `db`/`peak_db`'s exact counterparts on a linear (constant-Hz) frequency axis
+ *  instead of log — SpectrumScope's own optional linear-axis mode; this chart never reads them,
+ *  always drawing log (the right axis for an EQ curve). */
 export type SpectrumData = {
   db: number[];
   peak_db: number[];
+  db_lin: number[];
+  peak_db_lin: number[];
   signal: boolean;
   f_min: number;
   f_max: number;
