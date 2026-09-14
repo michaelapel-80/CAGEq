@@ -7,7 +7,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
 import { Band, composedCurveDb, logGrid } from "./biquad";
-import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData } from "./EqChart";
+import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_SIZES } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import { ScrubNumber } from "./ScrubNumber";
@@ -556,20 +556,24 @@ function App() {
     localStorage.setItem("cageq-theme", theme);
   }, [theme]);
   const cycleTheme = () => setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
-  // Spectrum analyzer window size — off (the default, ~171 ms window) or the high-res toggle
-  // (~683 ms, see cageq-monitor's HIGH_RES_FFT_SIZE doc for the resolution/smearing tradeoff).
-  // Backend-side, not just a display setting, so it lives here (not SpectrumScope's own tune
-  // panel state) and Meter — which owns the monitor's start/stop lifecycle — has to know about
-  // it too, the same way it already does for `deviceId`.
-  const [specHighRes, setSpecHighRes] = useState<boolean>(() => localStorage.getItem("cageq-spec-highres") === "1");
+  // Spectrum analyzer window size — one of SPEC_FFT_SIZES (~171/341/683 ms; see cageq-monitor's
+  // BASE_FFT_SIZE/MED_FFT_SIZE/HIGH_RES_FFT_SIZE docs for the resolution/smearing tradeoff each
+  // tier buys), the 3-position slider both SpectrumScope and EqChart render. Backend-side, not
+  // just a display setting, so it lives here (not SpectrumScope's own tune panel state) and Meter
+  // — which owns the monitor's start/stop lifecycle — has to know about it too, the same way it
+  // already does for `deviceId`.
+  const [specFftSize, setSpecFftSize] = useState<number>(() => {
+    const stored = Number(localStorage.getItem("cageq-spec-fft-size"));
+    return (SPEC_FFT_SIZES as readonly number[]).includes(stored) ? stored : SPEC_FFT_SIZES[0];
+  });
   useEffect(() => {
-    localStorage.setItem("cageq-spec-highres", specHighRes ? "1" : "0");
-  }, [specHighRes]);
-  // Spectrum analyzer harmonic folding — same reasoning as `specHighRes` just above (lifted out of
+    localStorage.setItem("cageq-spec-fft-size", String(specFftSize));
+  }, [specFftSize]);
+  // Spectrum analyzer harmonic folding — same reasoning as `specFftSize` just above (lifted out of
   // SpectrumScope's own per-view tune-panel state), but for a different reason: detection itself
   // now runs backend-side, on the one shared monitor (`cageq-monitor::find_peaks`), so two open
   // spectrum views would otherwise show inconsistent checkbox state while only one toggle is
-  // actually in effect. Unlike `specHighRes`, changing it needs no monitor restart — just the live
+  // actually in effect. Unlike `specFftSize`, changing it needs no monitor restart — just the live
   // `set_spectrum_harmonic_fold` command, fired directly from the setter below rather than a
   // Meter-owned start/stop effect.
   const [specHarmonicFold, setSpecHarmonicFold] = useState<boolean>(() => localStorage.getItem("cageq-spec-fold") === "1");
@@ -2866,8 +2870,8 @@ function App() {
                       <SpectrumScope
                         legendHost={legendHost}
                         sampleRate={sampleRate ?? undefined}
-                        highRes={specHighRes}
-                        onHighResChange={setSpecHighRes}
+                        fftSize={specFftSize}
+                        onFftSizeChange={setSpecFftSize}
                         harmonicFold={specHarmonicFold}
                         onHarmonicFoldChange={setSpecHarmonicFold}
                       />
@@ -2878,8 +2882,8 @@ function App() {
                         refs={chartRefs}
                         phase={chartPhase}
                         spectrumRef={spectrumRef}
-                        highRes={specHighRes}
-                        onHighResChange={setSpecHighRes}
+                        fftSize={specFftSize}
+                        onFftSizeChange={setSpecFftSize}
                         eqBands={selfTest?.phase === "running" ? undefined : dryActive || isolateAudition ? [] : result.filters}
                         preampDb={result?.preamp_db ?? 0}
                         sampleRate={sampleRate ?? undefined}
@@ -2910,7 +2914,7 @@ function App() {
                   </div>
                     {/* §5.3c post-EQ meters beside the chart (loopback, post-EQ) — always on. */}
                     <div className="meter-col">
-                      <Meter deviceId={deviceId} specHighRes={specHighRes} plotBox={plotBox} onSampleRate={setSampleRate} />
+                      <Meter deviceId={deviceId} specFftSize={specFftSize} plotBox={plotBox} onSampleRate={setSampleRate} />
                     </div>
                   </div>
                   {/* Full-width host for the chart legend (portaled from the chart) — spans under

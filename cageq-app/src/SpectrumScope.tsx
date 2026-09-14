@@ -8,7 +8,7 @@ import { spectrumStream } from "./streams";
 import { createPhosphor } from "./phosphor";
 import { traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
-import type { SpectrumData } from "./EqChart";
+import { SPEC_FFT_SIZES, fftSizeIndex, type SpectrumData } from "./EqChart";
 import type { ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters — same rationale as Vectorscope/TimeScope's panels. `trailTau`
@@ -24,7 +24,7 @@ import type { ScopeEq } from "./Vectorscope";
 // hadn't been tried against yet; confirmed live to fit better than expected, enabled by default
 // with its own tuned numbers rather than Vectorscope's/TimeScope's.
 // `linear` picks SpectrumUpdate's linear-axis bins (`db_lin`/`peak_db_lin`, constant-Hz spacing)
-// over the default log ones — pure per-viewer display choice, unlike `highRes`/`harmonicFold`
+// over the default log ones — pure per-viewer display choice, unlike `fftSize`/`harmonicFold`
 // (App.tsx-owned, since those are enforced by the one shared backend monitor): the backend always
 // computes both, so two open views can independently pick their own axis with no coordination
 // needed at all. Off by default — log is still the right axis for reading a tonal correction
@@ -302,8 +302,8 @@ function trackPeaks(
 export function SpectrumScope({
   legendHost,
   sampleRate,
-  highRes,
-  onHighResChange,
+  fftSize,
+  onFftSizeChange,
   harmonicFold,
   onHarmonicFoldChange,
 }: {
@@ -318,20 +318,21 @@ export function SpectrumScope({
    *  isn't cosmetic (the undistort correction's biquad math depends on it). Falls back to
    *  `biquad.ts`'s default 48 kHz only when genuinely unknown. */
   sampleRate?: number;
-  /** The backend's analysis window size — App.tsx-owned (not this component's own tune-panel
-   *  params) because changing it means restarting the loopback monitor, which `Meter` owns; the
-   *  checkbox rendered here just reads/writes App.tsx's state via these two props. See
-   *  cageq-monitor's `HIGH_RES_FFT_SIZE` doc for what it actually trades (resolution for temporal
-   *  smearing, not CPU — CPU cost either way is negligible). */
-  highRes?: boolean;
-  onHighResChange?: (v: boolean) => void;
+  /** The backend's analysis window size — one of `SPEC_FFT_SIZES` (`EqChart.tsx`), App.tsx-owned
+   *  (not this component's own tune-panel params) because changing it means restarting the
+   *  loopback monitor, which `Meter` owns; the slider rendered here just reads/writes App.tsx's
+   *  state via these two props. See cageq-monitor's `BASE_FFT_SIZE`/`MED_FFT_SIZE`/
+   *  `HIGH_RES_FFT_SIZE` docs for what each tier actually trades (resolution for temporal
+   *  smearing, not CPU — CPU cost is negligible at all three). */
+  fftSize?: number;
+  onFftSizeChange?: (v: number) => void;
   /** Whether the backend's peak-finder (`cageq-monitor::find_peaks`) folds a harmonic series into
    *  its root — App.tsx-owned (not this component's own tune-panel params) for the same reason
-   *  `highRes` is: detection itself is now backend-side and global to the one running monitor, not
+   *  `fftSize` is: detection itself is now backend-side and global to the one running monitor, not
    *  per-viewer, so two open spectrum views must show the same checkbox state rather than each
    *  independently believing whichever they last set. The checkbox rendered here just reads/writes
    *  App.tsx's state via these two props, which also pushes the live `set_spectrum_harmonic_fold`
-   *  command — no monitor restart needed, unlike `highRes`.
+   *  command — no monitor restart needed, unlike `fftSize`.
    *
    *  Off by default: decluttering a harmonic series down to its fundamental is the right default
    *  for real program material (a mains hum's ladder, an instrument's own overtones), but it
@@ -946,10 +947,18 @@ export function SpectrumScope({
                 />
               </label>
             )}
-            {onHighResChange && (
-              <label className="vs-tune-row vs-tune-check" title={t("scope.highResHint")}>
-                <span className="vs-tune-label">{t("scope.highRes")}</span>
-                <input type="checkbox" checked={!!highRes} onChange={(e) => onHighResChange(e.currentTarget.checked)} />
+            {onFftSizeChange && (
+              <label className="vs-tune-row" title={t("scope.fftSizeHint")}>
+                <span className="vs-tune-label">{t("scope.fftSize")}</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={SPEC_FFT_SIZES.length - 1}
+                  step={1}
+                  value={fftSizeIndex(fftSize)}
+                  onChange={(e) => onFftSizeChange(SPEC_FFT_SIZES[Number(e.currentTarget.value)])}
+                />
+                <b>{t(`scope.fftSizeTier${fftSizeIndex(fftSize)}`)}</b>
               </label>
             )}
           </div>

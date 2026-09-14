@@ -248,33 +248,42 @@ mod windows_impl {
     /// This is the *real* window length, not the FFT transform length — see `ZERO_PAD_FACTOR`
     /// below for why those are no longer the same number.
     ///
-    /// The default, not the only option — see [`HIGH_RES_FFT_SIZE`] for the tradeoff a larger
-    /// window buys (and, just as important, doesn't cost).
+    /// The default, not the only option — one of three explicit tiers the UI's FFT-size slider
+    /// picks between (`Spectrum::new`'s `base_fft_size` argument, passed straight through from
+    /// the frontend — see [`MED_FFT_SIZE`]/[`HIGH_RES_FFT_SIZE`] for the tradeoff a larger window
+    /// buys, and, just as important, doesn't cost).
     const BASE_FFT_SIZE: usize = 8192;
-    /// Opt-in alternative to [`BASE_FFT_SIZE`] (the app's "high-res spectrum" toggle,
-    /// `Spectrum::new`'s `base_fft_size` argument) — 4x the window, ≈683 ms at ≤48 kHz, ≈0.73 Hz
-    /// raw bins instead of ≈2.9 Hz (both at [`ZERO_PAD_FACTOR`]).
+    /// Middle tier — 2x [`BASE_FFT_SIZE`], ≈341 ms at ≤48 kHz, ≈1.5 Hz raw bins instead of ≈2.9 Hz
+    /// (both at [`ZERO_PAD_FACTOR`]). This exact size was tried once as the *default* and rejected
+    /// ("neither here nor there" — see [`HIGH_RES_FFT_SIZE`]'s doc for the full reasoning that
+    /// judgment rests on), but that's a verdict about the default, not about offering it as a
+    /// real, explicit choice between [`BASE_FFT_SIZE`] and [`HIGH_RES_FFT_SIZE`] for whoever wants
+    /// it — which is what the slider's middle position is. `Spectrum::new` treats this the same as
+    /// [`HIGH_RES_FFT_SIZE`] for the resolution-dependent peak-detection tuning (anything above
+    /// `BASE_FFT_SIZE` counts as "high res" there — see its own `high_res` local).
+    const MED_FFT_SIZE: usize = 16384;
+    /// Top tier — 4x [`BASE_FFT_SIZE`], ≈683 ms at ≤48 kHz, ≈0.73 Hz raw bins instead of ≈2.9 Hz
+    /// (both at [`ZERO_PAD_FACTOR`]).
     ///
     /// Not a CPU tradeoff the way it looks: total FFT cost/sec is `O(M log M) × hops/sec` where
     /// `M = analysis_size × ZERO_PAD_FACTOR` and `hops/sec = rate / (analysis_size /
     /// FFT_OVERLAP_DIV)` — `analysis_size` cancels out of the leading factor and only survives
     /// inside the `log`, so 4x the window costs roughly +13% total CPU, not +400% (baseline is
     /// ~0.3% of one core, per [`CAPTURE_RATE_CAP`]'s own measurement — CPU was never the
-    /// constraint here, at either size). `FFT_OVERLAP_DIV` is a genuinely different knob: more
-    /// overlap buys smoother/faster-updating output at whichever resolution is already chosen,
-    /// linearly in CPU — it cannot buy more resolution itself (that's fixed by window *duration*
-    /// alone, a Fourier uncertainty-principle floor, not an implementation gap `ZERO_PAD_FACTOR`
-    /// or overlap can paper over).
+    /// constraint here, at any of the three sizes). `FFT_OVERLAP_DIV` is a genuinely different
+    /// knob: more overlap buys smoother/faster-updating output at whichever resolution is already
+    /// chosen, linearly in CPU — it cannot buy more resolution itself (that's fixed by window
+    /// *duration* alone, a Fourier uncertainty-principle floor, not an implementation gap
+    /// `ZERO_PAD_FACTOR` or overlap can paper over).
     ///
     /// The actual price is smearing content that changes within the window's own duration —
     /// fine for hunting a stationary headphone/room resonance, worse for anything transient (a
-    /// fast sweep, a percussive test tone) — which is exactly why this is an opt-in toggle
-    /// (defaulting off) rather than replacing `BASE_FFT_SIZE` outright: tried as the default for
-    /// a session, judged "neither here nor there" against ordinary program material, where the
-    /// smearing cost is paid on *everything*, all the time, for a resolution win that only
+    /// fast sweep, a percussive test tone) — which is exactly why this and [`MED_FFT_SIZE`] are
+    /// opt-in slider positions (defaulting to [`BASE_FFT_SIZE`]) rather than replacing it outright:
+    /// the smearing cost is paid on *everything*, all the time, for a resolution win that only
     /// matters when specifically hunting a narrow low-frequency feature.
     const HIGH_RES_FFT_SIZE: usize = 32768;
-    /// The real, windowed analysis block (whichever of the two sizes above is active) is
+    /// The real, windowed analysis block (whichever of the three sizes above is active) is
     /// transformed at this many times its own length — the rest of the FFT's input is zeros.
     /// This is NOT the same thing as more resolution: resolution (how well two close tones can
     /// be told apart) is fixed by the analysis window's time *duration*, unaffected by this.
@@ -478,16 +487,17 @@ mod windows_impl {
         /// the loopback only accumulates and emits the (heavier) `scope` stream while it's > 0, so
         /// nothing's serialized when no one is watching the scope.
         ///
-        /// `high_res_spectrum` selects [`HIGH_RES_FFT_SIZE`] over [`BASE_FFT_SIZE`] for the
-        /// spectrum analyzer (see that constant's own doc for the tradeoff) — fixed for this
-        /// monitor's lifetime, so changing it means restarting the monitor, same as a device
+        /// `fft_size` selects the spectrum analyzer's window size — one of `BASE_FFT_SIZE`,
+        /// `MED_FFT_SIZE`, or `HIGH_RES_FFT_SIZE` (see those constants' own docs for the tradeoff;
+        /// this is passed straight through to `Spectrum::new`, whatever value it is) — fixed for
+        /// this monitor's lifetime, so changing it means restarting the monitor, same as a device
         /// change already does. `harmonic_fold` toggles `find_peaks`' harmonic folding live, no
         /// restart needed — shared with the Tauri layer (`HarmonicFoldState`) so it also survives
-        /// one, unlike `high_res_spectrum`.
+        /// one, unlike `fft_size`.
         pub fn start<F, G, H>(
             endpoint_id: Option<String>,
             scope_viewers: Arc<AtomicUsize>,
-            high_res_spectrum: bool,
+            fft_size: usize,
             harmonic_fold: Arc<AtomicBool>,
             on_update: F,
             on_spectrum: G,
@@ -507,7 +517,7 @@ mod windows_impl {
                         endpoint_id,
                         &stop_thread,
                         &scope_viewers,
-                        high_res_spectrum,
+                        fft_size,
                         harmonic_fold,
                         on_update,
                         on_spectrum,
@@ -1092,13 +1102,23 @@ mod windows_impl {
     }
 
     impl Spectrum {
-        /// `base_fft_size` is [`BASE_FFT_SIZE`] normally, or [`HIGH_RES_FFT_SIZE`] under the
-        /// app's high-res toggle — see the latter's own doc for what that trades away. Also
-        /// selects which of `find_peaks`'s resolution-dependent gates apply, the same way it
-        /// already selects the FFT size itself. `harmonic_fold` is shared with the Tauri layer
-        /// (`HarmonicFoldState`) so toggling it takes effect immediately, no restart — unlike
-        /// `base_fft_size`, which is genuinely fixed for this `Spectrum`'s lifetime.
+        /// `base_fft_size` is one of [`BASE_FFT_SIZE`]/[`MED_FFT_SIZE`]/[`HIGH_RES_FFT_SIZE`] — the
+        /// app's 3-position FFT-size slider, passed straight through — see those constants' own
+        /// docs for what a larger one trades away. Also selects which of `find_peaks`'s
+        /// resolution-dependent gates apply (anything above `BASE_FFT_SIZE` counts as "high res"
+        /// there — see `high_res` below), the same way it already selects the FFT size itself.
+        /// `harmonic_fold` is shared with the Tauri layer (`HarmonicFoldState`) so toggling it
+        /// takes effect immediately, no restart — unlike `base_fft_size`, which is genuinely fixed
+        /// for this `Spectrum`'s lifetime.
         fn new(rate: u32, base_fft_size: usize, harmonic_fold: Arc<AtomicBool>) -> Self {
+            // Snap to the nearest of the three real tiers — defensive against whatever crosses the
+            // Tauri IPC boundary (the frontend's slider only ever sends one of the three exactly,
+            // but this is the one place that assumption would actually matter: an arbitrary huge
+            // value here means an arbitrarily huge FFT plan/allocation below).
+            let base_fft_size = [BASE_FFT_SIZE, MED_FFT_SIZE, HIGH_RES_FFT_SIZE]
+                .into_iter()
+                .min_by_key(|&sz| (sz as i64 - base_fft_size as i64).abs())
+                .unwrap();
             // Scale the real analysis window up with the rate so its *duration* (≈171 ms at the
             // default base size) stays constant: analysis_size = base × next_pow2(round(rate /
             // 48 kHz)). At BASE_FFT_SIZE: 48 k→8192, 96 k→16384, 192 k→32768 (44.1/88.2/176.4
@@ -1160,7 +1180,10 @@ mod windows_impl {
             // the real (analysis_size) window's own coherent gain, FFT-size independent as before.
             let s1: f32 = window.iter().sum();
             let power_scale = (2.0 / s1).powi(2);
-            let high_res = base_fft_size == HIGH_RES_FFT_SIZE;
+            // Medium and High both count as "high res" for tuning purposes — only Base gets the
+            // tighter defaults. `>`, not `== HIGH_RES_FFT_SIZE`, so this doesn't need updating if
+            // another tier is ever added.
+            let high_res = base_fft_size > BASE_FFT_SIZE;
             let min_sep_octaves = if high_res { PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES } else { PEAK_MIN_SEPARATION_OCTAVES };
             let max_range_db = if high_res { PEAK_MAX_RANGE_DB_HIGH_RES } else { PEAK_MAX_RANGE_DB };
             Spectrum {
@@ -1368,7 +1391,7 @@ mod windows_impl {
         endpoint_id: Option<String>,
         stop: &AtomicBool,
         scope_viewers: &AtomicUsize,
-        high_res_spectrum: bool,
+        fft_size: usize,
         harmonic_fold: Arc<AtomicBool>,
         on_update: F,
         on_spectrum: G,
@@ -1392,7 +1415,7 @@ mod windows_impl {
                 &endpoint_id,
                 stop,
                 scope_viewers,
-                high_res_spectrum,
+                fft_size,
                 &harmonic_fold,
                 &on_update,
                 &on_spectrum,
@@ -1447,7 +1470,7 @@ mod windows_impl {
         endpoint_id: &Option<String>,
         stop: &AtomicBool,
         scope_viewers: &AtomicUsize,
-        high_res_spectrum: bool,
+        fft_size: usize,
         harmonic_fold: &Arc<AtomicBool>,
         on_update: &F,
         on_spectrum: &G,
@@ -1492,11 +1515,7 @@ mod windows_impl {
         )
         .map_err(|e| format!("ebur128 init: {e:?}"))?;
 
-        let mut spectrum = Spectrum::new(
-            rate,
-            if high_res_spectrum { HIGH_RES_FFT_SIZE } else { BASE_FFT_SIZE },
-            harmonic_fold.clone(),
-        );
+        let mut spectrum = Spectrum::new(rate, fft_size, harmonic_fold.clone());
 
         audio_client.start_stream()?;
 
@@ -1977,7 +1996,7 @@ mod stub {
         pub fn start<F, G, H>(
             _endpoint_id: Option<String>,
             _scope_viewers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-            _high_res_spectrum: bool,
+            _fft_size: usize,
             _harmonic_fold: std::sync::Arc<std::sync::atomic::AtomicBool>,
             _on_update: F,
             _on_spectrum: G,

@@ -79,7 +79,9 @@ fn main() {
 
     let idle = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let fold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let monitor = match cageq_monitor::Monitor::start(None, idle, false, fold, |_| {}, |_| {}, |_| {}) {
+    // 8192 = cageq_monitor's BASE_FFT_SIZE (private to that crate) — the spectrum analyzer isn't
+    // what this example is recording, so any tier would do.
+    let monitor = match cageq_monitor::Monitor::start(None, idle, 8192, fold, |_| {}, |_| {}, |_| {}) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("could not start the loopback recorder: {e}");

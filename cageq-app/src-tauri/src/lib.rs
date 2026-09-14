@@ -658,15 +658,17 @@ fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
 /// spectrum/scope streams) to every channel registered via `subscribe_*` — see [`StreamSubs`] for
 /// why channels, not events. Replaces any monitor already running (e.g. after a device change).
 ///
-/// `high_res_spectrum` selects the spectrum analyzer's window size for this monitor's lifetime
-/// (`cageq_monitor`'s internal `BASE_FFT_SIZE`/`HIGH_RES_FFT_SIZE` — see the latter's own doc for
-/// the tradeoff) — like a device change, toggling it means calling `start_monitor` again.
-/// Harmonic folding is *not* a parameter here — it rides `HarmonicFoldState`, live-toggleable via
-/// `set_spectrum_harmonic_fold` without restarting the monitor.
+/// `fft_size` selects the spectrum analyzer's window size for this monitor's lifetime — one of
+/// `cageq_monitor`'s internal `BASE_FFT_SIZE`/`MED_FFT_SIZE`/`HIGH_RES_FFT_SIZE` (the frontend's
+/// 3-position slider; see those constants' own docs for the tradeoff, and `Spectrum::new`'s own
+/// doc for the defensive snap-to-nearest-tier this doesn't need to duplicate) — like a device
+/// change, changing it means calling `start_monitor` again. Harmonic folding is *not* a parameter
+/// here — it rides `HarmonicFoldState`, live-toggleable via `set_spectrum_harmonic_fold` without
+/// restarting the monitor.
 #[tauri::command]
 fn start_monitor(
     device: Option<String>,
-    high_res_spectrum: bool,
+    fft_size: usize,
     state: State<MonitorState>,
     scope_viewers: State<ScopeViewers>,
     harmonic_fold: State<HarmonicFoldState>,
@@ -684,7 +686,7 @@ fn start_monitor(
     let monitor = cageq_monitor::Monitor::start(
         device,
         scope_viewers.0.clone(),
-        high_res_spectrum,
+        fft_size,
         harmonic_fold.0.clone(),
         move |update| fan_out(&meter_subs, &meter_alive, update),
         move |spectrum| fan_out(&spectrum_subs, &spectrum_alive, spectrum),

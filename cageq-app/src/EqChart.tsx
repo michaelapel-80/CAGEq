@@ -258,6 +258,20 @@ const fmtCursorHz = (hz: number) => (hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 1
 // SpectrumScope's identically-named constant.
 const CURSOR_LINE_COLOR = "rgba(230,240,255,0.55)";
 
+/** The backend's three FFT-window-size tiers for the loopback spectrum analyzer — mirrors
+ *  cageq-monitor's `BASE_FFT_SIZE`/`MED_FFT_SIZE`/`HIGH_RES_FFT_SIZE` by value (see those
+ *  constants' own docs for the resolution/smearing tradeoff each step buys). The one shared place
+ *  both this chart's and SpectrumScope's FFT-size sliders get their three positions from, and the
+ *  values `App.tsx`'s `specFftSize` state/the `start_monitor` invoke actually send. */
+export const SPEC_FFT_SIZES = [8192, 16384, 32768] as const;
+/** `fftSize`'s slider position (0-2), defaulting to Base for an unset/unrecognized value rather
+ *  than `indexOf`'s `-1` (which would otherwise look up a nonsense locale key downstream). Shared
+ *  by both this chart's and SpectrumScope's sliders. */
+export function fftSizeIndex(fftSize: number | undefined): number {
+  const i = SPEC_FFT_SIZES.indexOf((fftSize ?? SPEC_FFT_SIZES[0]) as (typeof SPEC_FFT_SIZES)[number]);
+  return i < 0 ? 0 : i;
+}
+
 export function EqChart({
   series,
   markers = [],
@@ -265,8 +279,8 @@ export function EqChart({
   phase,
   nodes,
   spectrumRef,
-  highRes,
-  onHighResChange,
+  fftSize,
+  onFftSizeChange,
   eqBands,
   preampDb = 0,
   sampleRate,
@@ -289,13 +303,13 @@ export function EqChart({
    *  the canvas effect below owns its own rAF loop and reads the ref directly, the same pattern
    *  Vectorscope uses for its sample stream. */
   spectrumRef?: RefObject<SpectrumData | null>;
-  /** The backend's analysis window size for the (one, shared) loopback spectrum — same setting
-   *  SpectrumScope's tune panel exposes, App.tsx-owned since changing it restarts the monitor
-   *  (see that component's identically-named props for the full doc). Both views' checkboxes
-   *  just read/write this one shared flag, since there's only ever one backend Spectrum active
-   *  at a time regardless of which view happens to be on screen. */
-  highRes?: boolean;
-  onHighResChange?: (v: boolean) => void;
+  /** The backend's analysis window size for the (one, shared) loopback spectrum — one of
+   *  `SPEC_FFT_SIZES`, same setting SpectrumScope's tune panel exposes, App.tsx-owned since
+   *  changing it restarts the monitor (see that component's identically-named props for the full
+   *  doc). Both views' sliders just read/write this one shared value, since there's only ever one
+   *  backend Spectrum active at a time regardless of which view happens to be on screen. */
+  fftSize?: number;
+  onFftSizeChange?: (v: number) => void;
   /** The applied filter cascade (AutoEq fit + custom). Its magnitude response is removed from
    *  the post-EQ capture per bin so the backdrop shows the **pre-filter** source spectrum. */
   eqBands?: Band[];
@@ -1326,10 +1340,18 @@ export function EqChart({
               }}
             />
           </label>
-          {onHighResChange && (
-            <label className="vs-tune-row vs-tune-check" title={t("scope.highResHint")}>
-              <span className="vs-tune-label">{t("scope.highRes")}</span>
-              <input type="checkbox" checked={!!highRes} onChange={(e) => onHighResChange(e.currentTarget.checked)} />
+          {onFftSizeChange && (
+            <label className="vs-tune-row" title={t("scope.fftSizeHint")}>
+              <span className="vs-tune-label">{t("scope.fftSize")}</span>
+              <input
+                type="range"
+                min={0}
+                max={SPEC_FFT_SIZES.length - 1}
+                step={1}
+                value={fftSizeIndex(fftSize)}
+                onChange={(e) => onFftSizeChange(SPEC_FFT_SIZES[Number(e.currentTarget.value)])}
+              />
+              <b>{t(`scope.fftSizeTier${fftSizeIndex(fftSize)}`)}</b>
             </label>
           )}
         </div>
