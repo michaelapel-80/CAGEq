@@ -27,10 +27,22 @@
 //!   cargo run -p cageq-monitor --example testtone -- --device "Phonitor"  # match by name
 //!   cargo run -p cageq-monitor --example testtone -- --sine 12000 --rate 44100  # test Windows' resampler
 //!   cargo run -p cageq-monitor --example testtone -- --isp 3.0103 --unsafe  # +3 dBTP true-peak over
+//!   cargo run -p cageq-monitor --example testtone -- --chirp-log 20 20000 8     # log sweep, repeats every 8s
+//!   cargo run -p cageq-monitor --example testtone -- --chirp-linear 20 20000 8  # linear sweep, same range
 //!
-//! `--sine`/`--square`/`--triangle`/`--sawtooth`/`--pulse`/`--pink`/`--white`/`--isp` are all
-//! mutually exclusive (one signal at a time); omitting every one of them plays pink noise, same as
-//! passing `--pink` explicitly.
+//! `--sine`/`--square`/`--triangle`/`--sawtooth`/`--pulse`/`--pink`/`--white`/`--isp`/
+//! `--chirp-log`/`--chirp-linear` are all mutually exclusive (one signal at a time); omitting
+//! every one of them plays pink noise, same as passing `--pink` explicitly.
+//!
+//! `--chirp-log`/`--chirp-linear <f0> <f1> <seconds>` sweep from `f0` to `f1` Hz over `<seconds>`,
+//! then repeat — useful for watching the loopback spectrum sweep across the whole band in one
+//! continuous pass instead of checking discrete frequencies by hand. `--chirp-log` spends equal
+//! *time* per octave (matching the app's own log-Hz spectrum axis, so the sweep crosses the
+//! display at a constant visual rate) — `--chirp-linear` spends equal time per Hz, which at a wide
+//! `f0`..`f1` range spends almost no time in the bass by comparison. The repeat is seamless-ish by
+//! construction (a short fade in/out at each cycle boundary, same idea as the whole session's own
+//! startup/stop fade — see `chirp_phase`'s own doc in `cageq_monitor::signal` for why a naive
+//! repeat would otherwise click), not a perfectly continuous sweep.
 //!
 //! `--isp <db-over>` is a different kind of test signal from the rest: not a spectrum-shape check,
 //! but a *true-peak* one. Every other signal here is judged purely by its sample values, but a
@@ -87,7 +99,8 @@
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cageq_monitor::signal::{
-        build_wavetable, wavetable_sample, wavetable_step, ISP_MAX_OVER_DB, PinkNoise, Signal, Waveform,
+        build_wavetable, chirp_phase, wavetable_sample, wavetable_step, ISP_MAX_OVER_DB, PinkNoise, Signal,
+        Waveform,
     };
     use std::time::Duration;
     use wasapi::{initialize_mta, Direction, SampleType, StreamMode, WaveFormat};
@@ -106,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // erroring.
         let mut set_signal = |sig: Signal| -> Result<(), Box<dyn std::error::Error>> {
             if signal.is_some() {
-                return Err("only one of --sine/--square/--triangle/--sawtooth/--pulse/--pink/--white/--isp may be given".into());
+                return Err("only one of --sine/--square/--triangle/--sawtooth/--pulse/--pink/--white/--isp/--chirp-log/--chirp-linear may be given".into());
             }
             signal = Some(sig);
             Ok(())
@@ -120,6 +133,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--pink" => set_signal(Signal::Pink)?,
             "--white" => set_signal(Signal::White)?,
             "--isp" => set_signal(Signal::Isp { db_over: args.next().ok_or("--isp needs a dB-over-0-dBFS true-peak target (0..=3.0103)")?.parse()? })?,
+            "--chirp-log" => set_signal(Signal::Chirp {
+                f0: args.next().ok_or("--chirp-log needs <f0> <f1> <seconds>")?.parse()?,
+                f1: args.next().ok_or("--chirp-log needs <f0> <f1> <seconds>")?.parse()?,
+                duration_secs: args.next().ok_or("--chirp-log needs <f0> <f1> <seconds>")?.parse()?,
+                log: true,
+            })?,
+            "--chirp-linear" => set_signal(Signal::Chirp {
+                f0: args.next().ok_or("--chirp-linear needs <f0> <f1> <seconds>")?.parse()?,
+                f1: args.next().ok_or("--chirp-linear needs <f0> <f1> <seconds>")?.parse()?,
+                duration_secs: args.next().ok_or("--chirp-linear needs <f0> <f1> <seconds>")?.parse()?,
+                log: false,
+            })?,
             "--level" => level_dbfs = args.next().ok_or("--level needs a value")?.parse()?,
             "--seconds" => seconds = Some(args.next().ok_or("--seconds needs a value")?.parse()?),
             "--device" => device_match = Some(args.next().ok_or("--device needs a name")?),
@@ -131,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (0 dBFS) torture test. Opt-in and deliberate — mind your ears and gear.
             "--unsafe" => unsafe_mode = true,
             "-h" | "--help" => {
-                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth|--pulse <hz>] [--pink|--white] [--isp <db-over> --unsafe] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
+                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth|--pulse <hz>] [--pink|--white] [--isp <db-over> --unsafe] [--chirp-log|--chirp-linear <f0> <f1> <seconds>] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
                 return Ok(());
             }
             other => return Err(format!("unknown arg: {other}").into()),
@@ -269,6 +294,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "[testtone] ISP torture: Fs/4 45°-phase sine, sample peak {:.4} dBFS → true peak {db_over:.4} dBTP, source {rate} Hz / {channels} ch{resample}",
             db_over - ISP_MAX_OVER_DB
         ),
+        Signal::Chirp { f0, f1, duration_secs, log } => eprintln!(
+            "[testtone] {} chirp {f0} Hz → {f1} Hz over {duration_secs}s (repeating) @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}",
+            if log { "log" } else { "linear" }
+        ),
     }
     eprintln!("[testtone] Ctrl+C to stop.");
 
@@ -281,6 +310,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let step = wavetable_step(signal, rate);
     let mut phase: f64 = 0.0;
     let mut noise = PinkNoise::new();
+    // Chirp's own repeat-cycle length in frames — see the `Signal::Chirp` arm below for why it
+    // repeats via a local per-cycle fade rather than carrying an accumulated phase across the
+    // wrap. Unused (stays 1) for every other signal.
+    let chirp_cycle_frames = if let Signal::Chirp { duration_secs, .. } = signal {
+        ((duration_secs * rate as f64).round() as u64).max(1)
+    } else {
+        1
+    };
 
     // Deliberately after the (potentially slow — see `build_wavetable`'s own doc) wavetable build
     // above, not before: starting the stream first would leave the freshly-opened device buffer
@@ -325,6 +362,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Signal::White => noise.next_white() * gain,
                 Signal::Pink => noise.next_pink() * gain,
+                Signal::Chirp { f0, f1, duration_secs, log } => {
+                    let frame_in_cycle = frame % chirp_cycle_frames;
+                    let t = frame_in_cycle as f64 / rate as f64;
+                    let s = chirp_phase(f0, f1, duration_secs, log, t).sin() as f32 * gain;
+                    // Local fade in/out at every repeat boundary, same `fade_frames` pattern as
+                    // the session-level `env` above but measured against the cycle instead of the
+                    // whole session — a naive phase wrap generally isn't continuous and would
+                    // otherwise click every `duration_secs` (see `Signal::Chirp`'s own doc).
+                    let mut cycle_env = if frame_in_cycle < fade_frames {
+                        frame_in_cycle as f32 / fade_frames as f32
+                    } else {
+                        1.0
+                    };
+                    let rem_in_cycle = chirp_cycle_frames.saturating_sub(frame_in_cycle);
+                    if rem_in_cycle < fade_frames {
+                        cycle_env = cycle_env.min(rem_in_cycle as f32 / fade_frames as f32);
+                    }
+                    s * cycle_env
+                }
             };
             let s = (mono * env).clamp(-sample_ceil, sample_ceil);
             let bytes = s.to_le_bytes();

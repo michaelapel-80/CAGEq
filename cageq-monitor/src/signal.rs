@@ -131,6 +131,41 @@ pub enum Signal {
     /// a fixed Fs/4, 45°-phase sine, parameterised by how many dB above 0 dBFS the *reconstructed*
     /// peak should reach (clamped to `0.0..=ISP_MAX_OVER_DB` by the caller).
     Isp { db_over: f64 },
+    /// A swept sine from `f0` to `f1` Hz over `duration_secs`, then repeating — see
+    /// [`chirp_phase`] for the construction. `log` selects a logarithmic (equal time per octave,
+    /// matching the spectrum view's own log-Hz axis) vs. linear (equal Hz/sec) sweep. Unlike
+    /// `Tone`/`Isp`, this doesn't use the wavetable machinery at all (see `build_wavetable`'s own
+    /// doc) — its instantaneous frequency changes continuously, so it's synthesized directly by
+    /// the render loops via `chirp_phase` instead.
+    Chirp { f0: f64, f1: f64, duration_secs: f64, log: bool },
+}
+
+/// Instantaneous phase (radians, unwrapped — the caller applies `.sin()`) of a `Signal::Chirp`
+/// sweep from `f0` to `f1` Hz over `duration_secs`, evaluated at `t` seconds (`0.0..=duration_secs`
+/// — the caller wraps `t` for a repeating sweep, not this function). This is the closed-form
+/// integral of the instantaneous frequency over time, not a per-sample accumulated step like
+/// `wavetable_step` — exact and driftless at any `t`, which matters here because the render loops
+/// re-evaluate it independently every cycle rather than carrying accumulated phase across the
+/// repeat boundary (see `render_generator`'s own doc on the per-cycle fade that hides the seam).
+///
+/// Linear (`log: false`): instantaneous frequency `f(t) = f0 + (f1-f0)·t/T`, so
+/// `phase(t) = 2π·(f0·t + (f1-f0)·t²/(2T))` (the integral of `2π·f(t)`).
+///
+/// Logarithmic (`log: true`): instantaneous frequency `f(t) = f0·(f1/f0)^(t/T)` — equal time per
+/// octave — so `phase(t) = 2π·f0·T/ln(f1/f0)·((f1/f0)^(t/T) - 1)`, the standard exponential
+/// ("log") sine sweep construction. Falls back to the linear formula when `f0` and `f1` are
+/// (nearly) equal, since `ln(f1/f0)` would otherwise divide by ~0 — degenerate case, but a
+/// legitimate one (a "sweep" with no actual sweep is just a constant tone, which the linear
+/// formula already produces correctly when `f0 == f1`).
+pub fn chirp_phase(f0: f64, f1: f64, duration_secs: f64, log: bool, t: f64) -> f64 {
+    use std::f64::consts::TAU;
+    let linear = || TAU * (f0 * t + (f1 - f0) * t * t / (2.0 * duration_secs));
+    if log && f0 > 0.0 && f1 > 0.0 && (f1 / f0 - 1.0).abs() > 1e-9 {
+        let k = (f1 / f0).ln();
+        TAU * f0 * duration_secs / k * ((k * t / duration_secs).exp() - 1.0)
+    } else {
+        linear()
+    }
 }
 
 /// The threshold this project treats as "safe for a real user's device" for a signal aimed at an
@@ -366,6 +401,70 @@ mod tests {
             "played at {estimated_hz:.2} Hz, requested {hz} Hz — the old round(rate/hz) table \
              sizing would have played this at 16000 Hz (table_len rounds to 3)"
         );
+    }
+
+    /// Estimate `chirp_phase`'s instantaneous frequency at `t` by central finite difference —
+    /// `f(t) = phase'(t) / 2π`. Independent of the closed-form derivation, so this pins the actual
+    /// behavior rather than just re-deriving the same formula.
+    fn chirp_instantaneous_hz(f0: f64, f1: f64, duration_secs: f64, log: bool, t: f64) -> f64 {
+        let dt = 1e-6;
+        let dphase = chirp_phase(f0, f1, duration_secs, log, t + dt) - chirp_phase(f0, f1, duration_secs, log, t - dt);
+        dphase / (2.0 * dt) / std::f64::consts::TAU
+    }
+
+    #[test]
+    fn chirp_phase_starts_at_zero() {
+        for log in [false, true] {
+            assert_eq!(chirp_phase(20.0, 20_000.0, 8.0, log, 0.0), 0.0);
+        }
+    }
+
+    /// The instantaneous frequency `chirp_phase`'s derivative actually produces must match each
+    /// sweep type's own defining formula at an arbitrary interior point `t` — not just "near f0/f1
+    /// at the edges", which (for a fast sweep like 20 Hz→20 kHz over a few seconds) can already be
+    /// many Hz away from f0/f1 within a millisecond of t=0/duration, a property of the *ramp rate*
+    /// rather than a bug (checked at t=0/duration exactly by `chirp_phase_starts_at_zero` and by
+    /// construction — `chirp_phase`'s own doc — at t=duration).
+    #[test]
+    fn chirp_instantaneous_frequency_matches_the_defining_formula() {
+        let (f0, f1, duration) = (20.0, 20_000.0, 8.0);
+        for t in [0.5, 2.0, duration / 2.0, 6.0, duration - 0.5] {
+            let linear_expected = f0 + (f1 - f0) * t / duration;
+            let linear_actual = chirp_instantaneous_hz(f0, f1, duration, false, t);
+            assert!(
+                (linear_actual - linear_expected).abs() / linear_expected < 1e-4,
+                "linear t={t}: {linear_actual} not near expected {linear_expected}"
+            );
+
+            let log_expected = f0 * (f1 / f0).powf(t / duration);
+            let log_actual = chirp_instantaneous_hz(f0, f1, duration, true, t);
+            assert!(
+                (log_actual - log_expected).abs() / log_expected < 1e-4,
+                "log t={t}: {log_actual} not near expected {log_expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn chirp_instantaneous_frequency_is_near_f0_and_f1_right_at_the_endpoints() {
+        // Right at the very edge (a small fraction of duration, not a fixed 1ms — see the
+        // defining-formula test's own doc for why a fixed offset isn't meaningful across sweep
+        // rates), both sweep types should read close to f0/f1.
+        let (f0, f1, duration) = (20.0, 20_000.0, 8.0);
+        for log in [false, true] {
+            let start_hz = chirp_instantaneous_hz(f0, f1, duration, log, duration * 1e-5);
+            let end_hz = chirp_instantaneous_hz(f0, f1, duration, log, duration * (1.0 - 1e-5));
+            assert!((start_hz - f0).abs() / f0 < 0.01, "log={log}: {start_hz} not near f0={f0}");
+            assert!((end_hz - f1).abs() / f1 < 0.01, "log={log}: {end_hz} not near f1={f1}");
+        }
+    }
+
+    #[test]
+    fn chirp_phase_falls_back_to_linear_when_f0_equals_f1() {
+        // A degenerate "sweep" with no actual sweep is just a constant tone — log's ln(f1/f0)
+        // would divide by ~0, so this must take the linear branch instead (see chirp_phase's doc).
+        let hz = chirp_instantaneous_hz(1000.0, 1000.0, 8.0, true, 4.0);
+        assert!((hz - 1000.0).abs() < 1.0, "expected ~1000 Hz, got {hz}");
     }
 
     #[test]

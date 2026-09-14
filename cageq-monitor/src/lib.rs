@@ -701,7 +701,7 @@ mod windows_impl {
         params: crate::signal::GeneratorParams,
         stop: &AtomicBool,
     ) -> Result<(), Box<dyn Error>> {
-        use crate::signal::{build_wavetable, wavetable_sample, wavetable_step, PinkNoise, Signal};
+        use crate::signal::{build_wavetable, chirp_phase, wavetable_sample, wavetable_step, PinkNoise, Signal};
 
         initialize_mta().ok()?;
         let enumerator = DeviceEnumerator::new()?;
@@ -726,6 +726,14 @@ mod windows_impl {
         let step = wavetable_step(params.signal, rate);
         let mut phase: f64 = 0.0;
         let mut noise = PinkNoise::new();
+        // Chirp's own repeat-cycle length in frames — see the `Signal::Chirp` arm below for why
+        // it repeats via a local per-cycle fade rather than carrying an accumulated phase across
+        // the wrap. Unused (stays 1) for every other signal.
+        let chirp_cycle_frames = if let Signal::Chirp { duration_secs, .. } = params.signal {
+            ((duration_secs * rate as f64).round() as u64).max(1)
+        } else {
+            1
+        };
 
         audio_client.start_stream()?;
         let mut frame: u64 = 0;
@@ -766,6 +774,26 @@ mod windows_impl {
                     }
                     Signal::White => noise.next_white() * gain,
                     Signal::Pink => noise.next_pink() * gain,
+                    Signal::Chirp { f0, f1, duration_secs, log } => {
+                        let frame_in_cycle = frame % chirp_cycle_frames;
+                        let t = frame_in_cycle as f64 / rate as f64;
+                        let s = chirp_phase(f0, f1, duration_secs, log, t).sin() as f32 * gain;
+                        // Local fade in/out at every repeat boundary, same `fade_frames` pattern
+                        // as the session-level `env` above but measured against the cycle instead
+                        // of the whole session — a naive phase wrap generally isn't continuous
+                        // and would otherwise click every `duration_secs` (see `Signal::Chirp`'s
+                        // own doc).
+                        let mut cycle_env = if frame_in_cycle < fade_frames {
+                            frame_in_cycle as f32 / fade_frames as f32
+                        } else {
+                            1.0
+                        };
+                        let rem_in_cycle = chirp_cycle_frames.saturating_sub(frame_in_cycle);
+                        if rem_in_cycle < fade_frames {
+                            cycle_env = cycle_env.min(rem_in_cycle as f32 / fade_frames as f32);
+                        }
+                        s * cycle_env
+                    }
                 };
                 let s = (mono * env).clamp(-params.sample_ceil, params.sample_ceil);
                 let bytes = s.to_le_bytes();

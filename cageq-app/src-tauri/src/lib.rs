@@ -842,10 +842,19 @@ fn start_test_generator(req: GeneratorRequest, state: State<TestSignalState>) ->
     if is_isp && !req.unsafe_mode {
         return Err("Isp requires unsafe_mode".to_string());
     }
-    let signal = if let Signal::Isp { db_over } = req.signal {
-        Signal::Isp { db_over: db_over.clamp(0.0, ISP_MAX_OVER_DB) }
-    } else {
-        req.signal
+    let signal = match req.signal {
+        Signal::Isp { db_over } => Signal::Isp { db_over: db_over.clamp(0.0, ISP_MAX_OVER_DB) },
+        // Same posture as Isp above: re-clamp server-side rather than trust the window's own
+        // field bounds. 1..=40_000 Hz mirrors the frequency field's own range (ToneWindow.tsx);
+        // 0.5..=60s keeps a sweep from being pathologically fast (a near-zero duration blows up
+        // chirp_phase's own ln(f1/f0)/duration division) or pathologically long.
+        Signal::Chirp { f0, f1, duration_secs, log } => Signal::Chirp {
+            f0: f0.clamp(1.0, 40_000.0),
+            f1: f1.clamp(1.0, 40_000.0),
+            duration_secs: duration_secs.clamp(0.5, 60.0),
+            log,
+        },
+        other => other,
     };
     let level_ceil_dbfs: f32 = if req.unsafe_mode { 0.0 } else { SAFE_PLAYBACK_CEILING_DBFS };
     let level_dbfs = if let Signal::Isp { db_over } = signal {

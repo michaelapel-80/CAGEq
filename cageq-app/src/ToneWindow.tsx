@@ -11,7 +11,8 @@ type Signal =
   | { kind: "Tone"; waveform: Waveform; hz: number }
   | { kind: "Pink" }
   | { kind: "White" }
-  | { kind: "Isp"; db_over: number };
+  | { kind: "Isp"; db_over: number }
+  | { kind: "Chirp"; f0: number; f1: number; duration_secs: number; log: boolean };
 type GeneratorRequest = {
   device: string | null;
   signal: Signal;
@@ -22,12 +23,15 @@ type GeneratorRequest = {
 };
 type AudioDevice = { id: string; name: string; eqapo_pattern: string; eqapo_enabled: boolean };
 
-// The one flat selection the UI offers — mirrors testtone.rs's eight mutually-exclusive CLI flags
-// (--sine/--square/--triangle/--sawtooth/--pulse/--pink/--white/--isp) as one dropdown instead of
-// a signal-kind selector plus a separate waveform-shape sub-selector.
-type Selected = Waveform | "Pink" | "White" | "Isp";
+// The one flat selection the UI offers — mirrors testtone.rs's mutually-exclusive CLI flags
+// (--sine/--square/--triangle/--sawtooth/--pulse/--chirp-log/--chirp-linear/--pink/--white/--isp)
+// as one dropdown instead of a signal-kind selector plus a separate waveform-shape sub-selector.
+// "Chirp" covers both --chirp-log/--chirp-linear — log vs. linear is its own field below, the
+// same way Tone's five shapes are flattened into SELECTIONS but a shape's own params (hz) live in
+// a conditional block rather than the dropdown.
+type Selected = Waveform | "Chirp" | "Pink" | "White" | "Isp";
 const TONE_WAVEFORMS: Waveform[] = ["Sine", "Square", "Triangle", "Sawtooth", "Pulse"];
-const SELECTIONS: Selected[] = [...TONE_WAVEFORMS, "Pink", "White", "Isp"];
+const SELECTIONS: Selected[] = [...TONE_WAVEFORMS, "Chirp", "Pink", "White", "Isp"];
 function isToneWaveform(s: Selected): s is Waveform {
   return (TONE_WAVEFORMS as Selected[]).includes(s);
 }
@@ -52,6 +56,10 @@ export function ToneWindow() {
   const [selected, setSelected] = useState<Selected>("Pink");
   const [hz, setHz] = useState(1000);
   const [dbOver, setDbOver] = useState(ISP_MAX_OVER_DB);
+  const [chirpF0, setChirpF0] = useState(20);
+  const [chirpF1, setChirpF1] = useState(20000);
+  const [chirpDuration, setChirpDuration] = useState(8);
+  const [chirpLog, setChirpLog] = useState(true);
   const [levelDbfs, setLevelDbfs] = useState(-20);
   const [unsafeMode, setUnsafeMode] = useState(false);
   const [rateOverride, setRateOverride] = useState<string>("");
@@ -97,7 +105,9 @@ export function ToneWindow() {
       ? { kind: "Tone", waveform: selected, hz }
       : selected === "Isp"
         ? { kind: "Isp", db_over: dbOver }
-        : { kind: selected };
+        : selected === "Chirp"
+          ? { kind: "Chirp", f0: chirpF0, f1: chirpF1, duration_secs: chirpDuration, log: chirpLog }
+          : { kind: selected };
     const req: GeneratorRequest = {
       device: deviceId || null,
       signal,
@@ -156,6 +166,64 @@ export function ToneWindow() {
           />
           Hz
         </label>
+      )}
+
+      {selected === "Chirp" && (
+        <>
+          <label className="row">
+            {t("toneGen.chirpF0")}
+            <ScrubNumber
+              value={chirpF0}
+              onInput={setChirpF0}
+              onCommit={setChirpF0}
+              min={1}
+              max={40000}
+              mode="mult"
+              arrowStep={1.05}
+              decimals={0}
+              ariaLabel={t("toneGen.chirpF0")}
+              style={{ width: "5em" }}
+            />
+            Hz
+          </label>
+          <label className="row">
+            {t("toneGen.chirpF1")}
+            <ScrubNumber
+              value={chirpF1}
+              onInput={setChirpF1}
+              onCommit={setChirpF1}
+              min={1}
+              max={40000}
+              mode="mult"
+              arrowStep={1.05}
+              decimals={0}
+              ariaLabel={t("toneGen.chirpF1")}
+              style={{ width: "5em" }}
+            />
+            Hz
+          </label>
+          <label className="row">
+            {t("toneGen.chirpDuration")}
+            <ScrubNumber
+              value={chirpDuration}
+              onInput={setChirpDuration}
+              onCommit={setChirpDuration}
+              min={0.5}
+              max={60}
+              mode="add"
+              arrowStep={0.5}
+              decimals={1}
+              ariaLabel={t("toneGen.chirpDuration")}
+              style={{ width: "4em" }}
+            />
+            s
+          </label>
+          <label className="row" style={{ alignItems: "center", gap: "0.4em" }}>
+            <input type="checkbox" checked={chirpLog} onChange={(e) => setChirpLog(e.currentTarget.checked)} />
+            {t("toneGen.chirpLog")}
+          </label>
+          <p style={{ fontSize: "0.75em", opacity: 0.7 }}>{t("toneGen.chirpLogHint")}</p>
+        </>
       )}
 
       {selected === "Isp" ? (
