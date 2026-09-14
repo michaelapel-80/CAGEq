@@ -720,7 +720,9 @@ mod windows_impl {
         params: crate::signal::GeneratorParams,
         stop: &AtomicBool,
     ) -> Result<(), Box<dyn Error>> {
-        use crate::signal::{build_wavetable, chirp_phase, wavetable_sample, wavetable_step, PinkNoise, Signal};
+        use crate::signal::{
+            am_sample, build_wavetable, chirp_phase, fm_phase, wavetable_sample, wavetable_step, PinkNoise, Signal,
+        };
 
         initialize_mta().ok()?;
         let enumerator = DeviceEnumerator::new()?;
@@ -812,6 +814,14 @@ mod windows_impl {
                             cycle_env = cycle_env.min(rem_in_cycle as f32 / fade_frames as f32);
                         }
                         s * cycle_env
+                    }
+                    Signal::Am { carrier_hz, mod_hz, depth } => {
+                        let t = frame as f64 / rate as f64;
+                        am_sample(carrier_hz, mod_hz, depth, t) as f32 * gain
+                    }
+                    Signal::Fm { carrier_hz, mod_hz, deviation_hz } => {
+                        let t = frame as f64 / rate as f64;
+                        fm_phase(carrier_hz, mod_hz, deviation_hz, t).sin() as f32 * gain
                     }
                 };
                 let s = (mono * env).clamp(-params.sample_ceil, params.sample_ceil);

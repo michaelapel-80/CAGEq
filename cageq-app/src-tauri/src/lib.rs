@@ -854,6 +854,21 @@ fn start_test_generator(req: GeneratorRequest, state: State<TestSignalState>) ->
             duration_secs: duration_secs.clamp(0.5, 60.0),
             log,
         },
+        // Same posture again: carrier mirrors the frequency field's own 1..=40_000 range;
+        // mod_hz allows anything from a slow vibrato-style rate up to audio-rate modulation;
+        // depth is AM's own defined 0..=1 range (0 = unmodulated, 1 = full "100%" modulation).
+        Signal::Am { carrier_hz, mod_hz, depth } => Signal::Am {
+            carrier_hz: carrier_hz.clamp(1.0, 40_000.0),
+            mod_hz: mod_hz.clamp(0.1, 20_000.0),
+            depth: depth.clamp(0.0, 1.0),
+        },
+        // deviation_hz isn't clamped relative to carrier_hz (a deviation exceeding the carrier is
+        // acoustically odd but not unsafe or mathematically invalid — fm_phase handles it fine).
+        Signal::Fm { carrier_hz, mod_hz, deviation_hz } => Signal::Fm {
+            carrier_hz: carrier_hz.clamp(1.0, 40_000.0),
+            mod_hz: mod_hz.clamp(0.1, 20_000.0),
+            deviation_hz: deviation_hz.clamp(0.0, 20_000.0),
+        },
         other => other,
     };
     let level_ceil_dbfs: f32 = if req.unsafe_mode { 0.0 } else { SAFE_PLAYBACK_CEILING_DBFS };

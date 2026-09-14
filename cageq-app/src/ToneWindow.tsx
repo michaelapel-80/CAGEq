@@ -12,7 +12,9 @@ type Signal =
   | { kind: "Pink" }
   | { kind: "White" }
   | { kind: "Isp"; db_over: number }
-  | { kind: "Chirp"; f0: number; f1: number; duration_secs: number; log: boolean };
+  | { kind: "Chirp"; f0: number; f1: number; duration_secs: number; log: boolean }
+  | { kind: "Am"; carrier_hz: number; mod_hz: number; depth: number }
+  | { kind: "Fm"; carrier_hz: number; mod_hz: number; deviation_hz: number };
 type GeneratorRequest = {
   device: string | null;
   signal: Signal;
@@ -24,14 +26,14 @@ type GeneratorRequest = {
 type AudioDevice = { id: string; name: string; eqapo_pattern: string; eqapo_enabled: boolean };
 
 // The one flat selection the UI offers — mirrors testtone.rs's mutually-exclusive CLI flags
-// (--sine/--square/--triangle/--sawtooth/--pulse/--chirp-log/--chirp-linear/--pink/--white/--isp)
-// as one dropdown instead of a signal-kind selector plus a separate waveform-shape sub-selector.
-// "Chirp" covers both --chirp-log/--chirp-linear — log vs. linear is its own field below, the
-// same way Tone's five shapes are flattened into SELECTIONS but a shape's own params (hz) live in
-// a conditional block rather than the dropdown.
-type Selected = Waveform | "Chirp" | "Pink" | "White" | "Isp";
+// (--sine/--square/--triangle/--sawtooth/--pulse/--chirp-log/--chirp-linear/--am/--fm/--pink/
+// --white/--isp) as one dropdown instead of a signal-kind selector plus a separate waveform-shape
+// sub-selector. "Chirp" covers both --chirp-log/--chirp-linear — log vs. linear is its own field
+// below, the same way Tone's five shapes are flattened into SELECTIONS but a shape's own params
+// (hz) live in a conditional block rather than the dropdown.
+type Selected = Waveform | "Chirp" | "Am" | "Fm" | "Pink" | "White" | "Isp";
 const TONE_WAVEFORMS: Waveform[] = ["Sine", "Square", "Triangle", "Sawtooth", "Pulse"];
-const SELECTIONS: Selected[] = [...TONE_WAVEFORMS, "Chirp", "Pink", "White", "Isp"];
+const SELECTIONS: Selected[] = [...TONE_WAVEFORMS, "Chirp", "Am", "Fm", "Pink", "White", "Isp"];
 function isToneWaveform(s: Selected): s is Waveform {
   return (TONE_WAVEFORMS as Selected[]).includes(s);
 }
@@ -60,6 +62,12 @@ export function ToneWindow() {
   const [chirpF1, setChirpF1] = useState(20000);
   const [chirpDuration, setChirpDuration] = useState(8);
   const [chirpLog, setChirpLog] = useState(true);
+  const [amCarrier, setAmCarrier] = useState(1000);
+  const [amMod, setAmMod] = useState(5);
+  const [amDepth, setAmDepth] = useState(1);
+  const [fmCarrier, setFmCarrier] = useState(1000);
+  const [fmMod, setFmMod] = useState(5);
+  const [fmDeviation, setFmDeviation] = useState(200);
   const [levelDbfs, setLevelDbfs] = useState(-20);
   const [unsafeMode, setUnsafeMode] = useState(false);
   const [rateOverride, setRateOverride] = useState<string>("");
@@ -107,7 +115,11 @@ export function ToneWindow() {
         ? { kind: "Isp", db_over: dbOver }
         : selected === "Chirp"
           ? { kind: "Chirp", f0: chirpF0, f1: chirpF1, duration_secs: chirpDuration, log: chirpLog }
-          : { kind: selected };
+          : selected === "Am"
+            ? { kind: "Am", carrier_hz: amCarrier, mod_hz: amMod, depth: amDepth }
+            : selected === "Fm"
+              ? { kind: "Fm", carrier_hz: fmCarrier, mod_hz: fmMod, deviation_hz: fmDeviation }
+              : { kind: selected };
     const req: GeneratorRequest = {
       device: deviceId || null,
       signal,
@@ -223,6 +235,111 @@ export function ToneWindow() {
             {t("toneGen.chirpLog")}
           </label>
           <p style={{ fontSize: "0.75em", opacity: 0.7 }}>{t("toneGen.chirpLogHint")}</p>
+        </>
+      )}
+
+      {selected === "Am" && (
+        <>
+          <label className="row">
+            {t("toneGen.amCarrier")}
+            <ScrubNumber
+              value={amCarrier}
+              onInput={setAmCarrier}
+              onCommit={setAmCarrier}
+              min={1}
+              max={40000}
+              mode="mult"
+              arrowStep={1.05}
+              decimals={0}
+              ariaLabel={t("toneGen.amCarrier")}
+              style={{ width: "5em" }}
+            />
+            Hz
+          </label>
+          <label className="row">
+            {t("toneGen.amMod")}
+            <ScrubNumber
+              value={amMod}
+              onInput={setAmMod}
+              onCommit={setAmMod}
+              min={0.1}
+              max={20000}
+              mode="mult"
+              arrowStep={1.05}
+              decimals={1}
+              ariaLabel={t("toneGen.amMod")}
+              style={{ width: "5em" }}
+            />
+            Hz
+          </label>
+          <label className="row">
+            {t("toneGen.amDepth")}
+            <ScrubNumber
+              value={amDepth}
+              onInput={setAmDepth}
+              onCommit={setAmDepth}
+              min={0}
+              max={1}
+              mode="add"
+              arrowStep={0.05}
+              decimals={2}
+              ariaLabel={t("toneGen.amDepth")}
+              style={{ width: "4em" }}
+            />
+          </label>
+        </>
+      )}
+
+      {selected === "Fm" && (
+        <>
+          <label className="row">
+            {t("toneGen.fmCarrier")}
+            <ScrubNumber
+              value={fmCarrier}
+              onInput={setFmCarrier}
+              onCommit={setFmCarrier}
+              min={1}
+              max={40000}
+              mode="mult"
+              arrowStep={1.05}
+              decimals={0}
+              ariaLabel={t("toneGen.fmCarrier")}
+              style={{ width: "5em" }}
+            />
+            Hz
+          </label>
+          <label className="row">
+            {t("toneGen.fmMod")}
+            <ScrubNumber
+              value={fmMod}
+              onInput={setFmMod}
+              onCommit={setFmMod}
+              min={0.1}
+              max={20000}
+              mode="mult"
+              arrowStep={1.05}
+              decimals={1}
+              ariaLabel={t("toneGen.fmMod")}
+              style={{ width: "5em" }}
+            />
+            Hz
+          </label>
+          <label className="row">
+            {t("toneGen.fmDeviation")}
+            <ScrubNumber
+              value={fmDeviation}
+              onInput={setFmDeviation}
+              onCommit={setFmDeviation}
+              min={0}
+              max={20000}
+              mode="add"
+              arrowStep={10}
+              decimals={0}
+              ariaLabel={t("toneGen.fmDeviation")}
+              style={{ width: "5em" }}
+            />
+            Hz
+          </label>
         </>
       )}
 

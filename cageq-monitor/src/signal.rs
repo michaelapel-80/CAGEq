@@ -138,6 +138,34 @@ pub enum Signal {
     /// doc) — its instantaneous frequency changes continuously, so it's synthesized directly by
     /// the render loops via `chirp_phase` instead.
     Chirp { f0: f64, f1: f64, duration_secs: f64, log: bool },
+    /// Amplitude-modulated sine — see [`am_sample`] for the construction.
+    Am { carrier_hz: f64, mod_hz: f64, depth: f64 },
+    /// Frequency-modulated sine — see [`fm_phase`] for the construction.
+    Fm { carrier_hz: f64, mod_hz: f64, deviation_hz: f64 },
+}
+
+/// Amplitude-modulated sine, envelope peak-normalized to exactly 1.0 regardless of `depth` (so
+/// `level_dbfs`/`gain` keeps meaning "true peak level" the same way it does for every other
+/// signal, instead of reaching `1+depth` at a modulation peak): `((1 + depth·sin(2π·mod_hz·t)) /
+/// (1 + depth)) · sin(2π·carrier_hz·t)`. `depth` is the classic AM modulation index — 0 is an
+/// unmodulated carrier, 1 is full ("100%") modulation — clamped to `0.0..=1.0` by the caller (see
+/// `start_test_generator`), same posture as every other signal's own server-side re-clamp.
+pub fn am_sample(carrier_hz: f64, mod_hz: f64, depth: f64, t: f64) -> f64 {
+    use std::f64::consts::TAU;
+    let envelope = (1.0 + depth * (TAU * mod_hz * t).sin()) / (1.0 + depth);
+    envelope * (TAU * carrier_hz * t).sin()
+}
+
+/// Instantaneous phase (radians, unwrapped — the caller applies `.sin()`) of a frequency-modulated
+/// sine — the standard sinusoidal-FM construction: `2π·carrier_hz·t +
+/// (deviation_hz/mod_hz)·sin(2π·mod_hz·t)`, i.e. a carrier whose own instantaneous frequency swings
+/// `±deviation_hz` around `carrier_hz` at a `mod_hz` rate (produces the classic Bessel-function
+/// sideband pattern at `carrier_hz ± n·mod_hz`). `mod_hz` is floored (`max(1e-6)`) against a
+/// literal 0 reaching here (e.g. a hand-typed `--fm` with a 0 modulator) — purely defensive, since
+/// the caller's own server-side clamp already keeps `mod_hz` well away from 0 in practice.
+pub fn fm_phase(carrier_hz: f64, mod_hz: f64, deviation_hz: f64, t: f64) -> f64 {
+    use std::f64::consts::TAU;
+    TAU * carrier_hz * t + (deviation_hz / mod_hz.max(1e-6)) * (TAU * mod_hz * t).sin()
 }
 
 /// Instantaneous phase (radians, unwrapped — the caller applies `.sin()`) of a `Signal::Chirp`
@@ -465,6 +493,50 @@ mod tests {
         // would divide by ~0, so this must take the linear branch instead (see chirp_phase's doc).
         let hz = chirp_instantaneous_hz(1000.0, 1000.0, 8.0, true, 4.0);
         assert!((hz - 1000.0).abs() < 1.0, "expected ~1000 Hz, got {hz}");
+    }
+
+    /// The whole point of the envelope normalization (see `am_sample`'s own doc): the peak
+    /// amplitude must never exceed 1.0 regardless of `depth`, unlike the un-normalized textbook
+    /// `1 + depth·sin(...)` envelope, which reaches `1+depth` at a modulation peak.
+    #[test]
+    fn am_sample_peak_never_exceeds_unity() {
+        let (carrier_hz, mod_hz, rate) = (1000.0, 5.0, 48_000.0);
+        for depth in [0.0, 0.5, 1.0] {
+            let mut peak = 0.0f64;
+            let steps = (rate / mod_hz) as usize; // one full modulation cycle
+            for i in 0..steps {
+                let t = i as f64 / rate;
+                peak = peak.max(am_sample(carrier_hz, mod_hz, depth, t).abs());
+            }
+            assert!(peak <= 1.0 + 1e-9, "depth={depth}: peak {peak} exceeds 1.0");
+        }
+    }
+
+    #[test]
+    fn am_sample_at_zero_depth_is_a_plain_carrier_tone() {
+        let (carrier_hz, mod_hz, rate) = (1000.0, 5.0, 48_000.0);
+        for i in 0..100 {
+            let t = i as f64 / rate;
+            let am = am_sample(carrier_hz, mod_hz, 0.0, t);
+            let plain = (std::f64::consts::TAU * carrier_hz * t).sin();
+            assert!((am - plain).abs() < 1e-9, "t={t}: am={am} plain={plain}");
+        }
+    }
+
+    /// Same finite-difference technique `chirp_instantaneous_hz` uses, applied to `fm_phase`.
+    #[test]
+    fn fm_phase_instantaneous_frequency_matches_the_defining_formula() {
+        let (carrier_hz, mod_hz, deviation_hz) = (1000.0, 5.0, 200.0);
+        let dt = 1e-6;
+        for t in [0.01, 0.1, 0.15, 0.19] {
+            let dphase = fm_phase(carrier_hz, mod_hz, deviation_hz, t + dt) - fm_phase(carrier_hz, mod_hz, deviation_hz, t - dt);
+            let actual_hz = dphase / (2.0 * dt) / std::f64::consts::TAU;
+            let expected_hz = carrier_hz + deviation_hz * (std::f64::consts::TAU * mod_hz * t).cos();
+            assert!(
+                (actual_hz - expected_hz).abs() < 1e-3,
+                "t={t}: {actual_hz} not near expected {expected_hz}"
+            );
+        }
     }
 
     #[test]

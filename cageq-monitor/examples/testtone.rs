@@ -29,10 +29,12 @@
 //!   cargo run -p cageq-monitor --example testtone -- --isp 3.0103 --unsafe  # +3 dBTP true-peak over
 //!   cargo run -p cageq-monitor --example testtone -- --chirp-log 20 20000 8     # log sweep, repeats every 8s
 //!   cargo run -p cageq-monitor --example testtone -- --chirp-linear 20 20000 8  # linear sweep, same range
+//!   cargo run -p cageq-monitor --example testtone -- --am 1000 5 1.0    # 1kHz carrier, 5Hz/100% AM
+//!   cargo run -p cageq-monitor --example testtone -- --fm 1000 5 200    # 1kHz carrier, ±200Hz/5Hz FM
 //!
 //! `--sine`/`--square`/`--triangle`/`--sawtooth`/`--pulse`/`--pink`/`--white`/`--isp`/
-//! `--chirp-log`/`--chirp-linear` are all mutually exclusive (one signal at a time); omitting
-//! every one of them plays pink noise, same as passing `--pink` explicitly.
+//! `--chirp-log`/`--chirp-linear`/`--am`/`--fm` are all mutually exclusive (one signal at a time);
+//! omitting every one of them plays pink noise, same as passing `--pink` explicitly.
 //!
 //! `--chirp-log`/`--chirp-linear <f0> <f1> <seconds>` sweep from `f0` to `f1` Hz over `<seconds>`,
 //! then repeat — useful for watching the loopback spectrum sweep across the whole band in one
@@ -43,6 +45,18 @@
 //! construction (a short fade in/out at each cycle boundary, same idea as the whole session's own
 //! startup/stop fade — see `chirp_phase`'s own doc in `cageq_monitor::signal` for why a naive
 //! repeat would otherwise click), not a perfectly continuous sweep.
+//!
+//! `--am <carrier_hz> <mod_hz> <depth>` amplitude-modulates a sine carrier by another sine at
+//! `mod_hz`, `depth` the classic AM modulation index (0..1, 1 = full/"100%" modulation) — produces
+//! sidebands at `carrier_hz ± mod_hz` only, useful for a simple, known two-sideband check of
+//! frequency resolution or envelope/tremolo-style behavior. Peak level stays exactly `--level`
+//! regardless of `depth` (see `am_sample`'s own doc in `cageq_monitor::signal`).
+//!
+//! `--fm <carrier_hz> <mod_hz> <deviation_hz>` frequency-modulates a sine carrier instead —
+//! `deviation_hz` how far the instantaneous frequency swings away from `carrier_hz`, at a
+//! `mod_hz` rate — producing the classic Bessel-function sideband comb at `carrier_hz ± n·mod_hz`
+//! (more/stronger sidebands as `deviation_hz/mod_hz`, the modulation index, grows), useful for a
+//! richer frequency-resolution or intermodulation-style check than AM's simple two sidebands.
 //!
 //! `--isp <db-over>` is a different kind of test signal from the rest: not a spectrum-shape check,
 //! but a *true-peak* one. Every other signal here is judged purely by its sample values, but a
@@ -99,8 +113,8 @@
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cageq_monitor::signal::{
-        build_wavetable, chirp_phase, wavetable_sample, wavetable_step, ISP_MAX_OVER_DB, PinkNoise, Signal,
-        Waveform,
+        am_sample, build_wavetable, chirp_phase, fm_phase, wavetable_sample, wavetable_step, ISP_MAX_OVER_DB,
+        PinkNoise, Signal, Waveform,
     };
     use std::time::Duration;
     use wasapi::{initialize_mta, Direction, SampleType, StreamMode, WaveFormat};
@@ -119,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // erroring.
         let mut set_signal = |sig: Signal| -> Result<(), Box<dyn std::error::Error>> {
             if signal.is_some() {
-                return Err("only one of --sine/--square/--triangle/--sawtooth/--pulse/--pink/--white/--isp/--chirp-log/--chirp-linear may be given".into());
+                return Err("only one of --sine/--square/--triangle/--sawtooth/--pulse/--pink/--white/--isp/--chirp-log/--chirp-linear/--am/--fm may be given".into());
             }
             signal = Some(sig);
             Ok(())
@@ -145,6 +159,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 duration_secs: args.next().ok_or("--chirp-linear needs <f0> <f1> <seconds>")?.parse()?,
                 log: false,
             })?,
+            "--am" => set_signal(Signal::Am {
+                carrier_hz: args.next().ok_or("--am needs <carrier_hz> <mod_hz> <depth>")?.parse()?,
+                mod_hz: args.next().ok_or("--am needs <carrier_hz> <mod_hz> <depth>")?.parse()?,
+                depth: args.next().ok_or("--am needs <carrier_hz> <mod_hz> <depth>")?.parse()?,
+            })?,
+            "--fm" => set_signal(Signal::Fm {
+                carrier_hz: args.next().ok_or("--fm needs <carrier_hz> <mod_hz> <deviation_hz>")?.parse()?,
+                mod_hz: args.next().ok_or("--fm needs <carrier_hz> <mod_hz> <deviation_hz>")?.parse()?,
+                deviation_hz: args.next().ok_or("--fm needs <carrier_hz> <mod_hz> <deviation_hz>")?.parse()?,
+            })?,
             "--level" => level_dbfs = args.next().ok_or("--level needs a value")?.parse()?,
             "--seconds" => seconds = Some(args.next().ok_or("--seconds needs a value")?.parse()?),
             "--device" => device_match = Some(args.next().ok_or("--device needs a name")?),
@@ -156,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (0 dBFS) torture test. Opt-in and deliberate — mind your ears and gear.
             "--unsafe" => unsafe_mode = true,
             "-h" | "--help" => {
-                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth|--pulse <hz>] [--pink|--white] [--isp <db-over> --unsafe] [--chirp-log|--chirp-linear <f0> <f1> <seconds>] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
+                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth|--pulse <hz>] [--pink|--white] [--isp <db-over> --unsafe] [--chirp-log|--chirp-linear <f0> <f1> <seconds>] [--am <carrier_hz> <mod_hz> <depth>] [--fm <carrier_hz> <mod_hz> <deviation_hz>] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
                 return Ok(());
             }
             other => return Err(format!("unknown arg: {other}").into()),
@@ -298,6 +322,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "[testtone] {} chirp {f0} Hz → {f1} Hz over {duration_secs}s (repeating) @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}",
             if log { "log" } else { "linear" }
         ),
+        Signal::Am { carrier_hz, mod_hz, depth } => eprintln!(
+            "[testtone] AM: {carrier_hz} Hz carrier, {mod_hz} Hz modulator, depth {depth} @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"
+        ),
+        Signal::Fm { carrier_hz, mod_hz, deviation_hz } => eprintln!(
+            "[testtone] FM: {carrier_hz} Hz carrier, {mod_hz} Hz modulator, ±{deviation_hz} Hz deviation @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"
+        ),
     }
     eprintln!("[testtone] Ctrl+C to stop.");
 
@@ -380,6 +410,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         cycle_env = cycle_env.min(rem_in_cycle as f32 / fade_frames as f32);
                     }
                     s * cycle_env
+                }
+                Signal::Am { carrier_hz, mod_hz, depth } => {
+                    let t = frame as f64 / rate as f64;
+                    am_sample(carrier_hz, mod_hz, depth, t) as f32 * gain
+                }
+                Signal::Fm { carrier_hz, mod_hz, deviation_hz } => {
+                    let t = frame as f64 / rate as f64;
+                    fm_phase(carrier_hz, mod_hz, deviation_hz, t).sin() as f32 * gain
                 }
             };
             let s = (mono * env).clamp(-sample_ceil, sample_ceil);
