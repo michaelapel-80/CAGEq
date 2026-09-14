@@ -29,3 +29,14 @@ members = [
 [workspace.package]
 version = "0.11.0"
 license = "GPL-3.0-or-later"
+
+# Dependencies (not workspace members — this form of the key excludes those) compile at release-
+# level optimization even in a dev/debug build. Added specifically for cageq-monitor's spectrum
+# analyzer: rustfft/realfft's own numeric work compiling fully unoptimized (opt-level=0, no
+# vectorization/inlining/bounds-check elimination) was the dominant cost behind visible frame
+# drops in debug builds at the larger FFT-window tiers — cageq-monitor's own code was a smaller,
+# second-order contributor (see the `push()` drain fix, same investigation) but is deliberately
+# left unoptimized here so it's still normally debuggable. Costs a slower first debug build (and
+# after any dependency-version bump) in exchange for every debug run afterward not chugging.
+[profile.dev.package."*"]
+opt-level = 3

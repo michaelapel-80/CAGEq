@@ -265,16 +265,21 @@ mod windows_impl {
     /// Top tier — 4x [`BASE_FFT_SIZE`], ≈683 ms at ≤48 kHz, ≈0.73 Hz raw bins instead of ≈2.9 Hz
     /// (both at [`ZERO_PAD_FACTOR`]).
     ///
-    /// Not a CPU tradeoff the way it looks: total FFT cost/sec is `O(M log M) × hops/sec` where
-    /// `M = analysis_size × ZERO_PAD_FACTOR` and `hops/sec = rate / (analysis_size /
-    /// FFT_OVERLAP_DIV)` — `analysis_size` cancels out of the leading factor and only survives
-    /// inside the `log`, so 4x the window costs roughly +13% total CPU, not +400% (baseline is
-    /// ~0.3% of one core, per [`CAPTURE_RATE_CAP`]'s own measurement — CPU was never the
-    /// constraint here, at any of the three sizes). `FFT_OVERLAP_DIV` is a genuinely different
-    /// knob: more overlap buys smoother/faster-updating output at whichever resolution is already
-    /// chosen, linearly in CPU — it cannot buy more resolution itself (that's fixed by window
-    /// *duration* alone, a Fourier uncertainty-principle floor, not an implementation gap
-    /// `ZERO_PAD_FACTOR` or overlap can paper over).
+    /// Not a CPU tradeoff at all any more, in fact — not just "nearly free". Total FFT cost/sec is
+    /// `O(M log M) × hops/sec` where `hops/sec = rate / (analysis_size / FFT_OVERLAP_DIV)`, and
+    /// `M` is `padded_size` (see that local's own doc for the fixed-budget mechanism): at any
+    /// given sample rate, `M` is now the *same* fixed budget at all three tiers (padding just
+    /// shrinks as the real window grows into it), so raising the tier doesn't grow `M` at all —
+    /// only `analysis_size` grows, which *shrinks* `hops/sec`. A higher tier therefore runs the
+    /// *same-cost* FFT *less often* — genuinely cheaper per second, not merely close to free
+    /// (baseline is ~0.3% of one core at Base, per [`CAPTURE_RATE_CAP`]'s own measurement — CPU
+    /// was never the constraint here, at any of the three sizes, before or after this). Higher
+    /// sample rates are the real cost driver instead: `mult` scales `M` directly (see
+    /// `padded_size`'s own doc), linearly, with no such cancellation. `FFT_OVERLAP_DIV` is a
+    /// genuinely different knob from either: more overlap buys smoother/faster-updating output at
+    /// whichever resolution is already chosen, linearly in CPU — it cannot buy more resolution
+    /// itself (that's fixed by window *duration* alone, a Fourier uncertainty-principle floor, not
+    /// an implementation gap `ZERO_PAD_FACTOR` or overlap can paper over).
     ///
     /// The actual price is smearing content that changes within the window's own duration —
     /// fine for hunting a stationary headphone/room resonance, worse for anything transient (a
@@ -283,10 +288,13 @@ mod windows_impl {
     /// the smearing cost is paid on *everything*, all the time, for a resolution win that only
     /// matters when specifically hunting a narrow low-frequency feature.
     const HIGH_RES_FFT_SIZE: usize = 32768;
-    /// The real, windowed analysis block (whichever of the three sizes above is active) is
-    /// transformed at this many times its own length — the rest of the FFT's input is zeros.
-    /// This is NOT the same thing as more resolution: resolution (how well two close tones can
-    /// be told apart) is fixed by the analysis window's time *duration*, unaffected by this.
+    /// Defines the *fixed* interpolation budget every tier shares: `BASE_FFT_SIZE ×
+    /// ZERO_PAD_FACTOR × mult` (see `Spectrum::new`'s `padded_size`) is the total FFT transform
+    /// length at [`BASE_FFT_SIZE`], and [`MED_FFT_SIZE`]/[`HIGH_RES_FFT_SIZE`] reuse that exact
+    /// same budget rather than multiplying their own, larger real window by this factor again —
+    /// see `padded_size`'s own doc for why growing both independently double-pays for the same
+    /// thing. This is NOT the same thing as more resolution: resolution (how well two close tones
+    /// can be told apart) is fixed by the analysis window's time *duration*, unaffected by this.
     /// Zero-padding instead *interpolates* the transform of that same finite window more finely
     /// — a finite-duration signal has a well-defined continuous Fourier transform, and the
     /// unpadded FFT only ever samples it coarsely; padding computes more exact samples of that
@@ -300,7 +308,8 @@ mod windows_impl {
     /// (see EqChart/SpectrumScope's dedup) rather than smooth over. At ×4 (≈1.5 Hz bins) that
     /// crossover drops to ~50 Hz, shrinking the affected range by roughly the same factor, for a
     /// modest one-time FFT cost (O(N log N), so ×4 the points costs well under ×4) and zero added
-    /// latency — same real samples, same hop cadence, just more (interpolated) output bins.
+    /// latency — same real samples, same hop cadence, just more (interpolated) output bins. That
+    /// ~1.5 Hz figure is also what the *budget* is pegged to, at any tier — see `padded_size`.
     const ZERO_PAD_FACTOR: usize = 4;
     /// Floor on `gaussian_power`'s sigma, in the same padded-linear-bin units `ranges` already
     /// uses — see that function's doc for the full case history this closes out. Width-matching
@@ -1081,8 +1090,9 @@ mod windows_impl {
         analysis_size: usize,      // real, windowed sample count (BASE_FFT_SIZE scaled to rate) —
                                     // governs window duration/hop timing, i.e. true resolution
         fft_hop: usize,            // hop between windows = analysis_size / FFT_OVERLAP_DIV
-        in_buf: Vec<f32>,          // realfft input scratch, len analysis_size*ZERO_PAD_FACTOR —
-                                    // only the first analysis_size entries ever hold real samples,
+        in_buf: Vec<f32>,          // realfft input scratch, len padded_size (see that local's own
+                                    // doc — the fixed per-rate budget, not analysis_size*ZERO_PAD_FACTOR
+                                    // at every tier) — only the first analysis_size entries ever hold real samples,
                                     // the rest must stay exactly 0.0 (see push(): realfft documents
                                     // input as "garbage after calling", so it's re-zeroed every hop
                                     // rather than trusted to stay zero from init)
@@ -1127,11 +1137,18 @@ mod windows_impl {
             let mult = ((rate as f32 / BASE_RATE).round().max(1.0) as usize).next_power_of_two();
             let analysis_size = base_fft_size * mult;
             let fft_hop = analysis_size / FFT_OVERLAP_DIV;
-            // The FFT is planned and run at ZERO_PAD_FACTOR times the real window — see that
-            // constant's doc for why this is an interpolation of the same window's transform, not
-            // additional resolution. Stays a power of two (both factors are), so the transform
-            // itself is exactly as cheap per-point as an unpadded one of the same total length.
-            let padded_size = analysis_size * ZERO_PAD_FACTOR;
+            // The FFT is planned and run at a fixed total length — BASE_FFT_SIZE's own
+            // ZERO_PAD_FACTOR×mult budget (see that constant's doc) — not analysis_size's own
+            // ZERO_PAD_FACTOR× every time: at BASE_FFT_SIZE this is exactly analysis_size ×
+            // ZERO_PAD_FACTOR as before (real + padding both scale with mult identically), but at
+            // MED_FFT_SIZE/HIGH_RES_FFT_SIZE the larger real window increasingly eats into that
+            // same fixed budget instead of multiplying it further — padding shrinks as real
+            // resolution grows, rather than both growing together and interpolating the same
+            // ~1.5 Hz-at-48kHz crossover redundantly. `max` covers HIGH_RES_FFT_SIZE, whose real
+            // window already meets (not exceeds) the budget, i.e. zero padding, not negative.
+            // Still always a power of two (every term is), so this transform is exactly as cheap
+            // per-point as an unpadded one of the same total length, same as before.
+            let padded_size = analysis_size.max(BASE_FFT_SIZE * ZERO_PAD_FACTOR * mult);
 
             let fft = RealFftPlanner::<f32>::new().plan_fft_forward(padded_size);
             let in_buf = fft.make_input_vec();
@@ -1230,9 +1247,12 @@ mod windows_impl {
                         *avg += a * (c.norm_sqr() - *avg);
                     }
                 }
-                for _ in 0..self.fft_hop {
-                    self.accum.pop_front();
-                }
+                // One bulk removal instead of `fft_hop` individual `pop_front` calls — same net
+                // effect (each call's own bookkeeping — wraparound index math, capacity checks —
+                // repeated per element adds up at the larger window tiers, especially unoptimized;
+                // `drain` does it once). The `Drain` iterator removes its whole range on drop even
+                // though its yielded items are never read here.
+                self.accum.drain(..self.fft_hop);
             }
         }
 
@@ -1739,6 +1759,32 @@ mod windows_impl {
         // so a future change to the reduction that reintroduces either failure mode fails a test
         // instead of needing a live screenshot to notice again.
         use super::*;
+
+        /// The whole point of `padded_size`'s fixed-budget formula (see its own doc): at a fixed
+        /// sample rate, the FFT transform length — and so its CPU cost — must be *identical*
+        /// across all three window tiers, not grow with them the way a flat `analysis_size ×
+        /// ZERO_PAD_FACTOR` would. `avg_power.len() == padded_size/2 + 1`, so its length is a
+        /// direct, inspectable proxy for `padded_size` from outside `Spectrum::new`.
+        #[test]
+        fn padded_transform_size_is_constant_across_tiers_at_a_fixed_rate() {
+            let rate = 48_000u32;
+            let fold = || Arc::new(AtomicBool::new(false));
+            let base = Spectrum::new(rate, BASE_FFT_SIZE, fold()).avg_power.len();
+            let med = Spectrum::new(rate, MED_FFT_SIZE, fold()).avg_power.len();
+            let high = Spectrum::new(rate, HIGH_RES_FFT_SIZE, fold()).avg_power.len();
+            assert_eq!(base, med, "Med should reuse Base's exact transform budget");
+            assert_eq!(base, high, "High should reuse Base's exact transform budget too");
+        }
+
+        /// The budget itself still scales with the sample-rate `mult`, same as before this
+        /// change — only the *tier* stopped growing the transform, not the rate.
+        #[test]
+        fn padded_transform_size_still_scales_with_sample_rate() {
+            let fold = || Arc::new(AtomicBool::new(false));
+            let at_48k = Spectrum::new(48_000, BASE_FFT_SIZE, fold()).avg_power.len();
+            let at_96k = Spectrum::new(96_000, BASE_FFT_SIZE, fold()).avg_power.len();
+            assert!(at_96k > at_48k, "96 kHz ({at_96k}) should budget more than 48 kHz ({at_48k})");
+        }
 
         #[test]
         fn pure_tone_lobe_is_monotonic_each_side_of_peak() {

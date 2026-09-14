@@ -43,3 +43,10 @@ tauri-plugin-single-instance = "2"
 # on the core crates stays fast and decoupled from the frontend build state.
 [workspace]
 
+# Same override as the core workspace's own root Cargo.toml, and for the same reason (its own
+# doc comment has the full story): this is the separate workspace `npm run tauri dev`/`cargo
+# build` actually use, so cageq-monitor's rustfft/realfft dependency chain needs it here too,
+# independently — profile settings aren't inherited across separate workspaces.
+[profile.dev.package."*"]
+opt-level = 3
+
