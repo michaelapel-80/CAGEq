@@ -45,6 +45,13 @@ resulting installer to that tag's Release. `workflow_dispatch` runs the same pip
 pipeline itself. What follows is that same process by hand — useful for local testing, or if the
 automated one ever needs debugging.
 
+**Before tagging:** update [`RELEASE_NOTES.md`](RELEASE_NOTES.md) with a short, plain-language
+summary of *this* release — it's published as the GitHub Release's own description (pre-pended
+to the auto-generated commit list, not replacing it), so it's what a reader sees first instead of
+having to reconstruct what changed from the raw log. It's overwritten each release, not a
+cumulative changelog — the previous release's text is still recoverable from git history if ever
+needed.
+
 The frozen sidecar (~177 MB) is a build artifact — gitignored, not committed. Rebuild it
 whenever `sidecar_dsp.py` or its deps change, then build the app:
 

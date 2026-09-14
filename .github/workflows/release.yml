@@ -157,6 +157,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.installer.outputs.path }}
+          # RELEASE_NOTES.md is a curated, human-written summary for *this* release only (not a
+          # cumulative changelog — each release overwrites it) — see DEPLOY.md's maintainer
+          # section. generate_release_notes alongside body_path doesn't replace it: per GitHub's
+          # Releases API, a given body is *pre-pended* to the auto-generated notes, so this reads
+          # as "what actually changed, in plain language" up top, with the full commit list still
+          # there below for anyone who wants it.
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
           # The installer isn't code-signed (no certificate configured) — Windows SmartScreen
           # will warn on first run. Not something this workflow can fix on its own; DEPLOY.md
