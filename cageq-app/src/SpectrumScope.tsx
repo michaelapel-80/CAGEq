@@ -23,18 +23,8 @@ import type { ScopeEq } from "./Vectorscope";
 // first) — a log-frequency curve rather than a dwelling point/beam was the one content shape this
 // hadn't been tried against yet; confirmed live to fit better than expected, enabled by default
 // with its own tuned numbers rather than Vectorscope's/TimeScope's.
-// `harmonicFold` gates `findPeaks`'s step 3 (see that function's own doc) — decluttering the
-// readout of a harmonic series down to its fundamental is the right default for real program
-// material (a mains hum's ladder, an instrument's own overtones), but it actively hides the thing
-// a harmonic-rich test signal (`testtone`'s --square/--triangle/--sawtooth/--pulse, or the in-app
-// generator) exists to show off: testtone.rs's own header doc says a clean --square readout
-// "should show *only* clean odd harmonics" — folding does the opposite, collapsing all of them
-// down to just the fundamental. Off by default: `trackPeaks`'s per-peak identity/hold already
-// covers the frame-to-frame *stability* folding used to help with, so folding's remaining job is
-// pure decluttering, which isn't the right default now that reading individual harmonics is a
-// real, common use of this view.
-type Params = { trailTau: number; tail: number; glow: number; bloom: number; haze: number; undistort: boolean; harmonicFold: boolean };
-const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true, harmonicFold: false };
+type Params = { trailTau: number; tail: number; glow: number; bloom: number; haze: number; undistort: boolean };
+const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation, and
@@ -135,18 +125,6 @@ function parseHex(hex: string): [number, number, number] {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-/** The representative index for a tied run spanning `[i, j]` — its middle, rounded. Used by
- *  `findPeaks` to mark a plateau at its centre rather than its (arbitrary) leading edge. In
- *  practice `i === j` essentially always now — the backend's Gaussian reduction (see
- *  `hermiteTangent`'s doc) is a smooth function of each bin's own never-repeating fractional
- *  range, so exact ties between adjacent bins are no longer expected the way they were under the
- *  old `max`-based reduction. Kept rather than special-cased away: still correct, still cheap, and
- *  still needed if a tie ever *does* land exactly (two adjacent bins integrating to the identical
- *  float by coincidence isn't provably impossible, just no longer routine). */
-function runMid(i: number, j: number): number {
-  return Math.round((i + j) / 2);
-}
-
 /** Format a peak frequency for the numeric readout below the tube — unlike EqChart's `fmtHz`
  *  (built for a handful of fixed, always-round grid-tick values), this has to handle an arbitrary
  *  continuous bin frequency without printing a long float tail. */
@@ -163,89 +141,22 @@ const PEAK_MARK_COLOR = "rgba(230,162,60,0.9)";
 // Plain cool white, not the peak amber — the hover cursor is a *reading tool*, not a detected
 // feature, so it deliberately doesn't compete visually with a genuine peak cross.
 const CURSOR_LINE_COLOR = "rgba(230,240,255,0.55)";
-// How far (dB) a local maximum must stand above the lower of the two valleys separating it from
-// taller ground before it counts as a real peak — see `findPeaks`. Plain "> both neighbours" flags
-// nearly every wiggle in FFT-noisy content; this rejects a shallow shoulder bump on a bigger peak's
-// flank, which never finds a low-enough valley before running into that bigger peak.
-const PEAK_MIN_PROMINENCE_DB = 6;
-// Minimum spacing between picked peaks, in octaves (so it means the same thing at the low and high
-// end of a log axis, unlike a fixed Hz or bin-count gap). A third-octave (roughly a critical band
-// in the midrange) still let one broad resonance's ripples fill several slots at once — confirmed
-// live, "still finds too many peaks" even after the slot-persistence fix stopped them jumping
-// around. A full octave is a much stronger claim ("nothing else within 2x/0.5x this frequency"),
-// closer to how far apart two features need to be before a reader would call them separate peaks
-// rather than texture on one bump.
-const PEAK_MIN_SEPARATION_OCTAVES = 1;
-// Under the high-res analyzer toggle, live-tuned down to a quarter octave — the backend's own
-// resolution genuinely improves there (cageq-monitor's decimation_spike.rs measured a 40/60 Hz
-// pair, 0.58 octaves apart, going from a 7.67 dB dip at the default window to 57.81 dB at
-// high-res — cleanly, distinctly resolved, not just less merged), so the readout's own minimum
-// spacing was needlessly hiding real, already-resolved close content at the default's 1-octave
-// gate. Not derived from that measurement by a formula — chosen by ear/eye against the live
-// readout, same as the other perceptual constants on this page.
-const PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES = 0.25;
-// How far (dB) below the loudest content in the current frame a candidate may sit and still count
-// as a real peak, not noise-floor texture. PEAK_MIN_PROMINENCE_DB alone isn't enough down at the
-// noise floor: it only asks "is this bump taller than its immediate valleys", and a floor's natural
-// statistical ripple routinely clears 6dB purely by chance somewhere across 240 bins — e.g. a clean
-// 1kHz sine visibly showing a second "peak" at 5.77kHz, -103dB, ~80dB below the real tone. A generic
-// analyzer gate would sit closer to 60dB — generous enough to keep real, quiet harmonics (a
-// sawtooth's ladder is nowhere near that far down within the range anyone's looking at) — but this
-// isn't measuring communications or synthetic test signals, it's marking peaks in audio someone is
-// actually listening to: content 30-60dB below the loudest thing in the room is inaudible against
-// it, so a "peak" back there is true content the ear can't use, not a false one worth relaxing the
-// gate for. 30dB keeps the readout to what's actually perceptually relevant.
-const PEAK_MAX_RANGE_DB = 30;
-// This app's own original value, before the 30dB perceptual tightening above — brought back
-// specifically for the high-res toggle. Two things push the other way at high-res, both raising
-// the odds of a false rejection rather than a false accept: (1) genuinely narrow real content
-// reads more accurately (less diluted by the width-matched Gaussian averaging it in with
-// near-silent neighbours — see `gaussian_power`'s own ~19dB-droop doc in cageq-monitor) at higher
-// resolution, so it can legitimately measure further below the loudest thing than the coarser
-// window's own, more-inflated reading of the same content did; (2) less inter-hop temporal
-// smoothing survives at high-res (`SPEC_TAU_SECS` in cageq-monitor is deliberately a fixed
-// absolute time, not scaled to the longer hop — see that constant's own doc for why scaling it
-// was tried and reverted), so a real, quiet, transient partial is likelier to get momentarily cut
-// off by a tighter gate. Live-tuned, not derived, like `PEAK_MAX_RANGE_DB` itself originally was.
-const PEAK_MAX_RANGE_DB_HIGH_RES = 60;
-// A candidate within this many partials of a lower, already-established peak still counts as
-// belonging to that peak's harmonic series (see `harmonicOf`) — a mains hum's 50/100/150/200 Hz
-// ladder or a sawtooth's n*f0 shouldn't compete for their own readout slots once the fundamental
-// they ride on is already shown.
-//
-// 1000 — the display's own [20 Hz, 20 kHz] range (cageq-monitor's SPEC_F_MIN/SPEC_F_MAX) already
-// bounds any real candidate's own n to at most `f_max/f_min` for the lowest possible root, so this
-// is a backstop tied to that actual ceiling, not the "no real instrument's audible partials go
-// much past this" guess an earlier, much smaller value (16) rested on. That guess broke on a
-// 50 Hz square wave with the high-res toggle + Fold both on: 850/1050/1250 Hz are its genuine
-// 17th/21st/25th (odd, as a square wave's are) harmonics, all rejected by a 16-partial cap and
-// left to compete for their own slots instead of folding into the 50 Hz root — a low fundamental
-// alone spans far more than 16 partials before running out of display range, no rich synthetic
-// content or anything-past-a-typical-instrument's-timbre required. The remaining guard against a
-// coincidental false fold at a large n is `HARMONIC_TOLERANCE_CENTS` (below) plus `findPeaks`'
-// own prominence/audibility gates already having run first — this cap is a sanity backstop against
-// the range ever changing, not the thing actually doing the rejecting in practice.
-const HARMONIC_MAX_N = 1000;
-// How far (in cents — 1200ths of an octave, the standard log-pitch unit) a candidate may drift from
-// an exact integer multiple and still count as that harmonic, rather than an unrelated peak that
-// happens to land nearby. Cents rather than a flat Hz or percent tolerance for the same reason
-// PEAK_MIN_SEPARATION_OCTAVES is in octaves: it means the same thing at 100 Hz and 10 kHz. Under a
-// quarter-tone (50 cents) — the backend's own bin spacing is ~26 cents (~1.5%, see `interpolatePeak`),
-// so this is under two bins of slack either side of the ideal ratio.
-const HARMONIC_TOLERANCE_CENTS = 45;
 // Shown in an empty readout slot instead of leaving it blank — an empty chip popping in and out of
 // existence every time the peak count changes (even just from frame-to-frame noise near a gate's
 // threshold) reads as more of a glitch than a fixed-width dash sitting there quietly does.
 const PEAK_PLACEHOLDER_HZ = "--- Hz";
 const PEAK_PLACEHOLDER_DB = "--- dB";
 // How close (in octaves) a candidate has to land to a tracked peak's last-known frequency to count
-// as "the same peak, still there" rather than an unrelated one — see `trackPeaks`, which takes
-// this as a parameter (half of whichever `PEAK_MIN_SEPARATION_OCTAVES*` is active — resolution-
-// dependent since that minimum gap now is too, see its own doc) rather than a fixed constant here.
-// Half the minimum gap `findPeaks` already guarantees between two genuinely distinct peaks means
-// this can never mistake one still-qualifying peak for another one that also survived this frame;
-// it only has to be loose enough to track a real peak's own frame-to-frame jitter (bin
-// quantisation, a slow glide/vibrato), which is far smaller than that gap.
+// as "the same peak, still there" rather than an unrelated one — see `trackPeaks`. Peak detection
+// itself (prominence, the noise gate, harmonic folding, minimum separation) now runs backend-side
+// (`cageq-monitor::find_peaks`, on the raw linear spectrum — see its own doc for why: this used to
+// run here, on the log-binned display curve, and produced wildly wrong frequencies at the top of
+// the spectrum), so this is deliberately the *tighter* of the backend's two resolution-dependent
+// minimum separations (0.25 octaves at high-res), halved — safe in both modes rather than needing
+// its own resolution branch just for this one derived tracking parameter. Loose enough to track a
+// real peak's own frame-to-frame jitter (bin quantisation, a slow glide/vibrato), which is far
+// smaller than that gap.
+const PEAK_TRACK_MATCH_OCTAVES = 0.125;
 // How long a tracked peak survives after nothing matches it before it's actually dropped — long
 // enough to bridge an ordinary flicker right at a detection threshold (prominence, the noise gate,
 // octave separation — a real peak sitting near any of those can wink out for a frame or two without
@@ -255,185 +166,45 @@ const PEAK_PLACEHOLDER_DB = "--- dB";
 // *identity*, but both answer "how long does a peak reading outlive the instant that produced it".
 const PEAK_TRACK_HOLD_MS = 400;
 
-/** Parabolic (quadratic) interpolation across the three log bins straddling a peak at integer index
- *  `i`, refining both its reported frequency and level to sub-bin precision. Without this, a peak
- *  can only ever be reported at one of the 240 fixed log-bin centres — increasingly coarse in
- *  absolute Hz as frequency rises, since log bins are constant-*percentage* wide, not constant-Hz
- *  (~1.5% here: ~15Hz at 1kHz, ~150Hz at 10kHz). That's why a dead-on 1kHz sine could only ever
- *  read as its nearest bin centre, ~990Hz, however precisely the backend located it. Standard
- *  technique (the same used for sub-bin FFT peak/pitch estimation), adapted to operate on the
- *  already log-binned, Gaussian-smoothed display curve rather than raw FFT bins — reasonable since
- *  that curve is itself smooth and unimodal near a real, isolated tone, not the discontinuous
- *  step function the old `max`-based reduction produced (interpolating across that would have
- *  been meaningless). Returns `i` untouched at an array edge or a plateau (flat top — the parabola
- *  is undefined there, denominator ~0), both rare with the current reduction. */
-function interpolatePeak(v: Float64Array, i: number, n: number): { i: number; v: number } {
-  if (i <= 0 || i >= n - 1) return { i, v: v[i] };
-  const ym1 = v[i - 1];
-  const y0 = v[i];
-  const yp1 = v[i + 1];
-  const denom = ym1 - 2 * y0 + yp1;
-  if (Math.abs(denom) < 1e-9) return { i, v: y0 };
-  const d = Math.max(-0.5, Math.min(0.5, (0.5 * (ym1 - yp1)) / denom));
-  return { i: i + d, v: y0 - 0.25 * (ym1 - yp1) * d };
-}
+/** A peak's identity across frames — its last-known frequency/level and when it last actually
+ *  matched something in a fresh backend `peaks` list — kept by `trackPeaks`, independent of which
+ *  readout chip it happens to be drawn into on any given tick (there is no fixed chip↔peak binding
+ *  at all — see `trackPeaks`'s own doc for why). */
+type TrackedPeak = { hz: number; db: number; lastSeen: number };
 
-/** Is `f` an integer multiple (2nd..`HARMONIC_MAX_N`th partial) of `root`, within
- *  `HARMONIC_TOLERANCE_CENTS`? Used by `findPeaks` to fold a peak into a lower one's harmonic
- *  series. Deliberately only tests the pairwise ratio between two *actually detected* peaks —
- *  it doesn't try to infer an absent fundamental from its partials (e.g. content with 200/300/400 Hz
- *  present but no energy at the true 100 Hz root: 300 and 400 fold into neither 200 nor each other,
- *  since 1.5x and 2x-of-a-different-root aren't integer ratios of what's actually there). That's a
- *  real limitation, not nothing — but recovering it needs real pitch estimation (autocorrelation or
- *  harmonic-product-spectrum over the whole partial set), a different and much larger feature than
- *  decluttering the readout of ladders whose root *is* present and already shown. */
-function harmonicOf(f: number, root: number): boolean {
-  if (f <= root) return false;
-  const n = Math.round(f / root);
-  if (n < 2 || n > HARMONIC_MAX_N) return false;
-  const cents = 1200 * Math.log2(f / (n * root));
-  return Math.abs(cents) < HARMONIC_TOLERANCE_CENTS;
-}
-
-/** Up to `PEAK_COUNT` distinct spectral peaks in `v[0..n)` (bin i's frequency given by `binHz`):
- *  none at all when the whole frame is at or below the noise floor, local maxima prominent enough
- *  to be a real peak rather than FFT noise, loud enough to be real content rather than noise-floor
- *  ripple (`PEAK_MAX_RANGE_DB`), spaced far enough apart that they aren't all just one resonance's
- *  shoulder, and — of the peaks left standing, when `foldHarmonics` is on — not an integer-ratio
- *  harmonic of a lower one that's also present (`harmonicOf`): a fundamental's own ladder folds
- *  into it rather than each partial spending a slot competing on its own (off by default — see
- *  `Params.harmonicFold`'s own doc). Returns the *largest* qualifying peaks, then reorders them
- *  to ascending frequency —
- *  picking by magnitude and presenting by frequency are different steps on purpose, so a strong
- *  low-frequency hum and a quieter but still-qualifying high note both land in the order a reader
- *  scans the axis, not loudest-first. */
-function findPeaks(
-  v: Float64Array,
-  n: number,
-  binHz: (i: number) => number,
-  foldHarmonics: boolean,
-  minSeparationOctaves: number,
-  maxRangeDb: number,
-): { i: number; v: number }[] {
-  if (n < 3) return [];
-  let loudest = -Infinity;
-  for (let i = 0; i < n; i++) if (v[i] > loudest) loudest = v[i];
-  // 0) Absolute silence gate: nothing in this frame reaches even the visible plot's own floor, so
-  // it's pure noise-floor content, not real signal — no matter how it's shaped, none of it should
-  // be marked. PEAK_MAX_RANGE_DB below can't catch this on its own: it's relative to `loudest`, and
-  // a frame that's ALL noise floor still has *a* loudest bin, with the rest of the floor's own
-  // ripple routinely within 60dB of it. Matters because `signal` (the caller's own gate) doesn't
-  // catch this either — WASAPI keeps delivering (all near-zero) frames as long as a stream is open,
-  // so it stays true right through digital silence — reported live as peak markers/readout not
-  // clearing when audio actually stopped.
-  if (loudest < SPEC_TOP_DB - SPEC_DYN) return [];
-  // 1) Local maxima, plateau-aware. A run of bins tied at *exactly* the same value is common here
-  // — the backend rounds dB to 1 decimal (see `SpectrumUpdate::db`), so the true rounded-off top of
-  // an ordinary rounded peak often lands several adjacent bins wide, not one. An earlier version of
-  // this scan flagged only the first (lowest-frequency) bin of such a run — the simple `v[i] >
-  // v[i-1] && v[i] >= v[i+1]` test a plain per-bin scan uses necessarily does, since it has no
-  // notion of "this whole flat stretch is one peak" — which put every marker at the run's leading
-  // edge instead of its middle, visibly off the curve's drawn (and genuinely rounded) apex. Walking
-  // each run's full extent and reporting its *centre* fixes that; for a true single-bin peak (no
-  // tie) the run has length 1 and this reduces to exactly the old per-bin test.
-  const candidates: { i: number; v: number }[] = [];
-  for (let i = 1; i < n - 1; ) {
-    if (v[i] <= v[i - 1]) {
-      i++;
-      continue;
-    }
-    let j = i;
-    while (j + 1 < n && v[j + 1] === v[i]) j++; // extend across the tied plateau
-    if (j + 1 < n && v[j + 1] < v[i]) candidates.push({ i: runMid(i, j), v: v[i] });
-    i = j + 1; // either past a confirmed peak, or past a run that turned out to keep rising/hit the edge
-  }
-  // 2) Prominence: walk outward from each candidate until the ground rises back above it (or the
-  // array ends), tracking the lowest point crossed each way. A shoulder bump never finds a valley
-  // deep enough before running into the bigger peak it's riding on; a standalone peak does.
-  const prominent = candidates.filter((c) => {
-    let leftMin = c.v;
-    for (let i = c.i - 1; i >= 0 && v[i] <= c.v; i--) leftMin = Math.min(leftMin, v[i]);
-    let rightMin = c.v;
-    for (let i = c.i + 1; i < n && v[i] <= c.v; i++) rightMin = Math.min(rightMin, v[i]);
-    return c.v - Math.max(leftMin, rightMin) >= PEAK_MIN_PROMINENCE_DB;
-  });
-  // 2.5) Noise-floor gate: prominence alone can't tell a real quiet feature from the floor's own
-  // statistical ripple (see PEAK_MAX_RANGE_DB's doc) — this can, since it's relative to the loudest
-  // thing actually in the frame (computed at the top, step 0) rather than each candidate's own
-  // immediate neighbours.
-  const audible = prominent.filter((c) => loudest - c.v <= maxRangeDb);
-  // 3) Harmonic folding: scanning low-to-high frequency, a candidate that's an integer multiple of
-  // an already-established root (`harmonicOf`) is absorbed into that root's family instead of
-  // becoming a root itself — so only the *lowest* member of each detected harmonic series ever
-  // competes for a slot below, regardless of which partial happens to be loudest (a resonance or a
-  // speaker's own response routinely makes some harmonic louder than the true fundamental, but the
-  // fundamental is still the one worth reporting). Ascending order matters: it's what makes "lowest
-  // surviving member" the thing each family collapses to, and it's why a later, higher partial can
-  // fold into a root added just before it in this same pass (100 → 200 → 300 → 400 all settle on
-  // root 100, tested against roots seen so far, not just the original candidate).
-  const byFreqAsc = audible.slice().sort((a, b) => binHz(a.i) - binHz(b.i));
-  const roots: { i: number; v: number }[] = [];
-  for (const c of byFreqAsc) {
-    const f = binHz(c.i);
-    if (!foldHarmonics || !roots.some((r) => harmonicOf(f, binHz(r.i)))) roots.push(c);
-  }
-  // 4) Greedy pick by magnitude, skipping anything too close (in octaves) to an already-picked
-  // peak — otherwise one broad resonance's own ripples could fill every remaining slot.
-  roots.sort((a, b) => b.v - a.v);
-  const picked: { i: number; v: number }[] = [];
-  for (const c of roots) {
-    if (picked.length >= PEAK_COUNT) break;
-    const f = binHz(c.i);
-    if (picked.some((p) => Math.abs(Math.log2(f / binHz(p.i))) < minSeparationOctaves)) continue;
-    picked.push(c);
-  }
-  // 5) Presented by frequency, not the magnitude order they were picked in. Interpolated last,
-  // after every index-based comparison above (prominence's neighbour walk, the octave-separation
-  // check) is done with the coarse integer bin — those decisions don't need sub-bin precision, only
-  // the final reported frequency/level do.
-  picked.sort((a, b) => a.i - b.i);
-  return picked.map((p) => interpolatePeak(v, p.i, n));
-}
-
-/** A peak's identity across frames — its last-known frequency and (fractional, interpolated) bin
- *  index, and when it last actually matched something in a fresh `findPeaks` result — kept by
- *  `trackPeaks`, independent of which readout chip it happens to be drawn into on any given tick
- *  (there is no fixed chip↔peak binding at all — see `trackPeaks`'s own doc for why). */
-type TrackedPeak = { hz: number; i: number; lastSeen: number };
-
-/** Update `tracked` against this tick's raw `findPeaks` output and return the peaks that should be
- *  shown right now, sorted ascending by frequency — always left-to-right in the order a reader
- *  scans the axis, exactly like the un-tracked list `findPeaks` itself returns.
+/** Update `tracked` against this tick's raw backend `peaks` (`SpectrumUpdate.peaks`,
+ *  `cageq-monitor::find_peaks`) and return the peaks that should be shown right now, sorted
+ *  ascending by frequency — always left-to-right in the order a reader scans the axis, exactly
+ *  like the backend's own list order.
  *
- * `findPeaks` has no memory: it recomputes the whole peak set from nothing every call, and a real
- * peak sitting near any of its thresholds (prominence, the noise gate, `PEAK_MIN_SEPARATION_OCTAVES`
- * from a louder neighbour) can wink out for a frame or two. The readout used to map chip `j`
- * straight to `peaks[j]`, so a single flickering peak made *every other* chip's content jump too,
- * not just its own — reported live as the readout "shuffling" on ordinary, momentary content.
+ * The backend has no memory across snapshots: it recomputes the whole peak set from nothing every
+ * time, and a real peak sitting near any of its thresholds (prominence, the noise gate, minimum
+ * separation) can wink out for a frame or two. The readout used to map chip `j` straight to
+ * `peaks[j]`, so a single flickering peak made *every other* chip's content jump too, not just its
+ * own — reported live as the readout "shuffling" on ordinary, momentary content.
  *
  * The identity-matching idea is the same one already shipped for CAGEq's own live EQ push
  * (`SlotAssignment` in `cageq-apo-backend`): a tracked peak within `PEAK_TRACK_MATCH_OCTAVES` of a
- * candidate is the same peak, continuing; one nothing matches keeps existing (still reported) for
- * `PEAK_TRACK_HOLD_MS` before it's actually dropped; a genuinely new candidate starts a new tracked
- * peak. Where this deliberately *diverges* from `SlotAssignment` — first tried the same way, then
- * corrected live ("it's visually harder to follow [but] the readout should still be frequency
- * sorted") — is display position: `SlotAssignment` pins a band to a fixed slot index because that
- * index is a real ramp target something else depends on. Nothing downstream depends on which
- * *chip* a peak lands in — the crosses on the tube are positioned independently, straight from
- * `findPeaks`, not from this — so there is no reason to trade the readout's left-to-right
- * readability for a stability property nothing needs. Sorting fresh each tick doesn't reintroduce
- * the original jumping either: a flickering peak is bridged by the hold instead of vanishing and
- * reappearing, so its neighbours' relative order — and hence position — never has to move for it;
- * position only changes when the tracked *set* genuinely changes (a peak truly arriving or, after
- * its hold expires, truly leaving), which is exactly when a reader would expect the row to move. */
+ * candidate is the same peak, continuing; one nothing matches keeps existing (still reported, at
+ * its last-known level — see the loop below) for `PEAK_TRACK_HOLD_MS` before it's actually dropped;
+ * a genuinely new candidate starts a new tracked peak. Where this deliberately *diverges* from
+ * `SlotAssignment` — first tried the same way, then corrected live ("it's visually harder to
+ * follow [but] the readout should still be frequency sorted") — is display position:
+ * `SlotAssignment` pins a band to a fixed slot index because that index is a real ramp target
+ * something else depends on. Nothing downstream depends on which *chip* a peak lands in — the
+ * crosses on the tube are positioned independently, straight from the backend list, not from this
+ * — so there is no reason to trade the readout's left-to-right readability for a stability
+ * property nothing needs. Sorting fresh each tick doesn't reintroduce the original jumping either:
+ * a flickering peak is bridged by the hold instead of vanishing and reappearing, so its neighbours'
+ * relative order — and hence position — never has to move for it; position only changes when the
+ * tracked *set* genuinely changes (a peak truly arriving or, after its hold expires, truly
+ * leaving), which is exactly when a reader would expect the row to move. */
 function trackPeaks(
   tracked: TrackedPeak[],
-  peaks: { i: number; v: number }[],
-  binHz: (i: number) => number,
+  peaks: { hz: number; db: number }[],
   now: number,
   matchOctaves: number,
 ): TrackedPeak[] {
-  const candidateHz = peaks.map((p) => binHz(p.i));
   const used = new Array(peaks.length).fill(false);
 
   // 1) Match each already-tracked peak to the closest still-unclaimed candidate, if one is near
@@ -444,7 +215,7 @@ function trackPeaks(
     let bestDist = matchOctaves;
     for (let k = 0; k < peaks.length; k++) {
       if (used[k]) continue;
-      const dist = Math.abs(Math.log2(candidateHz[k] / t.hz));
+      const dist = Math.abs(Math.log2(peaks[k].hz / t.hz));
       if (dist < bestDist) {
         best = k;
         bestDist = dist;
@@ -452,13 +223,13 @@ function trackPeaks(
     }
     if (best >= 0) {
       used[best] = true;
-      t.hz = candidateHz[best];
-      t.i = peaks[best].i;
+      t.hz = peaks[best].hz;
+      t.db = peaks[best].db;
       t.lastSeen = now;
     }
-    // else: left exactly as it was — still reported (from `pScratch`, at its remembered bin, so a
-    // held reading tracks the live level right there rather than a truly frozen snapshot) until
-    // the filter below decides its grace period is over.
+    // else: left exactly as it was, level included — a held reading freezes at its last-known
+    // level for the (short, PEAK_TRACK_HOLD_MS) grace period rather than tracking anything live,
+    // since there's no local bin array left to re-read a fresher value from.
   }
 
   // 2) Drop whatever nothing has matched for too long.
@@ -469,7 +240,7 @@ function trackPeaks(
   for (let k = 0; k < peaks.length; k++) {
     if (used[k]) continue;
     if (next.length >= PEAK_COUNT) break;
-    next.push({ hz: candidateHz[k], i: peaks[k].i, lastSeen: now });
+    next.push({ hz: peaks[k].hz, db: peaks[k].db, lastSeen: now });
   }
 
   next.sort((a, b) => a.hz - b.hz);
@@ -514,6 +285,8 @@ export function SpectrumScope({
   sampleRate,
   highRes,
   onHighResChange,
+  harmonicFold,
+  onHarmonicFoldChange,
 }: {
   /** The peak readout renders (via portal) into this element instead of inline below the tube —
    *  same mechanism, and the same element, as EqChart's own `legendHost` (App.tsx's
@@ -533,6 +306,25 @@ export function SpectrumScope({
    *  smearing, not CPU — CPU cost either way is negligible). */
   highRes?: boolean;
   onHighResChange?: (v: boolean) => void;
+  /** Whether the backend's peak-finder (`cageq-monitor::find_peaks`) folds a harmonic series into
+   *  its root — App.tsx-owned (not this component's own tune-panel params) for the same reason
+   *  `highRes` is: detection itself is now backend-side and global to the one running monitor, not
+   *  per-viewer, so two open spectrum views must show the same checkbox state rather than each
+   *  independently believing whichever they last set. The checkbox rendered here just reads/writes
+   *  App.tsx's state via these two props, which also pushes the live `set_spectrum_harmonic_fold`
+   *  command — no monitor restart needed, unlike `highRes`.
+   *
+   *  Off by default: decluttering a harmonic series down to its fundamental is the right default
+   *  for real program material (a mains hum's ladder, an instrument's own overtones), but it
+   *  actively hides the thing a harmonic-rich test signal (`testtone`'s
+   *  --square/--triangle/--sawtooth/--pulse, or the in-app generator) exists to show off —
+   *  testtone.rs's own header doc says a clean --square readout "should show *only* clean odd
+   *  harmonics", and folding does the opposite. `trackPeaks`'s own per-peak identity/hold already
+   *  covers frame-to-frame *stability*, so folding's remaining job is pure decluttering, which
+   *  isn't the right default now that reading individual harmonics is a real, common use of this
+   *  view. */
+  harmonicFold?: boolean;
+  onHarmonicFoldChange?: (v: boolean) => void;
 }) {
   const { t } = useTranslation();
   // Ref'd on `.vs-screen` (the CRT box itself), not the outer wrap — the wrap also hosts the
@@ -576,11 +368,6 @@ export function SpectrumScope({
   const cursorDbRef = useRef<HTMLSpanElement | null>(null);
   const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-spectrum-params", DEFAULTS);
   const [tuning, setTuning] = useState(false);
-  // Read by the imperative rAF loop below, not React state directly — same pattern as
-  // `sampleRateRef`. Drives `findPeaks`/`trackPeaks`'s resolution-dependent octave separation
-  // (see `PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES`'s own doc for why it's tighter at high-res).
-  const highResRef = useRef(highRes);
-  highResRef.current = highRes;
   const paramsRef = useRef(params);
   paramsRef.current = params;
   // Refreshed every render, read fresh each frame inside the mount-once rAF loop below — same
@@ -745,18 +532,20 @@ export function SpectrumScope({
     // reallocated fresh each frame, matching TimeScope's `magScratch` pattern.
     let xScratch = new Float64Array(0);
     let yScratch = new Float64Array(0);
-    // Every bin's (possibly corrected) value, one-to-one with xScratch/yScratch — `findPeaks` reads
-    // this directly for true bin-to-bin adjacency (needed to detect local maxima correctly).
+    // Every bin's (possibly corrected) value, one-to-one with xScratch/yScratch — the curve
+    // actually drawn. Peak detection itself no longer reads this (see `SpectrumUpdate.peaks`'s own
+    // doc) — it's backend-side, on the raw linear spectrum, precisely because this array's
+    // Gaussian-density smoothing dilutes and reshapes a high-frequency tone too much to locate one
+    // accurately.
     let vScratch = new Float64Array(0);
     // Same bins' *true* linear-FFT level (`peak_db` — max within the bin's span, not the
-    // Gaussian-weighted density average `db`/vScratch uses) — one-to-one with vScratch, but only
-    // ever read for the numeric peak/cursor readouts below, never drawn. The two exist because
-    // they answer different questions: vScratch is "what does the spectral *density* look like"
-    // (correct shape for broadband content, ~19dB-droops a swept tone by design — see
-    // `gaussian_power`'s doc in cageq-monitor), pScratch is "what is the actual level right here"
-    // (correct for an isolated tone, noisier as a *shape* for broadband content — exactly why it's
-    // never the thing stroked). Peak *positions* still come from vScratch/findPeaks so the crosses
-    // stay visually on the drawn curve; only the reported dB numbers switch to this array.
+    // Gaussian-weighted density average `db`/vScratch uses) — one-to-one with vScratch, read only
+    // for the hover cursor's numeric readout below (the peak readout reads the backend's own
+    // already-refined per-peak level, `s.peaks`, instead). The two exist because they answer
+    // different questions: vScratch is "what does the spectral *density* look like" (correct shape
+    // for broadband content, ~19dB-droops a swept tone by design — see `gaussian_power`'s doc in
+    // cageq-monitor), pScratch is "what is the actual level right here" (correct for an isolated
+    // tone, noisier as a *shape* for broadband content — exactly why it's never the thing stroked).
     let pScratch = new Float64Array(0);
     // Exponentially-smoothed copy of yScratch actually drawn — see the render loop's own comment
     // (the window-drag stutter fix). NaN marks "not yet initialized" so a fresh bin snaps straight
@@ -840,21 +629,40 @@ export function SpectrumScope({
 
         // Peak crosses: recomputed and redrawn every frame (not throttled — see below), so they
         // track the live trace exactly as fluidly as the trace itself does. (Layer already cleared
-        // above, unconditionally.)
+        // above, unconditionally.) Peaks themselves are backend-computed (`s.peaks`,
+        // `cageq-monitor::find_peaks`, on the raw linear spectrum) — this used to run client-side
+        // on `vScratch` (the log-binned, Gaussian-smoothed curve), which produced wildly wrong
+        // frequencies at the top of the spectrum; see that function's own doc. `lnF0`/`lnSpan`
+        // invert the same log-frequency axis the curve itself is drawn on, to place an
+        // already-resolved Hz value on the canvas.
         const lnF0 = Math.log(s.f_min);
         const lnSpan = Math.log(s.f_max) - lnF0;
-        const binHz = (i: number) => Math.exp(lnF0 + (i / (n - 1)) * lnSpan);
-        const minSeparationOctaves = highResRef.current ? PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES : PEAK_MIN_SEPARATION_OCTAVES;
-        const maxRangeDb = highResRef.current ? PEAK_MAX_RANGE_DB_HIGH_RES : PEAK_MAX_RANGE_DB;
-        const peaks = findPeaks(vScratch, n, binHz, p.harmonicFold, minSeparationOctaves, maxRangeDb);
+        // The backend has no notion of "undistort" — its peaks are always the raw, post-EQ
+        // spectrum's own. When undistort is on, the drawn curve subtracts `corr` (the EQ's own
+        // response) to show the reconstructed pre-EQ signal, so a raw peak's *level* is adjusted
+        // to match here too — interpolated into `corr`'s log bins the same way the hover cursor's
+        // own dB readout is, below. This is a display-level correction only: which frequencies
+        // the backend picked as peaks was already decided on the uncorrected spectrum, a
+        // simplification accepted because a real EQ correction curve is broad and smooth relative
+        // to genuine peaks, not something that plausibly manufactures or hides one.
+        const rawPeaks = s.peaks ?? [];
+        const peaks = corr
+          ? rawPeaks.map((pk) => {
+              const fi = Math.max(0, Math.min(n - 1, ((Math.log(pk.hz) - lnF0) / lnSpan) * (n - 1)));
+              const i0 = Math.floor(fi);
+              const i1 = Math.min(n - 1, i0 + 1);
+              const t = fi - i0;
+              return { hz: pk.hz, db: pk.db - (corr[i0] * (1 - t) + corr[i1] * t) };
+            })
+          : rawPeaks;
         if (peaks.length) {
           markCtx.strokeStyle = PEAK_MARK_COLOR;
           markCtx.lineWidth = Math.max(1, H / REF_SIZE) * 1.5;
           const r = Math.max(3, H * 0.018); // cross arm length
           markCtx.beginPath();
           for (const pk of peaks) {
-            const frac = Math.max(0, Math.min(1, (pk.v - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
-            const x = (pk.i / (n - 1)) * W;
+            const frac = Math.max(0, Math.min(1, (pk.db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
+            const x = ((Math.log(pk.hz) - lnF0) / lnSpan) * W;
             const y = plotBot - frac * (plotBot - plotTop);
             markCtx.moveTo(x - r, y);
             markCtx.lineTo(x + r, y);
@@ -868,12 +676,12 @@ export function SpectrumScope({
         // `lastReadout`'s own comment. `trackPeaks` gives each peak identity across ticks (see its
         // own doc) instead of the old direct `peaks[j]` indexing, so a peak flickering near a
         // detection threshold no longer makes the whole row jump — and it's still presented sorted
-        // by frequency, same as `findPeaks`'s own raw order, so left-to-right still reads as the
+        // by frequency, same as the backend's own list order, so left-to-right still reads as the
         // tube's own frequency axis.
         if (now - lastReadout > READOUT_INTERVAL_MS) {
           lastReadout = now;
           hadPeak = peaks.length > 0;
-          tracked = trackPeaks(tracked, peaks, binHz, now, minSeparationOctaves / 2);
+          tracked = trackPeaks(tracked, peaks, now, PEAK_TRACK_MATCH_OCTAVES);
           for (let j = 0; j < PEAK_COUNT; j++) {
             const slot = peakSlotRefs.current[j];
             const hzSpan = peakHzRefs.current[j];
@@ -882,11 +690,7 @@ export function SpectrumScope({
             if (j < tracked.length) {
               const t = tracked[j];
               hzSpan.textContent = fmtPeakHz(t.hz);
-              // pScratch, not the Gaussian curve's own value: the cross's position (drawn above)
-              // still comes from that curve so it sits on the trace, but the *number* reports the
-              // true linear-FFT level at that bin — see pScratch's own comment.
-              const pBin = Math.max(0, Math.min(n - 1, Math.round(t.i)));
-              dbSpan.textContent = `${pScratch[pBin].toFixed(1)} dB`;
+              dbSpan.textContent = `${t.db.toFixed(1)} dB`;
               // Same Fc→hue mapping ToneGrid's Fc readout uses, at the same full strength — a
               // peak's frequency reads as the same colour here as a band tuned to it would there.
               slot.style.color = fcHue(t.hz);
@@ -949,8 +753,10 @@ export function SpectrumScope({
           // data directly rather than the cosmetically-smoothed spline drawn through it (`traceSmooth`),
           // which is the right choice for a readout: the spline's only job is to look good between
           // points, not to claim sub-bin structure the data itself doesn't have. pScratch, not
-          // vScratch, for the same reason as the peak readout above — the true level, not the
-          // density-smoothed one the trace is drawn from.
+          // vScratch: the true (undiluted) linear-FFT level at the cursor, not the density-
+          // smoothed one the trace is drawn from — the same distinction `SpectrumUpdate::peak_db`'s
+          // own doc makes, though the peak readout itself now reads the backend's already-refined
+          // per-peak level (`s.peaks`) directly rather than this array.
           const fi = hoverFrac * (n - 1);
           const i0 = Math.floor(fi);
           const i1 = Math.min(n - 1, i0 + 1);
@@ -1097,14 +903,16 @@ export function SpectrumScope({
               <span className="vs-tune-label">{t("scope.undistort")}</span>
               <input type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
             </label>
-            <label className="vs-tune-row vs-tune-check" title={t("scope.harmonicFoldHint")}>
-              <span className="vs-tune-label">{t("scope.harmonicFold")}</span>
-              <input
-                type="checkbox"
-                checked={params.harmonicFold}
-                onChange={(e) => set("harmonicFold", e.currentTarget.checked)}
-              />
-            </label>
+            {onHarmonicFoldChange && (
+              <label className="vs-tune-row vs-tune-check" title={t("scope.harmonicFoldHint")}>
+                <span className="vs-tune-label">{t("scope.harmonicFold")}</span>
+                <input
+                  type="checkbox"
+                  checked={!!harmonicFold}
+                  onChange={(e) => onHarmonicFoldChange(e.currentTarget.checked)}
+                />
+              </label>
+            )}
             {onHighResChange && (
               <label className="vs-tune-row vs-tune-check" title={t("scope.highResHint")}>
                 <span className="vs-tune-label">{t("scope.highRes")}</span>
@@ -1116,7 +924,8 @@ export function SpectrumScope({
       </div>
     </div>
     {/* Numeric peak readout — up to PEAK_COUNT chips, one per cross marked on the tube, presented
-        left-to-right by frequency (see `findPeaks`). The trail's own long afterglow (`tail`,
+        left-to-right by frequency (see `SpectrumUpdate.peaks`/`cageq-monitor::find_peaks`). The
+        trail's own long afterglow (`tail`,
         phosphor.ts) already shows *where* the spectrum has recently been, but reading an exact
         level or frequency off a glowing curve isn't realistic — this is the same information as a
         number. A fixed PEAK_COUNT of slots is rendered upfront, ALWAYS all PEAK_COUNT of them (see

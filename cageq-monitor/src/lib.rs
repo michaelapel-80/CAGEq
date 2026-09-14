@@ -79,6 +79,20 @@ pub struct SpectrumUpdate {
     pub f_min: f32,
     /// Centre frequency of the last bin (Hz).
     pub f_max: f32,
+    /// Detected spectral peaks, ascending by frequency, already sub-bin-refined — found directly
+    /// on the raw linear power spectrum (uniform, frequency-independent resolution), not on `db`'s
+    /// log-binned curve. See `find_peaks`'s own doc for why: `db`'s Gaussian-density smoothing
+    /// widens with frequency, which dilutes and reshapes a high-frequency tone enough that
+    /// sub-bin interpolation on it produced wildly wrong frequencies at the top of the spectrum —
+    /// the bug this field exists to fix by not doing peak-finding on that curve at all.
+    pub peaks: Vec<SpectrumPeak>,
+}
+
+/// One detected spectral peak — see [`SpectrumUpdate::peaks`].
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct SpectrumPeak {
+    pub hz: f32,
+    pub db: f32,
 }
 
 /// A stereo vectorscope window (loopback X-Y goniometer): decimated (left, right) sample pairs
@@ -116,7 +130,7 @@ pub fn default_render_id() -> Option<String> {
 
 #[cfg(windows)]
 mod windows_impl {
-    use super::{MeterUpdate, ScopeUpdate, SpectrumUpdate};
+    use super::{MeterUpdate, ScopeUpdate, SpectrumPeak, SpectrumUpdate};
     use std::collections::VecDeque;
     use std::error::Error;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -321,6 +335,60 @@ mod windows_impl {
     /// real analysis window via FFT processing gain for incoherent content — see `max_power`'s
     /// doc) instead of being clamped to a number that looks like a limit but isn't one.
     const SPEC_FLOOR: f32 = -210.0;
+
+    // --- peak-finding (`find_peaks`) ------------------------------------------------------
+    // Ported from `SpectrumScope.tsx`'s former client-side `findPeaks`/`interpolatePeak` (values
+    // unchanged) — moved here because that function ran on `db`'s log-binned, Gaussian-*density*
+    // smoothed curve, whose smoothing sigma widens with frequency (see `gaussian_power`'s own
+    // doc). That's fine for drawing a broadband shape, but a high-frequency tone gets smeared
+    // into a broad, shallow, not-reliably-parabolic hump across many log bins, each smoothed with
+    // a *different*-width kernel — sub-bin interpolation on that produced wildly wrong
+    // frequencies at the top of the spectrum. Finding peaks here instead, directly on
+    // `avg_power` (uniform, frequency-*independent* linear-bin resolution, before it's ever
+    // collapsed into log bins), sidesteps the problem at its source rather than compensating for
+    // it after the data is already lossy.
+
+    /// Up to this many peaks reported per snapshot.
+    const PEAK_COUNT: usize = 5;
+    /// A candidate's dB must exceed both its flanking valleys by at least this much to count as a
+    /// real, standalone peak rather than a shoulder riding on a bigger one.
+    const PEAK_MIN_PROMINENCE_DB: f32 = 6.0;
+    /// How far apart (in octaves) two reported peaks must be — otherwise one broad resonance's
+    /// own ripples could fill every remaining slot. In octaves rather than a flat Hz/percent gap
+    /// so it means the same thing at 100 Hz and 10 kHz.
+    const PEAK_MIN_SEPARATION_OCTAVES: f32 = 1.0;
+    /// Tighter minimum spacing at high resolution, where genuinely close content is actually
+    /// resolved and the default 1-octave gate would needlessly hide it. Live-tuned against the
+    /// real readout, not derived.
+    const PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES: f32 = 0.25;
+    /// A candidate more than this many dB below the loudest thing in the frame is inaudible
+    /// against it and gated out — real content the ear can't use in context, not a false peak
+    /// worth relaxing the gate for.
+    const PEAK_MAX_RANGE_DB: f32 = 30.0;
+    /// Looser range at high resolution: `SPEC_TAU_SECS` (cageq-monitor's power-spectrum smoothing
+    /// time constant) is deliberately fixed rather than scaled to the longer hop at high-res, so a
+    /// real, quiet, transient partial is likelier to get momentarily cut off by the tighter
+    /// default gate. Live-tuned, not derived, like `PEAK_MAX_RANGE_DB` itself originally was.
+    const PEAK_MAX_RANGE_DB_HIGH_RES: f32 = 60.0;
+    /// How far (in cents — 1200ths of an octave) a candidate may drift from an exact integer
+    /// multiple of a lower peak and still fold into its harmonic series, rather than being an
+    /// unrelated peak that happens to land nearby.
+    const HARMONIC_TOLERANCE_CENTS: f32 = 45.0;
+    /// Backstop cap on which partial number a candidate may fold as, derived from the display's
+    /// own [SPEC_F_MIN]/[SPEC_F_MAX] range (`20_000 / 20 = 1000`) rather than an instrument-timbre
+    /// guess: no real candidate's `n` can ever exceed that ratio for the lowest possible root
+    /// anyway, so this only guards against the range ever changing — `HARMONIC_TOLERANCE_CENTS`
+    /// and the prominence/audibility gates above already do the real filtering.
+    const HARMONIC_MAX_N: u32 = 1000;
+    /// Absolute "nothing real happening" gate: a frame whose loudest bin doesn't even reach this
+    /// mirrors the frontend's own visible-plot floor (`SPEC_TOP_DB - SPEC_DYN` in
+    /// `SpectrumScope.tsx`/`EqChart.tsx`, both `0 - 90`) — kept in sync by hand, the same
+    /// convention this codebase already uses for other cross-language mirrored constants. Without
+    /// it, WASAPI keeps delivering (all near-zero) frames as long as a stream is open, so pure
+    /// digital silence would still have *a* loudest bin and could still report "peaks" that are
+    /// really just the noise floor's own ripple.
+    const PEAK_SILENCE_FLOOR_DB: f32 = -90.0;
+
     /// Power-spectrum smoothing time constant (seconds) — just enough to settle pure FFT/windowing
     /// noise across a couple of hops (~43 ms each at the default window, see fft_hop), not to
     /// steady the display over time: that's the front-end's job now (canvas phosphor persistence,
@@ -397,11 +465,14 @@ mod windows_impl {
         /// `high_res_spectrum` selects [`HIGH_RES_FFT_SIZE`] over [`BASE_FFT_SIZE`] for the
         /// spectrum analyzer (see that constant's own doc for the tradeoff) — fixed for this
         /// monitor's lifetime, so changing it means restarting the monitor, same as a device
-        /// change already does.
+        /// change already does. `harmonic_fold` toggles `find_peaks`' harmonic folding live, no
+        /// restart needed — shared with the Tauri layer (`HarmonicFoldState`) so it also survives
+        /// one, unlike `high_res_spectrum`.
         pub fn start<F, G, H>(
             endpoint_id: Option<String>,
             scope_viewers: Arc<AtomicUsize>,
             high_res_spectrum: bool,
+            harmonic_fold: Arc<AtomicBool>,
             on_update: F,
             on_spectrum: G,
             on_scope: H,
@@ -416,9 +487,16 @@ mod windows_impl {
             let handle = thread::Builder::new()
                 .name("cageq-loopback".into())
                 .spawn(move || {
-                    if let Err(e) =
-                        capture_loop(endpoint_id, &stop_thread, &scope_viewers, high_res_spectrum, on_update, on_spectrum, on_scope)
-                    {
+                    if let Err(e) = capture_loop(
+                        endpoint_id,
+                        &stop_thread,
+                        &scope_viewers,
+                        high_res_spectrum,
+                        harmonic_fold,
+                        on_update,
+                        on_spectrum,
+                        on_scope,
+                    ) {
                         // A failed monitor simply yields no updates; surface why for debugging.
                         eprintln!("[cageq-monitor] capture ended: {e}");
                     }
@@ -588,7 +666,7 @@ mod windows_impl {
         params: crate::signal::GeneratorParams,
         stop: &AtomicBool,
     ) -> Result<(), Box<dyn Error>> {
-        use crate::signal::{build_wavetable, PinkNoise, Signal};
+        use crate::signal::{build_wavetable, wavetable_sample, wavetable_step, PinkNoise, Signal};
 
         initialize_mta().ok()?;
         let enumerator = DeviceEnumerator::new()?;
@@ -610,8 +688,8 @@ mod windows_impl {
         let total_frames: Option<u64> = params.seconds.map(|s| (s * rate as f32) as u64);
         let fade_frames = (0.12 * rate as f32) as u64; // 120 ms fade in/out — kills startup/stop pops
         let table = build_wavetable(params.signal, rate);
-        let table_len = table.len();
-        let mut table_idx: usize = 0;
+        let step = wavetable_step(params.signal, rate);
+        let mut phase: f64 = 0.0;
         let mut noise = PinkNoise::new();
 
         audio_client.start_stream()?;
@@ -647,11 +725,8 @@ mod windows_impl {
                 }
                 let mono = match params.signal {
                     Signal::Tone { .. } | Signal::Isp { .. } => {
-                        let s = table[table_idx] * gain;
-                        table_idx += 1;
-                        if table_idx >= table_len {
-                            table_idx = 0;
-                        }
+                        let s = wavetable_sample(&table, phase) * gain;
+                        phase = (phase + step).rem_euclid(table.len() as f64);
                         s
                     }
                     Signal::White => noise.next_white() * gain,
@@ -798,6 +873,172 @@ mod windows_impl {
         }
     }
 
+    /// Up to [PEAK_COUNT] distinct spectral peaks in `power[0..n)` (raw, uniformly-spaced linear
+    /// FFT bins), ported from the frontend's former client-side `findPeaks` (see the module doc
+    /// above `PEAK_COUNT` for why it moved here): local maxima, prominent enough to be a real
+    /// peak rather than FFT noise (`PEAK_MIN_PROMINENCE_DB`), loud enough to be real content
+    /// rather than noise-floor ripple (`max_range_db`), spaced far enough apart that they aren't
+    /// all just one resonance's shoulder (`min_separation_octaves`), and — when `fold_harmonics`
+    /// is set — not an integer-ratio harmonic of a lower peak that's also present (`harmonic_of`).
+    /// Returns the *largest* qualifying peaks, then reorders them to ascending frequency —
+    /// picking by magnitude and presenting by frequency are different steps on purpose, so a
+    /// strong low-frequency hum and a quieter but still-qualifying high note both land in the
+    /// order a reader scans the axis, not loudest-first. Drops the original's plateau/tied-run
+    /// walk: that only existed for `db`'s display-side 1-decimal rounding, and raw `f32` power
+    /// values essentially never tie exactly.
+    fn find_peaks(
+        power: &[f32],
+        power_scale: f32,
+        bin_hz: f32,
+        fold_harmonics: bool,
+        min_separation_octaves: f32,
+        max_range_db: f32,
+    ) -> Vec<SpectrumPeak> {
+        let n = power.len();
+        if n < 3 {
+            return Vec::new();
+        }
+        let v: Vec<f32> = power
+            .iter()
+            .map(|&p| if p > 0.0 { 10.0 * (p * power_scale).log10() } else { f32::NEG_INFINITY })
+            .collect();
+
+        let mut loudest = f32::NEG_INFINITY;
+        for &x in &v {
+            if x > loudest {
+                loudest = x;
+            }
+        }
+        // Absolute silence gate — see PEAK_SILENCE_FLOOR_DB's own doc. WASAPI keeps delivering
+        // (all near-zero) frames as long as a stream is open, so this can't rely on `signal`.
+        if loudest < PEAK_SILENCE_FLOOR_DB {
+            return Vec::new();
+        }
+
+        // 1) Local maxima.
+        let mut candidates: Vec<(usize, f32)> = Vec::new();
+        for i in 1..n - 1 {
+            if v[i] > v[i - 1] && v[i] >= v[i + 1] {
+                candidates.push((i, v[i]));
+            }
+        }
+
+        // 2) Prominence: walk outward from each candidate until the ground rises back above it
+        // (or the array ends), tracking the lowest point crossed each way. A shoulder bump never
+        // finds a valley deep enough before running into the bigger peak it's riding on; a
+        // standalone peak does.
+        let prominent: Vec<(usize, f32)> = candidates
+            .into_iter()
+            .filter(|&(i, val)| {
+                let mut left_min = val;
+                let mut j = i;
+                while j > 0 && v[j - 1] <= val {
+                    j -= 1;
+                    left_min = left_min.min(v[j]);
+                }
+                let mut right_min = val;
+                let mut k = i;
+                while k + 1 < n && v[k + 1] <= val {
+                    k += 1;
+                    right_min = right_min.min(v[k]);
+                }
+                val - left_min.max(right_min) >= PEAK_MIN_PROMINENCE_DB
+            })
+            .collect();
+
+        // 2.5) Noise-floor gate: prominence alone can't tell a real quiet feature from the
+        // floor's own statistical ripple — this can, since it's relative to the loudest thing
+        // actually in the frame rather than each candidate's own immediate neighbours.
+        let audible: Vec<(usize, f32)> =
+            prominent.into_iter().filter(|&(_, val)| loudest - val <= max_range_db).collect();
+
+        // 3) Harmonic folding: ascending frequency (bin index already is, for this uniformly-
+        // spaced array), so a later, higher partial can fold into a root added just before it in
+        // this same pass.
+        let mut roots: Vec<(usize, f32)> = Vec::new();
+        for &(i, val) in &audible {
+            let f = bin_hz * i as f32;
+            let is_harmonic =
+                fold_harmonics && roots.iter().any(|&(ri, _)| harmonic_of(f, bin_hz * ri as f32));
+            if !is_harmonic {
+                roots.push((i, val));
+            }
+        }
+
+        // 4) Greedy pick by magnitude, skipping anything too close (in octaves) to an already-
+        // picked peak — otherwise one broad resonance's own ripples could fill every remaining
+        // slot.
+        roots.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut picked: Vec<(usize, f32)> = Vec::new();
+        for &(i, val) in &roots {
+            if picked.len() >= PEAK_COUNT {
+                break;
+            }
+            let f = bin_hz * i as f32;
+            let too_close = picked.iter().any(|&(pi, _)| {
+                let pf = bin_hz * pi as f32;
+                (f / pf).log2().abs() < min_separation_octaves
+            });
+            if too_close {
+                continue;
+            }
+            picked.push((i, val));
+        }
+
+        // 5) Presented by frequency, not the magnitude order they were picked in. Interpolated
+        // last, after every index-based comparison above is done with the coarse integer bin —
+        // those decisions don't need sub-bin precision, only the final reported frequency/level do.
+        picked.sort_by(|a, b| a.0.cmp(&b.0));
+        picked
+            .into_iter()
+            .map(|(i, _)| {
+                let (ri, rv) = interpolate_peak(&v, i, n);
+                SpectrumPeak { hz: bin_hz * ri, db: rv }
+            })
+            .collect()
+    }
+
+    /// Parabolic (quadratic) interpolation across the three linear bins straddling a peak at
+    /// integer index `i`, refining both its frequency and level to sub-bin precision — the
+    /// standard technique for sub-bin FFT peak/pitch estimation, principled here because these
+    /// are actual (Hann-windowed, zero-padded-for-interpolation) FFT bins with a smooth,
+    /// well-behaved main lobe near an isolated tone. This used to run on `db`'s log-binned,
+    /// cross-bin-varying-kernel curve instead (see the module doc above `PEAK_COUNT`), where that
+    /// smoothness assumption broke down at high frequency and produced wildly wrong frequencies —
+    /// the bug `find_peaks` exists to fix by not running on that curve at all. Returns `i`
+    /// untouched at an array edge or where the fit is degenerate (denominator ~0, a genuinely
+    /// flat top).
+    fn interpolate_peak(v: &[f32], i: usize, n: usize) -> (f32, f32) {
+        if i == 0 || i >= n - 1 {
+            return (i as f32, v[i]);
+        }
+        let ym1 = v[i - 1];
+        let y0 = v[i];
+        let yp1 = v[i + 1];
+        let denom = ym1 - 2.0 * y0 + yp1;
+        if denom.abs() < 1e-9 {
+            return (i as f32, y0);
+        }
+        let d = (0.5 * (ym1 - yp1) / denom).clamp(-0.5, 0.5);
+        (i as f32 + d, y0 - 0.25 * (ym1 - yp1) * d)
+    }
+
+    /// Is `f` an integer multiple (2nd..[HARMONIC_MAX_N]th partial) of `root`, within
+    /// [HARMONIC_TOLERANCE_CENTS]? Used by `find_peaks` to fold a peak into a lower one's
+    /// harmonic series. Deliberately only tests the pairwise ratio between two *actually
+    /// detected* peaks — it doesn't try to infer an absent fundamental from its partials.
+    fn harmonic_of(f: f32, root: f32) -> bool {
+        if f <= root {
+            return false;
+        }
+        let n = (f / root).round();
+        if n < 2.0 || n > HARMONIC_MAX_N as f32 {
+            return false;
+        }
+        let cents = 1200.0 * (f / (n * root)).log2();
+        cents.abs() < HARMONIC_TOLERANCE_CENTS
+    }
+
     fn clamp_lufs(v: f64) -> f32 {
         if v.is_finite() {
             (v as f32).max(LUFS_FLOOR)
@@ -827,12 +1068,20 @@ mod windows_impl {
         ranges: Vec<(f32, f32)>, // per log bin: exact (fractional) linear-bin span — see `gaussian_power`
         smoothing: f32,            // power-average coefficient per hop
         power_scale: f32,          // |X|² -> normalized power so a full-scale sine reads ~0 dBFS
+        bin_hz: f32,               // Hz per linear (padded) FFT bin — uniform, unlike a log bin's
+        harmonic_fold: Arc<AtomicBool>, // live-toggleable; see `find_peaks`'s own doc
+        min_sep_octaves: f32,      // resolution-dependent PEAK_MIN_SEPARATION_OCTAVES(_HIGH_RES)
+        max_range_db: f32,         // resolution-dependent PEAK_MAX_RANGE_DB(_HIGH_RES)
     }
 
     impl Spectrum {
         /// `base_fft_size` is [`BASE_FFT_SIZE`] normally, or [`HIGH_RES_FFT_SIZE`] under the
-        /// app's high-res toggle — see the latter's own doc for what that trades away.
-        fn new(rate: u32, base_fft_size: usize) -> Self {
+        /// app's high-res toggle — see the latter's own doc for what that trades away. Also
+        /// selects which of `find_peaks`'s resolution-dependent gates apply, the same way it
+        /// already selects the FFT size itself. `harmonic_fold` is shared with the Tauri layer
+        /// (`HarmonicFoldState`) so toggling it takes effect immediately, no restart — unlike
+        /// `base_fft_size`, which is genuinely fixed for this `Spectrum`'s lifetime.
+        fn new(rate: u32, base_fft_size: usize, harmonic_fold: Arc<AtomicBool>) -> Self {
             // Scale the real analysis window up with the rate so its *duration* (≈171 ms at the
             // default base size) stays constant: analysis_size = base × next_pow2(round(rate /
             // 48 kHz)). At BASE_FFT_SIZE: 48 k→8192, 96 k→16384, 192 k→32768 (44.1/88.2/176.4
@@ -884,6 +1133,9 @@ mod windows_impl {
             // the real (analysis_size) window's own coherent gain, FFT-size independent as before.
             let s1: f32 = window.iter().sum();
             let power_scale = (2.0 / s1).powi(2);
+            let high_res = base_fft_size == HIGH_RES_FFT_SIZE;
+            let min_sep_octaves = if high_res { PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES } else { PEAK_MIN_SEPARATION_OCTAVES };
+            let max_range_db = if high_res { PEAK_MAX_RANGE_DB_HIGH_RES } else { PEAK_MAX_RANGE_DB };
             Spectrum {
                 fft,
                 analysis_size,
@@ -897,6 +1149,10 @@ mod windows_impl {
                 ranges,
                 smoothing,
                 power_scale,
+                bin_hz,
+                harmonic_fold,
+                min_sep_octaves,
+                max_range_db,
             }
         }
 
@@ -966,7 +1222,15 @@ mod windows_impl {
                 };
                 peak_db.push(round_to(pk_cur, 1));
             }
-            SpectrumUpdate { db, peak_db, signal, f_min: SPEC_F_MIN, f_max: SPEC_F_MAX }
+            let peaks = find_peaks(
+                &self.avg_power,
+                self.power_scale,
+                self.bin_hz,
+                self.harmonic_fold.load(Ordering::Relaxed),
+                self.min_sep_octaves,
+                self.max_range_db,
+            );
+            SpectrumUpdate { db, peak_db, signal, f_min: SPEC_F_MIN, f_max: SPEC_F_MAX, peaks }
         }
     }
 
@@ -1059,6 +1323,7 @@ mod windows_impl {
         stop: &AtomicBool,
         scope_viewers: &AtomicUsize,
         high_res_spectrum: bool,
+        harmonic_fold: Arc<AtomicBool>,
         on_update: F,
         on_spectrum: G,
         on_scope: H,
@@ -1077,7 +1342,16 @@ mod windows_impl {
         // until the user toggled it off/on), tear down and reopen: get_mixformat re-reads the new
         // rate and the loudness state is rebuilt for it, so a rate change self-heals.
         while !stop.load(Ordering::Relaxed) {
-            if let Err(e) = run_session(&endpoint_id, stop, scope_viewers, high_res_spectrum, &on_update, &on_spectrum, &on_scope) {
+            if let Err(e) = run_session(
+                &endpoint_id,
+                stop,
+                scope_viewers,
+                high_res_spectrum,
+                &harmonic_fold,
+                &on_update,
+                &on_spectrum,
+                &on_scope,
+            ) {
                 eprintln!("[cageq-monitor] reopening capture after: {e}");
                 // Show the UI an idle state during the gap, then back off before reopening.
                 on_update(MeterUpdate {
@@ -1128,6 +1402,7 @@ mod windows_impl {
         stop: &AtomicBool,
         scope_viewers: &AtomicUsize,
         high_res_spectrum: bool,
+        harmonic_fold: &Arc<AtomicBool>,
         on_update: &F,
         on_spectrum: &G,
         on_scope: &H,
@@ -1171,7 +1446,11 @@ mod windows_impl {
         )
         .map_err(|e| format!("ebur128 init: {e:?}"))?;
 
-        let mut spectrum = Spectrum::new(rate, if high_res_spectrum { HIGH_RES_FFT_SIZE } else { BASE_FFT_SIZE });
+        let mut spectrum = Spectrum::new(
+            rate,
+            if high_res_spectrum { HIGH_RES_FFT_SIZE } else { BASE_FFT_SIZE },
+            harmonic_fold.clone(),
+        );
 
         audio_client.start_stream()?;
 
@@ -1399,7 +1678,7 @@ mod windows_impl {
         #[test]
         fn pure_tone_lobe_is_monotonic_each_side_of_peak() {
             let rate = 48_000u32;
-            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE);
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
             let freq = 60.0f32;
             let amp = 0.5f32;
             let total_samples = rate as usize * 2; // 2s — well past SPEC_TAU_SECS settling
@@ -1458,7 +1737,7 @@ mod windows_impl {
         #[test]
         fn peak_db_recovers_a_full_scale_tone_that_db_droops() {
             let rate = 48_000u32;
-            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE);
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
             let freq = 12_000.0f32;
             let amp = 1.0f32;
             let total_samples = rate as usize * 2; // 2s — well past SPEC_TAU_SECS settling
@@ -1506,6 +1785,139 @@ mod windows_impl {
             );
         }
     }
+
+    #[cfg(test)]
+    mod peak_finding {
+        use super::*;
+
+        /// Feed `spec` a full-scale sine at `freq` Hz for 2s (well past `SPEC_TAU_SECS`
+        /// settling), matching `spectrum_reduction`'s own harness.
+        fn feed_tone(spec: &mut Spectrum, rate: u32, freq: f32) {
+            let total_samples = rate as usize * 2;
+            let mut phase = 0.0f64;
+            let step = 2.0 * std::f64::consts::PI * freq as f64 / rate as f64;
+            let mut buf = vec![0.0f32; 4096];
+            let mut fed = 0;
+            while fed < total_samples {
+                let n = buf.len().min(total_samples - fed);
+                for s in buf.iter_mut().take(n) {
+                    *s = phase.sin() as f32;
+                    phase += step;
+                }
+                spec.push(&buf[..n]);
+                fed += n;
+            }
+        }
+
+        /// The actual regression case: a tone at a frequency with no special relationship to the
+        /// bin grid (not a "nice" round number). The bug this whole feature fixes only shows up
+        /// at the top of the spectrum, where the old log-bin approach's fractional-bin error
+        /// translated to hundreds of Hz — this asserts the refined frequency lands within a few
+        /// linear-bin-widths of the truth instead.
+        #[test]
+        fn an_awkward_high_frequency_tone_is_found_accurately() {
+            let rate = 48_000u32;
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
+            let freq = 15_437.0f32;
+            feed_tone(&mut spec, rate, freq);
+
+            let peaks = spec.snapshot(true).peaks;
+            assert_eq!(peaks.len(), 1, "expected exactly one peak, got {peaks:?}");
+            let bin_hz = rate as f32 / (BASE_FFT_SIZE as f32 * ZERO_PAD_FACTOR as f32);
+            let err = (peaks[0].hz - freq).abs();
+            assert!(
+                err < bin_hz * 5.0,
+                "peak reported at {} Hz, {err} Hz off {freq} Hz (bin width {bin_hz} Hz) — \
+                 log-bin peak-finding used to be off by hundreds of Hz here",
+                peaks[0].hz
+            );
+        }
+
+        /// Same check at a plain, bin-grid-friendly frequency — a sanity baseline the awkward
+        /// case above is compared against conceptually, not derived from.
+        #[test]
+        fn a_round_frequency_tone_is_found_accurately() {
+            let rate = 48_000u32;
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
+            let freq = 1_000.0f32;
+            feed_tone(&mut spec, rate, freq);
+
+            let peaks = spec.snapshot(true).peaks;
+            assert_eq!(peaks.len(), 1, "expected exactly one peak, got {peaks:?}");
+            let bin_hz = rate as f32 / (BASE_FFT_SIZE as f32 * ZERO_PAD_FACTOR as f32);
+            assert!((peaks[0].hz - freq).abs() < bin_hz * 5.0);
+        }
+
+        #[test]
+        fn true_silence_reports_no_peaks() {
+            let rate = 48_000u32;
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
+            spec.push(&vec![0.0f32; rate as usize * 2]);
+            assert!(spec.snapshot(true).peaks.is_empty());
+        }
+
+        /// Below this, `find_peaks` operates directly on synthetic power arrays rather than a
+        /// real `Spectrum` — precise control over exact bin values, for the algorithmic cases
+        /// that don't need a real FFT to exercise (silence-gate math aside, already covered above
+        /// against the real pipeline).
+        const TEST_BIN_HZ: f32 = 10.0;
+
+        /// Build a synthetic power spectrum of mostly-floor bins with isolated single-bin peaks
+        /// at the given (bin index, dB) pairs — `power_scale = 1.0` throughout, so dB is exactly
+        /// `10*log10(power)`.
+        fn synth(n: usize, peaks_db: &[(usize, f32)]) -> Vec<f32> {
+            let floor_db = -150.0f32;
+            let mut v = vec![10f32.powf(floor_db / 10.0); n];
+            for &(i, db) in peaks_db {
+                v[i] = 10f32.powf(db / 10.0);
+            }
+            v
+        }
+
+        #[test]
+        fn harmonic_folding_collapses_a_series_to_its_root() {
+            // Root at bin 100 (1000 Hz) plus its 2nd/3rd/4th partials, all loud and prominent.
+            // Near-zero minimum separation so this test isolates harmonic folding from the
+            // (separately tested) octave-separation gate.
+            let power = synth(2000, &[(100, -10.0), (200, -12.0), (300, -14.0), (400, -16.0)]);
+            let folded = find_peaks(&power, 1.0, TEST_BIN_HZ, true, 0.001, 60.0);
+            assert_eq!(folded.len(), 1, "harmonics should fold into the one root, got {folded:?}");
+            assert!((folded[0].hz - 1000.0).abs() < TEST_BIN_HZ * 2.0);
+
+            let unfolded = find_peaks(&power, 1.0, TEST_BIN_HZ, false, 0.001, 60.0);
+            assert_eq!(unfolded.len(), 4, "with folding off, all four should stand alone");
+        }
+
+        #[test]
+        fn peaks_closer_than_the_minimum_separation_are_dropped() {
+            // Two peaks 0.1 octave apart (bins 100 and 107 ~ 1000/1070 Hz) — well inside a
+            // 1-octave minimum separation, so only the louder one should survive.
+            let power = synth(2000, &[(100, -10.0), (107, -20.0)]);
+            let peaks = find_peaks(&power, 1.0, TEST_BIN_HZ, false, 1.0, 60.0);
+            assert_eq!(peaks.len(), 1);
+            assert!((peaks[0].hz - 1000.0).abs() < TEST_BIN_HZ * 2.0);
+        }
+
+        #[test]
+        fn at_most_peak_count_peaks_are_reported() {
+            // Eight well-separated, equally loud peaks (1 octave apart, right at the default
+            // separation gate — none of them collide with it) — only PEAK_COUNT should come back.
+            let peaks_db: Vec<(usize, f32)> = (0..8).map(|k| (100 * 2usize.pow(k), -10.0)).collect();
+            let power = synth(20_000, &peaks_db);
+            let found = find_peaks(&power, 1.0, TEST_BIN_HZ, false, 1.0, 60.0);
+            assert_eq!(found.len(), PEAK_COUNT);
+        }
+
+        #[test]
+        fn a_quiet_candidate_far_below_the_loudest_is_gated_out() {
+            // Two peaks 45dB apart, past PEAK_MAX_RANGE_DB's default 30dB — only the loud one
+            // should qualify.
+            let power = synth(2000, &[(100, -10.0), (300, -55.0)]);
+            let peaks = find_peaks(&power, 1.0, TEST_BIN_HZ, false, 1.0, PEAK_MAX_RANGE_DB);
+            assert_eq!(peaks.len(), 1);
+            assert!((peaks[0].hz - 1000.0).abs() < TEST_BIN_HZ * 2.0);
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -1520,6 +1932,7 @@ mod stub {
             _endpoint_id: Option<String>,
             _scope_viewers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
             _high_res_spectrum: bool,
+            _harmonic_fold: std::sync::Arc<std::sync::atomic::AtomicBool>,
             _on_update: F,
             _on_spectrum: G,
             _on_scope: H,

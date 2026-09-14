@@ -55,6 +55,14 @@ struct TestSignalState(std::sync::Mutex<Option<cageq_monitor::TestSignal>>);
 #[derive(Default)]
 struct ScopeViewers(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
+/// Live toggle for the spectrum analyzer's harmonic folding (§5.2-adjacent — the "Fold" checkbox
+/// in `SpectrumScope`). Shared into the monitor exactly like `ScopeViewers`, so it survives
+/// monitor restarts (device/high-res changes) and — the whole point of an atomic here rather than
+/// a `start_monitor` parameter — flips without restarting anything, set by
+/// `set_spectrum_harmonic_fold`.
+#[derive(Default)]
+struct HarmonicFoldState(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
 /// §5.3c data plane: per-stream `Channel` subscribers. These streams used to ride `app.emit`,
 /// but Tauri delivers each backend→frontend *event* by evaluating a script in the webview — at
 /// this app's sustained ~120 events/s (meter + spectrum at 60 fps each) that churned memory in
@@ -653,12 +661,15 @@ fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
 /// `high_res_spectrum` selects the spectrum analyzer's window size for this monitor's lifetime
 /// (`cageq_monitor`'s internal `BASE_FFT_SIZE`/`HIGH_RES_FFT_SIZE` — see the latter's own doc for
 /// the tradeoff) — like a device change, toggling it means calling `start_monitor` again.
+/// Harmonic folding is *not* a parameter here — it rides `HarmonicFoldState`, live-toggleable via
+/// `set_spectrum_harmonic_fold` without restarting the monitor.
 #[tauri::command]
 fn start_monitor(
     device: Option<String>,
     high_res_spectrum: bool,
     state: State<MonitorState>,
     scope_viewers: State<ScopeViewers>,
+    harmonic_fold: State<HarmonicFoldState>,
     subs: State<StreamSubs>,
 ) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -674,12 +685,20 @@ fn start_monitor(
         device,
         scope_viewers.0.clone(),
         high_res_spectrum,
+        harmonic_fold.0.clone(),
         move |update| fan_out(&meter_subs, &meter_alive, update),
         move |spectrum| fan_out(&spectrum_subs, &spectrum_alive, spectrum),
         move |scope| fan_out(&scope_subs, &scope_alive, scope),
     )?;
     *guard = Some(monitor);
     Ok(())
+}
+
+/// Live-toggle the spectrum analyzer's harmonic folding — see `HarmonicFoldState`'s own doc for
+/// why this is a standalone command rather than a `start_monitor` parameter.
+#[tauri::command]
+fn set_spectrum_harmonic_fold(fold: bool, state: State<HarmonicFoldState>) {
+    state.0.store(fold, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Register this webview's meter-stream channel — once per webview lifetime (frontend
@@ -1486,6 +1505,7 @@ pub fn run() {
             app.manage(MonitorState::default());
             app.manage(TestSignalState::default());
             app.manage(ScopeViewers::default());
+            app.manage(HarmonicFoldState::default());
             app.manage(StreamSubs::default());
             Ok(())
         })
@@ -1508,6 +1528,7 @@ pub fn run() {
             start_monitor,
             stop_monitor,
             set_scope_viewer,
+            set_spectrum_harmonic_fold,
             subscribe_meter,
             subscribe_spectrum,
             subscribe_scope,

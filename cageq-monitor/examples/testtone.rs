@@ -86,7 +86,9 @@
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use cageq_monitor::signal::{build_wavetable, ISP_MAX_OVER_DB, PinkNoise, Signal, Waveform};
+    use cageq_monitor::signal::{
+        build_wavetable, wavetable_sample, wavetable_step, ISP_MAX_OVER_DB, PinkNoise, Signal, Waveform,
+    };
     use std::time::Duration;
     use wasapi::{initialize_mta, Direction, SampleType, StreamMode, WaveFormat};
 
@@ -270,12 +272,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("[testtone] Ctrl+C to stop.");
 
-    // Wavetable (Tone/Isp) — built once, walked by index; Pink/White are generated per-sample
-    // below via `PinkNoise` instead (see `build_wavetable`'s own doc for why they don't share
-    // this). Both come from `cageq_monitor::signal` now — see this file's header doc for why.
+    // Wavetable (Tone/Isp) — built once, walked by a fractional phase accumulator
+    // (`wavetable_step`/`wavetable_sample`, not a plain integer index — see their own docs for
+    // why); Pink/White are generated per-sample below via `PinkNoise` instead (see
+    // `build_wavetable`'s own doc for why they don't share this). Both come from
+    // `cageq_monitor::signal` now — see this file's header doc for why.
     let table = build_wavetable(signal, rate);
-    let table_len = table.len();
-    let mut table_idx: usize = 0;
+    let step = wavetable_step(signal, rate);
+    let mut phase: f64 = 0.0;
     let mut noise = PinkNoise::new();
 
     // Deliberately after the (potentially slow — see `build_wavetable`'s own doc) wavetable build
@@ -315,11 +319,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mono = match signal {
                 Signal::Tone { .. } | Signal::Isp { .. } => {
-                    let s = table[table_idx] * gain;
-                    table_idx += 1;
-                    if table_idx >= table_len {
-                        table_idx = 0;
-                    }
+                    let s = wavetable_sample(&table, phase) * gain;
+                    phase = (phase + step).rem_euclid(table.len() as f64);
                     s
                 }
                 Signal::White => noise.next_white() * gain,

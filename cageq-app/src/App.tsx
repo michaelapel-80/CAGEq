@@ -565,6 +565,18 @@ function App() {
   useEffect(() => {
     localStorage.setItem("cageq-spec-highres", specHighRes ? "1" : "0");
   }, [specHighRes]);
+  // Spectrum analyzer harmonic folding — same reasoning as `specHighRes` just above (lifted out of
+  // SpectrumScope's own per-view tune-panel state), but for a different reason: detection itself
+  // now runs backend-side, on the one shared monitor (`cageq-monitor::find_peaks`), so two open
+  // spectrum views would otherwise show inconsistent checkbox state while only one toggle is
+  // actually in effect. Unlike `specHighRes`, changing it needs no monitor restart — just the live
+  // `set_spectrum_harmonic_fold` command, fired directly from the setter below rather than a
+  // Meter-owned start/stop effect.
+  const [specHarmonicFold, setSpecHarmonicFold] = useState<boolean>(() => localStorage.getItem("cageq-spec-fold") === "1");
+  useEffect(() => {
+    localStorage.setItem("cageq-spec-fold", specHarmonicFold ? "1" : "0");
+    invoke("set_spectrum_harmonic_fold", { fold: specHarmonicFold }).catch(() => {});
+  }, [specHarmonicFold]);
   // Live post-EQ spectrum (loopback FFT) drawn on the chart. The Meter component owns start/stop
   // of the capture; here we just subscribe to the spectrum stream it produces (a Channel-backed
   // bus, see streams.ts — not `listen` events, whose per-event webview eval churned WebView2's
@@ -2856,6 +2868,8 @@ function App() {
                         sampleRate={sampleRate ?? undefined}
                         highRes={specHighRes}
                         onHighResChange={setSpecHighRes}
+                        harmonicFold={specHarmonicFold}
+                        onHarmonicFoldChange={setSpecHarmonicFold}
                       />
                     ) : (
                       <EqChart

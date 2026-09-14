@@ -149,10 +149,26 @@ pub const SAFE_PLAYBACK_CEILING_DBFS: f32 = -18.0;
 /// since it's the deterministic maximum a single pure tone gives you.
 pub const ISP_MAX_OVER_DB: f64 = 3.0103;
 
+/// Fixed table resolution for a `Signal::Tone`'s wavetable, independent of the requested
+/// frequency — see [`build_wavetable`]'s own doc for why: tying the table length to an exact
+/// integer cycle count (as an earlier version of this did, `round(rate/hz)`) means the *actual*
+/// played frequency is `rate/table_len`, not the requested one, and that rounding error is small
+/// at low frequencies (`table_len` in the hundreds/thousands) but large at high ones (`table_len`
+/// in the single digits — several percent off, degenerating completely near Nyquist/2, e.g. a
+/// 2-sample "sine" table is `[sin(0), sin(π)] = [0, 0]`, silent rather than merely detuned). A
+/// fixed, large table plus fractional-phase linear interpolation ([`wavetable_step`]/
+/// [`wavetable_sample`]) reproduces the exact requested frequency at *any* table size, so this
+/// number is a pure quality knob (interpolation distortion — negligible at this size for any
+/// audible content) rather than something coupled to pitch accuracy at all.
+pub const TONE_TABLE_LEN: usize = 4096;
+
 /// Build one full period's wavetable for `signal` at `rate` Hz — unit-ish amplitude (a `Tone`
 /// peaks at ~1; `Isp`'s samples peak at ±1/√2, the gain applied on top is what pushes the *true*
 /// peak to the requested dBTP — see `testtone.rs`'s own extensive doc on that derivation). The
-/// caller applies its own per-sample gain; this only builds the shape.
+/// caller applies its own per-sample gain; this only builds the shape — playback advances through
+/// it via [`wavetable_step`]/[`wavetable_sample`], not a plain integer index (see their own docs
+/// for why: a plain wraparound index is exactly what used to make `Tone` play the wrong
+/// frequency at the top of its range).
 ///
 /// Only meaningful for `Signal::Tone`/`Signal::Isp` — `Pink`/`White` aren't periodic, so callers
 /// handle those separately via [`PinkNoise`], which generates per-sample from an RNG+filter
@@ -162,15 +178,14 @@ pub fn build_wavetable(signal: Signal, rate: u32) -> Vec<f32> {
     // Highest harmonic to sum, kept a few percent below true Nyquist rather than right up against
     // it — a naive square/triangle/sawtooth has harmonics to infinity, which would alias back down
     // and contaminate the very spectrum this signal exists to let you check against a known-correct
-    // shape.
+    // shape. Depends only on rate/hz, not on the table's own resolution below.
     let k_max: u32 = if tone_hz > 0.0 { (((rate as f64 * 0.48) / tone_hz).floor().max(1.0)) as u32 } else { 1 };
-    // The table holds exactly `round(rate/tone_hz)` samples, `theta` spanning exactly one full 2π
-    // cycle across them — that tiles with zero discontinuity at the wraparound by construction:
-    // sample 0 and the (never-materialized) sample at `table_len` are the same phase. `Signal::Isp`
-    // is fixed at exactly 4 samples/cycle (Fs/4, by construction, not rounding) with a 45° phase
-    // offset baked in, reusing `Waveform::Sine`'s own `sin()` rather than needing a shape of its own.
+    // `Tone`'s table is always `TONE_TABLE_LEN` samples spanning one full 2π cycle, regardless of
+    // `hz` — see that constant's own doc. `Signal::Isp` is fixed at exactly 4 samples/cycle (Fs/4,
+    // by construction, not rounding) with a 45° phase offset baked in, reusing `Waveform::Sine`'s
+    // own `sin()` rather than needing a shape of its own.
     let table_len = match signal {
-        Signal::Tone { .. } if tone_hz > 0.0 => ((rate as f64 / tone_hz as f64).round() as usize).max(1),
+        Signal::Tone { .. } if tone_hz > 0.0 => TONE_TABLE_LEN,
         Signal::Isp { .. } => 4,
         _ => 1,
     };
@@ -186,6 +201,36 @@ pub fn build_wavetable(signal: Signal, rate: u32) -> Vec<f32> {
             _ => 0.0,
         })
         .collect()
+}
+
+/// Per-sample phase-accumulator advance (in table-index units) for `signal`'s wavetable, paired
+/// with [`wavetable_sample`]. `Tone`'s step is a real, generally non-integer number — that's the
+/// whole fix: the exact requested `hz` comes from advancing through a *fixed-size* table at
+/// whatever fractional rate reproduces it, rather than by choosing the table's size to make the
+/// step exactly 1. `Isp`'s step is always exactly `1.0` (its 4-sample table has no fractional
+/// positions to interpolate between — see [`wavetable_sample`]'s own doc for why that's safe).
+/// `Pink`/`White` don't use a wavetable at all; `0.0` is unused dead weight for them.
+pub fn wavetable_step(signal: Signal, rate: u32) -> f64 {
+    match signal {
+        Signal::Tone { hz, .. } => TONE_TABLE_LEN as f64 * hz / rate as f64,
+        Signal::Isp { .. } => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// Read `table` at a fractional `phase` (table-index units, any real value — wraps automatically),
+/// linearly interpolating between the two entries straddling it. Serves both `Tone` and `Isp`
+/// wavetables with the one function: `Isp`'s step ([`wavetable_step`]) is always exactly `1.0` and
+/// phase starts at `0.0`, so phase never lands anywhere but an exact integer for it — the
+/// interpolation's fractional part is always `0.0`, which degenerates to plain indexing
+/// automatically and preserves its exact ±1/√2 construction bit-for-bit. No branching needed.
+pub fn wavetable_sample(table: &[f32], phase: f64) -> f32 {
+    let len = table.len();
+    let p = phase.rem_euclid(len as f64);
+    let i0 = p as usize;
+    let i1 = (i0 + 1) % len;
+    let frac = (p - i0 as f64) as f32;
+    table[i0] * (1.0 - frac) + table[i1] * frac
 }
 
 /// Stateful white/pink noise generator — xorshift RNG + Paul Kellet's economy pink filter.
@@ -270,15 +315,57 @@ mod tests {
         assert!(table[0] > 0.0 && table[1] > 0.0 && table[2] < 0.0 && table[3] < 0.0);
     }
 
-    /// A tone's wavetable holds exactly `round(rate/hz)` samples and tiles with zero phase
-    /// discontinuity at the wraparound (last-to-first step equals every other step).
+    /// A tone's wavetable is always `TONE_TABLE_LEN` samples, regardless of `hz` — the old
+    /// contract (`round(rate/hz)`) is gone on purpose, see that constant's own doc for why tying
+    /// table length to frequency was the actual bug.
     #[test]
-    fn tone_wavetable_length_matches_rate_over_hz_and_tiles_cleanly() {
-        let table = build_wavetable(Signal::Tone { waveform: Waveform::Sine, hz: 1000.0 }, 48_000);
-        assert_eq!(table.len(), 48); // round(48000/1000)
-        // A 48-sample-per-cycle sine's peak-to-peak step is small and uniform; just confirm the
-        // table isn't degenerate (not all-zero, not a single repeated value).
-        assert!(table.iter().any(|&s| s.abs() > 0.9), "sine table never reaches near its own peak");
+    fn tone_wavetable_length_is_fixed_regardless_of_frequency() {
+        let low = build_wavetable(Signal::Tone { waveform: Waveform::Sine, hz: 100.0 }, 48_000);
+        let high = build_wavetable(Signal::Tone { waveform: Waveform::Sine, hz: 15_437.0 }, 48_000);
+        assert_eq!(low.len(), TONE_TABLE_LEN);
+        assert_eq!(high.len(), TONE_TABLE_LEN);
+    }
+
+    /// The actual regression test for the bug this session found live: at `round(rate/hz)` table
+    /// sizing, a 15,437 Hz tone at 48 kHz played at 16,000 Hz instead (`table_len` rounds to 3).
+    /// Runs the real per-sample playback loop (`wavetable_step`/`wavetable_sample`, exactly what
+    /// `render_generator`/`testtone.rs` do) and estimates the resulting frequency from rising
+    /// zero-crossings — simple and sufficient for a sanity bound, no need for the FFT machinery
+    /// `cageq-monitor`'s own `find_peaks` regression test already covers that with.
+    #[test]
+    fn an_awkward_high_frequency_tone_plays_at_the_requested_frequency() {
+        let rate = 48_000u32;
+        let hz = 15_437.0f64;
+        let signal = Signal::Tone { waveform: Waveform::Sine, hz };
+        let table = build_wavetable(signal, rate);
+        let step = wavetable_step(signal, rate);
+
+        let n = rate as usize; // 1 second — many cycles at this frequency
+        let mut phase = 0.0f64;
+        let mut samples = Vec::with_capacity(n);
+        for _ in 0..n {
+            samples.push(wavetable_sample(&table, phase));
+            phase += step;
+        }
+
+        // Rising zero-crossings, linearly interpolated to a fractional sample index.
+        let mut crossings = Vec::new();
+        for i in 1..samples.len() {
+            let (prev, cur) = (samples[i - 1], samples[i]);
+            if prev <= 0.0 && cur > 0.0 {
+                let frac = -prev / (cur - prev);
+                crossings.push((i - 1) as f64 + frac as f64);
+            }
+        }
+        assert!(crossings.len() >= 2, "need at least one full cycle to estimate frequency");
+        let cycles = (crossings.len() - 1) as f64;
+        let estimated_hz = cycles * rate as f64 / (crossings.last().unwrap() - crossings[0]);
+
+        assert!(
+            (estimated_hz - hz).abs() < 1.0,
+            "played at {estimated_hz:.2} Hz, requested {hz} Hz — the old round(rate/hz) table \
+             sizing would have played this at 16000 Hz (table_len rounds to 3)"
+        );
     }
 
     #[test]
