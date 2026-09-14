@@ -136,6 +136,8 @@
     "rotate": "Drehen",
     "undistort": "Entzerren",
     "undistortHint": "Loopback invers filtern, um das Bild vor der EQ-Korrektur zu zeigen (für Oszilloskop-Musik bei aktiver Korrektur)",
+    "tilt": "Neigung",
+    "tiltHint": "Die übliche RTA-Darstellung statt der dichte-korrekten: rosa Rauschen erscheint flach und ein Ton mit seinem wahren Pegel, auf Kosten einer echten spektralen Dichte",
     "harmonicFold": "Falten",
     "harmonicFoldHint": "Fasst die Obertöne eines Signals im Peak-Readout mit dem Grundton zusammen — standardmäßig aus, damit die einzelnen Obertöne eines Testtons (Rechteck/Dreieck/Sägezahn/Puls) als eigene Peaks erscheinen",
     "linear": "Linear",

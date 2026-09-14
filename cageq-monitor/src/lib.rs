@@ -68,6 +68,23 @@ pub struct SpectrumUpdate {
     /// hover cursor) — as a curve it would be a poor density estimator (biased high, noisy) for
     /// broadband material, which is exactly why it's a second field and not a `db` replacement.
     pub peak_db: Vec<f32>,
+    /// `db`, but *before* the density-normalization fix (`gaussian_power`'s own doc, "A FOURTH
+    /// correction") — the same Gaussian-weighted *sum* that function computes on the way to its
+    /// own density average (`acc`, its second return value), calibrated with its own constant
+    /// (`Spectrum::raw_power_scale`, Parseval/S2-based — *not* `power_scale`, which is built for
+    /// reading a single peak bin and overshoots by several dB if reused for a summed quantity like
+    /// this one, measured live before that got corrected). Two genuinely different, both-correct-
+    /// in-their-own-convention readings result: `db` is power *spectral density* (right for
+    /// broadband/noise-floor claims — pink noise reads the correct -3 dB/octave); `db_raw`
+    /// approximates the *total* power captured over each display bin's span instead, which is
+    /// Parseval-consistent for a concentrated source (recovers a swept tone's true level with none
+    /// of `db`'s dilution droop — matches `peak_db` at the same bin to within ~1dB, verified for
+    /// several frequencies) — and, for broadband content, reads pink noise flat, the conventional
+    /// RTA display. Computed unconditionally (cheap — reuses the same `gaussian_power` call
+    /// already made for `db`, just an extra multiply-and-log step) so SpectrumScope's Tilt toggle
+    /// needs no backend coordination, the same "always compute both, let each view pick" pattern
+    /// `db_lin` below already established.
+    pub db_raw: Vec<f32>,
     /// `db`/`peak_db`'s exact counterparts on a *linear*-frequency axis instead (constant-Hz
     /// spacing spanning the same [`f_min`, `f_max`], `N_LIN_BINS` bins — see that constant's own
     /// doc). For SpectrumScope's optional linear-axis mode: a harmonic series reads as an
@@ -78,6 +95,8 @@ pub struct SpectrumUpdate {
     /// SpectrumScope (either) can each just read whichever fields they want.
     pub db_lin: Vec<f32>,
     pub peak_db_lin: Vec<f32>,
+    /// `db_lin`'s counterpart to `db_raw` — see that field's own doc.
+    pub db_lin_raw: Vec<f32>,
     /// `false` when the endpoint produced no audio this window (same silence test as
     /// [`MeterUpdate::signal`]). The analyzer view blanks its beam on this instead of painting the
     /// idle-decay sweep: without it, the ~35 dB/s slide to the floor is *actively redrawn* into
@@ -878,7 +897,15 @@ mod windows_impl {
     /// the correct -3dB/octave for pink noise, confirmed to ~0.02dB of theory once removed
     /// (`gaussian_floor_bias_on_pink_noise`, `width_matched_density_final_check`). Simply dropping
     /// the `*(hi-lo)` factor — reporting the Gaussian-weighted AVERAGE, not the average scaled up by
-    /// the span it was estimated over — is the fix.
+    /// the span it was estimated over — is the fix. The pre-normalized *sum* (`acc`, everything
+    /// below divides by `wsum` to get; this function's second return value) is worth keeping
+    /// around rather than discarding, though — see `SpectrumUpdate::db_raw`'s own doc for why: it's
+    /// what a later `db_raw` display mode reconstructs "un-density-normalized" power from, and
+    /// measured live to be a genuinely unbiased total for a concentrated source (unlike re-scaling
+    /// the average back up by the bin's own nominal span, which reads a systematic several dB high
+    /// — `sigma` isn't literally `(hi-lo)/2`, it's that scaled by `GAUSSIAN_WIDTH_MULT` and then
+    /// floored, so multiplying by the nominal span doesn't actually invert this function's own
+    /// weighting).
     ///
     /// This does cost something for an isolated TONE: sigma still widens with frequency (needed —
     /// `decimation_spike.rs`'s `debug_12khz_window_scan` shows a sigma that *doesn't* track the
@@ -890,8 +917,12 @@ mod windows_impl {
     /// technique — Tylka & Choueiri, JAES, "fractional-octave smoothing" — not fixable without a
     /// genuinely different architecture, e.g. multi-resolution FFT). Accepted per direct user
     /// steer: broadband content is the common case here, and a correct noise floor/pink-noise
-    /// reading matters more than a perfectly flat tone sweep.
-    fn gaussian_power(power: &[f32], lo: f32, hi: f32) -> f32 {
+    /// reading matters more than a perfectly flat tone sweep — `db_raw` (using this function's
+    /// `acc` return) is what routes around it for whoever wants that instead.
+    ///
+    /// Returns `(density, raw)` — `acc/wsum` (the density this function exists for) and `acc`
+    /// itself (the pre-normalization weighted sum, `db_raw`'s own input).
+    fn gaussian_power(power: &[f32], lo: f32, hi: f32) -> (f32, f32) {
         let lo = lo.max(0.0);
         let hi = hi.min(power.len().saturating_sub(1) as f32);
         let center = (lo + hi) / 2.0;
@@ -910,9 +941,9 @@ mod windows_impl {
             wsum += w;
         }
         if wsum > 0.0 {
-            acc / wsum
+            (acc / wsum, acc)
         } else {
-            0.0
+            (0.0, 0.0)
         }
     }
 
@@ -1134,6 +1165,13 @@ mod windows_impl {
         ranges_lin: Vec<(f32, f32)>, // per linear-axis bin: same, constant-Hz spacing instead
         smoothing: f32,            // power-average coefficient per hop
         power_scale: f32,          // |X|² -> normalized power so a full-scale sine reads ~0 dBFS
+        raw_power_scale: f32,      // db_raw's own calibration constant — see its own doc, and
+                                    // gaussian_power's ("A FOURTH correction"), for why it's a
+                                    // different constant from power_scale (S2/energetic-gain
+                                    // Parseval calibration, not S1/coherent-gain single-bin)
+        padded_size: usize,        // rate-only (see `new`'s own local of the same name) — kept as
+                                    // a field, unlike that local, only because `reconfigure` needs
+                                    // it again to recompute `raw_power_scale` on a tier change
         bin_hz: f32,               // Hz per linear (padded) FFT bin — uniform, unlike a log bin's
         harmonic_fold: Arc<AtomicBool>, // live-toggleable; see `find_peaks`'s own doc
         min_sep_octaves: f32,      // resolution-dependent PEAK_MIN_SEPARATION_OCTAVES(_HIGH_RES)
@@ -1153,6 +1191,11 @@ mod windows_impl {
         window: Vec<f32>,
         smoothing: f32,
         power_scale: f32,
+        // S2 (energetic gain, Σw[n]²) — `db_raw`'s own calibration input, alongside the
+        // tier-invariant `padded_size` neither `new` nor `reconfigure` have in scope here (see
+        // `power_scale`'s own comment above). Combined into the actual `raw_power_scale` constant
+        // by whichever of those two callers has `padded_size` on hand.
+        s2: f32,
         min_sep_octaves: f32,
         max_range_db: f32,
     }
@@ -1194,6 +1237,12 @@ mod windows_impl {
             // (analysis_size) window's own coherent gain, FFT-size independent as before.
             let s1: f32 = window.iter().sum();
             let power_scale = (2.0 / s1).powi(2);
+            // Input to `db_raw`'s own calibration constant (`raw_power_scale`, computed by `new`/
+            // `reconfigure` once `padded_size` is in scope — see `TierParams::s2`'s own doc) — see
+            // `gaussian_power`'s doc ("A FOURTH correction") for why it needs S2 (energetic gain,
+            // `Σw[n]²`) rather than S1 (coherent gain) above: derived from Parseval's theorem
+            // rather than the single-peak-bin relation `power_scale` is built on.
+            let s2: f32 = window.iter().map(|w| w * w).sum();
             // Medium and High both count as "high res" for tuning purposes — only Base gets the
             // tighter defaults. `>`, not `== HIGH_RES_FFT_SIZE`, so this doesn't need updating if
             // another tier is ever added.
@@ -1210,6 +1259,7 @@ mod windows_impl {
                 window,
                 smoothing,
                 power_scale,
+                s2,
                 min_sep_octaves,
                 max_range_db,
             }
@@ -1235,6 +1285,16 @@ mod windows_impl {
             // per-point as an unpadded one of the same total length, same as before. Rate-only —
             // unlike everything in `TierParams`, never changes on a `reconfigure`.
             let padded_size = tp.analysis_size.max(BASE_FFT_SIZE * ZERO_PAD_FACTOR * tp.mult);
+            // `db_raw`'s calibration constant (see its own doc, and `gaussian_power`'s "A FOURTH
+            // correction"): Parseval's theorem relates a windowed tone's *total* power, summed
+            // across the *whole* (padded) DFT's one-sided bins, to `S2 = Σw[n]²` — not `S1` —
+            // giving `amplitude² ≈ (4 / (padded_size × S2)) × Σ|X[k]|²` (excluding the negligible
+            // DC/Nyquist edge terms for a tone away from them). This is a different derivation
+            // from `power_scale`'s own single-peak-bin coherent-gain relation just above, and a
+            // different constant — reusing `power_scale` for a *summed* (not single-bin) reading
+            // is exactly what overshot when first tried (see git history/commit message for the
+            // measured bias this fixes).
+            let raw_power_scale = 4.0 / (padded_size as f32 * tp.s2);
 
             let fft = RealFftPlanner::<f32>::new().plan_fft_forward(padded_size);
             let in_buf = fft.make_input_vec();
@@ -1283,6 +1343,8 @@ mod windows_impl {
                 ranges_lin,
                 smoothing: tp.smoothing,
                 power_scale: tp.power_scale,
+                raw_power_scale,
+                padded_size,
                 bin_hz,
                 harmonic_fold,
                 min_sep_octaves: tp.min_sep_octaves,
@@ -1313,6 +1375,10 @@ mod windows_impl {
             self.window = tp.window;
             self.smoothing = tp.smoothing;
             self.power_scale = tp.power_scale;
+            // padded_size is tier-invariant (unlike everything else here) so self.padded_size,
+            // set once in `new`, is still correct — only S2 (from the new tier's own window)
+            // changed. See `new`'s own comment on `raw_power_scale` for the formula.
+            self.raw_power_scale = 4.0 / (self.padded_size as f32 * tp.s2);
             self.min_sep_octaves = tp.min_sep_octaves;
             self.max_range_db = tp.max_range_db;
         }
@@ -1360,8 +1426,11 @@ mod windows_impl {
         /// Collapse `avg_power` onto `ranges` (dB) — shared by both the log and linear axis
         /// reductions in `snapshot`, which differ only in how `ranges` itself was built
         /// (`Spectrum::new`'s `ranges` vs `ranges_lin`); this half doesn't know or care which.
-        fn reduce(avg_power: &[f32], power_scale: f32, ranges: &[(f32, f32)]) -> (Vec<f32>, Vec<f32>) {
+        /// Returns `(db, db_raw, peak_db)` — see `SpectrumUpdate::db_raw`'s own doc for what it is
+        /// and why it's worth a second field alongside `db`.
+        fn reduce(avg_power: &[f32], power_scale: f32, raw_power_scale: f32, ranges: &[(f32, f32)]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
             let mut db = Vec::with_capacity(ranges.len());
+            let mut db_raw = Vec::with_capacity(ranges.len());
             let mut peak_db = Vec::with_capacity(ranges.len());
             for &(lo, hi) in ranges {
                 // Gaussian-weighted integral of linear power across the bin's own span, not
@@ -1370,13 +1439,28 @@ mod windows_impl {
                 // order; both are in git history if the reasoning against either is ever needed
                 // again). Verified against synthetic ground truth before landing here — see
                 // `cageq-monitor/tests/decimation_spike.rs`, kept.
-                let power = gaussian_power(avg_power, lo, hi);
+                let (power, raw_power) = gaussian_power(avg_power, lo, hi);
                 let cur = if power > 0.0 {
                     (10.0 * (power * power_scale).log10()).max(SPEC_FLOOR)
                 } else {
                     SPEC_FLOOR
                 };
                 db.push(round_to(cur, 1));
+
+                // `db_raw`: the pre-normalization weighted sum `gaussian_power` computed on the
+                // way to its own density average — see that function's own doc ("A FOURTH
+                // correction") for why this, calibrated with `raw_power_scale` (Parseval/S2-based
+                // — see `Spectrum::new`'s own comment on it), not `power_scale`: `power_scale` is
+                // built for reading a *single* peak bin (`peak_db`/`db` both use it correctly for
+                // that), and reusing it for a *summed* quantity like this one overshoots by
+                // several dB for a concentrated source — measured live against `peak_db` at the
+                // same bin before this was corrected.
+                let raw_cur = if raw_power > 0.0 {
+                    (10.0 * (raw_power * raw_power_scale).log10()).max(SPEC_FLOOR)
+                } else {
+                    SPEC_FLOOR
+                };
+                db_raw.push(round_to(raw_cur, 1));
 
                 // Same span, but the true (undiluted) level — see `peak_db`'s own doc on
                 // `SpectrumUpdate` for why this is a second reduction rather than reusing `power`.
@@ -1388,13 +1472,15 @@ mod windows_impl {
                 };
                 peak_db.push(round_to(pk_cur, 1));
             }
-            (db, peak_db)
+            (db, db_raw, peak_db)
         }
 
         /// Collapse the averaged power onto both the log and linear display bins (dB).
         fn snapshot(&mut self, signal: bool) -> SpectrumUpdate {
-            let (db, peak_db) = Self::reduce(&self.avg_power, self.power_scale, &self.ranges);
-            let (db_lin, peak_db_lin) = Self::reduce(&self.avg_power, self.power_scale, &self.ranges_lin);
+            let (db, db_raw, peak_db) =
+                Self::reduce(&self.avg_power, self.power_scale, self.raw_power_scale, &self.ranges);
+            let (db_lin, db_lin_raw, peak_db_lin) =
+                Self::reduce(&self.avg_power, self.power_scale, self.raw_power_scale, &self.ranges_lin);
             let peaks = find_peaks(
                 &self.avg_power,
                 self.power_scale,
@@ -1406,8 +1492,10 @@ mod windows_impl {
             SpectrumUpdate {
                 db,
                 peak_db,
+                db_raw,
                 db_lin,
                 peak_db_lin,
+                db_lin_raw,
                 signal,
                 f_min: SPEC_F_MIN,
                 f_max: SPEC_F_MAX,
@@ -2015,6 +2103,130 @@ mod windows_impl {
                  at the same bin)",
                 update.peak_db[peak_i],
                 update.db[peak_i]
+            );
+        }
+
+        /// The actual claim behind moving Tilt server-side (see `SpectrumUpdate::db_raw`'s own
+        /// doc): the Parseval/S2-calibrated Gaussian-weighted sum recovers a swept tone's level
+        /// without `db`'s dilution droop — unlike a fixed additive dB/octave slope (the frontend
+        /// approximation this replaced, which couldn't correct a non-slope dilution effect) or
+        /// re-scaling the average by the bin's own nominal span (the first server-side attempt,
+        /// which reused `power_scale` — a single-peak-bin calibration — for a summed quantity and
+        /// measured a systematic +5 to +7dB overshoot live before this was corrected). Checked at
+        /// several frequencies, not just one: the S1-vs-S2 bug this pins was a near-constant
+        /// offset, which a single-frequency test could pass by accident if the tolerance happened
+        /// to swallow it.
+        #[test]
+        fn db_raw_recovers_a_swept_tone_without_dbs_dilution_droop() {
+            let rate = 48_000u32;
+            for freq in [200.0f32, 1000.0, 3000.0, 6000.0, 12000.0, 18000.0] {
+                let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
+                let amp = 1.0f32;
+                let total_samples = rate as usize * 2;
+                let mut phase = 0.0f64;
+                let step = 2.0 * std::f64::consts::PI * freq as f64 / rate as f64;
+                let mut buf = vec![0.0f32; 4096];
+                let mut fed = 0;
+                while fed < total_samples {
+                    let n = buf.len().min(total_samples - fed);
+                    for s in buf.iter_mut().take(n) {
+                        *s = amp * phase.sin() as f32;
+                        phase += step;
+                    }
+                    spec.push(&buf[..n]);
+                    fed += n;
+                }
+
+                let update = spec.snapshot(true);
+                let peak_i = update
+                    .db
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .map(|(i, _)| i)
+                    .unwrap();
+
+                if freq >= 1000.0 {
+                    assert!(
+                        update.db[peak_i] < -5.0,
+                        "expected db to still show a real HF droop at {freq}Hz, got {} dB",
+                        update.db[peak_i]
+                    );
+                }
+                // Tight, two-sided: db_raw should land close to peak_db's own true-0dBFS reading
+                // at every frequency, not just clear some generous one-sided floor — an S1/S2
+                // calibration mistake reads as a systematic offset in exactly this check.
+                let diff = (update.db_raw[peak_i] - update.peak_db[peak_i]).abs();
+                assert!(
+                    diff < 2.0,
+                    "db_raw should track peak_db closely at {freq}Hz — db_raw {} dB, peak_db {} \
+                     dB, diff {diff:.2} dB (db read {} dB at the same bin)",
+                    update.db_raw[peak_i],
+                    update.peak_db[peak_i],
+                    update.db[peak_i]
+                );
+            }
+        }
+
+        /// The other half of the same claim: `db_raw` should still read pink noise flat (the
+        /// pre-density-normalization, conventional-RTA behavior it's reviving on purpose — see
+        /// `SpectrumUpdate::db_raw`'s own doc), even though it now also fixes tones. Measured as
+        /// the *slope* of a linear fit against bin index, not the raw spread (max-min): pink
+        /// noise is genuine random noise, so individual bins carry real sample-to-sample variance
+        /// on top of the systematic tilt this test actually cares about, and — since `db_raw` is
+        /// just `db`'s own per-bin power rescaled by a *deterministic* per-bin span — that random
+        /// component is identical in both, only the systematic slope differs. A spread-based check
+        /// would conflate the two and wash out the improvement; the slope isolates it.
+        #[test]
+        fn db_raw_reads_pink_noise_flatter_than_db() {
+            let rate = 48_000u32;
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
+            let mut noise = crate::signal::PinkNoise::new();
+            let total_samples = rate as usize * 4; // longer settle — broadband, not a single tone
+            let mut buf = vec![0.0f32; 4096];
+            let mut fed = 0;
+            while fed < total_samples {
+                let n = buf.len().min(total_samples - fed);
+                for s in buf.iter_mut().take(n) {
+                    *s = noise.next_pink() * 0.5;
+                }
+                spec.push(&buf[..n]);
+                fed += n;
+            }
+
+            let update = spec.snapshot(true);
+            // Mid-range bins only (roughly 100Hz-10kHz at this SPEC_F_MIN/F_MAX span) — comfortably
+            // away from the floor at either end, where a pink source has real, settled energy.
+            let lo = update.db.len() / 6;
+            let hi = update.db.len() * 5 / 6;
+            // Ordinary-least-squares slope of `v[lo..hi]` against its own bin index — bins are
+            // log-spaced at a constant frequency ratio, so a constant dB/octave tilt is already a
+            // constant dB/*bin* slope here, no log-frequency conversion needed.
+            let slope = |v: &[f32]| -> f32 {
+                let seg = &v[lo..hi];
+                let n = seg.len() as f32;
+                let xbar = (n - 1.0) / 2.0;
+                let ybar = seg.iter().sum::<f32>() / n;
+                let mut sxy = 0.0f32;
+                let mut sxx = 0.0f32;
+                for (i, &y) in seg.iter().enumerate() {
+                    let x = i as f32 - xbar;
+                    sxy += x * (y - ybar);
+                    sxx += x * x;
+                }
+                sxy / sxx
+            };
+            let db_slope = slope(&update.db);
+            let raw_slope = slope(&update.db_raw);
+            assert!(db_slope < -0.05, "expected db to show a real declining tilt, got slope {db_slope:.4} dB/bin");
+            // A generous fraction, not near-zero: pink noise is genuine random noise, so the
+            // regression itself carries sampling scatter on top of whatever systematic tilt
+            // remains — this only needs to show db_raw's tilt is clearly, substantially smaller,
+            // not that it's a perfect zero.
+            assert!(
+                raw_slope.abs() < db_slope.abs() * 0.5,
+                "db_raw's tilt should be substantially smaller than db's — db slope {db_slope:.4} dB/bin, \
+                 db_raw slope {raw_slope:.4} dB/bin"
             );
         }
     }

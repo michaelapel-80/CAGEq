@@ -136,6 +136,8 @@
     "rotate": "Rotate",
     "undistort": "Undistort",
     "undistortHint": "Inverse-filter the loopback to show the pre-EQ image (for oscilloscope music with correction on)",
+    "tilt": "Tilt",
+    "tiltHint": "The conventional RTA reading instead of the density-correct one: pink noise reads flat and a tone reads at its true level, at the cost of no longer being a true spectral density",
     "harmonicFold": "Fold",
     "harmonicFoldHint": "Collapse a signal's harmonics into its fundamental in the peak readout — off by default so a test tone's individual harmonics (square/triangle/sawtooth/pulse) show up as their own peaks",
     "linear": "Linear",

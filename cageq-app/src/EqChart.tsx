@@ -80,12 +80,17 @@ export type PhaseCurve = { id: string; bands: Band[]; color: string; label: stri
  *  (`cageq-monitor::find_peaks`) — SpectrumScope's own readout/markers, not drawn here. `db_lin`/
  *  `peak_db_lin` are `db`/`peak_db`'s exact counterparts on a linear (constant-Hz) frequency axis
  *  instead of log — SpectrumScope's own optional linear-axis mode; this chart never reads them,
- *  always drawing log (the right axis for an EQ curve). */
+ *  always drawing log (the right axis for an EQ curve). `db_raw`/`db_lin_raw` are `db`/`db_lin`
+ *  before the density-normalization fix (see `SpectrumUpdate::db_raw`'s own Rust doc) — reads pink
+ *  noise flat and a swept tone undiluted instead of `db`'s density-correct (but tone-drooping)
+ *  reading; SpectrumScope's own Tilt toggle picks between them, this chart never reads them either. */
 export type SpectrumData = {
   db: number[];
   peak_db: number[];
+  db_raw: number[];
   db_lin: number[];
   peak_db_lin: number[];
+  db_lin_raw: number[];
   signal: boolean;
   f_min: number;
   f_max: number;

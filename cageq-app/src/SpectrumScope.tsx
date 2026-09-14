@@ -31,8 +31,28 @@ import type { ScopeEq } from "./Vectorscope";
 // against perception/octaves, which is what this view is used for most of the time; linear is the
 // occasional, deliberate choice for reading a harmonic series as the evenly-*spaced* comb it
 // actually is (mains hum, a motor, this app's own square/sawtooth/pulse test signals).
-type Params = { trailTau: number; tail: number; glow: number; bloom: number; haze: number; undistort: boolean; linear: boolean };
-const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true, linear: false };
+type Params = {
+  trailTau: number;
+  tail: number;
+  glow: number;
+  bloom: number;
+  haze: number;
+  undistort: boolean;
+  linear: boolean;
+  // Picks `SpectrumUpdate`'s `db_raw`/`db_lin_raw` fields instead of `db`/`db_lin` — the same
+  // Gaussian-weighted average, scaled back up by its own span (the pre-density-normalization
+  // formula, see `SpectrumUpdate::db_raw`'s own Rust doc) — so pink noise reads flat and a swept
+  // tone reads undiluted, the conventional RTA display, instead of `db`'s density-correct but
+  // tone-drooping one (`gaussian_power`'s doc, cageq-monitor/src/lib.rs). A real backend
+  // recomputation, not a display-side approximation: an earlier version of this toggle added a
+  // fixed dB/octave slope in the frontend instead, which only happened to cancel the density
+  // normalization's effect on genuinely broadband content — it did nothing for (and further
+  // distorted) a tone's own dilution droop, a real, separate effect no constant slope can correct.
+  // Off by default, same as `linear`: the density-correct view is the right default for judging a
+  // tonal correction, this is the occasional alternate convention some people prefer to eyeball.
+  tilt: boolean;
+};
+const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true, linear: false, tilt: false };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation, and
@@ -634,7 +654,12 @@ export function SpectrumScope({
         // the backend's Gaussian reduction essentially never produces two adjacent bins with the
         // exact same value the way the old `max`-based one routinely did, so there's no "tied run"
         // left to collapse or preserve the shape of.
-        const srcDb = p.linear ? s.db_lin : s.db;
+        // Tilt picks db_raw/db_lin_raw instead of db/db_lin — a real backend recomputation (see
+        // Params.tilt's own doc), not a display-side approximation, so it composes with `corr`
+        // exactly the same way regardless of which one is selected. srcPeakDb is untouched by
+        // Tilt on purpose: peak_db/peak_db_lin (max_power, not gaussian_power) were never part of
+        // the density-normalization distinction in the first place — see peak_db's own Rust doc.
+        const srcDb = p.linear ? (p.tilt ? s.db_lin_raw : s.db_lin) : p.tilt ? s.db_raw : s.db;
         const srcPeakDb = p.linear ? s.peak_db_lin : s.peak_db;
         for (let i = 0; i < n; i++) {
           vScratch[i] = corr ? srcDb[i] - corr[i] : srcDb[i];
@@ -935,6 +960,10 @@ export function SpectrumScope({
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
               <span className="vs-tune-label">{t("scope.undistort")}</span>
               <input type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
+            </label>
+            <label className="vs-tune-row vs-tune-check" title={t("scope.tiltHint")}>
+              <span className="vs-tune-label">{t("scope.tilt")}</span>
+              <input type="checkbox" checked={params.tilt} onChange={(e) => set("tilt", e.currentTarget.checked)} />
             </label>
             <label className="vs-tune-row vs-tune-check" title={t("scope.linearHint")}>
               <span className="vs-tune-label">{t("scope.linear")}</span>
