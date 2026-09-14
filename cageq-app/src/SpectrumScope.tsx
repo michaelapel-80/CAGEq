@@ -39,29 +39,24 @@ type Params = {
   haze: number;
   undistort: boolean;
   linear: boolean;
+  // Picks `SpectrumUpdate`'s `db_raw`/`db_lin_raw` fields instead of `db`/`db_lin` — the same
+  // Gaussian-weighted average, correctly re-calibrated (the pre-density-normalization formula, see
+  // `SpectrumUpdate::db_raw`'s own Rust doc) — so pink noise reads flat and a tone reads at its
+  // true level, the conventional RTA display, instead of `db`'s density-correct but tone-drooping
+  // one (`gaussian_power`'s doc, cageq-monitor/src/lib.rs). A real backend recomputation, not a
+  // display-side approximation: an earlier version of this toggle added a fixed dB/octave slope in
+  // the frontend instead, which only happened to cancel the density normalization's effect on
+  // genuinely broadband content — it did nothing for (and further distorted) a tone's own dilution
+  // droop, a real, separate effect no constant slope can correct.
+  //
+  // Lives in `Params`/`useTunableParams` — deliberately manual-save, same as every other control in
+  // this panel (an earlier version gave this one its own always-auto-persisted storage instead;
+  // reverted: two checkboxes in the same panel behaving differently, one "sticking" immediately and
+  // the other only on an explicit "save as default", was confusing rather than helpful). Default
+  // true: most people want this on and are the ones actually reading real levels off the curve.
+  tilt: boolean;
 };
-const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true, linear: false };
-// Picks `SpectrumUpdate`'s `db_raw`/`db_lin_raw` fields instead of `db`/`db_lin` — the same
-// Gaussian-weighted average, correctly re-calibrated (the pre-density-normalization formula, see
-// `SpectrumUpdate::db_raw`'s own Rust doc) — so pink noise reads flat and a tone reads at its true
-// level, the conventional RTA display, instead of `db`'s density-correct but tone-drooping one
-// (`gaussian_power`'s doc, cageq-monitor/src/lib.rs). A real backend recomputation, not a
-// display-side approximation: an earlier version of this toggle added a fixed dB/octave slope in
-// the frontend instead, which only happened to cancel the density normalization's effect on
-// genuinely broadband content — it did nothing for (and further distorted) a tone's own dilution
-// droop, a real, separate effect no constant slope can correct.
-//
-// Kept out of `Params`/`useTunableParams` (which is deliberately manual-save — see that hook's own
-// doc, "save as default" is a distinct action from just moving a slider) and given its own always-
-// auto-persisted storage instead, on default-on: unlike the "look" parameters above, this is a
-// correctness-adjacent reading choice most people want to just leave on and forget, the same way
-// `harmonicFold`/`fftSize` auto-persist in App.tsx — except this one stays local to SpectrumScope
-// rather than lifted there, since (unlike those two, which the one shared backend monitor
-// enforces) it's a pure per-viewer pick over data the backend already always sends, and EqChart's
-// own spectrum backdrop has no use for it at all (always log, always `db` — see `SpectrumData`'s
-// own doc in EqChart.tsx) — a second, real-but-different reason (on top of `linear`'s own doc's
-// axis-mode one) SpectrumScope and EqChart don't share this kind of setting.
-const TILT_STORAGE_KEY = "cageq-spectrumscope-tilt";
+const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true, linear: false, tilt: true };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation, and
@@ -422,26 +417,6 @@ export function SpectrumScope({
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
-  // See TILT_STORAGE_KEY's own doc for why this lives outside `Params`/`useTunableParams`: always
-  // auto-persisted (not gated behind "save as default"), default-on.
-  const [tilt, setTilt] = useState<boolean>(() => {
-    try {
-      const raw = localStorage.getItem(TILT_STORAGE_KEY);
-      return raw === null ? true : raw === "1";
-    } catch {
-      return true; // private-mode/quota localStorage failure — just default on rather than crash
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem(TILT_STORAGE_KEY, tilt ? "1" : "0");
-    } catch {
-      // Cosmetic preference, not worth surfacing an error for — same posture as
-      // useTunableParams's own saveAsDefault.
-    }
-  }, [tilt]);
-  const tiltRef = useRef(tilt);
-  tiltRef.current = tilt;
   // Refreshed every render, read fresh each frame inside the mount-once rAF loop below — same
   // pattern as `paramsRef`.
   const sampleRateRef = useRef(sampleRate);
@@ -684,12 +659,11 @@ export function SpectrumScope({
         // exact same value the way the old `max`-based one routinely did, so there's no "tied run"
         // left to collapse or preserve the shape of.
         // Tilt picks db_raw/db_lin_raw instead of db/db_lin — a real backend recomputation (see
-        // TILT_STORAGE_KEY's own doc), not a display-side approximation, so it composes with `corr`
+        // Params.tilt's own doc), not a display-side approximation, so it composes with `corr`
         // exactly the same way regardless of which one is selected. srcPeakDb is untouched by
         // Tilt on purpose: peak_db/peak_db_lin (max_power, not gaussian_power) were never part of
         // the density-normalization distinction in the first place — see peak_db's own Rust doc.
-        const tiltOn = tiltRef.current;
-        const srcDb = p.linear ? (tiltOn ? s.db_lin_raw : s.db_lin) : tiltOn ? s.db_raw : s.db;
+        const srcDb = p.linear ? (p.tilt ? s.db_lin_raw : s.db_lin) : p.tilt ? s.db_raw : s.db;
         const srcPeakDb = p.linear ? s.peak_db_lin : s.peak_db;
         for (let i = 0; i < n; i++) {
           vScratch[i] = corr ? srcDb[i] - corr[i] : srcDb[i];
@@ -993,7 +967,7 @@ export function SpectrumScope({
             </label>
             <label className="vs-tune-row vs-tune-check" title={t("scope.tiltHint")}>
               <span className="vs-tune-label">{t("scope.tilt")}</span>
-              <input type="checkbox" checked={tilt} onChange={(e) => setTilt(e.currentTarget.checked)} />
+              <input type="checkbox" checked={params.tilt} onChange={(e) => set("tilt", e.currentTarget.checked)} />
             </label>
             <label className="vs-tune-row vs-tune-check" title={t("scope.linearHint")}>
               <span className="vs-tune-label">{t("scope.linear")}</span>
