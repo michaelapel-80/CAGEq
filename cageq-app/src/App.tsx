@@ -556,26 +556,22 @@ function App() {
     localStorage.setItem("cageq-theme", theme);
   }, [theme]);
   const cycleTheme = () => setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
-  // Spectrum analyzer window size — one of SPEC_FFT_SIZES (~171/341/683 ms; see cageq-monitor's
-  // BASE_FFT_SIZE/MED_FFT_SIZE/HIGH_RES_FFT_SIZE docs for the resolution/smearing tradeoff each
-  // tier buys), the 3-position slider both SpectrumScope and EqChart render. Backend-side, not
-  // just a display setting, so it lives here (not SpectrumScope's own tune panel state) and Meter
-  // — which owns the monitor's start/stop lifecycle — has to know about it too, the same way it
-  // already does for `deviceId`.
+  // Spectrum analyzer window size and harmonic folding — both lifted out of SpectrumScope's own
+  // per-view tune-panel state because both run backend-side, on the one shared monitor
+  // (cageq-monitor's `Spectrum`/`find_peaks`), so two open spectrum views would otherwise show
+  // inconsistent control state while only one is actually in effect. Both are live-adjustable
+  // without restarting the monitor: `fftSize` reconfigures the running `Spectrum` in place (see
+  // `Spectrum::reconfigure`'s own doc for why a tier change never needs to reopen the WASAPI
+  // session), the same way harmonic folding already toggled live. Each fires its own Tauri
+  // command directly from the setter's effect below, independent of Meter's start/stop lifecycle.
   const [specFftSize, setSpecFftSize] = useState<number>(() => {
     const stored = Number(localStorage.getItem("cageq-spec-fft-size"));
     return (SPEC_FFT_SIZES as readonly number[]).includes(stored) ? stored : SPEC_FFT_SIZES[0];
   });
   useEffect(() => {
     localStorage.setItem("cageq-spec-fft-size", String(specFftSize));
+    invoke("set_spectrum_fft_size", { fftSize: specFftSize }).catch(() => {});
   }, [specFftSize]);
-  // Spectrum analyzer harmonic folding — same reasoning as `specFftSize` just above (lifted out of
-  // SpectrumScope's own per-view tune-panel state), but for a different reason: detection itself
-  // now runs backend-side, on the one shared monitor (`cageq-monitor::find_peaks`), so two open
-  // spectrum views would otherwise show inconsistent checkbox state while only one toggle is
-  // actually in effect. Unlike `specFftSize`, changing it needs no monitor restart — just the live
-  // `set_spectrum_harmonic_fold` command, fired directly from the setter below rather than a
-  // Meter-owned start/stop effect.
   const [specHarmonicFold, setSpecHarmonicFold] = useState<boolean>(() => localStorage.getItem("cageq-spec-fold") === "1");
   useEffect(() => {
     localStorage.setItem("cageq-spec-fold", specHarmonicFold ? "1" : "0");
@@ -2914,7 +2910,7 @@ function App() {
                   </div>
                     {/* §5.3c post-EQ meters beside the chart (loopback, post-EQ) — always on. */}
                     <div className="meter-col">
-                      <Meter deviceId={deviceId} specFftSize={specFftSize} plotBox={plotBox} onSampleRate={setSampleRate} />
+                      <Meter deviceId={deviceId} plotBox={plotBox} onSampleRate={setSampleRate} />
                     </div>
                   </div>
                   {/* Full-width host for the chart legend (portaled from the chart) — spans under

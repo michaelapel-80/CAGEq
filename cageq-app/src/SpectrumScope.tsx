@@ -319,11 +319,14 @@ export function SpectrumScope({
    *  `biquad.ts`'s default 48 kHz only when genuinely unknown. */
   sampleRate?: number;
   /** The backend's analysis window size — one of `SPEC_FFT_SIZES` (`EqChart.tsx`), App.tsx-owned
-   *  (not this component's own tune-panel params) because changing it means restarting the
-   *  loopback monitor, which `Meter` owns; the slider rendered here just reads/writes App.tsx's
-   *  state via these two props. See cageq-monitor's `BASE_FFT_SIZE`/`MED_FFT_SIZE`/
-   *  `HIGH_RES_FFT_SIZE` docs for what each tier actually trades (resolution for temporal
-   *  smearing, not CPU — CPU cost is negligible at all three). */
+   *  (not this component's own tune-panel params) because it's backend-side and global to the one
+   *  running monitor, not per-viewer, so two open spectrum views must show the same slider
+   *  position rather than each independently believing whichever they last set. The slider
+   *  rendered here just reads/writes App.tsx's state via these two props, which also pushes the
+   *  live `set_spectrum_fft_size` command — the running monitor reconfigures its analysis window
+   *  in place (see cageq-monitor's `Spectrum::reconfigure`), no restart. See cageq-monitor's
+   *  `BASE_FFT_SIZE`/`MED_FFT_SIZE`/`HIGH_RES_FFT_SIZE` docs for what each tier actually trades
+   *  (resolution for temporal smearing, not CPU — CPU cost is negligible at all three). */
   fftSize?: number;
   onFftSizeChange?: (v: number) => void;
   /** Whether the backend's peak-finder (`cageq-monitor::find_peaks`) folds a harmonic series into
@@ -332,7 +335,7 @@ export function SpectrumScope({
    *  per-viewer, so two open spectrum views must show the same checkbox state rather than each
    *  independently believing whichever they last set. The checkbox rendered here just reads/writes
    *  App.tsx's state via these two props, which also pushes the live `set_spectrum_harmonic_fold`
-   *  command — no monitor restart needed, unlike `fftSize`.
+   *  command — same live-no-restart shape as `fftSize` now has.
    *
    *  Off by default: decluttering a harmonic series down to its fundamental is the right default
    *  for real program material (a mains hum's ladder, an instrument's own overtones), but it

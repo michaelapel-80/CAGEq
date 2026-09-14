@@ -112,16 +112,10 @@ function parseAccent(hex: string): [number, number, number] {
 
 export function Meter({
   deviceId,
-  specFftSize,
   plotBox,
   onSampleRate,
 }: {
   deviceId: string;
-  /** The spectrum analyzer's window-size slider position (App.tsx-owned, one of `SPEC_FFT_SIZES`
-   *  — SpectrumScope's/EqChart's tune panels edit it) — backend-side, not just a display setting,
-   *  so changing it restarts the monitor here the same way a device change already does (see
-   *  `start_monitor`'s own doc). */
-  specFftSize: number;
   /** Rendered chart plot-area box (px) so the bars match the chart's Y extent (top gridline → X
    *  axis) instead of stretching past it. Null until measured → bars just fill the column. */
   plotBox: { top: number; height: number } | null;
@@ -157,7 +151,7 @@ export function Meter({
     });
     (async () => {
       try {
-        await invoke("start_monitor", { device: deviceId || null, fftSize: specFftSize });
+        await invoke("start_monitor", { device: deviceId || null });
         setErr(null);
       } catch (e) {
         setErr(String(e));
@@ -169,7 +163,7 @@ export function Meter({
       invoke("stop_monitor").catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceId, specFftSize]);
+  }, [deviceId]);
 
   // Level bar's beam canvas — sized by measuring its own container, matching Vectorscope's own
   // ResizeObserver + devicePixelRatio convention (the bar's height is dynamic, driven by `plotBox`

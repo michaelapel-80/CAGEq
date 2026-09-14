@@ -304,10 +304,11 @@ export function EqChart({
    *  Vectorscope uses for its sample stream. */
   spectrumRef?: RefObject<SpectrumData | null>;
   /** The backend's analysis window size for the (one, shared) loopback spectrum — one of
-   *  `SPEC_FFT_SIZES`, same setting SpectrumScope's tune panel exposes, App.tsx-owned since
-   *  changing it restarts the monitor (see that component's identically-named props for the full
-   *  doc). Both views' sliders just read/write this one shared value, since there's only ever one
-   *  backend Spectrum active at a time regardless of which view happens to be on screen. */
+   *  `SPEC_FFT_SIZES`, same setting SpectrumScope's tune panel exposes, App.tsx-owned since it's
+   *  backend-side and global to the one running monitor (see that component's identically-named
+   *  props for the full doc — changing it live-reconfigures the running `Spectrum`, no monitor
+   *  restart). Both views' sliders just read/write this one shared value, since there's only ever
+   *  one backend Spectrum active at a time regardless of which view happens to be on screen. */
   fftSize?: number;
   onFftSizeChange?: (v: number) => void;
   /** The applied filter cascade (AutoEq fit + custom). Its magnitude response is removed from

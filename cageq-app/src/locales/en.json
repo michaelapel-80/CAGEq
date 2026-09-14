@@ -141,7 +141,7 @@
     "linear": "Linear",
     "linearHint": "Linear (constant-Hz) frequency axis instead of log — reads a harmonic series as an evenly-spaced comb",
     "fftSize": "Window",
-    "fftSizeHint": "Analysis window size: longer means better low-frequency resolution, at the cost of smearing anything that changes faster than the window itself (~171/341/683 ms) — restarts the analyzer when changed",
+    "fftSizeHint": "Analysis window size: longer means better low-frequency resolution, at the cost of smearing anything that changes faster than the window itself (~171/341/683 ms)",
     "fftSizeTier0": "Base",
     "fftSizeTier1": "Med",
     "fftSizeTier2": "High",

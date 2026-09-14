@@ -141,7 +141,7 @@
     "linear": "Linear",
     "linearHint": "Lineare (konstante Hz-Schritte) statt logarithmische Frequenzachse — zeigt eine Obertonreihe als gleichmäßig verteilten Kamm",
     "fftSize": "Fenster",
-    "fftSizeHint": "Analysefenster-Größe: länger bedeutet bessere Auflösung im Bass, auf Kosten der Verschmierung von allem, was sich schneller als das Fenster selbst ändert (~171/341/683 ms) — startet den Analyzer bei Änderung neu",
+    "fftSizeHint": "Analysefenster-Größe: länger bedeutet bessere Auflösung im Bass, auf Kosten der Verschmierung von allem, was sich schneller als das Fenster selbst ändert (~171/341/683 ms)",
     "fftSizeTier0": "Basis",
     "fftSizeTier1": "Mittel",
     "fftSizeTier2": "Hoch",

@@ -57,11 +57,25 @@ struct ScopeViewers(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 /// Live toggle for the spectrum analyzer's harmonic folding (§5.2-adjacent — the "Fold" checkbox
 /// in `SpectrumScope`). Shared into the monitor exactly like `ScopeViewers`, so it survives
-/// monitor restarts (device/high-res changes) and — the whole point of an atomic here rather than
+/// monitor restarts (device changes) and — the whole point of an atomic here rather than
 /// a `start_monitor` parameter — flips without restarting anything, set by
 /// `set_spectrum_harmonic_fold`.
 #[derive(Default)]
 struct HarmonicFoldState(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+/// Live tier for the spectrum analyzer's FFT-size slider (`cageq_monitor`'s
+/// `BASE_FFT_SIZE`/`MED_FFT_SIZE`/`HIGH_RES_FFT_SIZE`). Shared into the monitor exactly like
+/// `HarmonicFoldState` — survives monitor restarts (device changes) and, the whole point of an
+/// atomic here rather than a `start_monitor` parameter, changes without restarting anything,
+/// set by `set_spectrum_fft_size`. Defaults to 8192 (`BASE_FFT_SIZE`, private to `cageq_monitor`
+/// so hardcoded here the same way a couple of its own examples already do — `Spectrum`'s own
+/// snap-to-nearest-tier defends against any drift if that constant's value ever changes).
+struct SpecFftSizeState(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl Default for SpecFftSizeState {
+    fn default() -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(8192)))
+    }
+}
 
 /// §5.3c data plane: per-stream `Channel` subscribers. These streams used to ride `app.emit`,
 /// but Tauri delivers each backend→frontend *event* by evaluating a script in the webview — at
@@ -658,20 +672,19 @@ fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
 /// spectrum/scope streams) to every channel registered via `subscribe_*` — see [`StreamSubs`] for
 /// why channels, not events. Replaces any monitor already running (e.g. after a device change).
 ///
-/// `fft_size` selects the spectrum analyzer's window size for this monitor's lifetime — one of
-/// `cageq_monitor`'s internal `BASE_FFT_SIZE`/`MED_FFT_SIZE`/`HIGH_RES_FFT_SIZE` (the frontend's
-/// 3-position slider; see those constants' own docs for the tradeoff, and `Spectrum::new`'s own
-/// doc for the defensive snap-to-nearest-tier this doesn't need to duplicate) — like a device
-/// change, changing it means calling `start_monitor` again. Harmonic folding is *not* a parameter
-/// here — it rides `HarmonicFoldState`, live-toggleable via `set_spectrum_harmonic_fold` without
-/// restarting the monitor.
+/// `fft_size` is *not* a parameter here — like harmonic folding, it rides `SpecFftSizeState`,
+/// live-adjustable via `set_spectrum_fft_size` without restarting the monitor (`Spectrum` inside
+/// `cageq_monitor` reconfigures itself in place; see its `reconfigure`'s own doc for why a tier
+/// change never needs to touch the FFT plan or reopen the WASAPI session). Harmonic folding is
+/// the same shape — it rides `HarmonicFoldState`, live-toggleable via
+/// `set_spectrum_harmonic_fold`.
 #[tauri::command]
 fn start_monitor(
     device: Option<String>,
-    fft_size: usize,
     state: State<MonitorState>,
     scope_viewers: State<ScopeViewers>,
     harmonic_fold: State<HarmonicFoldState>,
+    spec_fft_size: State<SpecFftSizeState>,
     subs: State<StreamSubs>,
 ) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -686,7 +699,7 @@ fn start_monitor(
     let monitor = cageq_monitor::Monitor::start(
         device,
         scope_viewers.0.clone(),
-        fft_size,
+        spec_fft_size.0.clone(),
         harmonic_fold.0.clone(),
         move |update| fan_out(&meter_subs, &meter_alive, update),
         move |spectrum| fan_out(&spectrum_subs, &spectrum_alive, spectrum),
@@ -701,6 +714,13 @@ fn start_monitor(
 #[tauri::command]
 fn set_spectrum_harmonic_fold(fold: bool, state: State<HarmonicFoldState>) {
     state.0.store(fold, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Live-adjust the spectrum analyzer's FFT-size tier — see `SpecFftSizeState`'s own doc for why
+/// this is a standalone command rather than a `start_monitor` parameter.
+#[tauri::command]
+fn set_spectrum_fft_size(fft_size: usize, state: State<SpecFftSizeState>) {
+    state.0.store(fft_size, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Register this webview's meter-stream channel — once per webview lifetime (frontend
@@ -1508,6 +1528,7 @@ pub fn run() {
             app.manage(TestSignalState::default());
             app.manage(ScopeViewers::default());
             app.manage(HarmonicFoldState::default());
+            app.manage(SpecFftSizeState::default());
             app.manage(StreamSubs::default());
             Ok(())
         })
@@ -1531,6 +1552,7 @@ pub fn run() {
             stop_monitor,
             set_scope_viewer,
             set_spectrum_harmonic_fold,
+            set_spectrum_fft_size,
             subscribe_meter,
             subscribe_spectrum,
             subscribe_scope,
