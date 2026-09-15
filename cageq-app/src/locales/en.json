@@ -387,6 +387,16 @@
   "meter": {
     "levelTitle": "Output level (dBFS): phosphor beam, amber true-peak (dBTP), neutral RMS",
     "lufsTitle": "Loudness (LUFS): short-term fill, momentary mark (BS.1770)",
+    "resetTitle": "Restart the Integrated / Loudness Range / Peak Max measurement — it runs for as long as the meter stays open otherwise",
+    "resetLabel": "Loudness",
+    "resetButton": "Restart",
+    "pkTitle": "Peak — true peak level (dBTP), a fast follower with a brief hold and release",
+    "rmsTitle": "RMS — true RMS level (VU-integrated), dBFS",
+    "mTitle": "Momentary — BS.1770 K-weighted loudness over the last 400 ms, LUFS",
+    "sTitle": "Short-term — BS.1770 K-weighted loudness over the last 3 s, LUFS",
+    "iTitle": "Integrated — the whole measurement's overall gated loudness (BS.1770), LUFS. Runs for as long as the meter stays open — use reset to start fresh.",
+    "lraTitle": "Loudness Range (LRA) — EBU Tech 3342: the spread, in LU, between the loud and quiet parts of the whole measurement (95th minus 10th percentile of gated short-term loudness)",
+    "pkMaxTitle": "Peak Max — the loudest true peak (dBTP) seen since the last reset",
     "unavailable": "Meter unavailable: {{error}}"
   },
 

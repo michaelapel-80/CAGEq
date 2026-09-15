@@ -29,6 +29,19 @@ pub struct MeterUpdate {
     pub momentary_lufs: f32,
     /// BS.1770 K-weighted short-term loudness (3 s window), LUFS (floored at -70).
     pub short_term_lufs: f32,
+    /// BS.1770 gated integrated loudness — the whole measurement's overall level, EBU R128's
+    /// headline number — LUFS (floored at -70). Accumulates for as long as the capture session
+    /// stays open (a slot/A-B/Dry switch does *not* reset it, only a device/rate change does, or
+    /// the reset control below), same window `loudness_range` gates against.
+    pub integrated_lufs: f32,
+    /// EBU Tech 3342 loudness range (LRA): the spread, in LU, between the 10th and 95th
+    /// percentile of gated short-term loudness across the whole measurement — a real statistical
+    /// dynamics measure, not a crest-factor stat. `0.0` (not negative, never NaN) before there's
+    /// enough history for a meaningful gate, same as `integrated_lufs` above.
+    pub loudness_range: f32,
+    /// The loudest true peak (dBTP) seen since the last reset — an all-time high-water mark, not
+    /// the PPM-style decaying `peak_db` above. Floored at -120.
+    pub true_peak_max_db: f32,
     /// `false` when the endpoint produced no audio this window — the UI shows an idle state
     /// rather than a misleading `-120`/`-70`.
     pub signal: bool,
@@ -522,11 +535,17 @@ mod windows_impl {
         /// toggles `find_peaks`' harmonic folding live the same way. Both are shared with the
         /// Tauri layer (`HarmonicFoldState`/`SpecFftSizeState`) so they survive a monitor restart
         /// (e.g. a device change) too.
+        ///
+        /// `reset_lufs` is the same shape again: set it once (from the Tauri layer's
+        /// `LufsResetState`) to restart the Integrated/Loudness Range/Peak Max measurement on the
+        /// very next tick, without touching momentary/short-term or restarting the monitor —
+        /// checked-and-cleared inside `run_session`'s own loop.
         pub fn start<F, G, H>(
             endpoint_id: Option<String>,
             scope_viewers: Arc<AtomicUsize>,
             fft_size: Arc<AtomicUsize>,
             harmonic_fold: Arc<AtomicBool>,
+            reset_lufs: Arc<AtomicBool>,
             on_update: F,
             on_spectrum: G,
             on_scope: H,
@@ -547,6 +566,7 @@ mod windows_impl {
                         &scope_viewers,
                         fft_size,
                         harmonic_fold,
+                        reset_lufs,
                         on_update,
                         on_spectrum,
                         on_scope,
@@ -1151,6 +1171,17 @@ mod windows_impl {
         }
     }
 
+    /// Same idea as `clamp_lufs`, but for a LU *width* (loudness range) rather than an absolute
+    /// LUFS level — 0.0 is the natural floor (no spread yet), not -70; `ebur128` itself already
+    /// never returns negative or NaN here, this just guards the non-finite case the same way.
+    fn clamp_lu(v: f64) -> f32 {
+        if v.is_finite() {
+            (v as f32).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
     /// Post-EQ spectrum analyzer: accumulates mono loopback samples, runs overlapping Hann-windowed
     /// FFTs, lightly averages the power spectrum across hops, and collapses it onto log-frequency
     /// bins. No peak-hold here — the front-end's own persistence covers that job now.
@@ -1604,6 +1635,7 @@ mod windows_impl {
         scope_viewers: &AtomicUsize,
         fft_size: Arc<AtomicUsize>,
         harmonic_fold: Arc<AtomicBool>,
+        reset_lufs: Arc<AtomicBool>,
         on_update: F,
         on_spectrum: G,
         on_scope: H,
@@ -1628,17 +1660,23 @@ mod windows_impl {
                 scope_viewers,
                 &fft_size,
                 &harmonic_fold,
+                &reset_lufs,
                 &on_update,
                 &on_spectrum,
                 &on_scope,
             ) {
                 eprintln!("[cageq-monitor] reopening capture after: {e}");
-                // Show the UI an idle state during the gap, then back off before reopening.
+                // Show the UI an idle state during the gap, then back off before reopening. A
+                // reopen already rebuilds the ebur128 instance from scratch (see run_session), so
+                // Integrated/LRA/Peak Max reset here too — same floor as the fresh-instance state.
                 on_update(MeterUpdate {
                     peak_db: DB_FLOOR,
                     rms_db: DB_FLOOR,
                     momentary_lufs: LUFS_FLOOR,
                     short_term_lufs: LUFS_FLOOR,
+                    integrated_lufs: LUFS_FLOOR,
+                    loudness_range: 0.0,
+                    true_peak_max_db: DB_FLOOR,
                     signal: false,
                     bins: Vec::new(),
                     sample_rate: 0, // unknown until the session reopens and re-reads the mix format
@@ -1683,6 +1721,7 @@ mod windows_impl {
         scope_viewers: &AtomicUsize,
         fft_size: &Arc<AtomicUsize>,
         harmonic_fold: &Arc<AtomicBool>,
+        reset_lufs: &Arc<AtomicBool>,
         on_update: &F,
         on_spectrum: &G,
         on_scope: &H,
@@ -1718,13 +1757,20 @@ mod windows_impl {
         // K-weighted loudness at the *actual* endpoint rate (ebur128 recomputes coefficients).
         // TRUE_PEAK (which subsumes SAMPLE_PEAK's own bits) also gets us BS.1770 oversampled true
         // peak "for free" off the same instance — see block_peak's own doc below for why that
-        // replaced a plain sample-peak scan.
+        // replaced a plain sample-peak scan. I | LRA add Integrated loudness and EBU Tech 3342
+        // Loudness Range — both real gated statistics `ebur128` already implements, not
+        // reimplemented here; `TRUE_PEAK` (already needed above) also gives Peak Max "for free"
+        // via `EbuR128::true_peak`'s own running maximum, no extra mode needed for that one.
         let mut ebu = ebur128::EbuR128::new(
             channels as u32,
             rate,
-            ebur128::Mode::M | ebur128::Mode::S | ebur128::Mode::TRUE_PEAK,
+            ebur128::Mode::M | ebur128::Mode::S | ebur128::Mode::TRUE_PEAK | ebur128::Mode::I | ebur128::Mode::LRA,
         )
         .map_err(|e| format!("ebur128 init: {e:?}"))?;
+        // A fresh instance has nothing to reset; drop any stale request left over from before this
+        // session opened (e.g. a reset clicked while the endpoint was mid-reopen) rather than
+        // firing it pointlessly on the first tick below.
+        reset_lufs.store(false, Ordering::Relaxed);
 
         let mut spectrum = Spectrum::new(rate, fft_size.load(Ordering::Relaxed), harmonic_fold.clone());
 
@@ -1877,6 +1923,14 @@ mod windows_impl {
                     *cell = (*cell * decay).max(target);
                 }
 
+                // A pending reset (§ meter's "restart measurement" control) restarts Integrated/
+                // Loudness Range/Peak Max together with momentary/short-term/true-peak filter
+                // state — `EbuR128::reset()` is a full reset, so this takes effect for every field
+                // below at once, on this very tick.
+                if reset_lufs.swap(false, Ordering::Relaxed) {
+                    ebu.reset();
+                }
+
                 on_update(MeterUpdate {
                     peak_db,
                     rms_db: to_db(rms_mean_sq.sqrt() as f32),
@@ -1885,6 +1939,13 @@ mod windows_impl {
                     ),
                     short_term_lufs: clamp_lufs(
                         ebu.loudness_shortterm().unwrap_or(f64::NEG_INFINITY),
+                    ),
+                    integrated_lufs: clamp_lufs(ebu.loudness_global().unwrap_or(f64::NEG_INFINITY)),
+                    loudness_range: clamp_lu(ebu.loudness_range().unwrap_or(f64::NAN)),
+                    true_peak_max_db: to_db(
+                        (0..channels as u32)
+                            .map(|c| ebu.true_peak(c).unwrap_or(0.0) as f32)
+                            .fold(0.0f32, f32::max),
                     ),
                     signal: last_signal.elapsed() < SILENCE_GAP,
                     bins: intensity.iter().map(|&v| round_to(v, 3)).collect(),
@@ -2373,6 +2434,93 @@ mod windows_impl {
             assert!((peaks[0].hz - 1000.0).abs() < TEST_BIN_HZ * 2.0);
         }
     }
+
+    /// First loudness-side tests in this crate — everything up to here only exercised
+    /// `Spectrum`/`find_peaks`. Drives `ebur128::EbuR128` directly (no WASAPI needed, same
+    /// "test the underlying machinery" approach `tests/decimation_spike.rs` already takes for
+    /// `Spectrum`), so this is really a test of *this crate's own integration* (which mode flags
+    /// are enabled, that a reset actually reaches every field) rather than re-proving `ebur128`'s
+    /// own Tech 3342 math, which is out of scope here.
+    #[cfg(test)]
+    mod loudness {
+        use super::*;
+
+        const TEST_RATE: u32 = 48_000;
+
+        /// A full-scale sine at `freq` Hz, `secs` long, interleaved mono-as-stereo (both channels
+        /// identical) — `EbuR128` wants real frame data, not a bare mono stream, for a 2-channel
+        /// instance. `gain` scales linear amplitude (1.0 = 0 dBFS).
+        fn tone_frames(freq: f32, secs: f32, gain: f32) -> Vec<f32> {
+            let n = (TEST_RATE as f32 * secs) as usize;
+            let step = 2.0 * std::f64::consts::PI * freq as f64 / TEST_RATE as f64;
+            let mut out = Vec::with_capacity(n * 2);
+            for i in 0..n {
+                let s = (gain as f64 * (step * i as f64).sin()) as f32;
+                out.push(s);
+                out.push(s);
+            }
+            out
+        }
+
+        fn new_ebu() -> ebur128::EbuR128 {
+            ebur128::EbuR128::new(
+                2,
+                TEST_RATE,
+                ebur128::Mode::M | ebur128::Mode::S | ebur128::Mode::TRUE_PEAK | ebur128::Mode::I | ebur128::Mode::LRA,
+            )
+            .expect("ebur128 init")
+        }
+
+        /// A programme alternating between a loud and a much quieter passage should show a real,
+        /// positive Loudness Range — the whole reason LRA exists (a track that's just constant
+        /// loudness the whole way through has ~0 LU, one that alternates loud/quiet has a wide
+        /// spread) — and Integrated should land somewhere between the two blocks' own levels, not
+        /// at either extreme.
+        #[test]
+        fn alternating_loud_and_quiet_blocks_show_a_real_loudness_range() {
+            let mut ebu = new_ebu();
+            for _ in 0..6 {
+                ebu.add_frames_f32(&tone_frames(1000.0, 3.0, 0.8)).unwrap(); // loud
+                ebu.add_frames_f32(&tone_frames(1000.0, 3.0, 0.05)).unwrap(); // quiet
+            }
+
+            let integrated = ebu.loudness_global().unwrap();
+            let lra = ebu.loudness_range().unwrap();
+            assert!(integrated.is_finite(), "expected a real integrated reading, got {integrated}");
+            assert!(lra > 3.0, "alternating loud/quiet should show a real LRA spread, got {lra} LU");
+        }
+
+        /// A programme at one constant level should show a small Loudness Range — the negative
+        /// case for the test above, so a real spread isn't just LRA always reading high.
+        #[test]
+        fn constant_level_shows_a_small_loudness_range() {
+            let mut ebu = new_ebu();
+            for _ in 0..6 {
+                ebu.add_frames_f32(&tone_frames(1000.0, 3.0, 0.3)).unwrap();
+            }
+            let lra = ebu.loudness_range().unwrap();
+            assert!(lra < 1.0, "a constant-level programme should show ~0 LRA, got {lra} LU");
+        }
+
+        /// `EbuR128::reset()` — what the meter's reset control calls — should drop Integrated back
+        /// to "no data" (-inf, clamped to LUFS_FLOOR by `clamp_lufs`), Loudness Range back to 0,
+        /// and the running true-peak maximum back to silence, all together, in one call.
+        #[test]
+        fn reset_clears_integrated_range_and_peak_max_together() {
+            let mut ebu = new_ebu();
+            ebu.add_frames_f32(&tone_frames(1000.0, 3.0, 0.9)).unwrap();
+            ebu.add_frames_f32(&tone_frames(1000.0, 3.0, 0.05)).unwrap();
+
+            assert!(ebu.loudness_global().unwrap().is_finite());
+            assert!(ebu.true_peak(0).unwrap() > 0.0, "should have a real peak before reset");
+
+            ebu.reset();
+
+            assert_eq!(clamp_lufs(ebu.loudness_global().unwrap_or(f64::NEG_INFINITY)), LUFS_FLOOR);
+            assert_eq!(clamp_lu(ebu.loudness_range().unwrap_or(f64::NAN)), 0.0);
+            assert_eq!(ebu.true_peak(0).unwrap(), 0.0, "true-peak max should be zeroed by reset");
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -2388,6 +2536,7 @@ mod stub {
             _scope_viewers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
             _fft_size: std::sync::Arc<std::sync::atomic::AtomicUsize>,
             _harmonic_fold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            _reset_lufs: std::sync::Arc<std::sync::atomic::AtomicBool>,
             _on_update: F,
             _on_spectrum: G,
             _on_scope: H,

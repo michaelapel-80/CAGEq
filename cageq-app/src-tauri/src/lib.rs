@@ -80,6 +80,14 @@ impl Default for SpecFftSizeState {
     }
 }
 
+/// One-shot "restart the Integrated LUFS / Loudness Range / Peak Max measurement" request for
+/// the meter. Shared into the monitor exactly like `HarmonicFoldState` — survives monitor
+/// restarts (device changes) and needs no `start_monitor` parameter of its own — but unlike that
+/// one, this is edge- not level-triggered: `reset_lufs_meter` sets it, the capture thread clears
+/// it back to `false` the instant it's acted on (see `cageq_monitor::run_session`'s own doc).
+#[derive(Default)]
+struct LufsResetState(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
 /// §5.3c data plane: per-stream `Channel` subscribers. These streams used to ride `app.emit`,
 /// but Tauri delivers each backend→frontend *event* by evaluating a script in the webview — at
 /// this app's sustained ~120 events/s (meter + spectrum at 60 fps each) that churned memory in
@@ -712,7 +720,8 @@ fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
 /// `cageq_monitor` reconfigures itself in place; see its `reconfigure`'s own doc for why a tier
 /// change never needs to touch the FFT plan or reopen the WASAPI session). Harmonic folding is
 /// the same shape — it rides `HarmonicFoldState`, live-toggleable via
-/// `set_spectrum_harmonic_fold`.
+/// `set_spectrum_harmonic_fold`. The meter's Integrated/Loudness Range/Peak Max reset rides
+/// `LufsResetState` the same way, via `reset_lufs_meter`.
 #[tauri::command]
 fn start_monitor(
     device: Option<String>,
@@ -720,6 +729,7 @@ fn start_monitor(
     scope_viewers: State<ScopeViewers>,
     harmonic_fold: State<HarmonicFoldState>,
     spec_fft_size: State<SpecFftSizeState>,
+    lufs_reset: State<LufsResetState>,
     subs: State<StreamSubs>,
 ) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -736,6 +746,7 @@ fn start_monitor(
         scope_viewers.0.clone(),
         spec_fft_size.0.clone(),
         harmonic_fold.0.clone(),
+        lufs_reset.0.clone(),
         move |update| fan_out(&meter_subs, &meter_alive, update),
         move |spectrum| fan_out(&spectrum_subs, &spectrum_alive, spectrum),
         move |scope| fan_out(&scope_subs, &scope_alive, scope),
@@ -749,6 +760,15 @@ fn start_monitor(
 #[tauri::command]
 fn set_spectrum_harmonic_fold(fold: bool, state: State<HarmonicFoldState>) {
     state.0.store(fold, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Restart the meter's Integrated LUFS / Loudness Range / Peak Max measurement — see
+/// `LufsResetState`'s own doc. Takes effect on the capture thread's very next tick; momentary,
+/// short-term and the rest of the meter are untouched by the request itself, though
+/// `EbuR128::reset()` (what actually runs) briefly zeroes everything together.
+#[tauri::command]
+fn reset_lufs_meter(state: State<LufsResetState>) {
+    state.0.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Live-adjust the spectrum analyzer's FFT-size tier — see `SpecFftSizeState`'s own doc for why
@@ -1624,6 +1644,7 @@ pub fn run() {
             app.manage(ScopeViewers::default());
             app.manage(HarmonicFoldState::default());
             app.manage(SpecFftSizeState::default());
+            app.manage(LufsResetState::default());
             app.manage(StreamSubs::default());
             Ok(())
         })
@@ -1648,6 +1669,7 @@ pub fn run() {
             set_scope_viewer,
             set_spectrum_harmonic_fold,
             set_spectrum_fft_size,
+            reset_lufs_meter,
             subscribe_meter,
             subscribe_spectrum,
             subscribe_scope,

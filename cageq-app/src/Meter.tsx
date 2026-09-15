@@ -375,6 +375,18 @@ export function Meter({
               </label>
             );
           })}
+          <div className="vs-tune-sep" />
+          {/* Restarts Integrated/Loudness Range/Peak Max only — momentary/short-term keep
+              running (it's a full ebur128 reset under the hood, see `reset_lufs_meter`'s own doc,
+              but that only matters for the three fields here that actually hold state across
+              ticks). Lives in this tuning panel — the meter column itself has no room to spare
+              for a labeled control, and a bare icon glyph there turned out too small to notice. */}
+          <div className="vs-tune-row vs-tune-check" title={t("meter.resetTitle")}>
+            <span className="vs-tune-label">{t("meter.resetLabel")}</span>
+            <button type="button" className="vs-tune-reset" onClick={() => void invoke("reset_lufs_meter")}>
+              {t("meter.resetButton")}
+            </button>
+          </div>
         </div>
       )}
       <div
@@ -413,15 +425,40 @@ export function Meter({
           <span className="vbar-cap">LUFS</span>
         </div>
       </div>
-      <div className="meter-read">
-        <span className="mr-k">pk</span>
-        <span className={`mr-v${showNums && nums!.peak_db > 0 ? " mr-over" : ""}`}>{num(nums?.peak_db)}</span>
-        <span className="mr-k">M</span>
-        <span className="mr-v">{num(nums?.momentary_lufs)}</span>
-        <span className="mr-k">rms</span>
-        <span className="mr-v">{num(nums?.rms_db)}</span>
-        <span className="mr-k">S</span>
-        <span className="mr-v">{num(nums?.short_term_lufs)}</span>
+      <div
+        className="meter-read"
+        style={
+          // Pins the readout to exactly where the bars visually end — the same
+          // plotBox.top/height JS already uses to size `.meter-bars` itself (see its own inline
+          // style above; BAR_TOP_GAP cancels out: marginTop + height = plotBox.top + plotBox.height).
+          // Deliberately not CSS `top:100%`: that resolves against `.meter`'s own *rendered* flex
+          // box, which isn't reliably the bars' bottom edge — `.meter`/`.meter-bars` both carry
+          // `flex:1 1 auto` and can grow to fill leftover cross-axis space handed down from
+          // `.chart-row`'s `align-items:stretch`, so "100% of .meter" silently drifted below the
+          // bars' actual bottom instead of sitting flush against it.
+          plotBox ? { top: `${plotBox.top + plotBox.height}px` } : undefined
+        }
+      >
+        <span className="mr-k" title={t("meter.pkTitle")}>pk</span>
+        <span className={`mr-v${showNums && nums!.peak_db > 0 ? " mr-over" : ""}`} title={t("meter.pkTitle")}>{num(nums?.peak_db)}</span>
+        <span className="mr-k" title={t("meter.mTitle")}>M</span>
+        <span className="mr-v" title={t("meter.mTitle")}>{num(nums?.momentary_lufs)}</span>
+        <span className="mr-k" title={t("meter.rmsTitle")}>rms</span>
+        <span className="mr-v" title={t("meter.rmsTitle")}>{num(nums?.rms_db)}</span>
+        <span className="mr-k" title={t("meter.sTitle")}>S</span>
+        <span className="mr-v" title={t("meter.sTitle")}>{num(nums?.short_term_lufs)}</span>
+        <span className="mr-k" title={t("meter.iTitle")}>I</span>
+        <span className="mr-v" title={t("meter.iTitle")}>{num(nums?.integrated_lufs)}</span>
+        <span className="mr-k" title={t("meter.lraTitle")}>LRA</span>
+        <span className="mr-v" title={t("meter.lraTitle")}>{num(nums?.loudness_range)}</span>
+        <span className="mr-k" title={t("meter.pkMaxTitle")}>pkMax</span>
+        <span className={`mr-v${showNums && nums!.true_peak_max_db > 0 ? " mr-over" : ""}`} title={t("meter.pkMaxTitle")}>{num(nums?.true_peak_max_db)}</span>
+        {/* The grid's own trailing empty slot (7 pairs don't fill the last row's 4 cells) — a much
+            more discoverable spot than burying this in the tuning panel (still there too, for
+            anyone who goes looking there instead). */}
+        <button type="button" className="mr-reset" title={t("meter.resetTitle")} onClick={() => void invoke("reset_lufs_meter")}>
+          ↺ {t("meter.resetButton")}
+        </button>
       </div>
     </div>
   );

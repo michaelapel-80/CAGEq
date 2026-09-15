@@ -83,7 +83,8 @@ fn main() {
     // what this example is recording, so any tier would do. Live-adjustable now (see
     // `Spectrum::reconfigure`), but this example never touches it after starting.
     let fft_size = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(8192));
-    let monitor = match cageq_monitor::Monitor::start(None, idle, fft_size, fold, |_| {}, |_| {}, |_| {}) {
+    let reset_lufs = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let monitor = match cageq_monitor::Monitor::start(None, idle, fft_size, fold, reset_lufs, |_| {}, |_| {}, |_| {}) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("could not start the loopback recorder: {e}");

@@ -387,6 +387,16 @@
   "meter": {
     "levelTitle": "Ausgangspegel (dBFS): Phosphorstrahl, True-Peak (dBTP) bernstein, RMS neutral",
     "lufsTitle": "Lautheit (LUFS): Short-Term-Füllung, Momentary-Marke (BS.1770)",
+    "resetTitle": "Integrated / Loudness Range / Peak Max neu starten — läuft sonst, solange das Meter geöffnet ist",
+    "resetLabel": "Lautheit",
+    "resetButton": "Neu starten",
+    "pkTitle": "Peak — True-Peak-Pegel (dBTP), schneller Follower mit kurzem Halt und Release",
+    "rmsTitle": "RMS — echter RMS-Pegel (VU-integriert), dBFS",
+    "mTitle": "Momentary — BS.1770 K-gewichtete Lautheit der letzten 400 ms, LUFS",
+    "sTitle": "Short-Term — BS.1770 K-gewichtete Lautheit der letzten 3 s, LUFS",
+    "iTitle": "Integrated — die gesamte Gated-Lautheit der Messung (BS.1770), LUFS. Läuft, solange das Meter geöffnet ist — mit Reset neu starten.",
+    "lraTitle": "Loudness Range (LRA) — EBU Tech 3342: die Spannweite in LU zwischen den lauten und leisen Teilen der ganzen Messung (95. minus 10. Perzentil der gegateten Short-Term-Lautheit)",
+    "pkMaxTitle": "Peak Max — der lauteste True Peak (dBTP) seit dem letzten Reset",
     "unavailable": "Meter nicht verfügbar: {{error}}"
   },
 

@@ -25,6 +25,9 @@ export type MeterData = {
   rms_db: number;
   momentary_lufs: number;
   short_term_lufs: number;
+  integrated_lufs: number;
+  loudness_range: number;
+  true_peak_max_db: number;
   signal: boolean;
   bins: number[];
   sample_rate: number;

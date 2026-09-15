@@ -454,6 +454,7 @@ select:disabled {
   min-width: 0;
 }
 .meter-col {
+  position: relative; /* positioning context for .meter-read's absolute overlay — see its own doc */
   flex: 0 0 auto;
   width: 104px; /* fits two bars + the center scale strip */
   padding-right: 0.45rem; /* keep the chart↔bars and bars↔edge gaps roughly even */
@@ -634,14 +635,39 @@ select:disabled {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-/* Compact readout under the bars: two tight rows, dBFS pair on the left, LUFS pair on the right. */
+/* Compact readout under the bars — `.meter-col` sits in `.chart-row` (flex, align-items:stretch)
+   next to `.chart-wrap`, whose own height is JS-owned and structurally can't be grown by content
+   (see that rule's own doc — a past runaway-expansion bug, fixed once already). `.meter-col` was
+   never given that same guarantee: flexbox sizes the *row* to the tallest item regardless of any
+   one item's own height, so anything that makes `.meter-read` taller than `.meter-bars` (JS-sized
+   to match the chart) grows `.chart-row` itself, pushing `.chart-legend-host` — a plain sibling
+   *after* the row in normal flow — down the page. Adding Integrated/Loudness-Range/Peak-Max hit
+   exactly that, the same way a widened grid then immediately hit `.meter-col`'s own fixed
+   104px `width` instead (overflowing sideways).
+   The actual fix, matching `.chart-wrap`'s own "structural, not by convention": `position:
+   absolute` (below) takes `.meter-read` out of `.meter-col`'s flow entirely, so `.meter-col`'s
+   own content height becomes just `.meter-bars` again — nothing left inside it can ever grow
+   `.chart-row`, regardless of how many rows this readout has. It's free to go back to a normal
+   width (2 pairs/row, matching the original pk/M/rms/S layout) since height is no longer a
+   constraint — it now extends below the chart as an overlay instead.
+   `top: 100%` below is a pre-measurement fallback only (the instant before `plotBox` is known) —
+   Meter.tsx overrides it inline with the same `plotBox.top + plotBox.height` pixel value already
+   driving `.meter-bars`' own position, once known. `.meter`'s own rendered box (the nearest
+   `position: relative` ancestor `top: 100%` would otherwise resolve against) isn't reliable for
+   this: it and `.meter-bars` both carry `flex: 1 1 auto` and can grow to fill leftover space
+   `.chart-row`'s `align-items: stretch` hands down, landing "100% of .meter" below the bars'
+   actual bottom edge instead of flush against it. */
 .meter-read {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%; /* fallback only — see doc above; Meter.tsx sets the real pixel value inline */
   display: grid;
   grid-template-columns: auto 1fr auto 1fr;
   gap: 0 0.25rem;
-  margin-top: 0.25rem;
+  margin-top: 0.1rem;
   font-size: 0.6rem;
-  line-height: 1.25;
+  line-height: 1.1;
 }
 .mr-k {
   opacity: 0.5;
@@ -657,6 +683,32 @@ select:disabled {
    specifically a clipping-risk flag. */
 .mr-over {
   color: #e5484d;
+}
+/* Restarts Integrated/Loudness Range/Peak Max — sits in `.meter-read`'s own trailing empty slot
+   (7 label/value pairs leave the last row's 4th column empty), spanning both remaining columns so
+   it reads as one control rather than a stray label/value pair. Right in the readout itself,
+   since a bare icon glyph in the tiny LUFS caption (tried first) and a row buried in the tuning
+   panel (still there too) both turned out easy to miss. */
+.mr-reset {
+  grid-column: span 2;
+  justify-self: stretch;
+  align-self: center;
+  margin: 0;
+  padding: 0;
+  font-size: 0.58rem;
+  line-height: 1.1; /* matches .mr-k/.mr-v's own line-height so this row isn't taller than the rest */
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  cursor: pointer;
+}
+.mr-reset:hover {
+  opacity: 1;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 /* --- §5.2 chart view swap: magnitude Response vs Impulse -------------------- */
@@ -1057,6 +1109,13 @@ select:disabled {
   opacity: 1;
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+/* A `.vs-tune-reset` used as a `.vs-tune-check` row's own value (Meter.tsx's LUFS reset) rather
+   than in the head row — grid `justify-items` defaults to stretch, which would otherwise blow it
+   up to the full value-column width; `.vs-tune-check input[type="checkbox"]`'s own rule sets the
+   same `justify-self: end` for the same reason. */
+.vs-tune-check .vs-tune-reset {
+  justify-self: end;
 }
 .vs-tune-close {
   flex: none;
