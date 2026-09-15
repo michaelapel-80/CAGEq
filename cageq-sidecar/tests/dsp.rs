@@ -139,6 +139,47 @@ fn real_dsp_appends_custom_filters() {
     );
 }
 
+/// A `flat: true` request skips AutoEq's own fit entirely — no measurement, no
+/// optimizer — so a headphone AutoEq has no measurement for (or one bad enough that
+/// fitting to it makes things worse) can still be corrected purely by the user's own
+/// custom filters.
+#[test]
+fn real_dsp_flat_skips_autoeq_fit() {
+    let Some(python) = venv_python() else {
+        eprintln!("skipping flat test: no .venv");
+        return;
+    };
+    let mut sc = Sidecar::spawn(&python, &dsp_script()).expect("spawn dsp sidecar");
+    sc.ping().expect("ping");
+
+    let reply = sc
+        .call(
+            "calculate_filters",
+            json!({
+                "device": "Test DAC",
+                "flat": true,
+                "custom_filters": [{ "kind": "Peaking", "freq_hz": 1000.0, "gain_db": 5.0, "q": 1.4 }],
+            }),
+        )
+        .expect("calculate_filters with flat: true");
+
+    // Exactly the custom filter, nothing from AutoEq (no shelves, no peaking bands).
+    let filters = reply["filters"].as_array().expect("filters array");
+    assert_eq!(filters.len(), 1, "flat should return only the custom filters: {filters:?}");
+    assert_eq!(filters[0]["kind"], "Peaking");
+    assert!((filters[0]["freq_hz"].as_f64().unwrap() - 1000.0).abs() < 1.0);
+    assert!((filters[0]["gain_db"].as_f64().unwrap() - 5.0).abs() < 0.1);
+
+    // No AutoEq baseline to chase — the §5.2 reference curve is empty rather than some
+    // fetched/fitted curve.
+    assert_eq!(reply["reference_curve"].as_array().unwrap().len(), 0);
+
+    // The curve-derived quantities the Rust core composes the preamp from still work,
+    // driven purely by the custom filter's own combined response.
+    assert!(reply["g_target_db"].as_f64().unwrap().is_finite());
+    assert!((reply["g_max_peak_db"].as_f64().unwrap() - 5.0).abs() < 0.1, "peak should be the custom filter's own +5 dB");
+}
+
 /// Regression guard for the pink-noise Jacobian bug (§4.1).
 ///
 /// A *uniform* gain can't catch a mis-weighted loudness integral — it factors out of

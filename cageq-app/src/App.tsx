@@ -75,7 +75,11 @@ type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: num
 type StageId = "fit" | "content" | "tone";
 type Stage = { enabled: boolean; bands: CustomFilter[] };
 type Stages = { fit: Stage; content: Stage; tone: Stage };
-type SlotInputs = { model: string; measurementPath: string; targetPath: string; stages: Stages };
+// `flat: true` means the slot opted out of AutoEq's fit entirely (§3.4a "flat start") —
+// no measurement, no optimizer, the Fit/Content/Tone stages are the whole correction.
+// `measurementPath`/`targetPath` are left whatever they last were (not cleared) so
+// toggling back to AutoEq restores the picker instead of losing the pick.
+type SlotInputs = { model: string; measurementPath: string; targetPath: string; flat: boolean; stages: Stages };
 type Selection = { headphone: string | null; target: string | null };
 // A slot's last computed fit, persisted so launch can write cageq.txt immediately without
 // waiting on the ~1–2 s cold AutoEq fit (§3.5 launch-from-cache). Exactly the fields the
@@ -167,8 +171,8 @@ function stableStringify(v: unknown): string {
  *  used to tell whether the editor has diverged from the preset last loaded into a slot
  *  (the "dirty" flag). Compared against the sig captured at load time — see `slotPreset`.
  *  Canonical (sorted-key) so it survives a persist→reload round-trip unchanged. */
-const presetSig = (model: string, measurementPath: string, targetPath: string, stages: Stages) =>
-  stableStringify({ model, measurementPath, targetPath, stages });
+const presetSig = (model: string, measurementPath: string, targetPath: string, flat: boolean, stages: Stages) =>
+  stableStringify({ model, measurementPath, targetPath, flat, stages });
 
 /** Which preset (or archived version) a slot was last loaded from, plus the document sig at
  *  load time — so the slot can show the preset name and flag divergence. Persisted in the resume
@@ -204,6 +208,13 @@ const appliedBands = (st: Stages): CustomFilter[] =>
  *  but does use up array space until something close enough reclaims it). */
 const MAX_BANDS = 64;
 
+// §3.4a "flat start": a synthetic option folded into the header's measurement `<select>`
+// rather than a separate control, so it's selectable regardless of what's in (or not in) the
+// Headphone box — including an unmatched or empty model, exactly the case it exists for. Never
+// sent anywhere as a real measurement path; the select's own onChange translates it to/from the
+// `flat` boolean that actually crosses to the backend (see `writeFit`).
+const FLAT_MEASUREMENT = "__flat__";
+
 /** §5.2 solo: which band, in which stage, is soloed (hear only it, within its stage). */
 type Solo = { stage: StageId; idx: number };
 // The Q of EqChart's middle-mouse "frequency finder" sweep's bandpass — "relatively high" per the
@@ -225,11 +236,17 @@ function soloStages(stages: Stages, solo: Solo | null): Stages {
 
 /** Migrate a slot's inputs to the stages shape — new blobs already carry `stages`; a
  *  pre-stages blob had a single `customFilters` list, which becomes the Tone stage. */
-function migrateInputs(inp: SlotInputs & { customFilters?: CustomFilter[] }): SlotInputs {
+function migrateInputs(inp: Partial<SlotInputs> & { customFilters?: CustomFilter[] }): SlotInputs {
   const stages = inp.stages
     ? normalizeStages(inp.stages)
     : normalizeStages({ tone: { enabled: true, bands: inp.customFilters ?? defaultTone() } });
-  return { model: inp.model, measurementPath: inp.measurementPath, targetPath: inp.targetPath, stages };
+  return {
+    model: inp.model ?? "",
+    measurementPath: inp.measurementPath ?? "",
+    targetPath: inp.targetPath ?? "",
+    flat: inp.flat ?? false, // pre-§3.4a blobs predate "flat start" — always AutoEq-origin
+    stages,
+  };
 }
 
 /** Migrate the saved library to the stages shape: pre-stages templates carried
@@ -237,7 +254,7 @@ function migrateInputs(inp: SlotInputs & { customFilters?: CustomFilter[] }): Sl
  *  stages with just Tone filled). New-shape entries pass through normalized. */
 type LegacyTemplate = { id: string; name: string; stage?: StageId; bands?: CustomFilter[]; customFilters?: CustomFilter[] };
 type LegacyPreset = {
-  id: string; name: string; model: string; measurementPath: string; targetPath: string;
+  id: string; name: string; model: string; measurementPath: string; targetPath: string; flat?: boolean;
   stages?: Partial<Stages>; customFilters?: CustomFilter[];
   versions?: (Partial<PresetState> & { at?: number })[];
 };
@@ -253,12 +270,14 @@ function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyP
     model: p.model,
     measurementPath: p.measurementPath,
     targetPath: p.targetPath,
+    flat: p.flat ?? false, // pre-§3.4a presets predate "flat start" — always AutoEq-origin
     stages: p.stages ? normalizeStages(p.stages) : normalizeStages({ tone: { enabled: true, bands: p.customFilters ?? defaultTone() } }),
     versions: (p.versions ?? []).map((v) => ({
       at: v.at ?? 0,
       model: v.model ?? p.model,
       measurementPath: v.measurementPath ?? p.measurementPath,
       targetPath: v.targetPath ?? p.targetPath,
+      flat: v.flat ?? p.flat ?? false,
       stages: normalizeStages(v.stages),
     })),
   }));
@@ -288,7 +307,7 @@ const TONE_PRESET_KEY: Record<string, string> = Object.fromEntries(TONE_PRESETS.
 // same UI-owned-blob treatment as the resume state — no per-field Rust change.
 type FilterTemplate = { id: string; name: string; stage: StageId; bands: CustomFilter[] };
 // The loadable payload shared by a preset and its archived versions (everything a full load needs).
-type PresetState = { model: string; measurementPath: string; targetPath: string; stages: Stages };
+type PresetState = { model: string; measurementPath: string; targetPath: string; flat: boolean; stages: Stages };
 // A past state of a preset, kept when the user explicitly saves a new version. `at` = timestamp.
 type PresetVersion = PresetState & { at: number };
 // A UserPreset is its *current* state plus a linear history of explicitly-saved previous versions
@@ -530,6 +549,9 @@ function App() {
   const [query, setQuery] = useState(""); // headphone-model search / selected model name
   const [measurementPath, setMeasurementPath] = useState(""); // chosen measurement (source) path
   const [targetPath, setTargetPath] = useState("");
+  // §3.4a "flat start": skip AutoEq's fit entirely for the active slot. `measurementPath`/
+  // `targetPath` are left as whatever they were so toggling back to AutoEq restores the pick.
+  const [flat, setFlat] = useState(false);
   const [stages, setStages] = useState<Stages>(defaultStages()); // §3.4 the three per-slot filter stages
   const [activeStage, setActiveStage] = useState<StageId>("fit"); // which stage the grid/chart edits (restored from resume)
   // Read-only "AutoEq fit" tab in the band section: shows the automatic parametric fit (not one
@@ -733,8 +755,10 @@ function App() {
     const soloing = soloRef.current != null;
     const applied = await invoke<ApplyResult>("apply", {
       device: dev.eqapo_pattern, // the EqAPO-matchable device pattern, not the headphone
-      headphone: inp.measurementPath,
-      target: inp.targetPath || null,
+      // §3.4a flat start: no measurement to fit, so no target either — a target is
+      // meaningless without a measurement to compensate against.
+      headphone: inp.flat ? null : inp.measurementPath,
+      target: inp.flat ? null : inp.targetPath || null,
       slot,
       // Every enabled stage's enabled bands, summed into one list (§3.4). Bypassed bands and
       // disabled stages stay in the UI but are excluded from what's written.
@@ -846,19 +870,22 @@ function App() {
           setQuery(inp.model);
           setMeasurementPath(inp.measurementPath);
           setTargetPath(inp.targetPath);
+          setFlat(inp.flat);
           setStages(inp.stages);
           try {
             if (activeFit) {
               // Fast path: the active slot was just seeded → write it from cache (instant),
               // then warm the sidecar's fit cache in the background so the first tone edit
               // doesn't pay the cold fit. The warm is fire-and-forget (no write, no race).
+              // Nothing to warm for a flat slot — there's no measurement fit to pre-cache.
               const applied = await invoke<ApplyResult>("activate_slot", { slot: activeSlotName });
               setResult(applied);
-              void invoke("warm_fit", {
-                device: useDev.eqapo_pattern,
-                headphone: inp.measurementPath,
-                target: inp.targetPath || null,
-              }).catch(() => {});
+              if (!inp.flat)
+                void invoke("warm_fit", {
+                  device: useDev.eqapo_pattern,
+                  headphone: inp.measurementPath,
+                  target: inp.targetPath || null,
+                }).catch(() => {});
             } else {
               // No cached fit for the active slot: re-fit + write as before.
               setResult(await writeFit(activeSlotName as "A" | "B", inp, useDev));
@@ -949,9 +976,10 @@ function App() {
   }, []);
 
   // §5.2 measurement nerd overlays: fetch the raw + target curves when the measurement or
-  // target changes (they share the dBr reference). Cleared on Dry / no measurement.
+  // target changes (they share the dBr reference). Cleared on Dry / no measurement / flat
+  // start — a flat slot has no measurement to chart, so this would just be a doomed RPC.
   useEffect(() => {
-    if (activeSlot === "Dry" || !measurementPath) {
+    if (activeSlot === "Dry" || flat || !measurementPath) {
       setRawCurve(null);
       setTargetCurve(null);
       return;
@@ -974,7 +1002,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [measurementPath, targetPath, activeSlot]);
+  }, [measurementPath, targetPath, flat, activeSlot]);
 
   async function retry() {
     try {
@@ -1099,17 +1127,25 @@ function App() {
   // Measurements available for the currently-selected model (empty until one is picked).
   const measurements = byModel.get(query) ?? [];
 
-  // Picking a model auto-selects its default (oratory1990-first) measurement.
+  // Picking a model auto-selects its default (oratory1990-first) measurement, and — since
+  // that's a real intent to use AutoEq — drops out of flat start if it was on. An unmatched/
+  // empty model leaves `flat` alone: typing a headphone AutoEq doesn't recognize is exactly
+  // the case flat start exists for, so it shouldn't get silently cancelled by the typing itself.
   function onModelInput(value: string) {
     setQuery(value);
     const ms = byModel.get(value);
-    setMeasurementPath(ms ? ms[0].path : "");
+    if (ms) {
+      setMeasurementPath(ms[0].path);
+      setFlat(false);
+    } else {
+      setMeasurementPath("");
+    }
   }
 
   /** `auto` = triggered by a live tone edit: no button spinner, no error nagging. */
   async function apply(auto = false) {
     if (activeSlot === "Dry") return; // Dry is a fixed reference, not editable
-    if (!measurementPath) {
+    if (!flat && !measurementPath) {
       if (!auto) setError(tr("errors.pickHeadphone"));
       return;
     }
@@ -1122,7 +1158,7 @@ function App() {
       setError("");
       inFlight.current = true;
       if (!auto) setApplying(true);
-      const inp: SlotInputs = { model: query, measurementPath, targetPath, stages };
+      const inp: SlotInputs = { model: query, measurementPath, targetPath, flat, stages };
       setResult(await writeFit(activeSlot as "A" | "B", inp, dev));
       if (!auto) setStatus(await invoke<Status>("status"));
     } catch (e) {
@@ -1369,6 +1405,7 @@ function App() {
         setQuery(s.model);
         setMeasurementPath(s.measurementPath);
         setTargetPath(s.targetPath);
+        setFlat(s.flat);
         setStages(s.stages);
       }
       if (!s) return; // empty slot: nothing written yet, user will configure + apply
@@ -1418,6 +1455,7 @@ function App() {
       setQuery(src.model);
       setMeasurementPath(src.measurementPath);
       setTargetPath(src.targetPath);
+      setFlat(src.flat);
       setStages(src.stages);
       setResult(applied);
     } catch (e) {
@@ -1712,6 +1750,7 @@ function App() {
     setQuery(p.model);
     setMeasurementPath(p.measurementPath);
     setTargetPath(p.targetPath);
+    setFlat(p.flat);
     setStages(stages);
     requestApply(0);
     // A full preset swaps measurement + target + all stages — a new document, not an edit; undo
@@ -1720,7 +1759,7 @@ function App() {
     if (activeSlot === "A" || activeSlot === "B")
       setSlotPreset((sp) => ({
         ...sp,
-        [activeSlot]: ref ? { ...ref, sig: presetSig(p.model, p.measurementPath, p.targetPath, stages) } : null,
+        [activeSlot]: ref ? { ...ref, sig: presetSig(p.model, p.measurementPath, p.targetPath, p.flat, stages) } : null,
       }));
   };
   // Re-anchor the active slot's loaded-preset attribution to a freshly saved state (so a
@@ -1729,7 +1768,7 @@ function App() {
   // always writes (or promotes the editor state to) the head.
   const setActiveSlotLoaded = (id: string, name: string) => {
     if (activeSlot !== "A" && activeSlot !== "B") return;
-    setSlotPreset((sp) => ({ ...sp, [activeSlot]: { id, name, at: "head", sig: presetSig(query, measurementPath, targetPath, stages) } }));
+    setSlotPreset((sp) => ({ ...sp, [activeSlot]: { id, name, at: "head", sig: presetSig(query, measurementPath, targetPath, flat, stages) } }));
   };
   // The other editable slot, if any (null on Dry, which has no `slotPreset` entry at all).
   const siblingSlot = (): "A" | "B" | null => (activeSlot === "A" ? "B" : activeSlot === "B" ? "A" : null);
@@ -1756,7 +1795,7 @@ function App() {
     if (!other || !ref || ref.id !== id || ref.at !== "head") return;
     setSlotPreset((sp) => ({
       ...sp,
-      [other]: archivedAt != null ? { ...ref, at: archivedAt } : { ...ref, sig: presetSig(query, measurementPath, targetPath, stages) },
+      [other]: archivedAt != null ? { ...ref, at: archivedAt } : { ...ref, sig: presetSig(query, measurementPath, targetPath, flat, stages) },
     }));
   };
 
@@ -1781,7 +1820,7 @@ function App() {
     const write = () => {
       setLibrary((lib) =>
         kind === "preset"
-          ? { ...lib, presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, stages, versions: existingVersions }) }
+          ? { ...lib, presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, flat, stages, versions: existingVersions }) }
           : { ...lib, templates: upsert(lib.templates, { id, name, stage: activeStage, bands: stages[activeStage].bands }) },
       );
       if (kind === "preset") {
@@ -1812,7 +1851,7 @@ function App() {
   const overwritePresetInPlace = (p: UserPreset) => {
     setLibrary((lib) => ({
       ...lib,
-      presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, stages, versions: p.versions }),
+      presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, flat, stages, versions: p.versions }),
     }));
     reconcileSiblingSlot(p.id);
     setActiveSlotLoaded(p.id, p.name);
@@ -1836,10 +1875,11 @@ function App() {
         model: query,
         measurementPath,
         targetPath,
+        flat,
         stages,
         versions: [
           ...(p.versions ?? []),
-          { at: archivedAt, model: p.model, measurementPath: p.measurementPath, targetPath: p.targetPath, stages: p.stages },
+          { at: archivedAt, model: p.model, measurementPath: p.measurementPath, targetPath: p.targetPath, flat: p.flat, stages: p.stages },
         ].slice(-MAX_VERSIONS),
       }),
     }));
@@ -1878,7 +1918,7 @@ function App() {
           ...lib,
           presets: lib.presets.map((x) =>
             x.id === p.id
-              ? { id: x.id, name: x.name, model: prev.model, measurementPath: prev.measurementPath, targetPath: prev.targetPath, stages: prev.stages, versions: versions.slice(0, -1) }
+              ? { id: x.id, name: x.name, model: prev.model, measurementPath: prev.measurementPath, targetPath: prev.targetPath, flat: prev.flat, stages: prev.stages, versions: versions.slice(0, -1) }
               : x,
           ),
         })),
@@ -2051,9 +2091,9 @@ function App() {
   const slotDirty = (s: "A" | "B") => {
     const ref = slotPreset[s];
     if (!ref) return false;
-    if (s === activeSlot) return presetSig(query, measurementPath, targetPath, stages) !== ref.sig;
+    if (s === activeSlot) return presetSig(query, measurementPath, targetPath, flat, stages) !== ref.sig;
     const inp = slotInputs[s];
-    return !inp || presetSig(inp.model, inp.measurementPath, inp.targetPath, inp.stages) !== ref.sig;
+    return !inp || presetSig(inp.model, inp.measurementPath, inp.targetPath, inp.flat, inp.stages) !== ref.sig;
   };
   // The vN label for a loaded ref, derived live from the current library instead of a cached
   // string — position-based labels (v1, v2, …) shift whenever *any* version of that preset is
@@ -2628,14 +2668,28 @@ function App() {
                 ))}
               </datalist>
               <label style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("header.measurement")}</label>
+              {/* §3.4a "flat start" folded in as the select's own first option — see
+                  FLAT_MEASUREMENT's doc — rather than a separate control, so it costs no extra
+                  header width and stays reachable whatever the Headphone box currently holds. */}
               <select
-                value={measurementPath}
-                onChange={(e) => setMeasurementPath(e.currentTarget.value)}
-                disabled={dryActive || measurements.length === 0}
-                title={tr("header.measurementTitle")}
+                value={flat ? FLAT_MEASUREMENT : measurementPath}
+                onChange={(e) => {
+                  const v = e.currentTarget.value;
+                  if (v === FLAT_MEASUREMENT) {
+                    setFlat(true);
+                  } else {
+                    setFlat(false);
+                    setMeasurementPath(v);
+                  }
+                }}
+                disabled={dryActive}
+                title={flat ? tr("header.flatHint") : tr("header.measurementTitle")}
               >
+                <option value={FLAT_MEASUREMENT}>{tr("header.flatOption")}</option>
                 {measurements.length === 0 ? (
-                  <option value="">{tr("header.pickModel")}</option>
+                  <option value="" disabled>
+                    {query ? tr("header.modelNotFound") : tr("header.pickModel")}
+                  </option>
                 ) : (
                   measurements.map((m) => (
                     <option key={m.path} value={m.path}>
@@ -2790,19 +2844,23 @@ function App() {
               </div>
               <div className="row" style={{ gap: "0.5em" }}>
                 <label style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("correction.target")}</label>
-                <select
-                  value={targetPath}
-                  onChange={(e) => setTargetPath(e.currentTarget.value)}
-                  disabled={dryActive}
-                  title={tr("correction.targetTitle")}
-                  style={{ minWidth: 0, maxWidth: "28em" }}
-                >
-                  {targets.map((t) => (
-                    <option key={t.path} value={t.path}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
+                {flat ? (
+                  <span style={{ fontSize: "0.85em", opacity: 0.6 }}>{tr("correction.targetFlat")}</span>
+                ) : (
+                  <select
+                    value={targetPath}
+                    onChange={(e) => setTargetPath(e.currentTarget.value)}
+                    disabled={dryActive}
+                    title={tr("correction.targetTitle")}
+                    style={{ minWidth: 0, maxWidth: "28em" }}
+                  >
+                    {targets.map((t) => (
+                      <option key={t.path} value={t.path}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 {/* Preamp badge — moved out of `.chart-wrap` (used to float top-right inside it,
                     absolutely positioned) to make room there for EqChart's own hover-cursor readout,
                     which needed that corner more. `marginLeft:auto` moved here from Apply (below) so
@@ -3242,7 +3300,7 @@ function App() {
                     className="pl-save"
                     disabled={dryActive}
                     onClick={() =>
-                      setSaveForm(saveForm ? null : { kind: measurementPath ? "preset" : "template", name: "", error: false })
+                      setSaveForm(saveForm ? null : { kind: measurementPath || flat ? "preset" : "template", name: "", error: false })
                     }
                     title={tr("presets.saveTitle")}
                   >
@@ -3260,8 +3318,8 @@ function App() {
                     <button
                       type="button"
                       className={saveForm.kind === "preset" ? "on" : ""}
-                      disabled={!measurementPath}
-                      title={measurementPath ? undefined : tr("presets.fullPresetDisabledTitle")}
+                      disabled={!measurementPath && !flat}
+                      title={measurementPath || flat ? undefined : tr("presets.fullPresetDisabledTitle")}
                       onClick={() => setSaveForm({ ...saveForm, kind: "preset" })}
                     >
                       {tr("presets.fullPreset")}
@@ -3421,8 +3479,8 @@ function App() {
                           <button
                             type="button"
                             className="pl-upd"
-                            title={measurementPath ? tr("presets.savePresetTitle") : tr("presets.updatePresetDisabledTitle")}
-                            disabled={dryActive || !measurementPath}
+                            title={measurementPath || flat ? tr("presets.savePresetTitle") : tr("presets.updatePresetDisabledTitle")}
+                            disabled={dryActive || (!measurementPath && !flat)}
                             onClick={() => setPresetSave(p)}
                           >
                             💾

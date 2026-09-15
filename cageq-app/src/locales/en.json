@@ -22,9 +22,12 @@
     "searchPlaceholder": "Search {{count}} models…",
     "measurementTitle": "Measurement source / rig",
     "pickModel": "— pick a model —",
+    "modelNotFound": "— not in AutoEq's database —",
     "measBy": "by {{source}}",
     "measOnRig": " on {{rig}}",
-    "soundSettings": "Change the playback format in Windows Sound settings"
+    "soundSettings": "Change the playback format in Windows Sound settings",
+    "flatOption": "— None (flat start) —",
+    "flatHint": "Skip AutoEq's fit and build the correction entirely from Fit/Content/Tone — for a headphone AutoEq doesn't have, or whose measurement makes the fit worse than no fit at all."
   },
 
   "slots": { "A": "Slot A", "B": "Slot B", "Dry": "Dry" },
@@ -43,6 +46,7 @@
     "title": "Correction",
     "target": "Target",
     "targetTitle": "The frequency response this correction aims for. If unsure, pick a Harman target — over-ear/on-ear for full-size headphones, in-ear for IEMs.",
+    "targetFlat": "— none (flat start) —",
     "apply": "Apply → {{slot}}",
     "fitting": "Fitting…",
     "applyDry": "Dry (pick A or B)",

@@ -22,9 +22,12 @@
     "searchPlaceholder": "{{count}} Modelle suchen…",
     "measurementTitle": "Messquelle / Rig",
     "pickModel": "— Modell wählen —",
+    "modelNotFound": "— nicht in AutoEqs Datenbank —",
     "measBy": "von {{source}}",
     "measOnRig": " auf {{rig}}",
-    "soundSettings": "Wiedergabeformat in den Windows-Sound-Einstellungen ändern"
+    "soundSettings": "Wiedergabeformat in den Windows-Sound-Einstellungen ändern",
+    "flatOption": "— Keine (flacher Start) —",
+    "flatHint": "AutoEqs Fit überspringen und die Korrektur allein aus Fit/Content/Tone aufbauen — für Kopfhörer, die AutoEq nicht kennt, oder deren Messung das Ergebnis eher verschlechtert als verbessert."
   },
 
   "slots": { "A": "Slot A", "B": "Slot B", "Dry": "Dry" },
@@ -43,6 +46,7 @@
     "title": "Korrektur",
     "target": "Zielkurve",
     "targetTitle": "Der Frequenzgang, auf den diese Korrektur zielt. Im Zweifel eine Zielkurve mit „Harman“ und „over-ear“ im Namen für Kopfhörer wählen, „in-ear“ für In-Ear-Hörer – die Liste selbst ist nicht übersetzt.",
+    "targetFlat": "— keine (flacher Start) —",
     "apply": "Anwenden → {{slot}}",
     "fitting": "Fitten…",
     "applyDry": "Dry (A oder B wählen)",

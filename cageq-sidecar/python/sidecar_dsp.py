@@ -5,7 +5,9 @@ Speaks the same line-delimited JSON-RPC 2.0 as sidecar_stub.py. Methods:
   ping / shutdown
   list_headphones {refresh?}   -> the AutoEq measurement catalogue (cached index)
   list_targets    {refresh?}   -> available AutoEq target curves
-  calculate_filters {device, (headphone | measurement), target?, ...}
+  calculate_filters {device, (headphone | measurement | flat), target?, ...}
+                  `flat: true` skips AutoEq's own fit entirely (no measurement, no
+                  optimizer) — the custom filters alone become the whole correction
   measurement_curves {headphone, target?} -> raw measurement + target curves for the §5.2
                   nerd overlays (see its own docstring)
   filter_response {filters, freqs, fs?} -> combined dB response of `filters` on `freqs`;
@@ -319,11 +321,14 @@ _FIT_CACHE_MAX = 32
 
 def _fit_key(params):
     """A hashable key over exactly the inputs the AutoEq fit depends on."""
-    src = params.get("headphone")
-    if not src:
-        meas = params.get("measurement") or []
-        digest = hashlib.sha1(repr([(round(float(p["frequency"]), 4), round(float(p["raw_db"]), 4)) for p in meas]).encode()).hexdigest()
-        src = "meas:" + digest
+    if params.get("flat"):
+        src = "flat"
+    else:
+        src = params.get("headphone")
+        if not src:
+            meas = params.get("measurement") or []
+            digest = hashlib.sha1(repr([(round(float(p["frequency"]), 4), round(float(p["raw_db"]), 4)) for p in meas]).encode()).hexdigest()
+            src = "meas:" + digest
     return (src, params.get("target") or "",
             float(params.get("max_gain", 6.0)), int(params.get("peaking_filters", 8)), int(params.get("fs", 48000)))
 
@@ -349,11 +354,27 @@ def _autoeq_fit(params):
     bands' combined response on f_grid, reference_curve is the *ideal* correction
     (AutoEq's gain-limited target-minus-measured, `fr.equalization`) that the parametric
     fit chases, subsampled for the chart. Cached by [`_fit_key`]; custom filters never
-    enter here."""
+    enter here.
+
+    `params["flat"]` skips all of this — no measurement fetch, no optimizer — for a
+    headphone AutoEq has no measurement for, or one bad enough that fitting to it makes
+    things worse than not fitting at all. Returns empty AutoEq bands on AutoEq's own
+    standard grid with a zero response, so `calculate_filters`/`filter_response` and the
+    §5.2 chart machinery downstream need no changes: the user's custom filters become
+    the entire correction."""
     key = _fit_key(params)
     cached = _FIT_CACHE.get(key)
     if cached is not None:
         return cached
+
+    if params.get("flat"):
+        flat_fr = FrequencyResponse(name="flat", frequency=[20.0, 20000.0], raw=[0.0, 0.0])
+        flat_fr.interpolate()  # same standard grid every other path fits on
+        result = ([], flat_fr.frequency, np.zeros(len(flat_fr.frequency)), [])
+        if len(_FIT_CACHE) >= _FIT_CACHE_MAX:
+            _FIT_CACHE.pop(next(iter(_FIT_CACHE)))
+        _FIT_CACHE[key] = result
+        return result
 
     fr = _measurement_fr(params)
     fr.interpolate()  # AutoEq's standard log grid (20..20k, f_step 1.01)

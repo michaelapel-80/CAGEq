@@ -236,10 +236,16 @@ fn health_kind(h: &Health) -> &'static str {
 /// Fit the selected AutoEq `headphone` (a catalogue path) against an optional named
 /// `target` into comparison `slot` (A or B), write cageq.txt through cageq-core, and
 /// return the hash plus the file content actually written.
+///
+/// `headphone: None` means the slot opted out of AutoEq entirely (filter.md §3.4a "flat
+/// start" — a headphone AutoEq has no measurement for, or one bad enough that fitting to
+/// it makes things worse than not fitting at all): `target` is meaningless without a
+/// measurement to compensate, so it's ignored in that case, and the sidecar's own
+/// `flat` flag is sent instead of `headphone`/`target`.
 #[tauri::command]
 fn apply(
     device: String,
-    headphone: String,
+    headphone: Option<String>,
     target: Option<String>,
     slot: Slot,
     custom_filters: Vec<Filter>,
@@ -249,9 +255,16 @@ fn apply(
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, eq, .. } => {
             let mut inputs = Map::new();
-            inputs.insert("headphone".into(), Value::String(headphone.clone()));
-            if let Some(t) = &target {
-                inputs.insert("target".into(), Value::String(t.clone()));
+            match &headphone {
+                Some(h) => {
+                    inputs.insert("headphone".into(), Value::String(h.clone()));
+                    if let Some(t) = &target {
+                        inputs.insert("target".into(), Value::String(t.clone()));
+                    }
+                }
+                None => {
+                    inputs.insert("flat".into(), Value::Bool(true));
+                }
             }
             // §3.4 manual filters stacked on the AutoEq fit; the sidecar combines them
             // into the curve that drives the loudness/clipping policy.
@@ -260,8 +273,10 @@ fn apply(
                 inputs.insert("custom_filters".into(), cf);
             }
             let applied = core.apply_to_slot(slot, CalcRequest { device, inputs }).map_err(|e| e.to_string())?;
-            // Remember what was applied so the pickers pre-fill on the next launch.
-            update_settings(|s| s.selection = Selection { headphone: Some(headphone), target });
+            // Remember what was applied so the pickers pre-fill on the next launch. A flat
+            // slot has no headphone/target worth pre-filling.
+            let target_for_selection = if headphone.is_some() { target } else { None };
+            update_settings(|s| s.selection = Selection { headphone, target: target_for_selection });
             Ok(apply_result(applied, eq))
         }
     }
