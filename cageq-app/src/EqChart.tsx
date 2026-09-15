@@ -83,7 +83,9 @@ export type PhaseCurve = { id: string; bands: Band[]; color: string; label: stri
  *  always drawing log (the right axis for an EQ curve). `db_raw`/`db_lin_raw` are `db`/`db_lin`
  *  before the density-normalization fix (see `SpectrumUpdate::db_raw`'s own Rust doc) — reads pink
  *  noise flat and a swept tone undiluted instead of `db`'s density-correct (but tone-drooping)
- *  reading; SpectrumScope's own Tilt toggle picks between them, this chart never reads them either. */
+ *  reading; this chart's own Tilt toggle (`SpecParams.tilt`, independent of SpectrumScope's) picks
+ *  `db_raw` over `db` — `db_lin_raw` stays unused here, same as `db_lin`, since this chart is
+ *  always log. */
 export type SpectrumData = {
   db: number[];
   peak_db: number[];
@@ -228,13 +230,21 @@ const TAU_REF = 0.1;
  *  `undistort` shares the scope views' own meaning (see `preampDb`'s own doc for what it actually
  *  undoes) — a live toggle rather than always-on, for the same reason SpectrumScope's own copy of
  *  this switch is: sometimes the *post-EQ* shape is what's actually wanted on screen (comparing the
- *  backdrop directly against the curve drawn over it, not the reconstructed source underneath it). */
-type SpecParams = { tau: number; tail: number; glowBase: number; undistort: boolean };
+ *  backdrop directly against the curve drawn over it, not the reconstructed source underneath it).
+ *
+ *  `tilt` is this chart's own copy of SpectrumScope's identically-named switch — same meaning
+ *  (picks `db_raw` over `db`, see `SpectrumUpdate::db_raw`'s own Rust doc and `SpectrumData`'s own
+ *  doc comment above), but a genuinely independent setting, own storage key
+ *  (`cageq-eqchart-spec-params`, same key this whole `SpecParams` bundle already persists under) —
+ *  the two views suit different defaults/use cases (this backdrop is read against a static EQ
+ *  curve, closer to a conventional RTA; SpectrumScope's is read against itself over time), so
+ *  toggling one was never meant to move the other. */
+type SpecParams = { tau: number; tail: number; glowBase: number; undistort: boolean; tilt: boolean };
 // `old_glowBase * tau/TAU_REF` (0.09 * 0.3/0.1 = 0.27) reproduced the exact pre-switch on-screen
 // brightness under the new TAU_REF/tau-corrected formula — confirming the blend swap alone was a
 // visual no-op — then hand-retuned live from that baseline to today's value, same as every other
 // view's glow default gets touched up after its own anchor change.
-const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3, undistort: true };
+const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3, undistort: true, tilt: true };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -731,8 +741,9 @@ export function EqChart({
           grown.set(yStrokeSmooth); // preserve already-settled bins; new ones start at NaN (unset)
           yStrokeSmooth = grown;
         }
+        const srcDb = specParams.tilt ? spectrum.db_raw : spectrum.db;
         for (let i = 0; i < n; i++) {
-          const db = undoing ? spectrum.db[i] - corr![i] : spectrum.db[i];
+          const db = undoing ? srcDb[i] - corr![i] : srcDb[i];
           xScratch[i] = fx(i);
           yScratch[i] = sy(db);
         }
@@ -824,7 +835,8 @@ export function EqChart({
           const i0 = Math.floor(fi);
           const i1 = Math.min(n - 1, i0 + 1);
           const ft = fi - i0;
-          const raw = spectrum.db[i0] * (1 - ft) + spectrum.db[i1] * ft;
+          const srcDb = specParams.tilt ? spectrum.db_raw : spectrum.db;
+          const raw = srcDb[i0] * (1 - ft) + srcDb[i1] * ft;
           const corrDb =
             specParams.undistort && eqBands !== undefined
               ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]), sampleRate)[0] : 0) + preampDb
@@ -1343,6 +1355,17 @@ export function EqChart({
               onChange={(e) => {
                 const undistort = e.currentTarget.checked;
                 setSpecParams((p) => ({ ...p, undistort }));
+              }}
+            />
+          </label>
+          <label className="vs-tune-row vs-tune-check" title={t("scope.tiltHint")}>
+            <span className="vs-tune-label">{t("scope.tilt")}</span>
+            <input
+              type="checkbox"
+              checked={specParams.tilt}
+              onChange={(e) => {
+                const tilt = e.currentTarget.checked;
+                setSpecParams((p) => ({ ...p, tilt }));
               }}
             />
           </label>
