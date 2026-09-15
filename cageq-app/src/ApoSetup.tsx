@@ -41,8 +41,13 @@ export type ApoSetupStatus = {
    *  type comes from the registry alone, which is exactly the blind spot this closes: a
    *  registration and an attachment can both read as entirely correct there while the DLL
    *  silently fails to load (see the Rust side's `LiveChannelStatus` for the real incident that
-   *  motivated this) — `"no_channel"` also just means nothing is playing right now, which the
-   *  UI cannot tell apart from that failure on its own. */
+   *  motivated this, and for why the channel's real lifetime is longer than "only while audio is
+   *  audibly playing" — most apps pause by writing silence into an already-open stream rather
+   *  than closing it, so the channel routinely survives long stretches of silence). `"no_channel"`
+   *  means no app anywhere currently has an open session on this device at all — could be genuine
+   *  (nothing has played through it recently) or the APO failing to load; the UI can't tell those
+   *  apart on its own. `"stalled"` is a real, meaningful confirmation on its own (the channel
+   *  exists — the APO loaded and locked successfully), just not processing frames this instant. */
   live_channel: "no_channel" | "stalled" | "processing" | null;
 };
 
@@ -224,9 +229,14 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
                   {/* The registry-only checks above can all read "done" while the DLL silently
                       failed to load — see `ApoSetupStatus.live_channel`'s own doc. This is the
                       one thing on this whole card that reflects the *live* channel rather than
-                      HKLM, so it's shown even in the otherwise-quiet settled state. */}
-                  {status.live_channel === "processing" && <p className="ok">{t("apoSetup.liveProcessing")}</p>}
-                  {status.live_channel === "stalled" && <p>{t("apoSetup.liveStalled")}</p>}
+                      HKLM, so it's shown even in the otherwise-quiet settled state. "stalled" is
+                      styled the same "ok" as "processing" now, not neutral — the channel simply
+                      existing is already a real confirmation the APO loaded and locked (see that
+                      doc for why its lifetime is much longer than "only while audio is playing"),
+                      independent of whether it happens to be pushing frames this exact instant. */}
+                  {(status.live_channel === "processing" || status.live_channel === "stalled") && (
+                    <p className="ok">{t(status.live_channel === "processing" ? "apoSetup.liveProcessing" : "apoSetup.liveStalled")}</p>
+                  )}
                   {status.live_channel === "no_channel" && <p>{t("apoSetup.liveNoChannel")}</p>}
                 </>
               ) : (

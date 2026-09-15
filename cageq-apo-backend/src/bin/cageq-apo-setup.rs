@@ -214,7 +214,13 @@ fn print_status(out: &mut Output) {
         }
     } else if eps.iter().any(|e| e.cageq && !e.effects_disabled) {
         out.line("READY: CAGEq's engine is attached and can run.");
-        out.line("(It is only actually loaded while audio is playing on that device.)");
+        // Loads into audiodg once *any* app opens a session on this device (one shared mix
+        // graph per endpoint) and stays loaded for as long as one remains open — most apps
+        // pause by writing silence into an already-open stream rather than closing it, so this
+        // routinely outlives a long stretch of silence. Not "only loaded while audio is
+        // playing" (an earlier version of this line said exactly that, wrongly) — check the
+        // app's own Engine dialog for a live read of whether the channel currently exists.
+        out.line("(Confirm it's actually connected in the app's own Engine dialog — a live heartbeat read, not a registry guess.)");
     } else {
         out.line("NEXT: attach a device - cageq-apo-setup attach 1   (or paste its GUID)");
     }

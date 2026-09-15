@@ -1,4 +1,4 @@
-//! Getting CAGEq's APO installed, attached, and back off again.
+﻿//! Getting CAGEq's APO installed, attached, and back off again.
 //!
 //! ## Why this is split in two
 //! Setup divides along a line that is not about installers versus wizards:
@@ -485,15 +485,28 @@ pub fn status() -> SetupStatus {
 /// `status()` reported everything fine, and nothing anywhere said the control channel had never
 /// come up. This is what closes that gap without needing a throwaway diagnostic CLI to find out
 /// by hand — see `cageq-apo/examples/push.rs`'s own `--watch` mode, which this mirrors.
+///
+/// **The section's real lifetime is longer, and its existence a stronger signal, than it first
+/// looks.** `Global\CAGEqApo_<id>` is created inside `LockForProcess` and destroyed inside
+/// `UnlockForProcess` (`cageq-apo/shim/cageq_apo.cpp`) — but those two are tied to the
+/// **WASAPI stream's own lifetime for the whole endpoint** (one shared mix graph, built once
+/// while at least one app anywhere has an open session on this device), not to whether audio is
+/// *audibly playing this instant*. Most apps pause by writing silence into an already-open
+/// stream rather than closing it, so the channel routinely survives long stretches of silence —
+/// confirmed live: a channel opened at one lock stayed open, `ControlChannel::open` still
+/// succeeding, with no further `LockForProcess`/`UnlockForProcess` logged at all in between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveChannelStatus {
-    /// No `Global\CAGEqApo_<id>` section exists. Ordinary and expected whenever nothing is
-    /// playing on that endpoint — the APO creates the section at `LockForProcess` and it dies
-    /// with the stream, so this is *not* on its own evidence of a problem. If audio *is*
-    /// playing there and this still reads `NoChannel`, the APO failed to load.
+    /// No `Global\CAGEqApo_<id>` section exists — i.e. no app anywhere currently has an open
+    /// audio session on this device at all. Ordinary right after attaching (nothing has opened
+    /// a stream on it yet) or once every session on the device has genuinely closed; *not* tied
+    /// to a momentary pause the way it first looks. If something is actively playing through
+    /// this device and this still reads `NoChannel`, the APO failed to load.
     NoChannel,
-    /// The section exists, but its heartbeat did not advance across a short sample window —
-    /// the APO instance exists but is not (yet, or any more) actually processing frames.
+    /// The section exists — a real, meaningful confirmation the APO loaded and locked
+    /// successfully, on its own — but its heartbeat did not advance across a short sample
+    /// window: no frames are being pushed through it in this exact instant (a genuinely silent
+    /// moment, or the sampling window landed between buffers), not necessarily "broken".
     Stalled,
     /// The section exists and its heartbeat is advancing: the APO is genuinely processing
     /// audio through this endpoint right now.

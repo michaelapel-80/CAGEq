@@ -534,9 +534,12 @@ struct ApoSetupDto {
     /// this field comes from `HKLM` alone, which is exactly the blind spot this closes: a
     /// registration and an attachment can both read as entirely correct there while the DLL
     /// silently fails to load — see `cageq_apo_backend::setup::LiveChannelStatus`'s own doc for
-    /// the real bug that motivated this. One of `"no_channel"` (nothing playing, *or* the APO
-    /// failed to load — the UI cannot tell those apart on its own, only the user knows whether
-    /// audio is expected to be flowing right now), `"stalled"`, or `"processing"`.
+    /// the real bug that motivated this, and for why the channel's real lifetime (and hence how
+    /// meaningful a positive read here is) is longer than "only while audio is audibly playing".
+    /// One of `"no_channel"` (no app has an open session on this device at all, *or* the APO
+    /// failed to load — the UI cannot tell those apart on its own), `"stalled"` (the channel
+    /// exists — a real confirmation the APO loaded — just not processing frames this instant),
+    /// or `"processing"`.
     live_channel: Option<&'static str>,
 }
 
