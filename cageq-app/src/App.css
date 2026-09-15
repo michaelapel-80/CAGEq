@@ -1085,11 +1085,13 @@ select:disabled {
   height: 100%;
 }
 /* Same dark "instrument screen" the scope views sit on (`.vs-screen` — background, vignette,
-   hairline, drop shadow, all shared verbatim) — used by both EqChart (originally the only reason
-   this existed: the phosphor accumulator converges toward *white* regardless of theme, which reads
-   as a glow against a guaranteed-dark background but inverts on light theme's own white page — see
-   EqChart.tsx's own doc) and ImpulseChart (no phosphor backdrop at all, just wants the same dark
-   "instrument" look for consistency with every other chart view). Named for the shared `.eq-chart`
+   hairline, drop shadow, all shared verbatim) — used by EqChart (originally the only reason this
+   existed: the phosphor accumulator converges toward *white* regardless of theme, which reads as
+   a glow against a guaranteed-dark background but inverts on light theme's own white page — see
+   EqChart.tsx's own doc), by ImpulseChart (no phosphor backdrop at all, just wants the same dark
+   "instrument" look for consistency with every other chart view), and by any EqChart caller with
+   no live spectrum at all that still wants the same on-tube look (the `screen` prop, e.g. the §8
+   export dialog's bands-only preview — see that prop's own doc). Named for the shared `.eq-chart`
    wrapper both use, not "spectrum" — it has no spectrum-specific meaning of its own. Fills the whole
    chart box (`inset:0`), not the plot rect inside it — same split `.vs-screen` makes for the scope
    views: the screen is the container's full bounds, PAD only insets the *content* drawn inside it.

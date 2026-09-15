@@ -39,10 +39,10 @@
 //!   for *edit latency*, not state-carry — the cascade carries its delay registers across any
 //!   coefficient change by construction, so even a reload from disk is already free of
 //!   Equalizer APO's cold-start bloom.
+//! * [`channel`] — the `Global\` shared-memory section [`control`]'s protocol runs over: its
+//!   DACL and Medium mandatory label, so exactly the right (unelevated, authenticated) writer
+//!   can reach it and nothing lower-integrity can tamper with it.
 //! * this module — the C ABI the shim drives: create/destroy, set bands and preamp, process.
-//!
-//! Still to come: the shared-memory plumbing for [`control`] (creating the `Global\` section
-//! with a DACL and mandatory label that let exactly the right process write to it).
 
 pub mod channel;
 pub mod config;

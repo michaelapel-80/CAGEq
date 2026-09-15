@@ -527,8 +527,8 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
 
   // Bloom's four programs (brightpass/blur are shared between both tiers) and two pairs of small
   // ping-pong targets — compiled/allocated lazily on first use, not up front, so a caller that
-  // never passes bloomIntensity/bloomWide (every view but Vectorscope, for now) pays nothing extra
-  // at all, not even the small textures.
+  // never passes bloomIntensity/bloomWide (EqChart and Meter don't; Vectorscope, TimeScope and
+  // SpectrumScope do) pays nothing extra at all, not even the small textures.
   let bloomProg: {
     brightPass: WebGLProgram; uThreshold: WebGLUniformLocation | null; uBPTex: WebGLUniformLocation | null;
     brightPassColor: WebGLProgram; uThresholdColor: WebGLUniformLocation | null; uBPColorTex: WebGLUniformLocation | null;

@@ -1738,7 +1738,7 @@ function App() {
   // didn't change, only the library did, so its ref needs correcting too or it silently
   // misrepresents what's actually loaded there (reported live: saving a new version of a preset
   // loaded in both slots bumped the vN *label* shown on both, since the label is computed live
-  // from the library — App.tsx:1821's `presetVerLabel` — but only the saving slot's actual content
+  // from the library — `presetVerLabel`, below — but only the saving slot's actual content
   // moved; the other slot kept showing the old content under the new, wrong version number, with
   // no dirty flag). Two different corrections depending on what the save actually did to the old
   // head:
@@ -1748,7 +1748,7 @@ function App() {
   //   - omitted (commitSave/overwritePresetInPlace): the old head was overwritten in place with
   //     no archived copy — the sibling's content is now orphaned relative to the library, so
   //     there's nothing valid to redirect `at` to. Refresh its `sig` to the *new* head's instead,
-  //     leaving `at: "head"` — `slotDirty` (App.tsx:1810) then correctly flags it as diverged,
+  //     leaving `at: "head"` — `slotDirty`, below, then correctly flags it as diverged,
   //     the same way editing away from a loaded preset in the active slot already does.
   const reconcileSiblingSlot = (id: string, archivedAt?: number) => {
     const other = siblingSlot();

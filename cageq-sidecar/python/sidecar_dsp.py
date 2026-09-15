@@ -6,6 +6,10 @@ Speaks the same line-delimited JSON-RPC 2.0 as sidecar_stub.py. Methods:
   list_headphones {refresh?}   -> the AutoEq measurement catalogue (cached index)
   list_targets    {refresh?}   -> available AutoEq target curves
   calculate_filters {device, (headphone | measurement), target?, ...}
+  measurement_curves {headphone, target?} -> raw measurement + target curves for the §5.2
+                  nerd overlays (see its own docstring)
+  filter_response {filters, freqs, fs?} -> combined dB response of `filters` on `freqs`;
+                  test-support only, cross-checks the Rust/TS biquad copies (see its own docstring)
   fit_export_eq   {filters, band_count, fs?} -> a low-band-count PEQ fit to a slot's own
                   composed curve, for exporting to a mobile EQ app (see its own docstring)
   fit_fixed_band_eq {filters, preset: "10"|"31", fs?} -> AutoEq's own standard 10-/31-band

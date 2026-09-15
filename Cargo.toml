@@ -1,7 +1,14 @@
-# Cargo workspace root. Introduced when the project grew past one crate:
+# Cargo workspace root. Introduced when the project grew past one crate, back when it was just
 #   * cageq-backend       — the EqBackend trait + neutral domain types (the new leaf)
 #   * cageq-config-writer — the Equalizer APO backend: renders its config + integrity
 #   * cageq-sidecar       — manages the Python DSP sidecar over stdio
+# and since grown to cover the rest of `members` below too:
+#   * cageq-apo           — CAGEq's own real-time APO (the audiodg-loaded COM object): DSP,
+#                           filter state and the control-channel protocol (filter.md §5.3c)
+#   * cageq-apo-backend   — the EqBackend impl that drives cageq-apo from the app side
+#   * cageq-watchdog      — fail-safe sidecar supervisor: silent-safe-state + recovery (§7.1/§7.2)
+#   * cageq-core          — orchestrator tying the sidecar/watchdog/EqBackend into one flow (§2)
+#   * cageq-monitor       — post-EQ loudness/spectrum monitoring via WASAPI loopback (§5.3c)
 # A workspace gives one shared target/ dir and a single Cargo.lock, and lets the
 # crates depend on each other (the sidecar's result maps onto the backend's
 # DeviceConfig).

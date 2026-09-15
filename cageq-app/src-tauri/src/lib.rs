@@ -45,7 +45,10 @@ enum Backend {
 #[derive(Default)]
 struct MonitorState(std::sync::Mutex<Option<cageq_monitor::Monitor>>);
 
-/// Holds the running self-test signal player (pink noise), so start/stop can replace or end it.
+/// Holds whatever test signal is currently playing — the §5.4 self-test's pink noise, or the
+/// tone-generator window's output (`start_test_generator`, any waveform) — so start/stop can
+/// replace or end it. One slot on purpose: only one thing should ever be rendering to an output
+/// at once, so starting either kind stops whatever the other left playing.
 #[derive(Default)]
 struct TestSignalState(std::sync::Mutex<Option<cageq_monitor::TestSignal>>);
 
