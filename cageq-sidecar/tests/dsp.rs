@@ -200,3 +200,57 @@ fn real_dsp_lists_the_autoeq_catalogue() {
         Err(err) => eprintln!("skipping catalogue assertions (network?): {err}"),
     }
 }
+
+/// §8 mobile export: `fit_export_eq` fits a low band count directly to a *given* curve
+/// (a slot's own full cascade) rather than inverting a measurement the way `calculate_filters`
+/// does — so this is a MATCH fit (reproduce the input's sign/shape), not a correction fit.
+#[test]
+fn real_dsp_fits_export_eq_to_full_cascade() {
+    let Some(python) = venv_python() else {
+        eprintln!("skipping fit_export_eq test: no .venv");
+        return;
+    };
+    let mut sc = Sidecar::spawn(&python, &dsp_script()).expect("spawn dsp sidecar");
+    sc.ping().expect("ping");
+
+    // Stands in for a slot's full cascade (AutoEq fit stage + content stage + tone macros, all
+    // summed): a dominant +8 dB peak at 3 kHz plus a couple of smaller bands elsewhere.
+    let full_cascade = json!([
+        { "kind": "LowShelf", "freq_hz": 105.0, "gain_db": 2.0, "q": 0.7 },
+        { "kind": "Peaking", "freq_hz": 3000.0, "gain_db": 8.0, "q": 2.0 },
+        { "kind": "HighShelf", "freq_hz": 10000.0, "gain_db": -1.5, "q": 0.7 },
+        { "kind": "Peaking", "freq_hz": 500.0, "gain_db": 1.0, "q": 1.0 },
+    ]);
+
+    let reply = sc.call("fit_export_eq", json!({ "filters": full_cascade, "band_count": 5 })).expect("fit_export_eq");
+
+    let filters = reply["filters"].as_array().expect("filters array");
+    assert_eq!(filters.len(), 5, "expected exactly band_count filters (1 low-shelf + 1 high-shelf + 3 peaking)");
+    for f in filters {
+        let kind = f["kind"].as_str().unwrap();
+        assert!(matches!(kind, "LowShelf" | "HighShelf" | "Peaking"), "bad kind {kind}");
+    }
+
+    // The dominant +8 dB peak should survive the reduction almost exactly, sign and all — unlike
+    // calculate_filters' inverse fit, a match fit must NOT flip it to a cut.
+    let strongest = filters
+        .iter()
+        .max_by(|a, b| a["gain_db"].as_f64().unwrap().partial_cmp(&b["gain_db"].as_f64().unwrap()).unwrap())
+        .unwrap();
+    assert_eq!(strongest["kind"], "Peaking");
+    assert!(strongest["gain_db"].as_f64().unwrap() > 5.0, "expected the 3 kHz peak to survive the reduction: {strongest}");
+    let fc = strongest["freq_hz"].as_f64().unwrap();
+    assert!((2000.0..4500.0).contains(&fc), "peak should stay near 3 kHz, got {fc}");
+
+    // preamp_db is a self-contained "don't clip on the destination device" headroom, derived
+    // from the achieved curve's own peak (~+8 dB here) — NOT calculate_filters' loudness-matched
+    // g_target_db (meaningless without a Dry to compare against).
+    let preamp = reply["preamp_db"].as_f64().expect("preamp_db");
+    assert!(preamp < -5.0, "expected real negative headroom for an ~8 dB peak, got {preamp}");
+
+    // Cache hit: the identical request should return the identical fit, not merely "a" valid
+    // one — pins `_export_fit_key` actually being hit deterministically on repeat, which is the
+    // whole point of caching this (the export dialog's band-count slider re-fits on every drag).
+    let reply2 = sc.call("fit_export_eq", json!({ "filters": full_cascade, "band_count": 5 })).expect("fit_export_eq (repeat)");
+    assert_eq!(reply["filters"], reply2["filters"], "identical request should hit the export fit cache");
+}

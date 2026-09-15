@@ -304,12 +304,20 @@ export function EqChart({
   onFreqSweep,
   onFreqSweepEnd,
   height = 210,
+  screen = false,
 }: {
   series: Series[];
   markers?: Marker[];
   refs?: RefCurve[];
   phase?: PhaseCurve;
   nodes?: Nodes;
+  /** Force the dark `.eq-chart-screen` instrument-screen backdrop even without `spectrumRef` —
+   *  for a caller that wants the same on-tube, accent-coloured axis treatment (readable in both
+   *  themes, see `.eq-chart-screen`'s own CSS doc) but has no live spectrum and no use for the
+   *  spectrum-tuning gear (that stays gated on `spectrumRef` alone, unaffected by this prop) —
+   *  e.g. a static bands-only preview chart in a dialog. The main chart doesn't need this: it
+   *  always has a `spectrumRef`, which already implies the screen. */
+  screen?: boolean;
   /** Floor for the symmetric Y range (± dB). Lets the caller keep the scale stable across a slot
    *  switch (e.g. the larger of both slots' ranges in Comparison mode) instead of rescaling. */
   minSpan?: number;
@@ -925,7 +933,7 @@ export function EqChart({
         to PAD directly (tried first) meant it could never match the scope tubes' own footprint no
         matter how far PAD shrank, since it was answering a different question — "how much margin
         does the content want" is not "how big is the screen". */}
-    {spectrumRef && <div className="eq-chart-screen" aria-hidden="true" />}
+    {(spectrumRef || screen) && <div className="eq-chart-screen" aria-hidden="true" />}
     {/* phosphor spectrum backdrop — same viewBox coords as the SVG (CSS-scaled to match), behind it */}
     <canvas ref={specCanvasRef} className="eq-spectrum-canvas" width={W} height={H} aria-hidden="true" />
     {/* Top-edge stroke, its own non-accumulating layer above the wash — see the render effect's own

@@ -1840,6 +1840,30 @@ select:disabled {
   line-height: 1.4;
 }
 
+/* --- §8 mobile export dialog: the Fc/Gain/Q table (the "manual entry" path — read a row off
+   screen and type it into a phone app by hand), alongside the copyable text the Parametric tab
+   also offers. */
+.export-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  margin: 0.4rem 0;
+}
+.export-table th,
+.export-table td {
+  text-align: right;
+  padding: 0.15rem 0.5rem;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+}
+.export-table th:first-child,
+.export-table td:first-child {
+  text-align: left;
+}
+.export-table th {
+  opacity: 0.65;
+  font-weight: 500;
+}
+
 /* Group heading with a muted "scope" caption. */
 .pl-group {
   display: flex;

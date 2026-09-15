@@ -6,6 +6,8 @@ Speaks the same line-delimited JSON-RPC 2.0 as sidecar_stub.py. Methods:
   list_headphones {refresh?}   -> the AutoEq measurement catalogue (cached index)
   list_targets    {refresh?}   -> available AutoEq target curves
   calculate_filters {device, (headphone | measurement), target?, ...}
+  fit_export_eq   {filters, band_count, fs?} -> a low-band-count PEQ fit to a slot's own
+                  composed curve, for exporting to a mobile EQ app (see its own docstring)
 
 Measurement/target data is NOT bundled (the AutoEq repo is ~4.4 GB); we build a
 searchable index from GitHub's tree API once, then fetch each chosen headphone's
@@ -445,6 +447,86 @@ def calculate_filters(params):
     }
 
 
+# --- mobile export (§8) ----------------------------------------------------
+
+# A second, independent fit cache from `_FIT_CACHE` above — keyed on the *composed* filters
+# list + band_count + fs, not on a headphone/target selection, so a custom-filter edit (which
+# changes what's being fit here) correctly invalidates it while leaving `_FIT_CACHE` alone.
+_EXPORT_FIT_CACHE = {}
+_EXPORT_FIT_CACHE_MAX = 32
+
+
+def _export_fit_key(params):
+    """A hashable key over exactly the inputs `fit_export_eq` depends on."""
+    filters = params.get("filters") or []
+    digest = hashlib.sha1(repr([
+        (f.get("kind"), round(float(f["freq_hz"]), 2), round(float(f["gain_db"]), 2), round(float(f["q"]), 4))
+        for f in filters
+    ]).encode()).hexdigest()
+    return (digest, max(3, int(params.get("band_count", 8))), int(params.get("fs", 48000)))
+
+
+def fit_export_eq(params):
+    """A second, independent AutoEq PEQ pass: fits `band_count` filters directly to the
+    *combined response* of a slot's own full cascade (`filters` — fit stage + content stage +
+    tone macros, same wire shape `_custom_filters` already parses, Tilt expansion included) —
+    not to a headphone measurement, the way `_autoeq_fit` does. For exporting a low-band-count
+    correction to a mobile parametric EQ app: the full cascade routinely runs well past what a
+    phone app (or a user typing values in by hand) wants to accept, so this re-targets the same
+    optimizer at "match my own curve with fewer filters" instead.
+
+    `band_count` (>= 3) is the *total* filter count: one LowShelf + one HighShelf (same corners
+    `_autoeq_fit` uses) + `band_count - 2` Peaking, mirroring `_autoeq_fit`'s own config shape.
+    Returns just `{filters, preamp_db}` — no curve payload. The frontend already has
+    `composedCurveDb` (biquad.ts, a verified match for this exact biquad model — see the
+    biquad-crosscheck tests) and can recompute both the achieved and the full-cascade reference
+    curve from bands alone, so there's no reason to duplicate that curve math a third time here
+    just to hand back samples the caller can already produce itself.
+
+    `preamp_db` is `-max(achieved curve) - 0.2 dB` headroom, mirroring AutoEq's own
+    `write_eqapo_parametric_eq`'s preamp line — a self-contained "don't clip on the destination
+    device" value. Deliberately NOT `calculate_filters`' `g_target_db` (the desktop's §4.1
+    loudness-matched preamp): that's calibrated for A/B-ing against Dry, which doesn't exist on
+    the destination device.
+
+    Cached like `_autoeq_fit` (`_EXPORT_FIT_CACHE`, own key/eviction) — the export dialog's
+    band-count slider re-fits on every change, and repeat drags over an already-seen value
+    should be instant rather than re-paying the SciPy optimization."""
+    key = _export_fit_key(params)
+    cached = _EXPORT_FIT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    fs = int(params.get("fs", 48000))
+    band_count = max(3, int(params.get("band_count", 8)))
+    f = FrequencyResponse.generate_frequencies()
+    _, curve = _custom_filters({"custom_filters": params.get("filters") or []}, f, fs)
+
+    fr = FrequencyResponse(name="export", frequency=f, equalization=curve)
+    config = {
+        "filters": [
+            {"type": "LOW_SHELF", "fc": 105.0, "q": 0.7},
+            {"type": "HIGH_SHELF", "fc": 10000.0, "q": 0.7},
+        ]
+        + [{"type": "PEAKING"} for _ in range(band_count - 2)]
+    }
+    peq = fr.optimize_parametric_eq([config], fs)[0]
+    filters = [
+        {
+            "kind": type(filt).__name__,  # 'LowShelf' | 'HighShelf' | 'Peaking' == Rust FilterType
+            "freq_hz": round(float(filt.fc), 2),
+            "gain_db": round(float(filt.gain), 2),
+            "q": round(float(filt.q), 4),
+        }
+        for filt in peq.filters
+    ]
+    result = {"filters": filters, "preamp_db": round(-float(np.max(peq.fr)) - 0.2, 2)}
+    if len(_EXPORT_FIT_CACHE) >= _EXPORT_FIT_CACHE_MAX:
+        _EXPORT_FIT_CACHE.pop(next(iter(_EXPORT_FIT_CACHE)))  # evict oldest (dicts keep insertion order)
+    _EXPORT_FIT_CACHE[key] = result
+    return result
+
+
 # --- JSON-RPC loop --------------------------------------------------------
 
 def reply(rid, result=None, error=None):
@@ -485,6 +567,8 @@ def main():
                 reply(rid, result=measurement_curves(params))
             elif method == "filter_response":
                 reply(rid, result=filter_response(params))
+            elif method == "fit_export_eq":
+                reply(rid, result=fit_export_eq(params))
             else:
                 reply(rid, error={"code": -32601, "message": f"unknown method: {method}"})
         except Exception as e:  # keep the loop alive; report the failure

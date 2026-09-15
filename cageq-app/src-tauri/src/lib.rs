@@ -967,6 +967,25 @@ fn measurement_curves(headphone: String, target: Option<String>, state: State<Ba
     }
 }
 
+/// §8 mobile export: a second, independent AutoEq PEQ pass that fits `band_count` filters
+/// directly to the *combined response* of `filters` (a slot's own full cascade — fit + content
+/// + tone, the same `Band[]` `ApplyResult::filters` already carries), not to a headphone
+/// measurement. Relayed as-is (`{filters, preamp_db}`) — see `fit_export_eq`'s own Python
+/// docstring for why it doesn't also return curve samples (the frontend already has
+/// `composedCurveDb` to turn the returned bands back into a curve itself).
+#[tauri::command]
+fn export_eq_fit(filters: Vec<Filter>, band_count: u32, state: State<Backend>) -> Result<Value, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => {
+            let mut params = Map::new();
+            params.insert("filters".into(), serde_json::to_value(filters).map_err(|e| e.to_string())?);
+            params.insert("band_count".into(), Value::Number(band_count.into()));
+            core.request("fit_export_eq", Value::Object(params)).map_err(|e| e.to_string())
+        }
+    }
+}
+
 /// The AutoEq target curves. Relayed as-is.
 #[tauri::command]
 fn list_targets(state: State<Backend>) -> Result<Value, String> {
@@ -1587,6 +1606,7 @@ pub fn run() {
             open_output_settings,
             list_targets,
             measurement_curves,
+            export_eq_fit,
             get_loudness,
             set_loudness,
             preview_loudness,

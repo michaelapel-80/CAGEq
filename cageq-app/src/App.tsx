@@ -17,6 +17,7 @@ import { Vectorscope } from "./Vectorscope";
 import { TimeScope } from "./TimeScope";
 import { SpectrumScope } from "./SpectrumScope";
 import ApoSetup, { computeEngineReason, type ApoSetupStatus } from "./ApoSetup";
+import { ExportDialog } from "./ExportDialog";
 import "./App.css";
 
 type Headphone = { source: string; form_factor: string; name: string; path: string; rig: string };
@@ -654,6 +655,7 @@ function App() {
   const [renaming, setRenaming] = useState<{ kind: "preset" | "template"; id: string; name: string } | null>(null);
   const [expandedPreset, setExpandedPreset] = useState<string | null>(null); // which preset's version history is open
   const [presetSave, setPresetSave] = useState<UserPreset | null>(null); // the preset whose save dialog is open
+  const [exportOpen, setExportOpen] = useState(false); // §8 mobile-export dialog open for the active slot
   const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
   const [selfTest, setSelfTest] = useState<SelfTestState | null>(null); // §5.4 output self-test
   // §5.2 solo: hear only one band within its stage (transient — never edits stored bands). A ref
@@ -2400,6 +2402,10 @@ function App() {
         </div>
       )}
 
+      {exportOpen && result && (
+        <ExportDialog filters={result.filters} sampleRate={sampleRate ?? undefined} onClose={() => setExportOpen(false)} />
+      )}
+
       {selfTest && (
         <div
           onClick={() => selfTest.phase !== "running" && setSelfTest(null)}
@@ -3221,17 +3227,28 @@ function App() {
             <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
               <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
                 <h2 style={{ margin: 0 }}>{tr("presets.title")}</h2>
-                <button
-                  type="button"
-                  className="pl-save"
-                  disabled={dryActive}
-                  onClick={() =>
-                    setSaveForm(saveForm ? null : { kind: measurementPath ? "preset" : "template", name: "", error: false })
-                  }
-                  title={tr("presets.saveTitle")}
-                >
-                  <span aria-hidden>💾</span> {tr("presets.save")}
-                </button>
+                <div className="row" style={{ gap: "0.4em" }}>
+                  <button
+                    type="button"
+                    className="pl-save"
+                    disabled={dryActive || !result?.filters?.length}
+                    onClick={() => setExportOpen(true)}
+                    title={tr("export.saveTitle")}
+                  >
+                    <span aria-hidden>📤</span> {tr("export.save")}
+                  </button>
+                  <button
+                    type="button"
+                    className="pl-save"
+                    disabled={dryActive}
+                    onClick={() =>
+                      setSaveForm(saveForm ? null : { kind: measurementPath ? "preset" : "template", name: "", error: false })
+                    }
+                    title={tr("presets.saveTitle")}
+                  >
+                    <span aria-hidden>💾</span> {tr("presets.save")}
+                  </button>
+                </div>
               </div>
 
               {saveForm && (

@@ -342,6 +342,26 @@
     "emptyPresets": "Kopfhörer + Ziel wählen, dann 💾 ein volles Preset speichern, um das ganze Setup abzurufen."
   },
 
+  "export": {
+    "save": "Export",
+    "saveTitle": "Die Korrektur dieses Slots für eine Handy-EQ-App exportieren",
+    "title": "Für eine Handy-EQ-App exportieren",
+    "hint": "CAGEq wirkt nur auf diesem Desktop. Eine der folgenden Ausgaben in eine unterstützende Handy-App einfügen, oder die Tabellenwerte von Hand eintragen.",
+    "parametric": "Parametrisch",
+    "graphic": "Grafik-EQ",
+    "bandCount": "Bänder",
+    "fitCurve": "Exportierte Anpassung",
+    "fullCurve": "Volle Korrektur",
+    "tableType": "Typ",
+    "tableFc": "Fc",
+    "tableGain": "Gain",
+    "tableQ": "Q",
+    "fitting": "Wird angepasst…",
+    "copy": "Kopieren",
+    "copied": "Kopiert!",
+    "impedanceCaveat": "Der Kopfhörerausgang eines Handys kann eine andere Impedanz haben als der Desktop-DAC/-Verstärker, gegen den abgestimmt wurde – das verschiebt bei manchen Kopfhörern den Frequenzgang bei direkter Kabelverbindung. Über Bluetooth spielt das keine Rolle, da der Verstärker ohnehin im Kopfhörer oder Dongle sitzt."
+  },
+
   "tonePresets": {
     "flat": "Neutral",
     "bassBoost": "Bass-Boost",

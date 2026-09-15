@@ -63,6 +63,20 @@ def handle(method, params):
             + list(params.get("custom_filters") or []),
         }
 
+    if method == "fit_export_eq":
+        # Canned low-band fit, shaped like the real engine's {filters, preamp_db} — enough for
+        # the export dialog's own tests/dev builds to exercise the endpoint without a DSP install.
+        band_count = max(3, int(params.get("band_count", 8)))
+        filters = [
+            {"kind": "LowShelf", "freq_hz": 105.0, "gain_db": 2.0, "q": 0.7},
+            {"kind": "HighShelf", "freq_hz": 10000.0, "gain_db": -1.5, "q": 0.7},
+        ]
+        filters += [
+            {"kind": "Peaking", "freq_hz": 200.0 * (i + 1), "gain_db": -1.0, "q": 1.4}
+            for i in range(max(0, band_count - 2))
+        ]
+        return {"filters": filters, "preamp_db": -3.5}
+
     if method == "measurement_curves":
         # Canned curves so the nerd overlays degrade gracefully without a DSP install.
         return {

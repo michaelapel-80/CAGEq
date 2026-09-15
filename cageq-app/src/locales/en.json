@@ -342,6 +342,26 @@
     "emptyPresets": "Pick a headphone + target, then 💾 Save a full preset to recall the whole setup."
   },
 
+  "export": {
+    "save": "Export",
+    "saveTitle": "Export this slot's correction for a mobile EQ app",
+    "title": "Export for a mobile EQ app",
+    "hint": "CAGEq only applies on this desktop. Paste one of these into a phone EQ app that supports it, or type the table's values in by hand.",
+    "parametric": "Parametric",
+    "graphic": "Graphic EQ",
+    "bandCount": "Bands",
+    "fitCurve": "Exported fit",
+    "fullCurve": "Full correction",
+    "tableType": "Type",
+    "tableFc": "Fc",
+    "tableGain": "Gain",
+    "tableQ": "Q",
+    "fitting": "Fitting…",
+    "copy": "Copy",
+    "copied": "Copied!",
+    "impedanceCaveat": "A phone's headphone output can have a different impedance than the desktop DAC/amp this was tuned against, which shifts response on some headphones when wired directly. Over Bluetooth this doesn't apply — the amp lives in the headphone or dongle either way."
+  },
+
   "tonePresets": {
     "flat": "Flat",
     "bassBoost": "Bass boost",
