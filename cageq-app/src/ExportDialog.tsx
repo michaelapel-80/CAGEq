@@ -3,30 +3,37 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { Band, composedCurveDb, logGrid } from "./biquad";
 import { EqChart, RefCurve, Series } from "./EqChart";
-import { graphicEqText, parametricEqText } from "./exportFormats";
+import { parametricEqText } from "./exportFormats";
 
 type ExportFormat = "parametric" | "graphic";
+type FixedBandPreset = "10" | "31";
 
 const BAND_COUNT_MIN = 3;
 const BAND_COUNT_MAX = 20;
 const BAND_COUNT_DEFAULT = 8;
-// Re-fit debounce: dragging the band-count slider shouldn't fire a ~1-2s SciPy optimization
-// (fit_export_eq) per tick — same reasoning as every other live-tunable slider that gates an
-// expensive backend call behind a settle delay rather than the raw onChange stream.
+// Re-fit debounce: dragging the band-count slider (or switching the 10-/31-band preset)
+// shouldn't fire a ~1-2s SciPy optimization per tick — same reasoning as every other
+// live-tunable control that gates an expensive backend call behind a settle delay.
 const DEBOUNCE_MS = 300;
 
 type ExportFit = { filters: Band[]; preamp_db: number };
 
-/** §8 mobile export dialog: re-fits the active slot's full cascade to a low band count for a
- *  mobile parametric EQ (Parametric tab), or resamples it exactly with no band-count tradeoff at
- *  all (Graphic tab, see `exportFormats.ts`'s own doc for why that one needs no backend call).
- *  `filters` is the slot's full composed cascade — `result.filters` in App.tsx, the same `Band[]`
- *  the §5.2 chart already draws for the active slot. Reuses the existing `.modal-card` overlay
- *  convention (see the `presetSave` dialog in App.tsx) rather than inventing new modal chrome. */
+/** §8 mobile export dialog: fits the active slot's full cascade to a phone-friendly band
+ *  count — either a free band count (Parametric tab, `fit_export_eq`) or AutoEq's own standard
+ *  10-/31-band graphic EQ (Graphic EQ tab, `fit_fixed_band_eq`, fixed ISO-standard Fc/Q, only
+ *  gain optimized). Both resolve to the exact same `{filters, preamp_db}` shape and are shown
+ *  the same way — a preview chart, an Fc/Gain/Q table (the "manual entry" path), and the
+ *  parametric-syntax text AutoEq's own site writes for all three of these presets (see
+ *  exportFormats.ts's own doc for why there's no separate dense-curve GraphicEQ format here).
+ *  `filters` is the slot's full composed cascade — `result.filters` in App.tsx, the same
+ *  `Band[]` the §5.2 chart already draws for the active slot. Reuses the existing `.modal-card`
+ *  overlay convention (see the `presetSave` dialog in App.tsx) rather than inventing new modal
+ *  chrome. */
 export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]; sampleRate?: number; onClose: () => void }) {
   const { t } = useTranslation();
   const [format, setFormat] = useState<ExportFormat>("parametric");
   const [bandCount, setBandCount] = useState(BAND_COUNT_DEFAULT);
+  const [fixedBandPreset, setFixedBandPreset] = useState<FixedBandPreset>("31");
   const [fit, setFit] = useState<ExportFit | null>(null);
   const [fitting, setFitting] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -38,26 +45,36 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
   const [legendHost, setLegendHost] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (format !== "parametric" || filters.length === 0) return;
+    if (filters.length === 0) return;
     setFitting(true);
+    const method = format === "parametric" ? "export_eq_fit" : "fixed_band_eq_fit";
+    const params = format === "parametric" ? { filters, bandCount } : { filters, preset: fixedBandPreset };
     const h = setTimeout(() => {
-      invoke<ExportFit>("export_eq_fit", { filters, bandCount })
-        .then((r) => setFit(r))
+      invoke<ExportFit>(method, params)
+        // Sorted ascending by Fc — AutoEq's optimizer returns bands in fit order (shelves
+        // first, peaking bands not otherwise ordered — the fixed-band presets happen to come
+        // back roughly low-to-high already, but not guaranteed to), which reads poorly both
+        // in the table and as "Filter 1/2/3..." in the exported text. Sorted once here so
+        // every consumer (the table, parametricEqText, the preview curve — order-independent
+        // for that one) sees the same canonical order.
+        .then((r) => setFit({ ...r, filters: [...r.filters].sort((a, b) => a.freq_hz - b.freq_hz) }))
         .catch(() => setFit(null))
         .finally(() => setFitting(false));
     }, DEBOUNCE_MS);
     return () => clearTimeout(h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [format, filters, bandCount]);
+  }, [format, filters, bandCount, fixedBandPreset]);
 
-  const graphicText = useMemo(() => (filters.length ? graphicEqText(filters, sampleRate) : ""), [filters, sampleRate]);
-  const parametricText = useMemo(() => (fit ? parametricEqText(fit.filters, fit.preamp_db) : ""), [fit]);
+  // Q omitted for the fixed-band presets — it's constant per preset, so AutoEq's own site
+  // doesn't state it either (see parametricEqText's own doc); the free-band-count fit still
+  // needs it, since there Q genuinely varies band to band.
+  const text = useMemo(() => (fit ? parametricEqText(fit.filters, fit.preamp_db, format === "parametric") : ""), [fit, format]);
 
-  // Preview curves: the low-band fit's own response (solid) against the full cascade it's
-  // approximating (dotted reference) — the same fit-vs-ideal visual language EqChart already
-  // uses elsewhere (the AutoEq fit vs. its own reference_curve). Both computed client-side via
-  // composedCurveDb — the exact function `fit_export_eq` fit against, so there's no second curve
-  // implementation to keep in sync (see exportFormats.ts's own doc).
+  // Preview curves: the fit's own response (solid) against the full cascade it's approximating
+  // (dotted reference) — the same fit-vs-ideal visual language EqChart already uses elsewhere
+  // (the AutoEq fit vs. its own reference_curve). Both computed client-side via composedCurveDb
+  // — the exact function both `fit_export_eq`/`fit_fixed_band_eq` fit against, so there's no
+  // second curve implementation to keep in sync (see exportFormats.ts's own doc).
   const previewFreqs = useMemo(() => logGrid(480, 20, 20000), []);
   const series: Series[] = useMemo(
     () => (fit ? [{ id: "export-fit", bands: fit.filters, color: "var(--accent)", label: t("export.fitCurve") }] : []),
@@ -76,7 +93,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
     ];
   }, [filters, previewFreqs, sampleRate, t]);
 
-  const copy = async (text: string) => {
+  const copy = async () => {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
@@ -95,11 +112,22 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
       <div
         className="modal-card"
         onClick={(e) => e.stopPropagation()}
-        // maxHeight + its own scroll: at a high band count the table + textarea can run taller
-        // than the viewport (reported live as the dialog getting cropped, nothing to scroll it
-        // back into view since the fixed overlay above has no scroll path of its own) — the card
-        // itself scrolls instead of silently overflowing past the screen edge.
-        style={{ maxWidth: "34em", width: "92vw", maxHeight: "85vh", overflowY: "auto" }}
+        // maxHeight + its own scroll: a backstop in case the sum of everything below still runs
+        // taller than the viewport (nothing to scroll it back into view since the fixed overlay
+        // above has no scroll path of its own) — the card itself scrolls instead of silently
+        // overflowing past the screen edge. The table/textarea below use a *fixed* height each
+        // (not a shrink-then-cap one) so the dialog's own size stays constant regardless of
+        // which tab or preset is active — this is just the safety net, not the primary fix.
+        //
+        // `overflowX: "hidden"` is required, not cosmetic, once `overflowY` is set to anything
+        // but `visible`: per the CSS overflow spec, an unset `overflow-x` on an element whose
+        // `overflow-y` is non-visible is computed to `auto` too, not left `visible` — so without
+        // this, EqChart's hover-cursor readout (`.ss-cursor`, centered on the mouse X position
+        // via `transform: translateX(-50%)`) bleeding past the chart's own right edge near the
+        // top of its frequency range was enough to pop a real horizontal scrollbar on this card
+        // (reported live: triggered by moving the mouse off the chart to the right). Hidden, not
+        // auto: there's nothing here that's ever supposed to need horizontal scrolling.
+        style={{ maxWidth: "34em", width: "92vw", maxHeight: "85vh", overflowY: "auto", overflowX: "hidden" }}
       >
         <p style={{ marginTop: 0, fontWeight: 600 }}>{t("export.title")}</p>
         <p style={{ fontSize: "0.85em", opacity: 0.75 }}>{t("export.hint")}</p>
@@ -113,82 +141,83 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
           </button>
         </div>
 
-        {format === "parametric" && (
-          <>
-            <label className="vs-tune-row" style={{ marginTop: "0.6em" }}>
-              <span className="vs-tune-label">{t("export.bandCount")}</span>
-              <input
-                type="range"
-                min={BAND_COUNT_MIN}
-                max={BAND_COUNT_MAX}
-                step={1}
-                value={bandCount}
-                onChange={(e) => setBandCount(Number(e.currentTarget.value))}
-              />
-              <b>{bandCount}</b>
-            </label>
-
-            <div style={{ height: 160, position: "relative", margin: "0.6em 0" }}>
-              <EqChart series={series} refs={refs} height={160} screen legendHost={legendHost} />
-            </div>
-            <div ref={setLegendHost} className="chart-legend-host" />
-
-            {fit && (
-              // Fixed `height`, not `maxHeight`: a shrink-then-cap box still grows with every
-              // extra band up to the cap (reported live as the dialog visibly expanding band by
-              // band before the internal scrollbar ever kicks in) — a fixed height scrolls
-              // internally from the very first row past it, so the dialog's total size stops
-              // depending on the band-count slider at all, not just above some threshold.
-              <div style={{ height: "9.5em", overflowY: "auto" }}>
-                <table className="export-table">
-                  <thead>
-                    <tr>
-                      <th>{t("export.tableType")}</th>
-                      <th>{t("export.tableFc")}</th>
-                      <th>{t("export.tableGain")}</th>
-                      <th>{t("export.tableQ")}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {fit.filters.map((b, i) => (
-                      <tr key={i}>
-                        <td>{b.kind}</td>
-                        <td>{Math.round(b.freq_hz)} Hz</td>
-                        <td>
-                          {b.gain_db > 0 ? "+" : ""}
-                          {b.gain_db.toFixed(1)} dB
-                        </td>
-                        <td>{b.q.toFixed(2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {/* Always the same fixed row count, never `fit.filters.length`-dependent — the same
-                "no growth at all, not just a cap" reasoning as the table's own fixed height just
-                above. The textarea's native scrollbar shows the rest. */}
-            <textarea
-              readOnly
-              rows={6}
-              value={fitting && !fit ? t("export.fitting") : parametricText}
-              style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.6em" }}
+        {format === "parametric" ? (
+          <label className="vs-tune-row" style={{ marginTop: "0.6em" }}>
+            <span className="vs-tune-label">{t("export.bandCount")}</span>
+            <input
+              type="range"
+              min={BAND_COUNT_MIN}
+              max={BAND_COUNT_MAX}
+              step={1}
+              value={bandCount}
+              onChange={(e) => setBandCount(Number(e.currentTarget.value))}
             />
-            <button type="button" disabled={!fit} onClick={() => copy(parametricText)}>
-              {copied ? t("export.copied") : t("export.copy")}
+            <b>{bandCount}</b>
+          </label>
+        ) : (
+          // Hint lives in `title` (hover), not a permanent paragraph — a visible line here
+          // pushed the dialog's total content past its own height budget again (reported live
+          // as the scrollbar coming back), the same growth this dialog's other fixed-height
+          // choices were already built to avoid.
+          <div className="pl-toggle" style={{ marginTop: "0.6em" }} title={t("export.fixedBandHint")}>
+            <button type="button" className={fixedBandPreset === "10" ? "on" : ""} onClick={() => setFixedBandPreset("10")}>
+              {t("export.band10")}
             </button>
-          </>
+            <button type="button" className={fixedBandPreset === "31" ? "on" : ""} onClick={() => setFixedBandPreset("31")}>
+              {t("export.band31")}
+            </button>
+          </div>
         )}
 
-        {format === "graphic" && (
-          <>
-            <textarea readOnly rows={4} value={graphicText} style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.6em" }} />
-            <button type="button" onClick={() => copy(graphicText)}>
-              {copied ? t("export.copied") : t("export.copy")}
-            </button>
-          </>
+        <div style={{ height: 160, position: "relative", margin: "0.6em 0" }}>
+          <EqChart series={series} refs={refs} height={160} screen legendHost={legendHost} />
+        </div>
+        <div ref={setLegendHost} className="chart-legend-host" />
+
+        {fit && (
+          // Fixed `height`, not `maxHeight`: a shrink-then-cap box still grows with every extra
+          // row up to the cap (reported live as the dialog visibly expanding before the internal
+          // scrollbar ever kicks in) — a fixed height scrolls internally from the very first row
+          // past it, so the dialog's total size stops depending on the band count/preset at all.
+          <div style={{ height: "9.5em", overflowY: "auto" }}>
+            <table className="export-table">
+              <thead>
+                <tr>
+                  <th>{t("export.tableType")}</th>
+                  <th>{t("export.tableFc")}</th>
+                  <th>{t("export.tableGain")}</th>
+                  <th>{t("export.tableQ")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fit.filters.map((b, i) => (
+                  <tr key={i}>
+                    <td>{b.kind}</td>
+                    <td>{Math.round(b.freq_hz)} Hz</td>
+                    <td>
+                      {b.gain_db > 0 ? "+" : ""}
+                      {b.gain_db.toFixed(1)} dB
+                    </td>
+                    <td>{b.q.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
+
+        {/* Always the same fixed row count, regardless of band count/preset — same "no growth
+            at all, not just a cap" reasoning as the table's own fixed height just above. The
+            textarea's native scrollbar shows the rest. */}
+        <textarea
+          readOnly
+          rows={6}
+          value={fitting && !fit ? t("export.fitting") : text}
+          style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.6em" }}
+        />
+        <button type="button" disabled={!fit} onClick={copy}>
+          {copied ? t("export.copied") : t("export.copy")}
+        </button>
 
         <p style={{ fontSize: "0.75em", opacity: 0.7, marginTop: "0.8em" }}>{t("export.impedanceCaveat")}</p>
 

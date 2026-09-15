@@ -254,3 +254,70 @@ fn real_dsp_fits_export_eq_to_full_cascade() {
     let reply2 = sc.call("fit_export_eq", json!({ "filters": full_cascade, "band_count": 5 })).expect("fit_export_eq (repeat)");
     assert_eq!(reply["filters"], reply2["filters"], "identical request should hit the export fit cache");
 }
+
+/// §8 mobile export: `fit_fixed_band_eq` — AutoEq's own standard 10-/31-band graphic EQ, fixed
+/// ISO-standard Fc/Q (`autoeq.constants.PEQ_CONFIGS`), only gain optimized.
+#[test]
+fn real_dsp_fits_fixed_band_eq_to_full_cascade() {
+    let Some(python) = venv_python() else {
+        eprintln!("skipping fit_fixed_band_eq test: no .venv");
+        return;
+    };
+    let mut sc = Sidecar::spawn(&python, &dsp_script()).expect("spawn dsp sidecar");
+    sc.ping().expect("ping");
+
+    // Same synthetic full cascade as the free-band-count test: a dominant +8 dB peak at 3 kHz.
+    let full_cascade = json!([
+        { "kind": "LowShelf", "freq_hz": 105.0, "gain_db": 2.0, "q": 0.7 },
+        { "kind": "Peaking", "freq_hz": 3000.0, "gain_db": 8.0, "q": 2.0 },
+        { "kind": "HighShelf", "freq_hz": 10000.0, "gain_db": -1.5, "q": 0.7 },
+        { "kind": "Peaking", "freq_hz": 500.0, "gain_db": 1.0, "q": 1.0 },
+    ]);
+
+    // 10-band: AutoEq's own PEQ_CONFIGS['10_BAND_GRAPHIC_EQ'] — Fc = 31.25 * 2^i (octave steps,
+    // 31.25 Hz .. 16 kHz), fixed Q = sqrt(2) for every band, only gain free.
+    let reply10 = sc
+        .call("fit_fixed_band_eq", json!({ "filters": full_cascade, "preset": "10" }))
+        .expect("fit_fixed_band_eq (10-band)");
+    let filters10 = reply10["filters"].as_array().expect("filters array");
+    assert_eq!(filters10.len(), 10, "10-band preset should return exactly 10 filters");
+    for f in filters10 {
+        assert_eq!(f["kind"], "Peaking", "fixed-band presets are peaking-only");
+        assert!((f["q"].as_f64().unwrap() - std::f64::consts::SQRT_2).abs() < 1e-3, "10-band Q should be fixed at sqrt(2): {f}");
+    }
+    let fcs10: Vec<f64> = filters10.iter().map(|f| f["freq_hz"].as_f64().unwrap()).collect();
+    assert!((fcs10[0] - 31.25).abs() < 0.5, "first 10-band Fc should be 31.25 Hz, got {}", fcs10[0]);
+    assert!((fcs10[9] - 16000.0).abs() < 5.0, "last 10-band Fc should be 16 kHz, got {}", fcs10[9]);
+    // The band nearest the 3 kHz bump (2 or 4 kHz — the grid has no exact 3 kHz point) should
+    // still show a real positive gain, even though a fixed, non-matching Fc can't capture it as
+    // exactly as the free-band-count fit does.
+    let near_3k = filters10.iter().min_by(|a, b| {
+        (a["freq_hz"].as_f64().unwrap() - 3000.0).abs().partial_cmp(&(b["freq_hz"].as_f64().unwrap() - 3000.0).abs()).unwrap()
+    });
+    assert!(near_3k.unwrap()["gain_db"].as_f64().unwrap() > 2.0, "band nearest 3 kHz should pick up real gain: {near_3k:?}");
+
+    // 31-band: PEQ_CONFIGS['31_BAND_GRAPHIC_EQ'] — Fc = 20 * 2^(i/3) (third-octave/ISO steps,
+    // 20 Hz .. ~20 kHz), fixed Q = 4.318473.
+    let reply31 = sc
+        .call("fit_fixed_band_eq", json!({ "filters": full_cascade, "preset": "31" }))
+        .expect("fit_fixed_band_eq (31-band)");
+    let filters31 = reply31["filters"].as_array().expect("filters array");
+    assert_eq!(filters31.len(), 31, "31-band preset should return exactly 31 filters");
+    for f in filters31 {
+        assert_eq!(f["kind"], "Peaking");
+        assert!((f["q"].as_f64().unwrap() - 4.318473).abs() < 1e-2, "31-band Q should be fixed at ~4.318: {f}");
+    }
+    let fc0 = filters31[0]["freq_hz"].as_f64().unwrap();
+    assert!((fc0 - 20.0).abs() < 0.5, "first 31-band Fc should be 20 Hz, got {fc0}");
+
+    // preamp_db is a self-contained "don't clip on the destination device" headroom (real
+    // negative headroom given the ~8 dB peak somewhere in the response), same convention as
+    // fit_export_eq's own.
+    assert!(reply10["preamp_db"].as_f64().unwrap() < -1.0, "expected real negative headroom: {reply10}");
+
+    // Cache hit: an identical request should return the identical fit, not merely "a" valid one.
+    let reply10_again = sc
+        .call("fit_fixed_band_eq", json!({ "filters": full_cascade, "preset": "10" }))
+        .expect("fit_fixed_band_eq (10-band, repeat)");
+    assert_eq!(reply10["filters"], reply10_again["filters"], "identical request should hit the fixed-band fit cache");
+}

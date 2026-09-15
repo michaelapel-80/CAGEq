@@ -986,6 +986,23 @@ fn export_eq_fit(filters: Vec<Filter>, band_count: u32, state: State<Backend>) -
     }
 }
 
+/// §8 mobile export: AutoEq's own standard 10-/31-band graphic EQ (`preset`), fit the same way
+/// `export_eq_fit` is but with fixed ISO-standard center frequencies/Q instead of a free band
+/// count — see `fit_fixed_band_eq`'s own Python docstring for why this needs a real optimizer
+/// pass rather than just sampling the curve at those frequencies. Relayed as-is.
+#[tauri::command]
+fn fixed_band_eq_fit(filters: Vec<Filter>, preset: String, state: State<Backend>) -> Result<Value, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => {
+            let mut params = Map::new();
+            params.insert("filters".into(), serde_json::to_value(filters).map_err(|e| e.to_string())?);
+            params.insert("preset".into(), Value::String(preset));
+            core.request("fit_fixed_band_eq", Value::Object(params)).map_err(|e| e.to_string())
+        }
+    }
+}
+
 /// The AutoEq target curves. Relayed as-is.
 #[tauri::command]
 fn list_targets(state: State<Backend>) -> Result<Value, String> {
@@ -1607,6 +1624,7 @@ pub fn run() {
             list_targets,
             measurement_curves,
             export_eq_fit,
+            fixed_band_eq_fit,
             get_loudness,
             set_loudness,
             preview_loudness,

@@ -8,6 +8,8 @@ Speaks the same line-delimited JSON-RPC 2.0 as sidecar_stub.py. Methods:
   calculate_filters {device, (headphone | measurement), target?, ...}
   fit_export_eq   {filters, band_count, fs?} -> a low-band-count PEQ fit to a slot's own
                   composed curve, for exporting to a mobile EQ app (see its own docstring)
+  fit_fixed_band_eq {filters, preset: "10"|"31", fs?} -> AutoEq's own standard 10-/31-band
+                  graphic EQ fit to a slot's own composed curve (see its own docstring)
 
 Measurement/target data is NOT bundled (the AutoEq repo is ~4.4 GB); we build a
 searchable index from GitHub's tree API once, then fetch each chosen headphone's
@@ -21,6 +23,7 @@ import os
 import types
 import json
 import hashlib
+import copy
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 import urllib.request
@@ -53,6 +56,7 @@ sys.modules["matplotlib"].ticker = sys.modules["matplotlib.ticker"]
 import numpy as np  # noqa: E402
 import autoeq.peq as autoeq_peq  # noqa: E402
 from autoeq.frequency_response import FrequencyResponse  # noqa: E402
+from autoeq.constants import PEQ_CONFIGS  # noqa: E402
 
 # AutoEq's PEQ optimizer measures its convergence "change rate" as d_loss / d_time, timing each
 # SLSQP callback with time.time() (peq.py: `from time import time`). On Windows time.time() has
@@ -527,6 +531,91 @@ def fit_export_eq(params):
     return result
 
 
+# AutoEq's own two standard "graphic EQ" presets (autoeq/constants.py's PEQ_CONFIGS) — the exact
+# ones its site's "10-band"/"31-band Graphic EQ" downloads use: fixed ISO-standard center
+# frequencies (10-band: 31.25 Hz doubling each band; 31-band: 20 Hz, third-octave steps) and a
+# fixed per-preset Q, only gain optimized per band.
+_FIXED_BAND_PRESETS = {"10": "10_BAND_GRAPHIC_EQ", "31": "31_BAND_GRAPHIC_EQ"}
+
+# `optimize_fixed_band_eq`'s own `gain_range` knob (frequency_response.py:178): bounds each
+# band's optimized gain to within this many dB of the curve's own value sampled *at that band's
+# exact Fc*, rather than letting the joint least-squares fit push a band's gain arbitrarily far
+# to compensate for its fixed-Q neighbours' overlap. Left unbounded (the default), a dense preset
+# fit against a real multi-band curve measurably overshoots/oscillates — reported live as visible
+# ripple in the 31-band preset specifically (its bands are narrower and more numerous than
+# 10-band's octave spacing, so neighbour interaction bites harder). Verified with a standalone
+# diagnostic script against several synthetic multi-band curves before landing this: gain_range
+# in the 4-6 dB range consistently roughly halved both the worst-case residual and a
+# diff-based ripple metric versus unconstrained, for both presets, with no regression on a
+# simpler single-peak curve; 4 dB gave the best numbers without ever being visibly worse.
+_FIXED_BAND_GAIN_RANGE_DB = 4.0
+
+_FIXED_BAND_CACHE = {}
+_FIXED_BAND_CACHE_MAX = 32
+
+
+def _fixed_band_key(params):
+    """A hashable key over exactly the inputs `fit_fixed_band_eq` depends on."""
+    filters = params.get("filters") or []
+    digest = hashlib.sha1(repr([
+        (f.get("kind"), round(float(f["freq_hz"]), 2), round(float(f["gain_db"]), 2), round(float(f["q"]), 4))
+        for f in filters
+    ]).encode()).hexdigest()
+    preset = _FIXED_BAND_PRESETS.get(str(params.get("preset", "31")), "31_BAND_GRAPHIC_EQ")
+    return (digest, preset, int(params.get("fs", 48000)))
+
+
+def fit_fixed_band_eq(params):
+    """AutoEq's own standard 10-/31-band graphic EQ, fit to a slot's own full cascade the same
+    way `fit_export_eq` is (same `filters` wire shape, same `_custom_filters` reuse) — but with
+    the band Fc/Q *fixed* to one of AutoEq's own presets (`_FIXED_BAND_PRESETS`) instead of free,
+    only gain optimized. Unlike `fit_export_eq`'s free-band fit, simply reading the composed
+    curve's value at each fixed center frequency would be WRONG here: a real graphic EQ's
+    fixed-bandwidth bands overlap and sum, so what to dial into any one band depends on its
+    neighbours too — exactly the interaction `optimize_fixed_band_eq`'s SciPy optimizer solves
+    for, the same way `calculate_filters`' own free-band fit does for a headphone measurement.
+
+    Returns the same `{filters, preamp_db}` shape as `fit_export_eq` — the frontend already
+    formats a Peaking/LowShelf/HighShelf `Band[]` as parametric-syntax text (`parametricEqText`,
+    exportFormats.ts), and that's exactly how AutoEq's own site writes these presets out too
+    (`write_eqapo_parametric_eq`, not the dense `eqapo_graphic_eq` curve-table format its plain
+    "GraphicEQ.txt" download uses) — there's no separate export format to build for this.
+
+    Passes `_FIXED_BAND_GAIN_RANGE_DB` to `optimize_fixed_band_eq` to keep the fit from
+    overshooting/rippling (see that constant's own doc) — which itself *mutates* each filter
+    dict's `min_gain`/`max_gain` in place when a gain_range is given, so `PEQ_CONFIGS[preset]`
+    (a module-level dict, shared and reused by every call and every other consumer of
+    autoeq.constants in this process) is deep-copied first; passing it directly would leak one
+    request's bounds into every subsequent request's preset, silently, forever."""
+    preset = _FIXED_BAND_PRESETS.get(str(params.get("preset", "31")), "31_BAND_GRAPHIC_EQ")
+    key = _fixed_band_key(params)
+    cached = _FIXED_BAND_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    fs = int(params.get("fs", 48000))
+    f = FrequencyResponse.generate_frequencies()
+    _, curve = _custom_filters({"custom_filters": params.get("filters") or []}, f, fs)
+
+    fr = FrequencyResponse(name="export", frequency=f, equalization=curve)
+    config = copy.deepcopy(PEQ_CONFIGS[preset])
+    peq = fr.optimize_fixed_band_eq([config], fs, gain_range=_FIXED_BAND_GAIN_RANGE_DB)[0]
+    filters = [
+        {
+            "kind": type(filt).__name__,
+            "freq_hz": round(float(filt.fc), 2),
+            "gain_db": round(float(filt.gain), 2),
+            "q": round(float(filt.q), 4),
+        }
+        for filt in peq.filters
+    ]
+    result = {"filters": filters, "preamp_db": round(-float(np.max(peq.fr)) - 0.2, 2)}
+    if len(_FIXED_BAND_CACHE) >= _FIXED_BAND_CACHE_MAX:
+        _FIXED_BAND_CACHE.pop(next(iter(_FIXED_BAND_CACHE)))
+    _FIXED_BAND_CACHE[key] = result
+    return result
+
+
 # --- JSON-RPC loop --------------------------------------------------------
 
 def reply(rid, result=None, error=None):
@@ -569,6 +658,8 @@ def main():
                 reply(rid, result=filter_response(params))
             elif method == "fit_export_eq":
                 reply(rid, result=fit_export_eq(params))
+            elif method == "fit_fixed_band_eq":
+                reply(rid, result=fit_fixed_band_eq(params))
             else:
                 reply(rid, error={"code": -32601, "message": f"unknown method: {method}"})
         except Exception as e:  # keep the loop alive; report the failure

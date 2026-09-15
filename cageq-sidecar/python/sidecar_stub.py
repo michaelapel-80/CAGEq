@@ -77,6 +77,16 @@ def handle(method, params):
         ]
         return {"filters": filters, "preamp_db": -3.5}
 
+    if method == "fit_fixed_band_eq":
+        # Canned fixed-band fit — a handful of standard-ish frequencies stand in for either
+        # preset (10 or 31 real bands), enough to exercise the endpoint without a DSP install.
+        n = 10 if str(params.get("preset", "31")) == "10" else 31
+        filters = [
+            {"kind": "Peaking", "freq_hz": 31.25 * 2 ** min(i, 9), "gain_db": -1.0 if i % 2 else 1.0, "q": 1.4}
+            for i in range(n)
+        ]
+        return {"filters": filters, "preamp_db": -3.0}
+
     if method == "measurement_curves":
         # Canned curves so the nerd overlays degrade gracefully without a DSP install.
         return {
