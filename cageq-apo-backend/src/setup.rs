@@ -160,6 +160,14 @@ pub struct SetupStatus {
     /// install from before this field existed, confidently older than any build that can even
     /// check it, not an ambiguous case to shrug off.
     pub dll_current: bool,
+    /// Whether LOCAL SERVICE — the account `audiodg` actually runs as — can read and execute
+    /// the registered DLL, checked against its real file ACL (see
+    /// [`crate::dll_acl::dll_readable_by_audiodg`]). `dll_present` above only proves the
+    /// *calling* account can see the file; this is the account that matters. `None` when the
+    /// check itself could not run (no registered DLL, or the API call failed) — treated as
+    /// "not blocking" everywhere this is read, since an inconclusive check must never read
+    /// the same as a confirmed block.
+    pub dll_readable: Option<bool>,
     /// `DisableProtectedAudioDG = 1`. **Without this the APO will not load at all**: Windows'
     /// APO signature check rejects unsigned *and* self-signed DLLs, so this key is the gate
     /// (verified on the VM). Equalizer APO's own installer sets exactly the same value.
@@ -170,14 +178,28 @@ pub struct SetupStatus {
     /// however it is attached — reported separately because attaching one looks successful
     /// and does nothing.
     pub effects_disabled: Vec<String>,
+    /// Endpoints where the CLSID slot is attached but the processing-modes `REG_MULTI_SZ`
+    /// value (`attach`'s own comment: "Missing any of them makes Windows skip the APO with no
+    /// error anywhere") is missing — attached looks successful here too, and does nothing.
+    /// Self-healing: `attach` already (re-)writes this value whenever it is absent, so the
+    /// fix is the same re-attach `effects_disabled` already prompts for.
+    pub modes_missing: Vec<String>,
 }
 
 impl SetupStatus {
     /// Is the machine-wide half done — the part an installer would normally have handled?
     /// Includes `dll_current`: a stale DLL is not "ready" in the sense that matters here, even
     /// though it is still running and still doing something (see `dll_current`'s own doc).
+    ///
+    /// `dll_readable` fails open: only a *confirmed* `Some(false)` counts against readiness,
+    /// same as every other field here treats an inconclusive read — an unelevated ACL check
+    /// that could not run is not evidence of anything.
     pub fn machine_ready(&self) -> bool {
-        self.registered_dll.is_some() && self.dll_present && self.dll_current && self.gate_open
+        self.registered_dll.is_some()
+            && self.dll_present
+            && self.dll_current
+            && self.gate_open
+            && self.dll_readable != Some(false)
     }
 
     /// The single next thing to do, or `None` when this endpoint is fully set up.
@@ -203,6 +225,11 @@ impl SetupStatus {
             return Some(Action::Attach(endpoint_id.to_string()));
         }
         if !self.attached.iter().any(|a| a == endpoint_id) {
+            return Some(Action::Attach(endpoint_id.to_string()));
+        }
+        // Self-healing, same as `effects_disabled` above: `attach` already re-writes the
+        // modes value whenever it finds it missing, so re-attaching is the whole fix.
+        if self.modes_missing.iter().any(|e| e == endpoint_id) {
             return Some(Action::Attach(endpoint_id.to_string()));
         }
         None
@@ -440,6 +467,7 @@ pub fn status() -> SetupStatus {
                 let right_place = registered_at_expected_location(&path, &installed_dll());
                 out.dll_current = right_place && installed_version() == Some(cageq_apo::APO_VERSION);
             }
+            out.dll_readable = crate::dll_acl::dll_readable_by_audiodg(&path);
             out.registered_dll = Some(path);
         }
     }
@@ -459,6 +487,14 @@ pub fn status() -> SetupStatus {
                 .is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID))
             {
                 out.attached.push(id.clone());
+                // `attach` writes this alongside the CLSID slot (see its own comment: missing
+                // it makes Windows skip the APO with no error anywhere) — re-verified here
+                // rather than assumed, since nothing stops a later external change removing it
+                // while the CLSID slot is left alone.
+                let modes = format!("{FX_MODES_PROP},{EFX_SLOT}");
+                if fx.get_value::<Vec<String>, _>(&modes).is_err() {
+                    out.modes_missing.push(id.clone());
+                }
             }
             // Any present value means the chain is bypassed; the value itself is a
             // PROPVARIANT blob, so its type varies and only presence is meaningful here.
@@ -468,6 +504,7 @@ pub fn status() -> SetupStatus {
         }
     }
     out.attached.sort();
+    out.modes_missing.sort();
     out.effects_disabled.sort();
     out
 }
@@ -1590,9 +1627,11 @@ mod tests {
             registered_dll: Some(PathBuf::from("C:/x/CAGEqApo.dll")),
             dll_present: true,
             dll_current: false,
+            dll_readable: None,
             gate_open: true,
             attached: vec![ep.to_string()],
             effects_disabled: vec![],
+            modes_missing: vec![],
         };
         assert!(!stale_but_attached.machine_ready(), "a stale DLL is not \"ready\", even though it is running");
         assert_eq!(
@@ -1652,11 +1691,66 @@ mod tests {
             registered_dll: Some(PathBuf::from("C:/x/CAGEqApo.dll")),
             dll_present: true,
             dll_current: true,
+            dll_readable: None,
             gate_open: true,
             attached: vec![ep.to_string()],
             effects_disabled: vec![ep.to_string()],
+            modes_missing: vec![],
         };
         assert_eq!(status.next_step(ep), Some(Action::Attach(ep.into())));
+    }
+
+    /// An endpoint attached but missing the processing-modes value needs the same fix as one
+    /// with effects disabled — attaching alone looks done here too, and Windows skips the APO
+    /// anyway (see `attach`'s own comment on why this value is written at all).
+    #[test]
+    fn an_endpoint_missing_the_modes_value_still_needs_work() {
+        let ep = "{6cafe423-cde5-4ec1-a1e2-e3fcec778349}";
+        let status = SetupStatus {
+            registered_dll: Some(PathBuf::from("C:/x/CAGEqApo.dll")),
+            dll_present: true,
+            dll_current: true,
+            dll_readable: None,
+            gate_open: true,
+            attached: vec![ep.to_string()],
+            effects_disabled: vec![],
+            modes_missing: vec![ep.to_string()],
+        };
+        assert_eq!(status.next_step(ep), Some(Action::Attach(ep.into())));
+    }
+
+    /// A confirmed-unreadable DLL is not "ready", even though every registry check passes —
+    /// the whole point of checking the file ACL at all.
+    #[test]
+    fn an_unreadable_dll_is_not_machine_ready() {
+        let status = SetupStatus {
+            registered_dll: Some(PathBuf::from("C:/x/CAGEqApo.dll")),
+            dll_present: true,
+            dll_current: true,
+            dll_readable: Some(false),
+            gate_open: true,
+            attached: vec![],
+            effects_disabled: vec![],
+            modes_missing: vec![],
+        };
+        assert!(!status.machine_ready());
+    }
+
+    /// An *inconclusive* ACL check must not read the same as a confirmed block — otherwise a
+    /// diagnostic that merely couldn't run would report the machine as broken.
+    #[test]
+    fn an_undetermined_dll_readable_check_does_not_block_machine_ready() {
+        let status = SetupStatus {
+            registered_dll: Some(PathBuf::from("C:/x/CAGEqApo.dll")),
+            dll_present: true,
+            dll_current: true,
+            dll_readable: None,
+            gate_open: true,
+            attached: vec![],
+            effects_disabled: vec![],
+            modes_missing: vec![],
+        };
+        assert!(status.machine_ready());
     }
 
     /// Status must be readable without elevation and without panicking, whatever this

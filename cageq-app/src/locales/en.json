@@ -196,6 +196,8 @@
     "stepAttach": "Attach it to {{device}}",
     "gateWarning": "This step lets Windows load audio effects that are not signed by Microsoft. Equalizer APO's installer sets the same option. Apps that require a protected audio path (some streaming services) may refuse to play while it is set.",
     "effectsDisabled": "Windows has audio enhancements switched off for this device, so no effect can run on it. Continuing will switch them back on.",
+    "modesMissing": "A required registry value for this device is missing, so Windows silently skips the effect even though it looks attached. Continuing rewrites it.",
+    "dllUnreadable": "⚠ The audio service account (LOCAL SERVICE) may not be able to read CAGEq's audio engine file — antivirus or a security policy could be blocking it. If the engine won't load, check your antivirus's exclusions for the CAGEq install folder.",
     "helperMissing": "cageq-apo-setup.exe is missing from the CAGEq folder, so setup cannot run. Reinstall CAGEq.",
     "doStep": "Continue",
     "working": "Working…",

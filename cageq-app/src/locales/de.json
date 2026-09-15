@@ -196,6 +196,8 @@
     "stepAttach": "Mit {{device}} verbinden",
     "gateWarning": "Dieser Schritt erlaubt Windows, Audioeffekte zu laden, die nicht von Microsoft signiert sind. Der Installer von Equalizer APO setzt dieselbe Option. Anwendungen, die einen geschützten Audiopfad verlangen (manche Streamingdienste), verweigern die Wiedergabe möglicherweise, solange sie gesetzt ist.",
     "effectsDisabled": "Windows hat die Audioverbesserungen für dieses Gerät abgeschaltet, dadurch kann dort kein Effekt laufen. Beim Fortfahren werden sie wieder eingeschaltet.",
+    "modesMissing": "Ein erforderlicher Registrierungswert für dieses Gerät fehlt, daher überspringt Windows den Effekt stillschweigend, obwohl er angehängt aussieht. Beim Fortfahren wird er neu geschrieben.",
+    "dllUnreadable": "⚠ Das Audiodienstkonto (LOKALER DIENST) kann die Datei von CAGEqs Audio-Engine möglicherweise nicht lesen – ein Virenschutz oder eine Sicherheitsrichtlinie könnte das blockieren. Falls die Engine nicht lädt, prüfen Sie die Ausnahmen Ihres Virenschutzes für den CAGEq-Installationsordner.",
     "helperMissing": "cageq-apo-setup.exe fehlt im CAGEq-Ordner, die Einrichtung kann nicht ausgeführt werden. Bitte CAGEq neu installieren.",
     "doStep": "Weiter",
     "working": "Wird ausgeführt…",

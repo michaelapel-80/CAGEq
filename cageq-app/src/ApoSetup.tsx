@@ -27,10 +27,21 @@ export type ApoSetupStatus = {
    *  OLD one is what's actually running. `register` (the same step first-time setup uses)
    *  fixes it: it always re-copies the shipped DLL, no separate "update" action exists. */
   dll_current: boolean;
+  /** Whether LOCAL SERVICE — the account `audiodg` actually runs as — can read and execute
+   *  the registered DLL, checked against its real file ACL. `dll_present` only proves the
+   *  interactive user's own account can see the file; this is the account that matters.
+   *  `null` when the check itself could not run (nothing registered, or the API call failed)
+   *  — deliberately not the same as a confirmed block, so an inconclusive read never reports
+   *  as broken. */
+  dll_readable: boolean | null;
   gate_open: boolean;
   machine_ready: boolean;
   attached: string[];
   effects_disabled: string[];
+  /** Endpoints attached but missing the processing-modes declaration Windows also requires —
+   *  attaching looks done here too, and the APO is silently skipped. Self-healing: the same
+   *  re-attach that fixes `effects_disabled` also rewrites this value. */
+  modes_missing: string[];
   active_backend_is_apo: boolean;
   /** Command string for the next step, e.g. `"open-gate"` — echoed back to the backend. */
   next_step: string | null;
@@ -87,13 +98,14 @@ export type EngineReason = "apo" | "eqapo" | "helperMissing" | "broken" | "unatt
 export function computeEngineReason(status: ApoSetupStatus | null, eqapoEnabled: boolean, endpointId: string): EngineReason {
   const attached = status !== null && status.attached.includes(endpointId);
   const inert = status !== null && status.effects_disabled.includes(endpointId);
+  const modesMissing = status !== null && status.modes_missing.includes(endpointId);
   // `active_backend_is_apo` is reconciled against reality on every status read (the backend
   // can now swap live — see `reconcile_backend` on the Rust side), so this flips true right
   // after attaching, on the very next poll. No "restart to take effect" state exists anymore.
   const activeIsApo = status !== null && attached && !inert && status.active_backend_is_apo;
   if (status === null) return "eqapo";
   if (!status.helper_available) return "helperMissing";
-  if (attached && (inert || !status.gate_open)) return "broken";
+  if (attached && (inert || !status.gate_open || modesMissing)) return "broken";
   if (activeIsApo) return "apo";
   return eqapoEnabled ? "eqapo" : "unattached";
 }
@@ -136,7 +148,8 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
 
   const attached = status !== null && status.attached.includes(endpointId);
   const inert = status !== null && status.effects_disabled.includes(endpointId);
-  const activeIsApo = status !== null && attached && !inert && status.active_backend_is_apo;
+  const modesMissing = status !== null && status.modes_missing.includes(endpointId);
+  const activeIsApo = status !== null && attached && !inert && !modesMissing && status.active_backend_is_apo;
   // An app update shipped a newer CAGEqApo.dll that was never installed — see
   // `ApoSetupStatus.dll_current`'s own doc. Independent of `activeIsApo`: it's readable even
   // before anything is attached, so it also fires for "registered, present, but stale" on its
@@ -221,6 +234,10 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
             {/* Everything that describes *why* things are the way they are. Never a button
                 here — see the fixed action slot below, always in the same place. */}
             <div className="apo-modal-body">
+              {/* Machine-wide, not per-endpoint, and worth showing regardless of whether this
+                  endpoint otherwise looks fully settled — nothing here can fix it the way
+                  `register`/`open-gate` can, so it is a standing warning rather than a step. */}
+              {status !== null && status.dll_readable === false && <p className="warn">{t("apoSetup.dllUnreadable")}</p>}
               {status === null ? (
                 <p>{t("apoSetup.loading")}</p>
               ) : settled ? (
@@ -256,7 +273,7 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
                   <ul className="setup-steps">
                     <Step done={status.registered_dll !== null && status.dll_present && status.dll_current} label={t("apoSetup.stepRegister")} />
                     <Step done={status.gate_open} label={t("apoSetup.stepGate")} />
-                    <Step done={attached && !inert} label={t("apoSetup.stepAttach", { device: endpointName ?? "" })} />
+                    <Step done={attached && !inert && !modesMissing} label={t("apoSetup.stepAttach", { device: endpointName ?? "" })} />
                   </ul>
 
                   {/* The gate reduces a machine-wide security mitigation, so it gets its own
@@ -265,6 +282,10 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
                   {status.next_step === "open-gate" && <p className="warn">{t("apoSetup.gateWarning")}</p>}
 
                   {inert && <p className="warn">{t("apoSetup.effectsDisabled")}</p>}
+
+                  {/* Attached but Windows will still skip the APO — the same silent-failure
+                      shape as `effects_disabled`, just a different missing registry value. */}
+                  {!inert && modesMissing && <p className="warn">{t("apoSetup.modesMissing")}</p>}
 
                   {!status.helper_available && <p className="warn">{t("apoSetup.helperMissing")}</p>}
 

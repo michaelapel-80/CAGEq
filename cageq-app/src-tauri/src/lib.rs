@@ -506,6 +506,13 @@ struct ApoSetupDto {
     /// points somewhere other than the expected install path entirely (silently never loads at
     /// all — see `SetupStatus::dll_current`'s own doc for exactly how that happens).
     dll_current: bool,
+    /// Whether LOCAL SERVICE — the account `audiodg` actually runs as — can read and execute
+    /// the registered DLL. `dll_present` above only proves the interactive user's own account
+    /// can see the file; this is the account that matters, checked against the file's real
+    /// ACL (see `cageq_apo_backend::dll_acl`). `null` when the check itself could not run
+    /// (nothing registered, or the API call failed) — deliberately not the same as a confirmed
+    /// block, so an inconclusive read never reports as broken.
+    dll_readable: Option<bool>,
     /// `DisableProtectedAudioDG`. Without it the APO cannot load at all.
     gate_open: bool,
     /// The machine-wide half is done — what an installer would normally have handled.
@@ -514,6 +521,11 @@ struct ApoSetupDto {
     /// Endpoints whose effect chain is switched off wholesale, where no APO runs however it
     /// is attached.
     effects_disabled: Vec<String>,
+    /// Endpoints where the CLSID slot is attached but the processing-modes declaration
+    /// Windows also requires is missing — attaching looks done here too, and the APO is
+    /// silently skipped (see `cageq_apo_backend::setup::SetupStatus::modes_missing`'s own
+    /// doc). Self-healing: re-attaching rewrites the missing value.
+    modes_missing: Vec<String>,
     /// Is CAGEq's own APO the active backend right now? Reconciled against reality on every
     /// call (see `reconcile_backend`), so finishing setup — or detaching — takes effect the
     /// next time anything asks, with no restart in between.
@@ -581,10 +593,12 @@ fn apo_setup_status(
         registered_dll: s.registered_dll.as_ref().map(|p| p.display().to_string()),
         dll_present: s.dll_present,
         dll_current: s.dll_current,
+        dll_readable: s.dll_readable,
         gate_open: s.gate_open,
         machine_ready: s.machine_ready(),
         attached: s.attached.clone(),
         effects_disabled: s.effects_disabled.clone(),
+        modes_missing: s.modes_missing.clone(),
         active_backend_is_apo,
         next_step: next.as_ref().map(|a| a.argv().join(" ")),
         next_step_description: next.as_ref().map(|a| a.describe()),
