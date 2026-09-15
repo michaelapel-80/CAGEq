@@ -1022,11 +1022,17 @@ select:disabled {
 /* The Tilt row's 3-way segmented control (Off/RTA/K-weighted) — `.pl-toggle`'s own sizing (built
    for the wider export dialog) is too large for `.vs-tuning`'s ~13em panel once squeezed into the
    `.vs-tune-check` value column alongside a label, so this shrinks font/padding just for this one
-   control rather than changing `.pl-toggle` itself (still used at its normal size elsewhere). */
+   control rather than changing `.pl-toggle` itself (still used at its normal size elsewhere).
+   Selector is `.pl-toggle.vs-tune-seg button`, not the bare `.vs-tune-seg button` this started as:
+   both compound with one class + `button` tie in specificity, so which one wins came down to
+   source order alone — and `.pl-toggle button` (below) sits later in this file, so it silently
+   won the tied font-size and this override did nothing at the size that actually shipped. Two
+   classes on the same element (the div really is `class="pl-toggle vs-tune-seg"`) outranks one,
+   which wins regardless of where either rule sits in the file. */
 .vs-tune-seg {
   justify-self: end;
 }
-.vs-tune-seg button {
+.pl-toggle.vs-tune-seg button {
   font-size: 0.62rem;
   padding: 0.15em 0.35em;
 }
