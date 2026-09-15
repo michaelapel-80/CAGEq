@@ -1019,6 +1019,17 @@ select:disabled {
   accent-color: var(--accent);
   cursor: pointer;
 }
+/* The Tilt row's 3-way segmented control (Off/RTA/K-weighted) — `.pl-toggle`'s own sizing (built
+   for the wider export dialog) is too large for `.vs-tuning`'s ~13em panel once squeezed into the
+   `.vs-tune-check` value column alongside a label, so this shrinks font/padding just for this one
+   control rather than changing `.pl-toggle` itself (still used at its normal size elsewhere). */
+.vs-tune-seg {
+  justify-self: end;
+}
+.vs-tune-seg button {
+  font-size: 0.62rem;
+  padding: 0.15em 0.35em;
+}
 .vs-tune-sep {
   height: 1px;
   margin: 0.1em 0;
