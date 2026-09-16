@@ -1,18 +1,16 @@
-A perceptual K-weighted Tilt mode, a way to skip AutoEq entirely, and a full LUFS meter.
+A round of bug fixes from a full-codebase review — nothing new to learn, just more correct.
 
-- **New:** a third **K-weighted** option on the spectrum Tilt toggle — layers the project's own
-  ITU-R BS.1770-4 K-weighting curve on top of the RTA reading, a real perceptual-loudness tilt
-  instead of an arbitrary slope. The Tilt toggle now shows small slope glyphs instead of
-  easily-truncated text labels.
-- **New:** **skip AutoEq's fit entirely** for a headphone it has no good measurement for — a "flat
-  start" option right in the measurement picker. Build the whole correction from your own
-  Fit/Content/Tone bands instead, with nothing from AutoEq mixed in.
-- **New:** the level meter gains a full BS.1770 loudness readout — **Integrated**, **Loudness
-  Range** (EBU Tech 3342), and a **Peak Max** high-water mark, alongside the existing
-  momentary/short-term numbers — with a one-click restart, since those three otherwise keep
-  accumulating for as long as the meter stays open.
-- **Fixed:** the spectrum analyzer's peak detector no longer reports peaks outside the displayed
-  20 Hz–20 kHz range.
-- Setup diagnostics catch two more ways the APO can silently fail to load: a missing
-  processing-modes registry value, and the installed DLL not being readable by the account
-  `audiodg` actually runs as.
+- **Fixed:** the EQ chart's K-weighted Tilt cursor readout showed a weighted number instead of the
+  raw measurement.
+- **Fixed:** the fail-safe watchdog could rarely hang instead of tripping, if the safe-state write
+  itself was slow.
+- **Fixed:** a custom filter with an invalid Q or frequency (e.g. dragged to zero) could silently
+  corrupt the applied EQ instead of being rejected.
+- **Fixed:** CAGEq's own APO could permanently leave "disable audio enhancements" turned on for an
+  endpoint after being detached.
+- **Fixed:** the DSP sidecar process wasn't reliably terminated when the app closed.
+- **Fixed:** a rare race could lose a settings update if two changes landed at the same time.
+- **Fixed:** Self-Test could measure an active solo/isolate audition instead of the real
+  correction.
+- Hardened the real-time control channel's cross-process memory safety, and improved screen-reader
+  labels on the preset list's icon buttons.
