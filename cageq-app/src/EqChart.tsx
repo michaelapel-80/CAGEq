@@ -1315,7 +1315,7 @@ export function EqChart({
               the synthetic event's currentTarget, throwing on read. The scope views' own tuning
               panels dodge this via a `set(key, value)` helper that captures the value the same
               way, just less visibly; inlined here since this is only two fields. */}
-          <label className="vs-tune-row">
+          <label className="vs-tune-row" title={t("scope.trailHint")}>
             <span className="vs-tune-label">{t("scope.trail")}</span>
             <input
               type="range"
@@ -1330,7 +1330,7 @@ export function EqChart({
             />
             <b>{specParams.tau.toFixed(2)}</b>
           </label>
-          <label className="vs-tune-row">
+          <label className="vs-tune-row" title={t("scope.tailHint")}>
             <span className="vs-tune-label">{t("scope.tail")}</span>
             <input
               type="range"
@@ -1345,7 +1345,7 @@ export function EqChart({
             />
             <b>{specParams.tail.toFixed(0)}</b>
           </label>
-          <label className="vs-tune-row">
+          <label className="vs-tune-row" title={t("scope.glowHint")}>
             <span className="vs-tune-label">{t("scope.glow")}</span>
             <input
               type="range"

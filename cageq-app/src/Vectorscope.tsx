@@ -542,16 +542,16 @@ export function Vectorscope({
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  const CONTROLS: { key: keyof Params; label: string; min: number; max: number; step: number }[] = [
-    { key: "trailTau", label: t("scope.trail"), min: 0.02, max: 0.6, step: 0.01 },
-    { key: "tail", label: t("scope.tail"), min: 1, max: 64, step: 1 },
-    { key: "glow", label: t("scope.glow"), min: 0.02, max: 1, step: 0.02 },
-    { key: "beam", label: t("scope.beam"), min: 0.1, max: 5, step: 0.05 },
-    { key: "focus", label: t("scope.focus"), min: 1, max: 24, step: 0.5 },
-    { key: "radiusFrac", label: t("scope.scale"), min: 0.3, max: 0.5, step: 0.01 },
-    { key: "gridAlpha", label: t("scope.grid"), min: 0, max: 0.5, step: 0.02 },
-    { key: "bloom", label: t("scope.bloom"), min: 0, max: 2, step: 0.05 },
-    { key: "haze", label: t("scope.haze"), min: 0, max: 4, step: 0.05 },
+  const CONTROLS: { key: keyof Params; label: string; hint: string; min: number; max: number; step: number }[] = [
+    { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 0.6, step: 0.01 },
+    { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 64, step: 1 },
+    { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.02, max: 1, step: 0.02 },
+    { key: "beam", label: t("scope.beam"), hint: t("scope.beamHint"), min: 0.1, max: 5, step: 0.05 },
+    { key: "focus", label: t("scope.focus"), hint: t("scope.focusHint"), min: 1, max: 24, step: 0.5 },
+    { key: "radiusFrac", label: t("scope.scale"), hint: t("scope.scaleHint"), min: 0.3, max: 0.5, step: 0.01 },
+    { key: "gridAlpha", label: t("scope.grid"), hint: t("scope.gridHint"), min: 0, max: 0.5, step: 0.02 },
+    { key: "bloom", label: t("scope.bloom"), hint: t("scope.bloomHint"), min: 0, max: 2, step: 0.05 },
+    { key: "haze", label: t("scope.haze"), hint: t("scope.hazeHint"), min: 0, max: 4, step: 0.05 },
   ];
 
   // Inline (not fill): `.vectorscope-wrap:not(.fill)` is already an exact CSS square
@@ -599,7 +599,7 @@ export function Vectorscope({
             {CONTROLS.map((cc) => {
               const dp = cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : cc.step >= 0.01 ? 2 : 3;
               return (
-                <label key={cc.key} className="vs-tune-row">
+                <label key={cc.key} className="vs-tune-row" title={cc.hint}>
                   <span className="vs-tune-label">{cc.label}</span>
                   <input
                     type="range"
@@ -614,7 +614,7 @@ export function Vectorscope({
               );
             })}
             <div className="vs-tune-sep" />
-            <label className="vs-tune-row vs-tune-check">
+            <label className="vs-tune-row vs-tune-check" title={t("scope.rotateHint")}>
               <span className="vs-tune-label">{t("scope.rotate")}</span>
               <input type="checkbox" checked={params.rotate} onChange={(e) => set("rotate", e.currentTarget.checked)} />
             </label>
