@@ -460,8 +460,14 @@ export function Meter({
         {/* The grid's own trailing empty slot (7 pairs don't fill the last row's 4 cells) — a much
             more discoverable spot than burying this in the tuning panel (still there too, for
             anyone who goes looking there instead). */}
-        <button type="button" className="mr-reset" title={t("meter.resetTitle")} onClick={() => void invoke("reset_lufs_meter")}>
-          ↺ {t("meter.resetButton")}
+        <button
+          type="button"
+          className="mr-reset"
+          title={t("meter.resetTitle")}
+          aria-label={t("meter.resetButton")}
+          onClick={() => void invoke("reset_lufs_meter")}
+        >
+          ↺
         </button>
       </div>
     </div>
