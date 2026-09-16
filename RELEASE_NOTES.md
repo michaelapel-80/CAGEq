@@ -1,13 +1,18 @@
-New test signals, a Tilt display mode for the spectrum views, and exporting a slot's correction to a phone.
+A perceptual K-weighted Tilt mode, a way to skip AutoEq entirely, and a full LUFS meter.
 
-- **New:** the test-tone generator gains a **frequency sweep (chirp)** signal, log or linear, and
-  **AM/FM** signals — useful for checking frequency resolution, sidebands, and envelope/vibrato
-  behavior beyond a steady tone.
-- **New:** a **Tilt** toggle on SpectrumScope and EqChart's spectrum backdrop — the conventional
-  RTA reading instead of the density-correct one: pink noise reads flat and a tone reads at its
-  true level, at the cost of no longer being a true spectral density. Independent per view; on by
-  default.
-- **New:** **export a slot's correction for a mobile EQ app** — a new Export button next to Save
-  Preset. Choose a free low-band-count parametric fit (with a live preview and an Fc/Gain/Q table
-  for manual entry), or AutoEq's own standard 10-/31-band graphic EQ; copy the result straight to
-  the clipboard.
+- **New:** a third **K-weighted** option on the spectrum Tilt toggle — layers the project's own
+  ITU-R BS.1770-4 K-weighting curve on top of the RTA reading, a real perceptual-loudness tilt
+  instead of an arbitrary slope. The Tilt toggle now shows small slope glyphs instead of
+  easily-truncated text labels.
+- **New:** **skip AutoEq's fit entirely** for a headphone it has no good measurement for — a "flat
+  start" option right in the measurement picker. Build the whole correction from your own
+  Fit/Content/Tone bands instead, with nothing from AutoEq mixed in.
+- **New:** the level meter gains a full BS.1770 loudness readout — **Integrated**, **Loudness
+  Range** (EBU Tech 3342), and a **Peak Max** high-water mark, alongside the existing
+  momentary/short-term numbers — with a one-click restart, since those three otherwise keep
+  accumulating for as long as the meter stays open.
+- **Fixed:** the spectrum analyzer's peak detector no longer reports peaks outside the displayed
+  20 Hz–20 kHz range.
+- Setup diagnostics catch two more ways the APO can silently fail to load: a missing
+  processing-modes registry value, and the installed DLL not being readable by the account
+  `audiodg` actually runs as.
