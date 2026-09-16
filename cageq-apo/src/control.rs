@@ -284,20 +284,35 @@ pub fn try_read(block: &ControlBlock, out: &mut Snapshot) -> ReadOutcome {
         return ReadOutcome::Torn; // writer mid-update
     }
 
-    if block.magic != CONTROL_MAGIC || block.version != CONTROL_VERSION {
+    // Every payload field below is read via `read_volatile`, not a plain field load. `block` is
+    // mapped shared memory: the writer touching it is a *different process*, invisible to this
+    // compilation's own aliasing/data-race analysis, so nothing here can rely on the compiler
+    // treating a `&ControlBlock` the way it would treat an ordinary, privately-owned reference
+    // (in particular: never assuming a plain field keeps returning the same value on a second
+    // read, or reordering a plain load across the atomic fences above/below). The surrounding
+    // seqlock fence is necessary but not sufficient for that guarantee on its own — see the
+    // struct's own doc for why `heartbeat`/`ack`/`sample_rate`/`build_stamp` are already real
+    // atomics rather than plain fields for the identical reason; these fields just have no
+    // matching atomic width (`f64`, or a 40-byte `RawCoeffs`), so `read_volatile` is the
+    // equivalent tool. Volatile does not by itself defend against a torn *value* — the trailing
+    // `seq` recheck below still does that; it only stops the *compiler* from doing something
+    // additionally wrong on top of a torn value it never expected to see change at all.
+    let magic = unsafe { std::ptr::read_volatile(&block.magic) };
+    let version = unsafe { std::ptr::read_volatile(&block.version) };
+    if magic != CONTROL_MAGIC || version != CONTROL_VERSION {
         return ReadOutcome::Unrecognised;
     }
 
-    let count = block.band_count as usize;
+    let count = unsafe { std::ptr::read_volatile(&block.band_count) } as usize;
     if count > MAX_BANDS {
         return ReadOutcome::Rejected;
     }
-    let preamp = block.preamp_db;
-    let crossfade = block.crossfade != 0;
+    let preamp = unsafe { std::ptr::read_volatile(&block.preamp_db) };
+    let crossfade = unsafe { std::ptr::read_volatile(&block.crossfade) } != 0;
 
     let mut staged = [Coeffs::PASSTHROUGH; MAX_BANDS];
     for i in 0..count {
-        let raw = block.coeffs[i];
+        let raw = unsafe { std::ptr::read_volatile(&block.coeffs[i]) };
         if !raw.is_safe() {
             return ReadOutcome::Rejected;
         }
@@ -339,21 +354,30 @@ pub fn publish(block: &mut ControlBlock, preamp_db: f64, coeffs: &[RawCoeffs], c
         return false;
     }
 
-    block.magic = CONTROL_MAGIC;
-    block.version = CONTROL_VERSION;
+    // See `try_read`'s matching comment: every payload field is written via `write_volatile`
+    // rather than a plain store, for the same cross-process-mutation reason (here: so the
+    // compiler cannot elide, merge, or reorder a write the *reader* process depends on
+    // actually landing in memory, since nothing in this process's own view of `block` looks
+    // like it is ever read back).
+    unsafe {
+        std::ptr::write_volatile(&mut block.magic, CONTROL_MAGIC);
+        std::ptr::write_volatile(&mut block.version, CONTROL_VERSION);
+    }
 
     // Odd: readers now know the payload is in flux.
     let start = block.seq.load(Ordering::Relaxed);
     block.seq.store(start.wrapping_add(1), Ordering::Release);
 
-    block.preamp_db = preamp_db;
-    block.band_count = coeffs.len() as u32;
-    block.crossfade = crossfade as u32;
-    for (slot, c) in block.coeffs.iter_mut().zip(coeffs) {
-        *slot = *c;
-    }
-    for slot in block.coeffs[coeffs.len()..].iter_mut() {
-        *slot = RawCoeffs::default();
+    unsafe {
+        std::ptr::write_volatile(&mut block.preamp_db, preamp_db);
+        std::ptr::write_volatile(&mut block.band_count, coeffs.len() as u32);
+        std::ptr::write_volatile(&mut block.crossfade, crossfade as u32);
+        for (i, c) in coeffs.iter().enumerate() {
+            std::ptr::write_volatile(&mut block.coeffs[i], *c);
+        }
+        for i in coeffs.len()..MAX_BANDS {
+            std::ptr::write_volatile(&mut block.coeffs[i], RawCoeffs::default());
+        }
     }
 
     // Even again, and Release so a reader that sees this value also sees everything above.
@@ -493,38 +517,65 @@ mod tests {
     /// must also be discarded. Exercised for real, with a writer thread racing the reader —
     /// the reader must only ever return snapshots that were internally consistent, never a
     /// mixture of two publishes.
+    ///
+    /// **Genuinely racing, not just concurrent.** An earlier version of this test put `block`
+    /// behind a `Mutex` and had both the writer and the reader lock it around every single
+    /// `publish`/`try_read` call — which fully serializes them: the reader could then never
+    /// actually observe an in-flight write, so the test would have passed even if `try_read`'s
+    /// tear detection were completely broken. This version shares a raw pointer instead, with
+    /// no lock around either side at all, mirroring `channel.rs`'s own access pattern (a raw
+    /// pointer into shared memory, dereferenced fresh on each call) — synchronised only by the
+    /// seqlock itself, which is the actual property under test.
     #[test]
     fn a_racing_writer_never_yields_a_mixed_snapshot() {
         use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
 
+        // Raw pointers aren't `Send`/`Sync` by default; this wrapper asserts what the test is
+        // actually exercising — that unsynchronised concurrent access to the pointee is safe
+        // *because of the seqlock protocol*, not despite bypassing it.
+        struct RacyPtr(*mut ControlBlock);
+        unsafe impl Send for RacyPtr {}
+        unsafe impl Sync for RacyPtr {}
+
         // Two publishes distinguishable in *every* field, so any mixture is detectable.
         let a = RawCoeffs { b0: 0.5, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.5 };
         let z = RawCoeffs { b0: 0.9, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.9 };
 
-        let block = Arc::new(std::sync::Mutex::new(zeroed()));
+        let ptr = RacyPtr(Box::into_raw(Box::new(zeroed())));
         let stop = Arc::new(AtomicBool::new(false));
 
         let writer = {
-            let (block, stop) = (Arc::clone(&block), Arc::clone(&stop));
+            let ptr = RacyPtr(ptr.0);
+            let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
+                // Binds the *whole* wrapper (not just the `.0` field) so 2021 edition's
+                // disjoint-capture rules move `RacyPtr` itself into the closure — the point of
+                // the wrapper's `unsafe impl Send` — rather than silently capturing the bare
+                // `*mut ControlBlock` field instead, which isn't `Send` on its own.
+                let ptr = ptr;
+                // SAFETY: outlives this thread (joined below, before the block is freed); the
+                // reader below only ever calls `try_read`, which touches nothing but through
+                // the seqlock-guarded, volatile accesses `publish` itself uses.
+                let block = unsafe { &mut *ptr.0 };
                 let mut flip = false;
                 while !stop.load(Ordering::Relaxed) {
-                    let mut g = block.lock().unwrap();
                     if flip {
-                        publish(&mut g, -3.0, &[a, a, a], false);
+                        publish(block, -3.0, &[a, a, a], false);
                     } else {
-                        publish(&mut g, -9.0, &[z], false);
+                        publish(block, -9.0, &[z], false);
                     }
                     flip = !flip;
                 }
             })
         };
 
+        // SAFETY: same block as the writer thread's, for as long as it runs — see its own
+        // comment; `try_read` never assumes exclusive access, by construction.
+        let block = unsafe { &*ptr.0 };
         let mut snap = Snapshot::default();
-        for _ in 0..20_000 {
-            let g = block.lock().unwrap();
-            if let ReadOutcome::Updated(_) = try_read(&g, &mut snap) {
+        for _ in 0..200_000 {
+            if let ReadOutcome::Updated(_) = try_read(block, &mut snap) {
                 // Whatever we got must be one publish or the other, never a blend of the two.
                 let consistent = (snap.preamp_db == -3.0
                     && snap.band_count == 3
@@ -538,6 +589,8 @@ mod tests {
 
         stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
+        // SAFETY: both threads are done touching it.
+        unsafe { drop(Box::from_raw(ptr.0)) };
     }
 
     /// The core safety property: an unstable filter is refused. Its output grows without

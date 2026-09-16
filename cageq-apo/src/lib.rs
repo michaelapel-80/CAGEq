@@ -152,7 +152,7 @@ impl Drop for DenormalGuard {
 /// Compared against `install_dir()`'s own `CAGEqApo.version` marker file (written by
 /// `register`, read by `status` — see both their own docs) instead of the DLL's bytes, so
 /// staleness now means "an intentional version bump", not "recompiled".
-pub const APO_VERSION: u32 = 6;
+pub const APO_VERSION: u32 = 7;
 
 /// Per-instance state. One of these exists per APO instance (per endpoint, per mode),
 /// created at `LockForProcess` and destroyed at `UnlockForProcess`.
