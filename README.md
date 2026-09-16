@@ -49,13 +49,11 @@ still reads flat no matter how aggressive the correction is; each has its own to
 the raw post-EQ signal instead. The meters are the one exception and always show the real post-EQ
 output, since that's what actually needs measuring for safety.
 
-The level meter (phosphor-beam rendered, like the scopes) carries true-peak (BS.1770 oversampled —
-catches inter-sample overs a plain sample-peak read misses) and true-RMS marks, and a BS.1770
-momentary/short-term LUFS meter sits beside it, making the auto-loudness compensation this app is
-built around actually visible rather than just trusted to work.
-
 The scopes share a CRT-phosphor-style persistence/bloom renderer — a trailing glow that decays at
 a real, tunable rate, closer to a real analog scope's look than a plain clear-and-redraw.
+
+![The oscilloscope (with trigger/mix controls) and stereo vectorscope side by side, both rendered
+with the CRT-phosphor persistence trail.](docs/Scope.png)
 
 A few things about the spectrum analyzer specifically:
 
@@ -67,6 +65,18 @@ A few things about the spectrum analyzer specifically:
   frontend, so the display reads as continuous motion rather than a stepped, sample-and-hold look.
 * **Still readable on fast-moving signals**, since the CRT-phosphor persistence above integrates
   rapid change into a legible trail instead of flickering into noise.
+
+![The spectrum analyzer, with detected peaks marked and read out below the
+chart.](docs/SpectrumScope.png)
+
+The level meter (phosphor-beam rendered, like the scopes) carries true-peak (BS.1770 oversampled —
+catches inter-sample overs a plain sample-peak read misses) and true-RMS marks, and a full BS.1770
+loudness readout sits beside it — momentary, short-term, integrated, and loudness range (EBU Tech
+3342 LRA), plus a peak-max high-water mark, all restartable on demand — making the auto-loudness
+compensation this app is built around actually visible rather than just trusted to work.
+
+![The level/LUFS meter: peak and RMS bars, and the full BS.1770 readout (momentary, short-term,
+integrated, loudness range, peak max).](docs/Meter.png)
 
 ## Safety first
 
