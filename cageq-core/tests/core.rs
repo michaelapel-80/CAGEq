@@ -237,6 +237,40 @@ fn large_tonal_changes_morph_across_several_writes() {
     assert_eq!(core.applied_count() - before, 1, "an unchanged curve must not morph");
 }
 
+/// A custom filter with a non-positive Q divides by zero in morph.rs's `coefficients()`
+/// (`alpha = w0.sin() / (2.0 * band.q)`), producing NaN that would otherwise silently
+/// reach the applied preamp with no error surfaced anywhere. The core must reject it
+/// before any curve math runs and before anything is written to the backend.
+#[test]
+fn a_non_positive_q_custom_filter_is_rejected_not_applied_as_nan() {
+    let tmp = TempDir::new("bad-q");
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+
+    let mut req = CalcRequest::for_device("DAC");
+    req.inputs.insert(
+        "custom_filters".into(),
+        json!([{ "kind": "Peaking", "freq_hz": 1000.0, "gain_db": 3.0, "q": 0.0 }]),
+    );
+
+    let before = core.applied_count();
+    let err = core.apply_to_slot(Slot::A, req).expect_err("q=0 must be rejected, not applied");
+    assert!(matches!(err, CoreError::InvalidFilter(_)), "expected InvalidFilter, got {err:?}");
+    assert_eq!(core.applied_count(), before, "a rejected filter set must never reach the backend");
+}
+
+/// Same guard, via §5.2 isolate's directly-supplied `q` rather than a sidecar round-trip.
+#[test]
+fn isolate_with_a_non_positive_q_is_rejected() {
+    let tmp = TempDir::new("bad-q-isolate");
+    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    core.apply_to_slot(Slot::A, CalcRequest::for_device("DAC")).expect("apply A");
+
+    let before = core.applied_count();
+    let err = core.apply_isolate(1000.0, -1.0).expect_err("negative q must be rejected");
+    assert!(matches!(err, CoreError::InvalidFilter(_)), "expected InvalidFilter, got {err:?}");
+    assert_eq!(core.applied_count(), before, "a rejected isolate must never reach the backend");
+}
+
 #[test]
 fn copy_slot_duplicates_a_fit_and_activates_the_target() {
     let tmp = TempDir::new("copy");

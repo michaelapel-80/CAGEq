@@ -30,6 +30,7 @@ import types
 import json
 import hashlib
 import copy
+import math
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 import urllib.request
@@ -298,6 +299,17 @@ def _custom_filters(params, f, fs):
     for cf in params.get("custom_filters") or []:
         kind = cf.get("kind")
         fc, gain, q = float(cf["freq_hz"]), float(cf["gain_db"]), float(cf["q"])
+        # biquad_coefficients() divides by q and by fc with no bounds check of its own
+        # (min_q/max_q above only constrain AutoEq's *optimiser*, not a directly-built
+        # filter like every one of these) -- q<=0 or fc<=0 silently produces NaN that
+        # poisons `curve` and, downstream, the JSON-RPC reply itself (NaN has no valid
+        # JSON representation). Reject here instead, same as any other malformed input.
+        if not math.isfinite(fc) or fc <= 0.0:
+            raise ValueError(f"custom filter {kind!r}: freq_hz must be positive and finite, got {fc!r}")
+        if not math.isfinite(q) or q <= 0.0:
+            raise ValueError(f"custom filter {kind!r} at {fc} Hz: q must be positive and finite, got {q!r}")
+        if not math.isfinite(gain):
+            raise ValueError(f"custom filter {kind!r} at {fc} Hz: gain_db must be finite, got {gain!r}")
         if kind == "Tilt":
             curve = curve + _peq_filter(autoeq_peq.LowShelf, f, fs, fc, -gain / 2.0, q).fr
             curve = curve + _peq_filter(autoeq_peq.HighShelf, f, fs, fc, gain / 2.0, q).fr

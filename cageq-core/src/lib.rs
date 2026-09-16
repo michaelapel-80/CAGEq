@@ -290,6 +290,30 @@ pub enum CoreError {
     EmptySlot(Slot),
     #[error("loudness ramp aborted (safe state active)")]
     RampAborted,
+    #[error("invalid filter: {0}")]
+    InvalidFilter(String),
+}
+
+/// Reject a filter set before any curve/preamp math touches it (morph.rs's `coefficients()`
+/// divides by `q` and takes `log10()` of quantities built from it — a non-finite or
+/// non-positive `q`/`freq_hz` turns into NaN there with no further check downstream, silently
+/// corrupting the applied preamp). Called at every point a `Filter` enters the core from
+/// outside it: the sidecar's `calculate_filters` reply (which echoes back hand-entered custom
+/// bands verbatim) and `apply_isolate`'s directly-supplied `freq_hz`/`q`. "No sound beats wrong
+/// sound" means refusing to apply here, not silently clamping to some plausible-looking value.
+fn validate_filters(filters: &[Filter]) -> Result<(), CoreError> {
+    for f in filters {
+        if !f.freq_hz.is_finite() || f.freq_hz <= 0.0 {
+            return Err(CoreError::InvalidFilter(format!("{:?} band: freq_hz must be positive and finite, got {}", f.kind, f.freq_hz)));
+        }
+        if !f.q.is_finite() || f.q <= 0.0 {
+            return Err(CoreError::InvalidFilter(format!("{:?} band at {} Hz: q must be positive and finite, got {}", f.kind, f.freq_hz, f.q)));
+        }
+        if !f.gain_db.is_finite() {
+            return Err(CoreError::InvalidFilter(format!("{:?} band at {} Hz: gain_db must be finite, got {}", f.kind, f.freq_hz, f.gain_db)));
+        }
+    }
+    Ok(())
 }
 
 /// §7.5 maximum volume-increase rate for the "Finale Lautstärke" transition. The
@@ -569,6 +593,7 @@ impl Core {
     /// touch the slot cache, so a subsequent `activate_slot`/`apply` restores the real correction
     /// with no extra bookkeeping. Errors if the active slot has no device to scope to.
     pub fn apply_isolate(&self, freq_hz: f64, q: f64) -> Result<Applied, CoreError> {
+        validate_filters(&[Filter { kind: FilterType::Bandpass, freq_hz, gain_db: 0.0, q }])?;
         let _guard = self.inner.apply_lock.lock().unwrap();
         let device = {
             let store = self.inner.slots.lock().unwrap();
@@ -753,6 +778,7 @@ fn do_apply_to_slot(
         let params = serde_json::to_value(&request)?;
         let reply = supervisor.call("calculate_filters", params)?;
         let result: CalcResult = serde_json::from_value(reply)?;
+        validate_filters(&result.filters)?;
 
         let mut store = inner.slots.lock().unwrap();
         store.device = Some(result.device.clone());
