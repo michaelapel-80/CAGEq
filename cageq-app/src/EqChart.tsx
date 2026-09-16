@@ -847,10 +847,14 @@ export function EqChart({
           const i0 = Math.floor(fi);
           const i1 = Math.min(n - 1, i0 + 1);
           const ft = fi - i0;
+          // Tilt only ever picks which underlying array to read (db vs. db_raw, see this file's
+          // own doc above) — it must never add a weighting curve into the number itself, same as
+          // SpectrumScope's own cursor/peak readout (`pScratch`, never K-weighted, only its drawn
+          // `vScratch` trace is): the reading has to stay the raw measurement no matter what's
+          // drawn on top of it.
           const cursorMode = tiltMode(specParams.tilt);
           const srcDb = cursorMode === "off" ? spectrum.db : spectrum.db_raw;
-          let raw = srcDb[i0] * (1 - ft) + srcDb[i1] * ft;
-          if (cursorMode === "kweighted") raw += kWeightingDb(hz);
+          const raw = srcDb[i0] * (1 - ft) + srcDb[i1] * ft;
           const corrDb =
             specParams.undistort && eqBands !== undefined
               ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]), sampleRate)[0] : 0) + preampDb
