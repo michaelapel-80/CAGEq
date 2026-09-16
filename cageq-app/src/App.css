@@ -1080,11 +1080,17 @@ select:disabled {
    source order alone — and `.pl-toggle button` (below) sits later in this file, so it silently
    won the tied font-size and this override did nothing at the size that actually shipped. Two
    classes on the same element (the div really is `class="pl-toggle vs-tune-seg"`) outranks one,
-   which wins regardless of where either rule sits in the file. */
+   which wins regardless of where either rule sits in the file.
+   The buttons hold `TiltGlyph` SVGs now, not text (the "K-W" label used to word-wrap at this
+   width) — `display:flex` centers the glyph in both axes; default inline/baseline alignment left
+   it sitting slightly off-centre. */
 .vs-tune-seg {
   justify-self: end;
 }
 .pl-toggle.vs-tune-seg button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 0.62rem;
   padding: 0.15em 0.35em;
 }

@@ -5,6 +5,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { composedCurveDb, type FadingCurve, retargetFadingCurve, stepFadingCurve } from "./biquad";
 import { fcHue } from "./fcColor";
 import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
+import { TiltGlyph } from "./TiltGlyph";
 import { spectrumStream } from "./streams";
 import { createPhosphor } from "./phosphor";
 import { traceSmooth } from "./spline";
@@ -975,18 +976,32 @@ export function SpectrumScope({
             <div className="vs-tune-row vs-tune-check" title={t("scope.tiltHint")}>
               <span className="vs-tune-label">{t("scope.tilt")}</span>
               <div className="pl-toggle vs-tune-seg">
-                <button type="button" className={tiltMode(params.tilt) === "off" ? "on" : ""} onClick={() => set("tilt", "off")}>
-                  {t("scope.tiltOff")}
+                <button
+                  type="button"
+                  className={tiltMode(params.tilt) === "off" ? "on" : ""}
+                  title={t("scope.tiltOff")}
+                  aria-label={t("scope.tiltOff")}
+                  onClick={() => set("tilt", "off")}
+                >
+                  <TiltGlyph mode="off" />
                 </button>
-                <button type="button" className={tiltMode(params.tilt) === "rta" ? "on" : ""} onClick={() => set("tilt", "rta")}>
-                  {t("scope.tiltRta")}
+                <button
+                  type="button"
+                  className={tiltMode(params.tilt) === "rta" ? "on" : ""}
+                  title={t("scope.tiltRta")}
+                  aria-label={t("scope.tiltRta")}
+                  onClick={() => set("tilt", "rta")}
+                >
+                  <TiltGlyph mode="rta" />
                 </button>
                 <button
                   type="button"
                   className={tiltMode(params.tilt) === "kweighted" ? "on" : ""}
+                  title={t("scope.tiltKweighted")}
+                  aria-label={t("scope.tiltKweighted")}
                   onClick={() => set("tilt", "kweighted")}
                 >
-                  {t("scope.tiltKweighted")}
+                  <TiltGlyph mode="kweighted" />
                 </button>
               </div>
             </div>

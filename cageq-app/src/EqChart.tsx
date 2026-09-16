@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, logGrid, phaseDeg, type FadingCurve, retargetFadingCurve, stepFadingCurve } from "./biquad";
 import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
+import { TiltGlyph } from "./TiltGlyph";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
@@ -1377,23 +1378,29 @@ export function EqChart({
               <button
                 type="button"
                 className={tiltMode(specParams.tilt) === "off" ? "on" : ""}
+                title={t("scope.tiltOff")}
+                aria-label={t("scope.tiltOff")}
                 onClick={() => setSpecParams((p) => ({ ...p, tilt: "off" }))}
               >
-                {t("scope.tiltOff")}
+                <TiltGlyph mode="off" />
               </button>
               <button
                 type="button"
                 className={tiltMode(specParams.tilt) === "rta" ? "on" : ""}
+                title={t("scope.tiltRta")}
+                aria-label={t("scope.tiltRta")}
                 onClick={() => setSpecParams((p) => ({ ...p, tilt: "rta" }))}
               >
-                {t("scope.tiltRta")}
+                <TiltGlyph mode="rta" />
               </button>
               <button
                 type="button"
                 className={tiltMode(specParams.tilt) === "kweighted" ? "on" : ""}
+                title={t("scope.tiltKweighted")}
+                aria-label={t("scope.tiltKweighted")}
                 onClick={() => setSpecParams((p) => ({ ...p, tilt: "kweighted" }))}
               >
-                {t("scope.tiltKweighted")}
+                <TiltGlyph mode="kweighted" />
               </button>
             </div>
           </div>
