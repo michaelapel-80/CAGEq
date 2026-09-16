@@ -616,6 +616,14 @@ impl Core {
         self.inner.slots.lock().unwrap().active
     }
 
+    /// Kill the sidecar child process right now, without waiting to be dropped. See
+    /// [`cageq_watchdog::Supervisor::kill_current_sidecar`]'s own doc for why this exists
+    /// alongside `Core`'s ordinary `Drop` impl rather than instead of it: the app's normal exit
+    /// path can't rely on `Drop` ever running at all.
+    pub fn kill_sidecar_now(&self) {
+        self.supervisor.kill_current_sidecar();
+    }
+
     /// Set the shared output device every slot is scoped to (§3.0). Lets Dry be written
     /// before any fit exists.
     ///

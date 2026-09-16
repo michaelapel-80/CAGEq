@@ -40,6 +40,20 @@ enum Backend {
     Failed(String),
 }
 
+impl Backend {
+    /// Kill the sidecar child process right now, without waiting to be dropped — Tauri's
+    /// `App::run` calls `std::process::exit` right after it returns, which skips every `Drop`
+    /// impl on the Rust side (this managed `Backend` included), so the sidecar's own
+    /// kill-on-drop plumbing never runs on a normal window close. Called from `run()`'s
+    /// `RunEvent::Exit` handler — the last point that still executes before the process
+    /// actually exits.
+    fn shutdown(&self) {
+        if let Backend::Ready { core, .. } = self {
+            core.kill_sidecar_now();
+        }
+    }
+}
+
 /// Holds the running §5.3c loopback monitor so start/stop commands can replace or end it.
 /// Capture is Windows-only (`cageq_monitor::Monitor::start` errors elsewhere).
 #[derive(Default)]
@@ -1696,8 +1710,16 @@ pub fn run() {
             set_library,
             retry
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // The last point that still runs before `run()`'s own `std::process::exit` --
+            // see `Backend::shutdown`'s own doc for why this can't just be a `Drop` impl.
+            if matches!(event, tauri::RunEvent::Exit) {
+                use tauri::Manager;
+                app_handle.state::<Backend>().shutdown();
+            }
+        });
 }
 
 #[cfg(test)]

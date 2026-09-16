@@ -247,6 +247,25 @@ fn manual_retry_recovers_from_terminal() {
 }
 
 #[test]
+fn kill_current_sidecar_lets_an_external_caller_terminate_the_child_directly() {
+    // Stands in for the one caller that can't wait to be dropped: the app's own exit path
+    // (Tauri calls std::process::exit right after App::run returns, skipping every Drop impl,
+    // Supervisor's own included -- see kill_current_sidecar's own doc). This must actually
+    // terminate the OS process via &self, not just flip some in-memory flag.
+    let safe = SafeStateSpy::new();
+    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), safe.callback()).unwrap();
+    assert!(sup.call("ping", json!(null)).is_ok(), "sidecar should be up first");
+
+    sup.kill_current_sidecar();
+
+    // The exit waiter notices the OS process actually died and trips into recovery -- proving
+    // the child was really terminated, not merely marked dead in memory.
+    let h = wait_for_recovery(&sup, Duration::from_secs(3));
+    assert!(matches!(h, Health::Running), "should auto-recover after the kill, got {h:?}");
+    assert!(safe.reached(), "the kill should have been treated as a real crash, tripping safe state");
+}
+
+#[test]
 fn safe_state_write_does_not_block_other_shared_access() {
     // Regression test: the safe-state write must never run while Shared's mutex is
     // held (see trip_if_running's own doc) — otherwise every other consumer of it

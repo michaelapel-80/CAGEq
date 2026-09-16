@@ -329,6 +329,21 @@ impl Supervisor {
         self.shared.lock().unwrap().manual_retry = true;
     }
 
+    /// Kill the current sidecar child process right now, via `&self` rather than requiring
+    /// ownership — for the one caller that cannot wait to be dropped: `App::run`'s exit event
+    /// (Tauri calls `std::process::exit` right after it returns, which skips every `Drop` impl
+    /// on the Rust side, `Supervisor`'s own included). Not a graceful shutdown — doesn't flip
+    /// `shared.shutdown` or join the driver/monitor threads, since the whole process is about
+    /// to exit anyway and those threads die with it regardless. Just makes sure the *child*
+    /// process doesn't outlive this one as an orphan, which is the actual risk: this process
+    /// dying is fine, its still-running Python interpreter is not.
+    pub fn kill_current_sidecar(&self) {
+        let killer = self.shared.lock().unwrap().killer.clone();
+        if let Some(k) = killer {
+            let _ = k.kill();
+        }
+    }
+
     /// Block until `pred(health)` holds or `timeout` elapses; returns the last
     /// health seen. Introspection/test aid.
     pub fn wait_until(&self, mut pred: impl FnMut(&Health) -> bool, timeout: Duration) -> Health {
