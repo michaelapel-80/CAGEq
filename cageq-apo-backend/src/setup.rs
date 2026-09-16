@@ -855,6 +855,101 @@ fn forget_displaced(endpoint_id: &str) {
         let _ = key.delete_value(&id);
     }
 }
+
+/// Where CAGEq remembers that `PKEY_AudioEndpoint_Disable_SysFx` was present before `attach`
+/// deleted it, so `detach` can restore it exactly.
+///
+/// Attaching *must* delete it — present means Windows bypasses the endpoint's whole effect
+/// chain, ours included — but deleting it unconditionally with nothing ever putting it back
+/// permanently re-enabled system effects on any endpoint that had deliberately disabled them,
+/// silently, the moment CAGEq was ever attached there. Same "detach returns the machine to how
+/// it was found" goal as `DISPLACED_KEY` above, for a value instead of a slot.
+const DISABLED_SYSFX_KEY: &str = r"SOFTWARE\CAGEq\apo\disabled_sysfx";
+
+/// `[vtype: u32 LE][raw bytes]`, so `decode_disabled_sysfx` can reconstruct the exact original
+/// `RegValue` — `status`'s own comment notes this value's type varies (it's a PROPVARIANT
+/// blob). Split out from the registry I/O around it so the encoding round-trip is unit-testable
+/// without a real (and HKLM-privileged) registry key.
+#[cfg(windows)]
+fn encode_disabled_sysfx(value: &winreg::RegValue) -> Vec<u8> {
+    let mut encoded = (value.vtype.clone() as u32).to_le_bytes().to_vec();
+    encoded.extend_from_slice(&value.bytes);
+    encoded
+}
+
+#[cfg(windows)]
+fn decode_disabled_sysfx(bytes: &[u8]) -> Option<winreg::RegValue> {
+    let vtype = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?);
+    Some(winreg::RegValue { vtype: regtype_from_u32(vtype)?, bytes: bytes[4..].to_vec() })
+}
+
+/// Record `value` (the disabled-sysfx flag `attach` is about to delete) for `endpoint_id`, via
+/// `encode_disabled_sysfx` in one `REG_BINARY` value. This key is CAGEq's own, so the encoding
+/// only has to round-trip through itself, not match any Windows convention.
+#[cfg(windows)]
+fn remember_disabled_sysfx(endpoint_id: &str, value: &winreg::RegValue) -> Result<(), SetupError> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_LOCAL_MACHINE, RegType};
+    let Some(id) = cageq_apo::config::normalize_endpoint_id(endpoint_id) else { return Ok(()) };
+    let (key, _) = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .create_subkey(DISABLED_SYSFX_KEY)
+        .map_err(|e| SetupError::Win32("create the disabled-sysfx key", e))?;
+    key.set_raw_value(&id, &winreg::RegValue { bytes: encode_disabled_sysfx(value), vtype: RegType::REG_BINARY })
+        .map_err(|e| SetupError::Win32("record the disabled-sysfx value", e))
+}
+
+/// What was recorded for `endpoint_id` by `remember_disabled_sysfx`, decoded back into the
+/// original `RegValue`. `None` if nothing was recorded (the common case: most endpoints never
+/// had system effects disabled to begin with).
+#[cfg(windows)]
+fn disabled_sysfx(endpoint_id: &str) -> Option<winreg::RegValue> {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    let id = cageq_apo::config::normalize_endpoint_id(endpoint_id)?;
+    let raw = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(DISABLED_SYSFX_KEY)
+        .ok()?
+        .get_raw_value(&id)
+        .ok()?;
+    decode_disabled_sysfx(&raw.bytes)
+}
+
+/// Forget the record once it has been put back.
+#[cfg(windows)]
+fn forget_disabled_sysfx(endpoint_id: &str) {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_SET_VALUE};
+    let Some(id) = cageq_apo::config::normalize_endpoint_id(endpoint_id) else { return };
+    if let Ok(key) =
+        RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(DISABLED_SYSFX_KEY, KEY_SET_VALUE)
+    {
+        let _ = key.delete_value(&id);
+    }
+}
+
+/// `winreg::enums::RegType` only converts *to* `u32` (`as u32`); this is the reverse, needed to
+/// decode what `remember_disabled_sysfx` encoded. These are the standard Win32 registry
+/// value-type constants (`winnt.h`) — stable, and safe to hardcode since the only bytes ever
+/// decoded here are ones this same code encoded.
+#[cfg(windows)]
+fn regtype_from_u32(v: u32) -> Option<winreg::enums::RegType> {
+    use winreg::enums::RegType::*;
+    Some(match v {
+        0 => REG_NONE,
+        1 => REG_SZ,
+        2 => REG_EXPAND_SZ,
+        3 => REG_BINARY,
+        4 => REG_DWORD,
+        5 => REG_DWORD_BIG_ENDIAN,
+        6 => REG_LINK,
+        7 => REG_MULTI_SZ,
+        8 => REG_RESOURCE_LIST,
+        9 => REG_FULL_RESOURCE_DESCRIPTOR,
+        10 => REG_RESOURCE_REQUIREMENTS_LIST,
+        11 => REG_QWORD,
+        _ => return None,
+    })
+}
 #[cfg(windows)]
 fn attach(endpoint_id: &str) -> Result<(), SetupError> {
     use winreg::RegKey;
@@ -909,8 +1004,13 @@ fn attach(endpoint_id: &str) -> Result<(), SetupError> {
     }
 
     // With this present Windows bypasses the endpoint's entire effect chain, so an attached
-    // APO simply never runs.
-    let _ = fx.delete_value(FX_DISABLE_SYSFX);
+    // APO simply never runs. Recorded first so `detach` can restore it exactly — deleting it
+    // with nothing ever putting it back permanently re-enabled system effects on an endpoint
+    // that had deliberately disabled them.
+    if let Ok(existing) = fx.get_raw_value(FX_DISABLE_SYSFX) {
+        remember_disabled_sysfx(endpoint_id, &existing)?;
+        let _ = fx.delete_value(FX_DISABLE_SYSFX);
+    }
 
     // No restart here: `perform` does it once, so unregistering several endpoints does not
     // stop and start the audio service once per endpoint.
@@ -949,6 +1049,12 @@ fn detach(endpoint_id: &str) -> Result<(), SetupError> {
                 .map_err(|e| SetupError::Win32("restore a displaced effect", e))?;
         }
         forget_displaced(endpoint_id);
+    }
+    // Put the disabled-sysfx flag back exactly as found, if attach ever removed one.
+    if let Some(value) = disabled_sysfx(endpoint_id) {
+        fx.set_raw_value(FX_DISABLE_SYSFX, &value)
+            .map_err(|e| SetupError::Win32("restore the disabled-sysfx value", e))?;
+        forget_disabled_sysfx(endpoint_id);
     }
     Ok(())
 }
@@ -1759,5 +1865,53 @@ mod tests {
     fn reading_status_needs_no_privileges() {
         let s = status();
         assert!(s.attached.windows(2).all(|w| w[0] <= w[1]), "attached should be sorted");
+    }
+
+    /// **The bug this fixes.** `attach` deletes `FX_DISABLE_SYSFX` unconditionally so its own
+    /// APO can run, but used to never record what it deleted — `detach` had nothing to put
+    /// back, so an endpoint that had system effects deliberately disabled came out of a
+    /// detach with them silently, permanently re-enabled. The encode/decode round trip below
+    /// is the part that can be tested without a real (HKLM-privileged) registry key; the
+    /// registry I/O around it (`remember_disabled_sysfx`/`disabled_sysfx`) is exercised for
+    /// real on the setup VM alongside the rest of attach/detach.
+    #[test]
+    fn the_disabled_sysfx_value_round_trips_through_its_encoding() {
+        use winreg::RegValue;
+        use winreg::enums::RegType::*;
+
+        for original in [
+            RegValue { bytes: vec![], vtype: REG_NONE },
+            RegValue { bytes: 1u32.to_le_bytes().to_vec(), vtype: REG_DWORD },
+            RegValue { bytes: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01], vtype: REG_BINARY },
+            RegValue { bytes: 1u64.to_le_bytes().to_vec(), vtype: REG_QWORD },
+        ] {
+            let encoded = encode_disabled_sysfx(&original);
+            let decoded = decode_disabled_sysfx(&encoded).expect("must decode what was just encoded");
+            assert_eq!(decoded.vtype, original.vtype, "vtype must round-trip");
+            assert_eq!(decoded.bytes, original.bytes, "raw bytes must round-trip exactly");
+        }
+    }
+
+    /// Garbage (too short to even hold the vtype prefix) must decode to `None`, not panic —
+    /// this runs against whatever a real registry read hands back.
+    #[test]
+    fn decoding_a_too_short_disabled_sysfx_value_is_none_not_a_panic() {
+        assert!(decode_disabled_sysfx(&[]).is_none());
+        assert!(decode_disabled_sysfx(&[1, 2, 3]).is_none());
+    }
+
+    /// `regtype_from_u32` covers exactly the variants `RegType` has — every one of them must
+    /// survive `as u32` and back, and nothing outside that set is accepted.
+    #[test]
+    fn regtype_from_u32_inverts_the_as_u32_cast_for_every_known_variant() {
+        use winreg::enums::RegType::*;
+        for t in [
+            REG_NONE, REG_SZ, REG_EXPAND_SZ, REG_BINARY, REG_DWORD, REG_DWORD_BIG_ENDIAN, REG_LINK,
+            REG_MULTI_SZ, REG_RESOURCE_LIST, REG_FULL_RESOURCE_DESCRIPTOR,
+            REG_RESOURCE_REQUIREMENTS_LIST, REG_QWORD,
+        ] {
+            assert_eq!(regtype_from_u32(t.clone() as u32), Some(t));
+        }
+        assert_eq!(regtype_from_u32(0xFFFF_FFFF), None, "unknown values must not silently pick a variant");
     }
 }
