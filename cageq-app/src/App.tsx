@@ -3420,12 +3420,19 @@ function App() {
                         type="button"
                         className="pl-upd"
                         title={tr("presets.updateTemplateTitle", { stage: stageLabel(t.stage) })}
+                        aria-label={tr("presets.updateAria", { name: t.name })}
                         disabled={dryActive}
                         onClick={() => updateTemplate(t)}
                       >
                         💾
                       </button>
-                      <button type="button" className="pl-del" title={tr("presets.deleteTitle")} onClick={() => deleteTemplate(t)}>
+                      <button
+                        type="button"
+                        className="pl-del"
+                        title={tr("presets.deleteTitle")}
+                        aria-label={tr("presets.deleteAria", { name: t.name })}
+                        onClick={() => deleteTemplate(t)}
+                      >
                         🗑
                       </button>
                     </li>
@@ -3489,12 +3496,19 @@ function App() {
                             type="button"
                             className="pl-upd"
                             title={measurementPath || flat ? tr("presets.savePresetTitle") : tr("presets.updatePresetDisabledTitle")}
+                            aria-label={tr("presets.updateAria", { name: p.name })}
                             disabled={dryActive || (!measurementPath && !flat)}
                             onClick={() => setPresetSave(p)}
                           >
                             💾
                           </button>
-                          <button type="button" className="pl-del" title={tr("presets.deleteTitle")} onClick={() => deletePreset(p)}>
+                          <button
+                            type="button"
+                            className="pl-del"
+                            title={tr("presets.deleteTitle")}
+                            aria-label={tr("presets.deleteAria", { name: p.name })}
+                            onClick={() => deletePreset(p)}
+                          >
                             🗑
                           </button>
                         </div>
@@ -3513,6 +3527,7 @@ function App() {
                                   className="pl-del pl-del-head"
                                   disabled={dryActive}
                                   title={tr("presets.deleteHeadVersionTitle", { ver: `v${(p.versions?.length ?? 0) + 1}` })}
+                                  aria-label={tr("presets.deleteHeadVersionAria", { ver: `v${(p.versions?.length ?? 0) + 1}` })}
                                   onClick={() => deleteHeadVersion(p)}
                                 >
                                   🗑 v{(p.versions?.length ?? 0) + 1}
@@ -3538,6 +3553,7 @@ function App() {
                                         type="button"
                                         className="pl-del"
                                         title={tr("presets.deleteVersionTitle")}
+                                        aria-label={tr("presets.deleteVersionAria", { ver: `v${i + 1}` })}
                                         onClick={() => deleteVersion(p, i)}
                                       >
                                         🗑

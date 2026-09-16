@@ -353,12 +353,16 @@
     "updatePresetDisabledTitle": "Pick a headphone to save to this preset",
     "renameTitle": "Rename",
     "renameAria": "Rename {{name}}",
+    "updateAria": "Update {{name}}",
     "versionsTitle": "Version history — save and A/B earlier refinements",
     "versions": "Versions",
     "noVersions": "No saved versions yet. Refine the loaded preset, then 💾 → Save as new version to keep this state to A/B against.",
     "deleteVersionTitle": "Delete this version",
+    "deleteVersionAria": "Delete version {{ver}}",
     "deleteHeadVersionTitle": "Delete the newest version ({{ver}}), reverting to the one below it",
+    "deleteHeadVersionAria": "Delete version {{ver}}",
     "deleteTitle": "Delete",
+    "deleteAria": "Delete {{name}}",
     "emptyPresets": "Pick a headphone + target, then 💾 Save a full preset to recall the whole setup."
   },
 

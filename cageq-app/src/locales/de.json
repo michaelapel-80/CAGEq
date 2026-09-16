@@ -353,12 +353,16 @@
     "updatePresetDisabledTitle": "Kopfhörer wählen, um in dieses Preset zu speichern",
     "renameTitle": "Umbenennen",
     "renameAria": "{{name}} umbenennen",
+    "updateAria": "{{name}} aktualisieren",
     "versionsTitle": "Versionsverlauf – frühere Feinschliffe speichern und A/B vergleichen",
     "versions": "Versionen",
     "noVersions": "Noch keine gespeicherten Versionen. Verfeinere das geladene Preset und dann 💾 → Als neue Version speichern, um diesen Stand zum A/B-Vergleich zu behalten.",
     "deleteVersionTitle": "Diese Version löschen",
+    "deleteVersionAria": "Version {{ver}} löschen",
     "deleteHeadVersionTitle": "Neueste Version ({{ver}}) löschen – setzt auf die darunterliegende zurück",
+    "deleteHeadVersionAria": "Version {{ver}} löschen",
     "deleteTitle": "Löschen",
+    "deleteAria": "{{name}} löschen",
     "emptyPresets": "Kopfhörer + Ziel wählen, dann 💾 ein volles Preset speichern, um das ganze Setup abzurufen."
   },
 
