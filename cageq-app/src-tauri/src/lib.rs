@@ -1310,9 +1310,19 @@ fn save_settings_to(path: &Path, s: &AppSettings) -> std::io::Result<()> {
     std::fs::write(path, json)
 }
 
+/// Serializes the load-modify-save cycle below across Tauri commands, which each run on their
+/// own thread (`spawn_blocking`) and so can genuinely race here. Without it, two commands
+/// touching settings close together (e.g. `apply()` persisting `last_hash` racing the
+/// frequently-fired `set_resume()`) could both read the same on-disk snapshot and each write
+/// back only their own edit — whichever finishes last silently clobbers the other's. Losing
+/// `last_hash` in particular is the worst case: it feeds directly into the next launch's
+/// startup-integrity verdict (§3.0).
+static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Update one field of the persisted settings without clobbering the others
 /// (load-modify-save). Best-effort; a failed write just loses the update.
 fn update_settings(edit: impl FnOnce(&mut AppSettings)) {
+    let _guard = SETTINGS_LOCK.lock().unwrap();
     let mut s = load_settings();
     edit(&mut s);
     let _ = save_settings(&s);
@@ -1891,5 +1901,37 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// **The bug this fixes.** `update_settings` used to be a plain load-modify-save with no
+    /// lock, while Tauri dispatches commands concurrently on separate threads. Two commands
+    /// touching different fields close together (e.g. `apply()`'s `last_hash` racing
+    /// `set_confirm_final_volume()`) could each read the same on-disk snapshot and each write
+    /// back only their own edit -- whichever finished last silently clobbered the other's
+    /// field back to its stale value. Hammers both fields concurrently through the real
+    /// `update_settings`/`load_settings` path (not `save_settings_to` directly, which
+    /// bypasses `SETTINGS_LOCK` entirely) and asserts neither was lost.
+    #[test]
+    fn concurrent_update_settings_calls_do_not_clobber_each_others_fields() {
+        let path = std::env::temp_dir().join(format!("cageq-settings-concurrent-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        unsafe { env::set_var("CAGEQ_SETTINGS_PATH", &path) };
+
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                scope.spawn(move || update_settings(|s| s.last_hash = Some(format!("hash-{i}"))));
+                scope.spawn(|| update_settings(|s| s.confirm_final_volume = false));
+            }
+        });
+
+        let reloaded = load_settings();
+        assert!(reloaded.last_hash.is_some(), "last_hash update must not have been lost entirely");
+        assert!(
+            !reloaded.confirm_final_volume,
+            "confirm_final_volume must not have been clobbered back to its default (true) by a racing last_hash write"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        unsafe { env::remove_var("CAGEQ_SETTINGS_PATH") };
     }
 }
