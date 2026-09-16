@@ -1039,9 +1039,16 @@ mod windows_impl {
             return Vec::new();
         }
 
-        // 1) Local maxima.
+        // 1) Local maxima — only within [SPEC_F_MIN, SPEC_F_MAX], the range the chart/readout
+        // actually display. `power` is the raw linear FFT spectrum, which extends from DC (and up
+        // to Nyquist) regardless of what the UI shows, so without this a genuine local maximum
+        // below 20 Hz (rumble, DC leakage) or above 20 kHz could be reported and land in the peak
+        // readout as a number the axis has no room for — confusing on its own even if the on-chart
+        // cross itself falls off the visible edge.
+        let min_bin = ((SPEC_F_MIN / bin_hz).ceil() as usize).max(1);
+        let max_bin = ((SPEC_F_MAX / bin_hz).floor() as usize).min(n - 1);
         let mut candidates: Vec<(usize, f32)> = Vec::new();
-        for i in 1..n - 1 {
+        for i in min_bin..max_bin {
             if v[i] > v[i - 1] && v[i] >= v[i + 1] {
                 candidates.push((i, v[i]));
             }
@@ -2388,6 +2395,21 @@ mod windows_impl {
                 v[i] = 10f32.powf(db / 10.0);
             }
             v
+        }
+
+        /// The raw linear spectrum runs from DC up to Nyquist regardless of what the chart shows
+        /// (20 Hz–20 kHz) — a genuine local maximum outside that range (rumble/DC leakage below
+        /// 20 Hz, content above 20 kHz) must not be reported: there's no axis position for it, and
+        /// it would show up as a confusing number in the peak readout even if the on-chart cross
+        /// itself fell off the visible edge.
+        #[test]
+        fn peaks_outside_the_displayed_range_are_not_reported() {
+            // Bin 1 = 10 Hz (below 20 Hz); bin 2500 = 25000 Hz (above 20 kHz); bin 100 = 1000 Hz,
+            // safely inside the displayed range and the one peak that should survive.
+            let power = synth(3000, &[(1, -10.0), (100, -12.0), (2500, -10.0)]);
+            let peaks = find_peaks(&power, 1.0, TEST_BIN_HZ, false, 1.0, 60.0);
+            assert_eq!(peaks.len(), 1, "only the in-range peak should be reported, got {peaks:?}");
+            assert!((peaks[0].hz - 1000.0).abs() < TEST_BIN_HZ * 2.0);
         }
 
         #[test]
