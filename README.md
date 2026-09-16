@@ -169,3 +169,5 @@ the full list and their license texts.
   CAGEq can drive.
 * [AQUA](https://github.com/h39s/AQUA) — the project that first suggested this space was worth
   building a real UI for.
+* [Peace](https://sourceforge.net/projects/peace-equalizer-apo-extension/) — another Equalizer APO GUI,
+  with a much deeper feature set than AQUA's, if a dated UI.
