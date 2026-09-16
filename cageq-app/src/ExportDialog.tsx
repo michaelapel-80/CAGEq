@@ -93,6 +93,27 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
     ];
   }, [filters, previewFreqs, sampleRate, t]);
 
+  // How well the exported (reduced-band) fit actually matches the full cascade it's approximating
+  // — the same two curves the chart above already draws (`series`/`refs`), just reduced to two
+  // numbers instead of a shape someone has to eyeball. RMS is the fit's overall closeness; Max is
+  // its worst single point, since that's what the 31-band ripple (or an aggressive band-count cut)
+  // can hide inside an otherwise-good RMS. Both computed client-side via the same `composedCurveDb`
+  // the backend fit itself targets (see `fit_export_eq`/`fit_fixed_band_eq`'s own doc for why they
+  // don't hand back a curve at all) — no second error computation to keep in sync with the backend.
+  const fitError = useMemo(() => {
+    if (!fit || !filters.length) return null;
+    const achieved = composedCurveDb(fit.filters, previewFreqs, sampleRate);
+    const reference = composedCurveDb(filters, previewFreqs, sampleRate);
+    let sumSq = 0;
+    let max = 0;
+    for (let i = 0; i < previewFreqs.length; i++) {
+      const err = Math.abs(achieved[i] - reference[i]);
+      sumSq += err * err;
+      max = Math.max(max, err);
+    }
+    return { rms: Math.sqrt(sumSq / previewFreqs.length), max };
+  }, [fit, filters, previewFreqs, sampleRate]);
+
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(text);
@@ -171,6 +192,15 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
 
         <div style={{ height: 160, position: "relative", margin: "0.6em 0" }}>
           <EqChart series={series} refs={refs} height={160} screen legendHost={legendHost} />
+          {/* Absolutely positioned inside the chart's own fixed-height box, not a line of its
+              own — same "nothing here may grow the dialog" discipline as everything else in it
+              (see the modal-card's own doc). `pointerEvents: none` so it never steals the
+              chart's hover-cursor tracking underneath it. */}
+          {fitError && (
+            <div style={{ position: "absolute", top: 6, left: 8, fontSize: "0.68em", opacity: 0.75, pointerEvents: "none" }}>
+              {t("export.fitError", { rms: fitError.rms.toFixed(2), max: fitError.max.toFixed(2) })}
+            </div>
+          )}
         </div>
         <div ref={setLegendHost} className="chart-legend-host" />
 

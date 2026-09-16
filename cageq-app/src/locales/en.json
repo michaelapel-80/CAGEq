@@ -375,6 +375,7 @@
     "fixedBandHint": "AutoEq's own standard preset: fixed frequencies and bandwidth. A correction with detail narrower than that can show ripple here — for a tighter, low-ripple export, use Parametric instead.",
     "fitCurve": "Exported fit",
     "fullCurve": "Full correction",
+    "fitError": "Fit error — RMS {{rms}} dB · Max {{max}} dB",
     "tableType": "Type",
     "tableFc": "Fc",
     "tableGain": "Gain",
@@ -442,6 +443,6 @@
   },
 
   "footer": {
-    "text": "Headphone corrections and target curves from <0>AutoEq</0> by Jaakko Pasanen, MIT-licensed. CAGEq, by Michael Apel, is an independent project, not affiliated with AutoEq — itself licensed under the <1>GNU GPL v3.0 or later</1>."
+    "text": "Headphone corrections and target curves from <0>AutoEq</0> by Jaakko Pasanen, MIT-licensed. <2>CAGEq</2>, by Michael Apel, is an independent project, not affiliated with AutoEq — itself licensed under the <1>GNU GPL v3.0 or later</1>."
   }
 }

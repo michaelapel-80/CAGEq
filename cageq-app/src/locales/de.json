@@ -375,6 +375,7 @@
     "fixedBandHint": "AutoEqs eigenes Standard-Preset: feste Frequenzen und Bandbreite. Eine Korrektur mit feineren Details als das kann hier Welligkeit zeigen – für einen präziseren, welligkeitsarmen Export stattdessen Parametrisch verwenden.",
     "fitCurve": "Exportierte Anpassung",
     "fullCurve": "Volle Korrektur",
+    "fitError": "Anpassungsfehler — RMS {{rms}} dB · Max {{max}} dB",
     "tableType": "Typ",
     "tableFc": "Fc",
     "tableGain": "Gain",
@@ -442,6 +443,6 @@
   },
 
   "footer": {
-    "text": "Kopfhörer-Korrekturen und Zielkurven von <0>AutoEq</0> von Jaakko Pasanen, MIT-lizenziert. CAGEq, von Michael Apel, ist ein unabhängiges Projekt, nicht mit AutoEq affiliiert — selbst lizenziert unter der <1>GNU GPL v3.0 oder später</1>."
+    "text": "Kopfhörer-Korrekturen und Zielkurven von <0>AutoEq</0> von Jaakko Pasanen, MIT-lizenziert. <2>CAGEq</2>, von Michael Apel, ist ein unabhängiges Projekt, nicht mit AutoEq affiliiert — selbst lizenziert unter der <1>GNU GPL v3.0 oder später</1>."
   }
 }

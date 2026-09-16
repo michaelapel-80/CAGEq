@@ -3576,6 +3576,13 @@ function App() {
                 void openUrl("https://www.gnu.org/licenses/gpl-3.0.html").catch(() => {});
               }}
             />,
+            <a
+              href="https://github.com/michaelapel-80/CAGEq"
+              onClick={(e) => {
+                e.preventDefault();
+                void openUrl("https://github.com/michaelapel-80/CAGEq").catch(() => {});
+              }}
+            />,
           ]}
         />
       </footer>
