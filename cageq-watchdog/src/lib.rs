@@ -177,26 +177,42 @@ struct Shared {
     recoveries: u32,
 }
 
-impl Shared {
-    /// Idempotent trip (both threads may call it): if currently `Running`, write the
-    /// safe state and move to `Recovering` (recoverable fault) or `Terminal` (not).
-    fn trip_if_running(&mut self, reason: TripReason) {
-        if !matches!(self.health, Health::Running) {
+/// Idempotent trip (any thread may call it): if currently `Running`, write the safe
+/// state and move to `Recovering` (recoverable fault) or `Terminal` (not).
+///
+/// Two-phase so the safe-state write — real, unbounded file I/O — never runs while
+/// the mutex is held, per this module's own "never held ... across a blocking call"
+/// invariant (see module doc): phase 1 just confirms `Running` under the lock and
+/// clones out the `SafeState` closure (an `Arc`, cheap to clone); phase 2 calls it
+/// unlocked, then re-locks to commit. Another thread can race in during phase 2 and
+/// also observe `Running` — both safe-state writes are idempotent (the same
+/// hardcoded silent state), so the redundant call is harmless, and whichever thread
+/// re-locks first commits the transition; the other finds `health` already moved on
+/// and no-ops.
+fn trip_if_running(shared: &Arc<Mutex<Shared>>, reason: TripReason) {
+    let safe_state = {
+        let s = shared.lock().unwrap();
+        if !matches!(s.health, Health::Running) {
             return;
         }
-        // If we can't even reach silence, that supersedes the original reason and is
-        // non-recoverable.
-        let reason = match (self.safe_state)() {
-            Ok(()) => reason,
-            Err(e) => TripReason::SafeStateWriteFailed(e),
-        };
-        self.in_flight = None;
-        self.health = if reason.recoverable() {
-            Health::Recovering { attempt: 0, reason }
-        } else {
-            Health::Terminal { reason }
-        };
+        s.safe_state.clone()
+    };
+    // If we can't even reach silence, that supersedes the original reason and is
+    // non-recoverable.
+    let reason = match (safe_state)() {
+        Ok(()) => reason,
+        Err(e) => TripReason::SafeStateWriteFailed(e),
+    };
+    let mut s = shared.lock().unwrap();
+    if !matches!(s.health, Health::Running) {
+        return;
     }
+    s.in_flight = None;
+    s.health = if reason.recoverable() {
+        Health::Recovering { attempt: 0, reason }
+    } else {
+        Health::Terminal { reason }
+    };
 }
 
 /// A request handed from a caller to the driver, with a one-shot reply channel. `deadline` is
@@ -445,18 +461,19 @@ fn after_interaction<F>(outcome: Outcome, spawn_fn: &F, sidecar: &mut Sidecar, s
 where
     F: Fn() -> Result<Sidecar, SidecarError>,
 {
-    let recovering = {
+    let (mode, waited) = {
         let mut s = shared.lock().unwrap();
         let waited = s.in_flight.as_ref().map(|i| i.started.elapsed()).unwrap_or_default();
         let mode = s.in_flight.as_ref().map(|i| i.mode).unwrap_or(Mode::Busy);
         s.in_flight = None;
-        match outcome {
-            Outcome::Ok => {}
-            Outcome::Exited => s.trip_if_running(TripReason::SidecarExited),
-            Outcome::Failed => s.trip_if_running(TripReason::Unresponsive { mode, waited }),
-        }
-        matches!(s.health, Health::Recovering { .. })
+        (mode, waited)
     };
+    match outcome {
+        Outcome::Ok => {}
+        Outcome::Exited => trip_if_running(shared, TripReason::SidecarExited),
+        Outcome::Failed => trip_if_running(shared, TripReason::Unresponsive { mode, waited }),
+    }
+    let recovering = matches!(shared.lock().unwrap().health, Health::Recovering { .. });
     if recovering {
         run_recovery(spawn_fn, sidecar, shared, cfg);
     }
@@ -578,9 +595,12 @@ fn install_waiter(shared: &Arc<Mutex<Shared>>, killer: cageq_sidecar::Killer) {
     let shared = Arc::clone(shared);
     thread::spawn(move || {
         let _ = killer.wait(); // blocks until THIS process exits
-        let mut s = shared.lock().unwrap();
-        if !s.shutdown && s.generation == generation {
-            s.trip_if_running(TripReason::SidecarExited);
+        let should_trip = {
+            let s = shared.lock().unwrap();
+            !s.shutdown && s.generation == generation
+        };
+        if should_trip {
+            trip_if_running(&shared, TripReason::SidecarExited);
         }
     });
 }
@@ -594,8 +614,8 @@ fn install_waiter(shared: &Arc<Mutex<Shared>>, killer: cageq_sidecar::Killer) {
 fn monitor_loop(shared: Arc<Mutex<Shared>>, cfg: WatchdogConfig) {
     loop {
         thread::sleep(cfg.tick);
-        let killer = {
-            let mut s = shared.lock().unwrap();
+        let breach = {
+            let s = shared.lock().unwrap();
             if s.shutdown {
                 break;
             }
@@ -604,20 +624,18 @@ fn monitor_loop(shared: Arc<Mutex<Shared>>, cfg: WatchdogConfig) {
             if !matches!(s.health, Health::Running) {
                 continue;
             }
-            let breach = s
-                .in_flight
+            s.in_flight
                 .as_ref()
-                .and_then(|op| (op.started.elapsed() > op.deadline).then(|| (op.mode, op.started.elapsed())));
-            match breach {
-                Some((mode, waited)) => {
-                    s.trip_if_running(TripReason::Unresponsive { mode, waited });
-                    s.killer.clone() // kill outside the lock, below
-                }
-                None => continue,
-            }
+                .and_then(|op| (op.started.elapsed() > op.deadline).then(|| (op.mode, op.started.elapsed())))
         };
+        let (mode, waited) = match breach {
+            Some(b) => b,
+            None => continue,
+        };
+        trip_if_running(&shared, TripReason::Unresponsive { mode, waited });
         // Killing closes the child's pipes, so the driver's blocked read returns EOF
         // and it proceeds into recovery.
+        let killer = shared.lock().unwrap().killer.clone();
         if let Some(k) = killer {
             let _ = k.kill();
         }

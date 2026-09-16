@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use cageq_sidecar::{Sidecar, SidecarError};
@@ -244,4 +244,45 @@ fn manual_retry_recovers_from_terminal() {
     let h = sup.wait_until(|h| matches!(h, Health::Running), Duration::from_secs(3));
     assert!(matches!(h, Health::Running), "manual retry should heal, got {h:?}");
     assert!(sup.call("ping", json!(null)).is_ok());
+}
+
+#[test]
+fn safe_state_write_does_not_block_other_shared_access() {
+    // Regression test: the safe-state write must never run while Shared's mutex is
+    // held (see trip_if_running's own doc) — otherwise every other consumer of it
+    // (health(), call(), the driver's own next command) blocks for as long as the
+    // write takes, turning the fail-safe into a hang instead of a trip. 300 ms is
+    // slow enough that holding the lock across it would be unmistakable.
+    let in_progress = Arc::new(AtomicBool::new(false));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (ip, h) = (Arc::clone(&in_progress), Arc::clone(&hits));
+    let safe_state: SafeState = Arc::new(move || {
+        ip.store(true, Ordering::SeqCst);
+        h.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(300));
+        ip.store(false, Ordering::SeqCst);
+        Ok(())
+    });
+    let sup = Supervisor::start(healthy_spawner(), fast_cfg(), safe_state).unwrap();
+
+    let _ = sup.call("exit", json!({ "code": 1 })); // provokes a trip
+
+    // Wait until the safe-state write is actually underway.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !in_progress.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(in_progress.load(Ordering::SeqCst), "safe-state write never started");
+
+    // While it's in progress, health() must still return promptly — it locks the
+    // same mutex trip_if_running does.
+    let t0 = Instant::now();
+    let _ = sup.health();
+    let elapsed = t0.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "health() took {elapsed:?} while the safe-state write was in progress \
+         — the mutex appears to be held across it"
+    );
+    assert!(hits.load(Ordering::SeqCst) >= 1);
 }
