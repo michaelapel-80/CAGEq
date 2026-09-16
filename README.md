@@ -95,12 +95,11 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──JSON-R
                                                     │                                     │
                                                     └──────── biquad coefficients ────────┘
                                                                        │
-                                           ┌───────────────────────────┴───────────────────────────┐
-                                           ▼                                                       ▼
-                          Equalizer APO (external, optional)                           CAGEq's own Windows Audio
-                         — click-free config-reload crossfade                          Processing Object — live
-                                                                                      coefficient ramping over a
-                                                                                     shared-memory control channel
+                              ┌────────────────────────────────────────┴──────┐
+                              ▼                                               ▼
+             Equalizer APO (external, optional)                        CAGEq's own APO
+            — click-free config-reload crossfade              — live coefficient ramping over a
+                                                                shared-memory control channel
 ```
 
 * **Why Python in the sidecar:** reuse the established AutoEq framework (fitting algorithms plus
