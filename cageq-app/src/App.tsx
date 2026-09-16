@@ -1578,6 +1578,15 @@ function App() {
   // the current correction (no config change); the backend only plays the signal.
   async function runSelfTest() {
     if (!result || dryActive || (activeSlot !== "A" && activeSlot !== "B")) return;
+    // An active solo/isolate audition writes its own bandpass-only config directly to the
+    // backend (bypassing the slot cache — see `toggleIsolate`'s own doc), so the loopback
+    // capture below would measure that audition instead of `bands`. Every other structural
+    // action in this file (addFilter, undo, switchSlot, ...) exits the audition first for the
+    // same reason; self-test is the one path that didn't. `clearSolo`/`clearIsolate` (not
+    // `dropAudition`) so the real cascade is actually re-applied before the test starts, not
+    // just the UI state cleared.
+    clearSolo();
+    clearIsolate();
     const bands = result.filters;
     const originalSlot = activeSlot; // restored after the Dry reference capture
     // Pre-check: if the correction is too flat there's no shape to measure — don't bother playing.
