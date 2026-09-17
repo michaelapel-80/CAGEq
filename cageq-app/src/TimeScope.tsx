@@ -218,7 +218,7 @@ export function TimeScope() {
   // toward white instead of holding steady (see phosphor.ts's closing note).
   const peakRef = useRef<HTMLCanvasElement>(null);
   const scopeRef = useRef<ScopeData | null>(null);
-  const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-timescope-params", DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory, savedDefault } = useTunableParams("cageq-timescope-params", DEFAULTS);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -711,6 +711,16 @@ export function TimeScope() {
                 >
                   {t("scope.presetDistribution")}
                 </button>
+                {savedDefault && (
+                  <button
+                    type="button"
+                    className={JSON.stringify(params) === JSON.stringify(savedDefault) ? "on" : ""}
+                    title={t("scope.presetSavedHint")}
+                    onClick={() => setParams(savedDefault)}
+                  >
+                    {t("scope.presetSaved")}
+                  </button>
+                )}
               </div>
             </div>
             {CONTROLS.map((cc) => (

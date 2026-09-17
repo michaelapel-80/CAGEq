@@ -417,7 +417,7 @@ export function SpectrumScope({
   const cursorElRef = useRef<HTMLDivElement | null>(null);
   const cursorHzRef = useRef<HTMLSpanElement | null>(null);
   const cursorDbRef = useRef<HTMLSpanElement | null>(null);
-  const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-spectrum-params", DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory, savedDefault } = useTunableParams("cageq-spectrum-params", DEFAULTS);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -991,6 +991,16 @@ export function SpectrumScope({
                 >
                   {t("scope.presetDistribution")}
                 </button>
+                {savedDefault && (
+                  <button
+                    type="button"
+                    className={JSON.stringify(params) === JSON.stringify(savedDefault) ? "on" : ""}
+                    title={t("scope.presetSavedHint")}
+                    onClick={() => setParams(savedDefault)}
+                  >
+                    {t("scope.presetSaved")}
+                  </button>
+                )}
               </div>
             </div>
             {CONTROLS.map((cc) => (

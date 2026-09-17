@@ -170,7 +170,7 @@ export function Vectorscope({
   // Latest payload, written by the listener and read by the rAF loop — a ref, not state, so the
   // 60 fps stream drives the imperative canvas without ever re-rendering React.
   const scopeRef = useRef<ScopeData | null>(null);
-  const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-vectorscope-params", DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory, savedDefault } = useTunableParams("cageq-vectorscope-params", DEFAULTS);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -647,6 +647,16 @@ export function Vectorscope({
                 >
                   {t("scope.presetDistribution")}
                 </button>
+                {savedDefault && (
+                  <button
+                    type="button"
+                    className={JSON.stringify(params) === JSON.stringify(savedDefault) ? "on" : ""}
+                    title={t("scope.presetSavedHint")}
+                    onClick={() => setParams(savedDefault)}
+                  >
+                    {t("scope.presetSaved")}
+                  </button>
+                )}
               </div>
             </div>
             <div className="vs-tune-sep" />

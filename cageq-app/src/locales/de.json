@@ -135,6 +135,8 @@
     "presetHint": "Springt mit Schweif/Ausklang auf ein kuratiertes Nachleucht-Fenster — Schnell für eine knappe, fast unmittelbare Anzeige; Verteilung für ein langes Fenster, das die tatsächliche Streuung der Werte zeigt statt nur eines Mittelwerts",
     "presetFast": "Schnell",
     "presetDistribution": "Verteilung",
+    "presetSaved": "Gespeichert",
+    "presetSavedHint": "Der eigene gespeicherte Standard (siehe „Als Standard speichern“ unten) — ohne Neuladen der Ansicht wiederherstellen",
     "peak": "Peak",
     "glow": "Glühen",
     "glowHint": "Helligkeit der Spur bei voller (langsam bewegter) Intensität — schneller bewegte Abschnitte dunkeln von hier aus ab",
