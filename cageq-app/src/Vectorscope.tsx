@@ -49,6 +49,15 @@ type Params = {
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
 };
+// Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
+// reasoning (shared verbatim: the Trail/Glow orthogonality fix keeps *steady-state* brightness
+// independent of trailTau in theory, but live tuning showed glow still needs its own adjustment
+// per preset). Here, "distribution" reads as a stereo-image density cloud instead of the usual
+// dwelling point/curve. Numbers below are a starting point for live tuning, not the final word.
+const PRESETS: Record<"fast" | "distribution", { trailTau: number; tail: number; glow: number }> = {
+  fast: { trailTau: 0.03, tail: 3, glow: 0.3 },
+  distribution: { trailTau: 0.8, tail: 6, glow: 0.6 },
+};
 const DEFAULTS: Params = {
   trailTau: 0.08,
   tail: 6,
@@ -613,6 +622,33 @@ export function Vectorscope({
                 </label>
               );
             })}
+            <div className="vs-tune-row vs-tune-check" title={t("scope.presetHint")}>
+              <span className="vs-tune-label">{t("scope.preset")}</span>
+              <div className="pl-toggle vs-tune-seg">
+                <button
+                  type="button"
+                  className={
+                    params.trailTau === PRESETS.fast.trailTau && params.tail === PRESETS.fast.tail && params.glow === PRESETS.fast.glow ? "on" : ""
+                  }
+                  onClick={() => setParams((prev) => ({ ...prev, ...PRESETS.fast }))}
+                >
+                  {t("scope.presetFast")}
+                </button>
+                <button
+                  type="button"
+                  className={
+                    params.trailTau === PRESETS.distribution.trailTau &&
+                    params.tail === PRESETS.distribution.tail &&
+                    params.glow === PRESETS.distribution.glow
+                      ? "on"
+                      : ""
+                  }
+                  onClick={() => setParams((prev) => ({ ...prev, ...PRESETS.distribution }))}
+                >
+                  {t("scope.presetDistribution")}
+                </button>
+              </div>
+            </div>
             <div className="vs-tune-sep" />
             <label className="vs-tune-row vs-tune-check" title={t("scope.rotateHint")}>
               <span className="vs-tune-label">{t("scope.rotate")}</span>

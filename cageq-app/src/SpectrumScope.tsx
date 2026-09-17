@@ -49,6 +49,18 @@ type Params = {
   tilt: TiltMode;
 };
 const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true, linear: false, tilt: "rta" };
+// Curated Trail/Tail/Glow combinations. The Trail/Glow orthogonality fix below (`TAU_REF/trailTau`
+// in doseMult) keeps *steady-state* brightness independent of trailTau in theory, but live tuning
+// of "distribution" showed glow still needs its own adjustment to get the actual density read
+// right — bloom/haze are left alone, at whatever the user already has them. "distribution" is the
+// case that motivated this: a fast FFT redraw plus a long accumulator window reads a bin's actual
+// value *distribution* over that window (density, not just a mean) — a much better read of e.g.
+// dense electronic material than slowing the FFT itself (which only ever collapses to one averaged
+// number per bin). Numbers below are a starting point for that live tuning, not the final word.
+const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" | "glow">> = {
+  fast: { trailTau: 0.05, tail: 4, glow: 0.1 },
+  distribution: { trailTau: 0.8, tail: 6, glow: 0.3 },
+};
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation, and
@@ -953,6 +965,33 @@ export function SpectrumScope({
               <button type="button" className="vs-tune-close" title={t("scope.close")} aria-label={t("scope.close")} onClick={() => setTuning(false)}>
                 ×
               </button>
+            </div>
+            <div className="vs-tune-row vs-tune-check" title={t("scope.presetHint")}>
+              <span className="vs-tune-label">{t("scope.preset")}</span>
+              <div className="pl-toggle vs-tune-seg">
+                <button
+                  type="button"
+                  className={
+                    params.trailTau === PRESETS.fast.trailTau && params.tail === PRESETS.fast.tail && params.glow === PRESETS.fast.glow ? "on" : ""
+                  }
+                  onClick={() => setParams((prev) => ({ ...prev, ...PRESETS.fast }))}
+                >
+                  {t("scope.presetFast")}
+                </button>
+                <button
+                  type="button"
+                  className={
+                    params.trailTau === PRESETS.distribution.trailTau &&
+                    params.tail === PRESETS.distribution.tail &&
+                    params.glow === PRESETS.distribution.glow
+                      ? "on"
+                      : ""
+                  }
+                  onClick={() => setParams((prev) => ({ ...prev, ...PRESETS.distribution }))}
+                >
+                  {t("scope.presetDistribution")}
+                </button>
+              </div>
             </div>
             {CONTROLS.map((cc) => (
               <label key={cc.key} className="vs-tune-row" title={cc.hint}>

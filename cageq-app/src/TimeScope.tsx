@@ -43,6 +43,16 @@ const DIVISIONS = 10;
 // (thicker, brighter by default) and content (two lanes of a continuous waveform, not a dwelling
 // point/curve) haven't been checked against those numbers at all yet.
 const DEFAULTS: Params = { trailTau: 0.06, tail: 6, glow: 0.40, beam: 3.0, bloom: 0.3, haze: 0.6, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 80, mode: "mix" }; // 2 ms/div × 10 = 20 ms
+// Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
+// reasoning (shared verbatim: the Trail/Glow orthogonality fix keeps *steady-state* brightness
+// independent of trailTau in theory, but live tuning showed glow still needs its own adjustment
+// per preset). Here, "distribution" mainly pays off in free-run mode on dense/non-periodic
+// material, where a long window overlays many cycles into a waveform-density cloud rather than one
+// blurred average trace. Numbers below are a starting point for live tuning, not the final word.
+const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" | "glow">> = {
+  fast: { trailTau: 0.03, tail: 3, glow: 0.24 },
+  distribution: { trailTau: 0.8, tail: 40, glow: 0.8 },
+};
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
 const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler than the lane centrelines
@@ -676,6 +686,33 @@ export function TimeScope() {
               />
               <b>{msPerDiv < 1 ? msPerDiv.toFixed(1) : msPerDiv}</b>
             </label>
+            <div className="vs-tune-row vs-tune-check" title={t("scope.presetHint")}>
+              <span className="vs-tune-label">{t("scope.preset")}</span>
+              <div className="pl-toggle vs-tune-seg">
+                <button
+                  type="button"
+                  className={
+                    params.trailTau === PRESETS.fast.trailTau && params.tail === PRESETS.fast.tail && params.glow === PRESETS.fast.glow ? "on" : ""
+                  }
+                  onClick={() => setParams((prev) => ({ ...prev, ...PRESETS.fast }))}
+                >
+                  {t("scope.presetFast")}
+                </button>
+                <button
+                  type="button"
+                  className={
+                    params.trailTau === PRESETS.distribution.trailTau &&
+                    params.tail === PRESETS.distribution.tail &&
+                    params.glow === PRESETS.distribution.glow
+                      ? "on"
+                      : ""
+                  }
+                  onClick={() => setParams((prev) => ({ ...prev, ...PRESETS.distribution }))}
+                >
+                  {t("scope.presetDistribution")}
+                </button>
+              </div>
+            </div>
             {CONTROLS.map((cc) => (
               <label key={cc.key} className="vs-tune-row" title={cc.hint}>
                 <span className="vs-tune-label">{cc.label}</span>
