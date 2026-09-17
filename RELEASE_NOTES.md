@@ -1,16 +1,11 @@
-A round of bug fixes from a full-codebase review — nothing new to learn, just more correct.
+A small tuning-quality-of-life update for the scope views (Spectrum/Time/Vectorscope), plus routine
+dependency security bumps.
 
-- **Fixed:** the EQ chart's K-weighted Tilt cursor readout showed a weighted number instead of the
-  raw measurement.
-- **Fixed:** the fail-safe watchdog could rarely hang instead of tripping, if the safe-state write
-  itself was slow.
-- **Fixed:** a custom filter with an invalid Q or frequency (e.g. dragged to zero) could silently
-  corrupt the applied EQ instead of being rejected.
-- **Fixed:** CAGEq's own APO could permanently leave "disable audio enhancements" turned on for an
-  endpoint after being detached.
-- **Fixed:** the DSP sidecar process wasn't reliably terminated when the app closed.
-- **Fixed:** a rare race could lose a settings update if two changes landed at the same time.
-- **Fixed:** Self-Test could measure an active solo/isolate audition instead of the real
-  correction.
-- Hardened the real-time control channel's cross-process memory safety, and improved screen-reader
-  labels on the preset list's icon buttons.
+- **Added:** curated "Fast"/"Distribution" render-tuning presets, plus a "Saved" preset for your
+  own saved default — all three sit next to the existing Save/Reset controls.
+- **Added:** the Trail slider's usable range is no longer artificially capped short.
+- **Changed:** each scope view now remembers exactly where you left its tuning sliders across
+  restarts, independently of your saved default (which is now a preset you load on demand, not
+  something that's silently reapplied on launch).
+- Updated a few frontend build dependencies (postcss, browserslist, baseline-browser-mapping) to
+  patch known vulnerabilities.
