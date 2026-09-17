@@ -17,10 +17,16 @@ meters, filter-band editor, and A/B/Dry comparison controls.](docs/screenshot.pn
 
 ## The problem
 
-Getting a good headphone correction curve is a solved problem (thanks, AutoEq). Comparing curves
-*meaningfully by ear* isn't: any EQ change also shifts perceived loudness, so a naive A/B swap
-answers "does A just sound louder?" instead of "does A sound better?". And hand-tuning your own
-filters without guardrails risks digital clipping or jarring level jumps.
+Getting a good *starting point* for a headphone correction curve is a largely solved problem
+(thanks, AutoEq) — but a measurement-to-target fit is a generally good match, not a perfect one
+for *your* ears and *your* pair: individual anatomy shapes your own frequency response, headphones
+bypass most of the head-related transfer function your brain is calibrated for, the measurement
+rig can't reproduce your anatomy unless it was measured with in-ear mics in your own ears, and
+there's sample variation between individual headphone units. So the curve still needs hand-tuning
+to close that gap. Comparing curves *meaningfully by ear* while you do that isn't solved either:
+any EQ change also shifts perceived loudness, so a naive A/B swap answers "does A just sound
+louder?" instead of "does A sound better?". And hand-tuning your own filters without guardrails
+risks digital clipping or jarring level jumps.
 
 ## What CAGEq does about it
 
