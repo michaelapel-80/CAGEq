@@ -543,7 +543,7 @@ export function Vectorscope({
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
   const CONTROLS: { key: keyof Params; label: string; hint: string; min: number; max: number; step: number }[] = [
-    { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 0.6, step: 0.01 },
+    { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 2.0, step: 0.01 },
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.02, max: 1, step: 0.02 },
     { key: "beam", label: t("scope.beam"), hint: t("scope.beamHint"), min: 0.1, max: 5, step: 0.05 },
