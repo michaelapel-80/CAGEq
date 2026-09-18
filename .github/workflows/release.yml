@@ -2,8 +2,12 @@
 #
 # Mirrors DEPLOY.md's own maintainer build steps exactly (same scripts, same order) rather than
 # reimplementing the process here — see that file if a step here looks unfamiliar. Runs the same
-# four stages a human would: freeze the Python sidecar, build CAGEq's own APO (needs the MSVC
-# C++ toolset), build the frontend + Tauri bundle, then locate and publish the resulting .exe.
+# three stages a human would: build CAGEq's own APO (needs the MSVC C++ toolset), build the
+# frontend + Tauri bundle, then locate and publish the resulting .exe. No Python sidecar to
+# freeze/bundle any more — the app doesn't ship or depend on one (see cageq-core's "No sidecar"
+# module doc); `cageq-sidecar`/`cageq-watchdog` stay in the workspace purely as dev-only
+# infrastructure for the `tests/*_vs_sidecar.rs` comparison tests, which this release build
+# doesn't run.
 #
 # Triggers on a version tag push (the real release path) and workflow_dispatch (so the whole
 # pipeline can be test-run without cutting a release — see the "Publish release" step's own
@@ -55,31 +59,13 @@ jobs:
           cache: "npm"
           cache-dependency-path: cageq-app/package-lock.json
 
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          # autoeq pins 2022-era numpy/matplotlib wheels that only exist through cp310 — see
-          # cageq-sidecar/python/requirements.txt's own doc.
-          python-version: "3.10"
-
-      # --- 1. Python DSP sidecar: venv, deps, freeze (PyInstaller) ---
-      - name: Set up the sidecar's venv
-        working-directory: cageq-sidecar
-        run: |
-          python -m venv .venv
-          .venv\Scripts\python -m pip install -r python\requirements.txt
-
-      - name: Freeze the sidecar
-        shell: pwsh
-        run: ./scripts/build-sidecar.ps1
-
-      # --- 2. CAGEq's own APO: Rust static lib + C++ COM shim, needs the MSVC toolset ---
+      # --- 1. CAGEq's own APO: Rust static lib + C++ COM shim, needs the MSVC toolset ---
       - name: Build CAGEq's own APO
         shell: pwsh
         working-directory: cageq-app
         run: ./scripts/build-apo.ps1
 
-      # --- 3. Frontend + Tauri bundle. beforeBuildCommand (tauri.conf.json) re-checks the APO
+      # --- 2. Frontend + Tauri bundle. beforeBuildCommand (tauri.conf.json) re-checks the APO
       # staging is fresh — it is, having just been built above in this same job — before this
       # actually builds the installer. ---
       - name: Install frontend dependencies
@@ -111,7 +97,7 @@ jobs:
         working-directory: cageq-app
         run: npm run tauri build -- --bundles nsis
 
-      # --- 4. Locate + publish. Globbed rather than hardcoding the version, so a version bump
+      # --- 3. Locate + publish. Globbed rather than hardcoding the version, so a version bump
       # in tauri.conf.json never needs a matching edit here — but verified against that same
       # version afterwards, so a stale artifact (see the cache note above) fails the build
       # loudly instead of shipping silently under the wrong name.

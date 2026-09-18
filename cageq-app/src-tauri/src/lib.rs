@@ -1,14 +1,13 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use std::sync::Arc;
 
 use cageq_core::{
-    Applied, AudioDevice, BackendError, CalcRequest, Capabilities, Core, CoreError, CurvePoint,
+    Applied, AudioDevice, BackendError, CalcRequest, Capabilities, Core, CurvePoint,
     DEFAULT_BASE_PREGAIN_DB, DEFAULT_ISP_HEADROOM_DB, DeviceConfig, EqApoBackend, EqBackend,
-    Filter, Health, LoudnessSettings, Sidecar, Slot, StartupDecision, WatchdogConfig,
+    Filter, LoudnessSettings, Slot, StartupDecision,
     detect_eqapo_config_dir, list_render_devices,
 };
 use serde_json::{json, Map, Value};
@@ -35,23 +34,8 @@ enum Backend {
         /// [`SwitchableBackend`]) — `dyn EqBackend` alone has no such operation.
         switch: Arc<SwitchableBackend>,
         config_source: String,
-        sidecar: String,
     },
     Failed(String),
-}
-
-impl Backend {
-    /// Kill the sidecar child process right now, without waiting to be dropped — Tauri's
-    /// `App::run` calls `std::process::exit` right after it returns, which skips every `Drop`
-    /// impl on the Rust side (this managed `Backend` included), so the sidecar's own
-    /// kill-on-drop plumbing never runs on a normal window close. Called from `run()`'s
-    /// `RunEvent::Exit` handler — the last point that still executes before the process
-    /// actually exits.
-    fn shutdown(&self) {
-        if let Backend::Ready { core, .. } = self {
-            core.kill_sidecar_now();
-        }
-    }
 }
 
 /// Holds the running §5.3c loopback monitor so start/stop commands can replace or end it.
@@ -235,24 +219,9 @@ struct ApplyResult {
 struct Status {
     /// §3.0 startup verdict: FirstRun / ResumeTrusted / SafeStateStillActive / ExternallyModified.
     startup: String,
-    /// Watchdog health detail (Debug of the Health enum).
-    health: String,
-    /// Coarse health for UI branching: "Running" | "Recovering" | "Terminal" | "-".
-    health_kind: String,
-    recoveries: u32,
     config_dir: String,
     /// How config_dir was resolved: the detected EqAPO dir, an override, or dev temp.
     config_source: String,
-    /// Which sidecar is live: the real AutoEq DSP or the stub.
-    sidecar: String,
-}
-
-fn health_kind(h: &Health) -> &'static str {
-    match h {
-        Health::Running => "Running",
-        Health::Recovering { .. } => "Recovering",
-        Health::Terminal { .. } => "Terminal",
-    }
 }
 
 /// Fit the selected AutoEq `headphone` (a catalogue path) against an optional named
@@ -1157,45 +1126,21 @@ fn set_apo_nudge_dismissed() {
     update_settings(|s| s.apo_nudge_dismissed = true);
 }
 
-/// Backend status for the UI: startup verdict, watchdog health, recovery count,
-/// and which sidecar is live.
+/// Backend status for the UI: startup verdict and where the config is written. No
+/// sidecar/watchdog health to report any more — nothing here spawns one.
 #[tauri::command]
 fn status(state: State<Backend>) -> Status {
     match state.inner() {
         Backend::Failed(e) => Status {
             startup: format!("init failed: {e}"),
-            health: "-".into(),
-            health_kind: "-".into(),
-            recoveries: 0,
             config_dir: "-".into(),
             config_source: "-".into(),
-            sidecar: "-".into(),
         },
-        Backend::Ready { core, config_dir, config_source, sidecar, .. } => {
-            let health = core.health();
-            Status {
-                startup: format!("{:?}", core.startup_decision()),
-                health_kind: health_kind(&health).into(),
-                health: format!("{health:?}"),
-                recoveries: core.recoveries(),
-                config_dir: config_dir.clone(),
-                config_source: config_source.clone(),
-                sidecar: sidecar.clone(),
-            }
-        }
-    }
-}
-
-/// Request one manual recovery attempt out of the watchdog `Terminal` state (§7.2) —
-/// from the UI's "Retry" button. The watchdog acts asynchronously; poll `status`.
-#[tauri::command]
-fn retry(state: State<Backend>) -> Result<(), String> {
-    match state.inner() {
-        Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, .. } => {
-            core.retry();
-            Ok(())
-        }
+        Backend::Ready { core, config_dir, config_source, .. } => Status {
+            startup: format!("{:?}", core.startup_decision()),
+            config_dir: config_dir.clone(),
+            config_source: config_source.clone(),
+        },
     }
 }
 
@@ -1321,22 +1266,13 @@ fn update_settings(edit: impl FnOnce(&mut AppSettings)) {
 
 // --- backend setup --------------------------------------------------------
 
-/// How to launch the DSP sidecar.
-enum SidecarSource {
-    /// The self-contained PyInstaller-frozen executable (bundled release build) — no
-    /// Python needed on the machine.
-    Frozen(PathBuf),
-    /// A Python interpreter + a script (dev venv, an env override, or the stub).
-    Python { python: PathBuf, script: PathBuf },
-}
-
 /// Lets which backend is actually driving audio change without restarting the app.
 ///
 /// `Core` and every backend-scoped command hold one `Arc<dyn EqBackend>` for the process's
 /// whole lifetime — this is that object. Every trait method just forwards to whatever
 /// concrete backend is currently behind the mutex; only [`Self::replace`] ever changes what
-/// that is. Nothing downstream (the reconciler thread, the watchdog's safe-state closure, the
-/// foreign-config commands) needs to know a swap can happen at all.
+/// that is. Nothing downstream (the foreign-config commands) needs to know a swap can happen
+/// at all.
 ///
 /// The backend was originally chosen once at startup and never revisited — reasonable until
 /// there was a way to change the choice *from inside a running app* (the setup wizard). A
@@ -1430,14 +1366,15 @@ fn reconcile_backend(switch: &SwitchableBackend, core: &Core) {
     let _ = core.reapply(); // push whatever's already active through the newly-loaded backend
 }
 
-/// `bundled_sidecar` is the frozen sidecar exe inside the app's resources (release), or
-/// `None` in dev.
-fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
+/// Build the app's `Backend`: resolve where cageq.txt lives, choose the EQ backend
+/// (Equalizer APO or CAGEq's own APO), and start `Core` over it. No sidecar to resolve
+/// any more — `Core::start` doesn't take one.
+fn build_backend() -> Backend {
     let (config_dir, config_source) = resolve_config_dir();
-    // Set once, before the sidecar (or any restart of it) is ever spawned — a child process
-    // inherits the parent's environment, so this alone is enough for every launch/restart to see it.
+    // `cageq-catalog`'s HTTP cache (measurement/target CSVs, the headphone/target index)
+    // reads this — set before anything might fetch, same as it was set before the
+    // sidecar (which used to read it too) was ever spawned.
     set_cache_dir_env(&resolve_cache_dir());
-    let (source, sidecar) = resolve_sidecar(bundled_sidecar.as_deref());
     let settings = load_settings();
     let _ = std::fs::create_dir_all(&config_dir);
     // The single place a backend is chosen (filter.md §5.3c) — wrapped so setup can change
@@ -1447,7 +1384,7 @@ fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
     // Where the UI says the applied state lives — asked of the backend rather than assumed,
     // since the two keep their configuration in entirely different places.
     let reported_dir = eq.location();
-    match start_core(Arc::clone(&eq), source, settings.last_hash.as_deref()) {
+    match Core::start(Arc::clone(&eq), settings.last_hash.as_deref()) {
         Ok(core) => {
             core.set_loudness(settings.loudness); // restore §4.0 settings
             Backend::Ready {
@@ -1456,35 +1393,9 @@ fn build_backend(bundled_sidecar: Option<PathBuf>) -> Backend {
                 config_dir: reported_dir,
                 switch,
                 config_source,
-                sidecar,
             }
         }
         Err(e) => Backend::Failed(format!("backend init failed: {e}")),
-    }
-}
-
-fn start_core(
-    eq: Arc<dyn EqBackend>,
-    source: SidecarSource,
-    expected_hash: Option<&str>,
-) -> Result<Core, CoreError> {
-    let spawn_fn = move || match &source {
-        SidecarSource::Frozen(exe) => Sidecar::spawn_program(exe),
-        SidecarSource::Python { python, script } => Sidecar::spawn(python, script),
-    };
-    Core::start(eq, spawn_fn, watchdog_cfg(), expected_hash)
-}
-
-/// Lenient timeouts: the real DSP sidecar spends a few seconds importing
-/// numpy/scipy/autoeq at startup and ~1-2 s per fit, so short deadlines would
-/// false-trip the watchdog.
-fn watchdog_cfg() -> WatchdogConfig {
-    WatchdogConfig {
-        idle_interval: Duration::from_secs(10),
-        idle_response: Duration::from_secs(5),
-        busy_response: Duration::from_secs(25),
-        tick: Duration::from_millis(200),
-        restart_backoffs: vec![Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(10)],
     }
 }
 
@@ -1530,68 +1441,6 @@ fn set_cache_dir_env(dir: &Path) {
     unsafe { env::set_var("CAGEQ_CACHE_DIR", dir) };
 }
 
-fn sidecar_root() -> PathBuf {
-    // this crate is cageq-app/src-tauri; the sidecar crate is a sibling of cageq-app.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("cageq-sidecar")
-}
-
-/// Resolve how to launch the sidecar, plus a human label for the UI. Precedence:
-///   1. `CAGEQ_PYTHON` / `CAGEQ_SIDECAR_SCRIPT` env override (tests / other machine),
-///   2. **debug build:** the dev venv + `sidecar_dsp.py`, else the bundled exe;
-///      **release build:** the bundled frozen exe, else the dev venv,
-///   3. a `py`-resolved interpreter + the dependency-free stub.
-///
-/// The profile-dependent order matters: Tauri stages bundled resources into
-/// `target/debug/` for `tauri dev` too, so a frozen bundle would otherwise shadow the
-/// live script and silently ignore every edit to `sidecar_dsp.py`. In a dev build the
-/// live script must win; in a release build (no source tree) the bundle must.
-fn resolve_sidecar(bundled: Option<&Path>) -> (SidecarSource, String) {
-    let root = sidecar_root();
-    let env_python = env::var("CAGEQ_PYTHON").ok();
-    let env_script = env::var("CAGEQ_SIDECAR_SCRIPT").ok();
-
-    // 1. Explicit override — a Python interpreter + script.
-    if env_python.is_some() || env_script.is_some() {
-        let python = env_python.map(PathBuf::from).unwrap_or_else(resolve_python);
-        let script =
-            env_script.map(PathBuf::from).unwrap_or_else(|| root.join("python").join("sidecar_dsp.py"));
-        let label = format!("AutoEq DSP, override ({})", python.display());
-        return (SidecarSource::Python { python, script }, label);
-    }
-
-    // 2. Bundled frozen exe vs live dev venv, ordered by build profile.
-    let venv = root.join(".venv").join("Scripts").join("python.exe");
-    let dsp = root.join("python").join("sidecar_dsp.py");
-    let frozen = bundled.filter(|e| e.exists()).map(|e| {
-        (SidecarSource::Frozen(e.to_path_buf()), format!("AutoEq DSP, bundled ({})", e.display()))
-    });
-    let dev = (venv.exists() && dsp.exists()).then(|| {
-        let label = format!("AutoEq DSP, dev venv ({})", venv.display());
-        (SidecarSource::Python { python: venv.clone(), script: dsp.clone() }, label)
-    });
-    let picked = if cfg!(debug_assertions) { dev.or(frozen) } else { frozen.or(dev) };
-    if let Some(picked) = picked {
-        return picked;
-    }
-
-    // 4. Fallback: the dependency-free stub.
-    let script = root.join("python").join("sidecar_stub.py");
-    (SidecarSource::Python { python: resolve_python(), script: script.clone() }, format!("stub ({})", script.display()))
-}
-
-/// Fallback interpreter resolution: the Windows `py` launcher's target, else bare
-/// `python`. (Nested ifs rather than a let-chain: this crate is edition 2021.)
-fn resolve_python() -> PathBuf {
-    if let Ok(out) = Command::new("py").args(["-c", "import sys;print(sys.executable)"]).output() {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() {
-                return PathBuf::from(p);
-            }
-        }
-    }
-    PathBuf::from("python")
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -1633,17 +1482,8 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            // The frozen DSP sidecar ships as a bundled resource (see tauri.conf.json);
-            // its path needs the app handle, so build the backend here rather than in
-            // `.manage(...)`. In dev this path won't exist and resolve_sidecar falls
-            // back to the venv.
             use tauri::Manager;
-            let bundled = app
-                .path()
-                .resource_dir()
-                .ok()
-                .map(|r| r.join("sidecar").join("cageq-sidecar.exe"));
-            app.manage(build_backend(bundled));
+            app.manage(build_backend());
             app.manage(MonitorState::default());
             app.manage(TestSignalState::default());
             app.manage(ScopeViewers::default());
@@ -1698,19 +1538,11 @@ pub fn run() {
             get_resume,
             set_resume,
             get_library,
-            set_library,
-            retry
+            set_library
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            // The last point that still runs before `run()`'s own `std::process::exit` --
-            // see `Backend::shutdown`'s own doc for why this can't just be a `Drop` impl.
-            if matches!(event, tauri::RunEvent::Exit) {
-                use tauri::Manager;
-                app_handle.state::<Backend>().shutdown();
-            }
-        });
+        .run(|_app_handle, _event| {});
 }
 
 #[cfg(test)]
@@ -1736,18 +1568,16 @@ mod tests {
         m
     }
 
-    /// Exercises the app's dev-path wiring end to end (no Tauri/GUI): resolve the
-    /// sidecar, start a Core, and apply a synthetic measurement, asserting a real
-    /// cageq.txt is written. Runs against whichever sidecar resolves (real DSP if the
-    /// venv is present, else the stub). Needs a working Python.
+    /// Exercises the app's wiring end to end (no Tauri/GUI, no sidecar): start a Core
+    /// and apply a synthetic measurement through the Rust fit pipeline, asserting a
+    /// real cageq.txt is written.
     #[test]
     fn dev_backend_applies_end_to_end() {
         let dir = std::env::temp_dir().join(format!("cageq-app-it-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
 
-        let (source, _) = resolve_sidecar(None);
-        let core = start_core(Arc::new(EqApoBackend::new(&dir)), source, None).expect("core should start");
+        let core = Core::start(Arc::new(EqApoBackend::new(&dir)), None).expect("core should start");
         let request = CalcRequest { device: "Test DAC".into(), inputs: demo_inputs() };
         let applied = core.apply(request).expect("apply should compute + write");
 
@@ -1760,27 +1590,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The real catalogue path: list headphones, then fit the first one. Only runs
-    /// against the real DSP; soft-skips on the stub or a network error.
+    /// The real catalogue path: list headphones (a real GitHub fetch via
+    /// `cageq-catalog`), then fit the first one. Soft-skips on a network error.
     #[test]
     fn dev_backend_applies_a_catalogue_headphone() {
-        let (source, _) = resolve_sidecar(None);
-        let is_real = match &source {
-            SidecarSource::Frozen(_) => true,
-            SidecarSource::Python { script, .. } => {
-                script.file_name().and_then(|n| n.to_str()) == Some("sidecar_dsp.py")
-            }
-        };
-        if !is_real {
-            eprintln!("skipping catalogue apply: stub sidecar (no venv)");
-            return;
-        }
         let dir = std::env::temp_dir().join(format!("cageq-app-cat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
-        let core = start_core(Arc::new(EqApoBackend::new(&dir)), source, None).expect("core should start");
+        let core = Core::start(Arc::new(EqApoBackend::new(&dir)), None).expect("core should start");
 
-        let list = match core.request("list_headphones", json!({})) {
+        let list = match core.list_headphones(false) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("skipping catalogue apply (network?): {e}");
@@ -1788,8 +1607,8 @@ mod tests {
                 return;
             }
         };
-        let hp = &list["headphones"].as_array().expect("headphones")[0];
-        let (name, path) = (hp["name"].as_str().unwrap().to_string(), hp["path"].as_str().unwrap().to_string());
+        let hp = list.first().expect("at least one headphone in the catalogue");
+        let (name, path) = (hp.name.clone(), hp.path.clone());
 
         let mut inputs = Map::new();
         inputs.insert("headphone".into(), Value::String(path));
@@ -1815,8 +1634,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cageq-app-loud-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
-        let (source, _) = resolve_sidecar(None);
-        let core = start_core(Arc::new(EqApoBackend::new(&dir)), source, None).expect("core should start");
+        let core = Core::start(Arc::new(EqApoBackend::new(&dir)), None).expect("core should start");
 
         // Default (Comparison, -9 dB base pre-gain).
         core.apply(CalcRequest { device: "Dev".into(), inputs: demo_inputs() }).expect("apply");

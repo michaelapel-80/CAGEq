@@ -1,21 +1,29 @@
-//! Orchestrator — the "Rust Core" that ties the three building blocks into one
-//! flow (filter.md §2, the Rust Core layer):
+//! Orchestrator — the "Rust Core" that ties the building blocks into one flow
+//! (filter.md §2, the Rust Core layer):
 //!
-//!   * owns the DSP sidecar through the fail-safe [`Supervisor`] (watchdog),
-//!   * turns a user request into filters by asking the sidecar to
-//!     `calculate_filters`, then applies them through the [`EqBackend`],
+//!   * turns a user request into filters by driving [`cageq_peq_solver`]/
+//!     [`cageq_catalog`] directly (`fit.rs`/`export.rs`/`catalog.rs`), then applies
+//!     them through the [`EqBackend`],
 //!   * holds the A/B/Dry comparison slots (§5.2): each fit is cached, so switching
 //!     which one is active is a pure re-apply (no re-fit) — the loudness match (§4.1)
 //!     keeps them level-matched so switching compares timbre, not level,
-//!   * after a watchdog recovery, re-applies the active slot so the pipeline leaves the
-//!     safe state (the "auto-leave" §7.2 leaves to this layer),
 //!   * runs the §3.0 startup-integrity check.
 //!
-//! The sidecar's `calculate_filters` reply carries the fitted filters plus two
-//! curve-derived quantities (§4.1 loudness target, §4.2 curve peak); the core
-//! composes the final preamp from them and the user's §4.0 base pre-gain, then
-//! builds a [`DeviceConfig`]. The DSP reports physics; the core owns the
-//! preamp/clipping policy.
+//! The fit carries the fitted filters plus two curve-derived quantities (§4.1
+//! loudness target, §4.2 curve peak); the core composes the final preamp from them
+//! and the user's §4.0 base pre-gain, then builds a [`DeviceConfig`]. The fit reports
+//! physics; the core owns the preamp/clipping policy.
+//!
+//! ## No sidecar
+//! This used to own a Python DSP sidecar through a fail-safe watchdog (spawn, health
+//! polling, crash recovery, a "safe state" reconciler thread). Every RPC method that
+//! sidecar exposed now has a Rust equivalent the core calls in-process
+//! (`cageq-peq-solver` for the fit itself, `cageq-catalog` for fetching/browsing
+//! AutoEq's measurement/target catalogue), so there's nothing left to supervise —
+//! `cageq-sidecar`/`cageq-watchdog` still exist in the workspace and the reference
+//! Python implementations they talk to (`sidecar_dsp.py`) are still what the
+//! `tests/*_vs_sidecar.rs` comparison tests validate this crate's ports against, but
+//! neither is a dependency of this crate or shipped with the app any more.
 //!
 //! ## Backends
 //! Nothing here knows how filters actually reach the audio pipeline — that is
@@ -25,20 +33,10 @@
 //! [`Capabilities`] rather than assuming one model — most visibly in how fast it may
 //! apply consecutively (`min_write_spacing`) and whether it must emulate a tonal morph
 //! out of intermediate frames at all (`owns_transitions`).
-//!
-//! ## Threads
-//! One background **reconciler** thread watches the supervisor's recovery counter;
-//! when it advances (the watchdog brought a fresh sidecar up), the reconciler
-//! re-writes the active slot's cached config. Everything else runs on the caller's
-//! thread. The
-//! `Supervisor` is shared as `Arc<Supervisor>` (its `call`/`health`/`recoveries`
-//! all take `&self`), so caller and reconciler can both drive it; the driver
-//! serialises the actual requests, and an `apply_lock` serialises calc+write so the
-//! two never interleave an apply to the backend.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
 mod catalog;
@@ -46,7 +44,6 @@ mod export;
 mod fit;
 mod morph;
 
-use cageq_watchdog::{Supervisor, SupervisorError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -61,8 +58,6 @@ pub use cageq_backend::{
 // config-directory detection to build one. Everything else about it reaches the core
 // through the trait above.
 pub use cageq_config_writer::{EqApoBackend, detect_eqapo_config_dir, eqapo_drives_endpoint};
-pub use cageq_sidecar::{Sidecar, SidecarError};
-pub use cageq_watchdog::{Health, WatchdogConfig};
 
 // ---------------------------------------------------------------------------
 // Public request/response types
@@ -276,10 +271,6 @@ fn compose_preamp(g_target_db: f64, g_max_peak_db: f64, s: &LoudnessSettings) ->
 /// Errors from the core.
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
-    #[error("could not start the sidecar: {0}")]
-    Spawn(#[from] SidecarError),
-    #[error("sidecar/watchdog error: {0}")]
-    Supervisor(#[from] SupervisorError),
     /// The EQ backend could not apply what was asked. Message unchanged from when this
     /// wrapped the config-writer directly: `BackendError` is `#[error(transparent)]` over
     /// the backend's own error, so EqAPO's specific diagnostics still read identically.
@@ -291,8 +282,6 @@ pub enum CoreError {
     DryNotEditable,
     #[error("slot {0:?} has nothing to activate yet")]
     EmptySlot(Slot),
-    #[error("loudness ramp aborted (safe state active)")]
-    RampAborted,
     #[error("invalid filter: {0}")]
     InvalidFilter(String),
     /// The Rust-side PEQ fit (`fit.rs`, `cageq-peq-solver`) failed — SLSQP setup/solve
@@ -426,13 +415,12 @@ struct Inner {
     /// APO's file-reload model and CAGEq's own in-process APO — see
     /// [`cageq_backend::Capabilities`] for the differences it has to adapt to.
     backend: Arc<dyn EqBackend>,
-    /// Serialises a calc+write so a user apply and a recovery re-apply never
-    /// interleave their writes to the backend.
+    /// Serialises a calc+write so two callers never interleave their writes to the
+    /// backend.
     apply_lock: Mutex<()>,
     /// The A/B/Dry comparison slots and which is active (filter.md §5.2).
     slots: Mutex<SlotStore>,
     applied_count: AtomicU32,
-    shutdown: AtomicBool,
     /// When the last write happened, for the backend's own write-spacing rule
     /// ([`cageq_backend::Capabilities::min_write_spacing`]).
     last_write: Mutex<Instant>,
@@ -466,45 +454,24 @@ struct Inner {
 
 /// The orchestrator handle.
 pub struct Core {
-    supervisor: Arc<Supervisor>,
     inner: Arc<Inner>,
-    reconciler: Option<JoinHandle<()>>,
 }
 
 impl Core {
     /// Start the core over `backend` — whatever actually applies filters (Equalizer APO's
-    /// config files, or CAGEq's own APO). `spawn_fn` produces DSP sidecars (used by the
-    /// watchdog for the initial spawn and every restart). `expected_hash` is the hash
-    /// settings.json remembered for the applied state, or `None` on a clean install — it
-    /// drives the startup-integrity verdict ([`Core::startup_decision`]).
-    pub fn start<F>(
-        backend: Arc<dyn EqBackend>,
-        spawn_fn: F,
-        watchdog: WatchdogConfig,
-        expected_hash: Option<&str>,
-    ) -> Result<Self, CoreError>
-    where
-        F: Fn() -> Result<Sidecar, SidecarError> + Send + 'static,
-    {
+    /// config files, or CAGEq's own APO). `expected_hash` is the hash settings.json
+    /// remembered for the applied state, or `None` on a clean install — it drives the
+    /// startup-integrity verdict ([`Core::startup_decision`]).
+    pub fn start(backend: Arc<dyn EqBackend>, expected_hash: Option<&str>) -> Result<Self, CoreError> {
         // §3.0: is what we remember still what's actually applied?
         let startup = backend.startup_decision(expected_hash)?;
 
-        // The watchdog reaches the safe state (§7.1/7.2) through this closure rather than
-        // a file path, so it stays agnostic to the backend — see `cageq_watchdog::SafeState`.
-        let safe_state: cageq_watchdog::SafeState = {
-            let backend = Arc::clone(&backend);
-            Arc::new(move || backend.write_safe_state().map_err(|e| e.to_string()))
-        };
-
-        let poll = watchdog.tick;
-        let supervisor = Arc::new(Supervisor::start(spawn_fn, watchdog, safe_state)?);
         let min_write_spacing = backend.capabilities().min_write_spacing;
         let inner = Arc::new(Inner {
             backend,
             apply_lock: Mutex::new(()),
             slots: Mutex::new(SlotStore { a: None, b: None, device: None, active: Slot::A }),
             applied_count: AtomicU32::new(0),
-            shutdown: AtomicBool::new(false),
             // Back-date so the first write is never delayed by the spacing rule.
             last_write: Mutex::new(Instant::now() - min_write_spacing),
             startup,
@@ -517,12 +484,7 @@ impl Core {
             fixed_band_cache: Mutex::new(export::FixedBandCache::new()),
         });
 
-        let reconciler = {
-            let (sup, inner) = (Arc::clone(&supervisor), Arc::clone(&inner));
-            thread::spawn(move || reconcile_loop(sup, inner, poll))
-        };
-
-        Ok(Core { supervisor, inner, reconciler: Some(reconciler) })
+        Ok(Core { inner })
     }
 
     /// Calculate filters for `request`, load them into `slot` (A or B), make it active,
@@ -533,7 +495,7 @@ impl Core {
         if slot == Slot::Dry {
             return Err(CoreError::DryNotEditable);
         }
-        do_apply_to_slot(&self.supervisor, &self.inner, slot, request)
+        do_apply_to_slot(&self.inner, slot, request)
     }
 
     /// Apply to slot A (the default editable slot) — convenience over
@@ -642,7 +604,7 @@ impl Core {
             }
             store.active = slot;
         }
-        morph_to_active(&self.supervisor, &self.inner, ticket)
+        morph_to_active(&self.inner, ticket)
     }
 
     /// Copy slot `from`'s cached fit into slot `to` and make `to` active (filter.md
@@ -663,7 +625,7 @@ impl Core {
         }
         // Reproduces `from`'s config exactly, so the morph is a no-op distance — but
         // routing through it keeps every write path on one mechanism.
-        morph_to_active(&self.supervisor, &self.inner, ticket)
+        morph_to_active(&self.inner, ticket)
     }
 
     /// §5.2 isolate: write a **bandpass-only** config for the active slot — audition one band's
@@ -695,14 +657,6 @@ impl Core {
         self.inner.slots.lock().unwrap().active
     }
 
-    /// Kill the sidecar child process right now, without waiting to be dropped. See
-    /// [`cageq_watchdog::Supervisor::kill_current_sidecar`]'s own doc for why this exists
-    /// alongside `Core`'s ordinary `Drop` impl rather than instead of it: the app's normal exit
-    /// path can't rely on `Drop` ever running at all.
-    pub fn kill_sidecar_now(&self) {
-        self.supervisor.kill_current_sidecar();
-    }
-
     /// Set the shared output device every slot is scoped to (§3.0). Lets Dry be written
     /// before any fit exists.
     ///
@@ -723,40 +677,9 @@ impl Core {
         self.inner.slots.lock().unwrap().set_device(device);
     }
 
-    /// Send a raw request to the sidecar (the core is the process's front door).
-    /// Used for methods beyond `calculate_filters` and by tests to provoke faults.
-    pub fn request(&self, method: &str, params: Value) -> Result<Value, CoreError> {
-        Ok(self.supervisor.call(method, params)?)
-    }
-
-    /// Like [`Core::request`], but with a caller-chosen busy deadline instead of the watchdog's
-    /// fit-tuned default — for a request whose normal duration that default can't cover (the
-    /// AutoEq catalogue build: dozens of network round-trips, vs. the ~1-2 s a fit takes). The
-    /// caller (not this generic passthrough) is the one that knows which of its own requests
-    /// that applies to.
-    pub fn request_with_deadline(&self, method: &str, params: Value, deadline: Duration) -> Result<Value, CoreError> {
-        Ok(self.supervisor.call_with_deadline(method, params, deadline)?)
-    }
-
     /// The startup-integrity verdict computed at [`Core::start`].
     pub fn startup_decision(&self) -> StartupDecision {
         self.inner.startup
-    }
-
-    /// Current supervisor health.
-    pub fn health(&self) -> Health {
-        self.supervisor.health()
-    }
-
-    /// How many times the sidecar has been recovered by the watchdog.
-    pub fn recoveries(&self) -> u32 {
-        self.supervisor.recoveries()
-    }
-
-    /// Request one manual recovery attempt out of the `Terminal` state (§7.2) — e.g.
-    /// from a UI "Retry" button. No-op if the sidecar isn't Terminal.
-    pub fn retry(&self) {
-        self.supervisor.retry();
     }
 
     /// How many times a config has been written (initial applies + re-applies).
@@ -792,8 +715,7 @@ impl Core {
     /// a large jump) is ramped in at [`RAMP_RATE_DB_PER_SEC`], blocking for the ramp duration
     /// (~`Δ/6` s); everything else — including interactive base-pre-gain edits (which stay in
     /// Comparison mode, bounded by the §4.1 loudness match / §4.2 ceiling) and any decrease — is
-    /// applied directly so the field stays responsive. `None` if nothing is active yet; a ramp
-    /// interrupted by a safe state returns [`CoreError::RampAborted`].
+    /// applied directly so the field stays responsive. `None` if nothing is active yet.
     pub fn update_loudness(&self, settings: LoudnessSettings) -> Option<Result<Applied, CoreError>> {
         let prev = {
             let mut l = self.inner.loudness.lock().unwrap();
@@ -816,7 +738,7 @@ impl Core {
         // stall the UI. A decrease or no-change also writes directly (never a hazard).
         let entering_final = settings.mode == LoudnessMode::FinalVolume && prev.mode != LoudnessMode::FinalVolume;
         if entering_final && target > start + 0.05 {
-            Some(ramp_preamp(&self.supervisor, &self.inner, start, target))
+            Some(ramp_preamp(&self.inner, start, target))
         } else {
             let _guard = self.inner.apply_lock.lock().unwrap();
             Some(write_active_locked(&self.inner))
@@ -835,31 +757,14 @@ impl Core {
     }
 }
 
-impl Drop for Core {
-    fn drop(&mut self) {
-        // Stop the reconciler first, then let the Supervisor Arc drop with the struct
-        // (its Drop tears down the watchdog threads and the sidecar).
-        self.inner.shutdown.store(true, Ordering::SeqCst);
-        if let Some(h) = self.reconciler.take() {
-            let _ = h.join();
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
-// The calc+write step and the reconciler
+// The calc+write step
 // ---------------------------------------------------------------------------
 
-/// Fit `request` (`fit.rs` — a Rust-side FR-prep/optimize/loudness pipeline that only
-/// still reaches the sidecar for the raw measurement/target curve fetch, since AutoEq's
-/// database isn't bundled), cache the result in `slot`, make it active, and write it.
-/// Held under `apply_lock` so callers and the reconciler serialise.
-fn do_apply_to_slot(
-    supervisor: &Supervisor,
-    inner: &Inner,
-    slot: Slot,
-    request: CalcRequest,
-) -> Result<Applied, CoreError> {
+/// Fit `request` (`fit.rs` — the Rust-side FR-prep/optimize/loudness pipeline, plus
+/// `cageq-catalog` for the raw measurement/target curve fetch), cache the result in
+/// `slot`, make it active, and write it. Held under `apply_lock` so callers serialise.
+fn do_apply_to_slot(inner: &Inner, slot: Slot, request: CalcRequest) -> Result<Applied, CoreError> {
     let ticket = claim_write(inner);
     {
         let _guard = inner.apply_lock.lock().unwrap();
@@ -879,7 +784,7 @@ fn do_apply_to_slot(
         *store.slot_mut(slot) = Some(result);
         store.active = slot;
     }
-    morph_to_active(supervisor, inner, ticket)
+    morph_to_active(inner, ticket)
 }
 
 /// Take a ticket for a new write intention (§5.3a). Any morph still running against an
@@ -967,14 +872,13 @@ fn morph_frames(distance_db: f64) -> usize {
 /// a 300 ms lock per change would make live node-dragging feel glued. The generation
 /// check happens under that lock, so once superseded this writes nothing further and
 /// the two callers cannot interleave.
-fn morph_to_active(supervisor: &Supervisor, inner: &Inner, ticket: u32) -> Result<Applied, CoreError> {
+fn morph_to_active(inner: &Inner, ticket: u32) -> Result<Applied, CoreError> {
     let superseded = |inner: &Inner| inner.morph_gen.load(Ordering::SeqCst) != ticket;
 
     let to = current_effective(inner)?;
     let from = inner.last_written.lock().unwrap().clone();
-    // Nothing written yet (first apply), or the sidecar is not healthy: no morph. A
-    // safe state must be left immediately, not eased out of.
-    let can_morph = from.is_some() && matches!(supervisor.health(), Health::Running);
+    // Nothing written yet (first apply): no morph, just write it.
+    let can_morph = from.is_some();
     let from = from.unwrap_or_else(|| CalcResult {
         device: to.device.clone(),
         filters: Vec::new(),
@@ -993,10 +897,11 @@ fn morph_to_active(supervisor: &Supervisor, inner: &Inner, ticket: u32) -> Resul
         if emulate_morph { morph_frames(morph::tonal_distance_db(&from.filters, &to.filters)) } else { 0 };
 
     if frames > 0 {
-        // Our own §4.1 model and the sidecar's agree in form but not to the last
-        // decimal (different grids). Carrying the endpoint residuals across the morph
-        // keeps intermediate frames level-matched *and* lands exactly on the DSP's own
-        // number, so there's no small step at the finish.
+        // morph.rs's own loudness model (a 192-point grid, built for cheap per-frame
+        // recomputation) and fit.rs's (the standard 695-point grid `cageq-peq-solver`
+        // fits on) agree in form but not to the last decimal. Carrying the endpoint
+        // residuals across the morph keeps intermediate frames level-matched *and*
+        // lands exactly on the fit's own number, so there's no small step at the finish.
         let residual = |c: &CalcResult| c.g_target_db - morph::loudness_target_db(&morph::curve_db(&c.filters));
         let (res_from, res_to) = (residual(&from), residual(&to));
         let loudness = *inner.loudness.lock().unwrap();
@@ -1042,56 +947,17 @@ fn last_applied(inner: &Inner) -> Result<Applied, CoreError> {
 
 /// §7.5 controlled preamp increase: step from `start` up to the composed target at
 /// [`RAMP_RATE_DB_PER_SEC`], one write per [`RAMP_STEP`] (EqAPO crossfades each). Holds
-/// `apply_lock` for the whole ramp so no other write interleaves. Aborts (leaving the
-/// watchdog's safe state in place) the instant health leaves `Running`.
-fn ramp_preamp(
-    supervisor: &Supervisor,
-    inner: &Inner,
-    start: f64,
-    target: f64,
-) -> Result<Applied, CoreError> {
+/// `apply_lock` for the whole ramp so no other write interleaves.
+fn ramp_preamp(inner: &Inner, start: f64, target: f64) -> Result<Applied, CoreError> {
     let _guard = inner.apply_lock.lock().unwrap();
     let step_db = RAMP_RATE_DB_PER_SEC * RAMP_STEP.as_secs_f64();
     let mut cur = start;
     while cur + step_db < target {
         cur += step_db;
-        if !matches!(supervisor.health(), Health::Running) {
-            return Err(CoreError::RampAborted); // safe state tripped — stop increasing
-        }
         write_effective(inner, current_effective(inner)?, cur, false)?;
         thread::sleep(RAMP_STEP);
     }
-    if !matches!(supervisor.health(), Health::Running) {
-        return Err(CoreError::RampAborted);
-    }
     write_active_locked(inner) // land exactly on the composed target
-}
-
-/// Watch the supervisor's recovery counter; each time it advances and the sidecar is
-/// `Running` again, re-write the active slot (cached — no sidecar) so EqAPO leaves the
-/// safe state.
-fn reconcile_loop(supervisor: Arc<Supervisor>, inner: Arc<Inner>, poll: Duration) {
-    let mut handled = supervisor.recoveries();
-    loop {
-        thread::sleep(poll);
-        if inner.shutdown.load(Ordering::SeqCst) {
-            break;
-        }
-        let recoveries = supervisor.recoveries();
-        if recoveries <= handled || !matches!(supervisor.health(), Health::Running) {
-            continue;
-        }
-        // A fresh sidecar is up. Re-write the active slot's cached config; if the write
-        // fails, leave `handled` unchanged so we retry on the next poll. Written
-        // directly, never morphed: a safe state is left at once, not eased out of.
-        claim_write(&inner);
-        let _guard = inner.apply_lock.lock().unwrap();
-        if inner.slots.lock().unwrap().effective().is_none() {
-            handled = recoveries; // nothing applied yet, nothing to restore
-        } else if write_active_locked(&inner).is_ok() {
-            handled = recoveries;
-        }
-    }
 }
 
 // `cageq_path_in` lived here — an EqAPO path convention exposed by the backend-neutral

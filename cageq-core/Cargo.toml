@@ -18,8 +18,13 @@ cageq-config-writer = { path = "../cageq-config-writer" }
 # `calculate_filters` (see that module's doc) — needs CMake on top of the usual MSVC
 # Rust prerequisites to build `nlopt-sys` (`cageq-peq-solver`'s own dependency).
 cageq-peq-solver = { path = "../cageq-peq-solver" }
-cageq-sidecar = { path = "../cageq-sidecar" }
-cageq-watchdog = { path = "../cageq-watchdog" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+
+[dev-dependencies]
+# Not shipped, not a dependency of this crate's own code any more (see lib.rs's "No
+# sidecar" module doc) — only the tests/*_vs_sidecar.rs comparison tests spawn a real
+# Python sidecar directly (`cageq_sidecar::Sidecar::spawn`/`call`, no `Core`/watchdog
+# involved) to keep validating the Rust port against the AutoEq reference.
+cageq-sidecar = { path = "../cageq-sidecar" }

@@ -1,5 +1,10 @@
 MIT License
 
+This crate is a Rust port of the fitting algorithms from AutoEq
+(https://github.com/jaakkopasanen/AutoEq), whose original author is credited
+first below.
+
+Copyright (c) 2018-2022 Jaakko Pasanen (AutoEq)
 Copyright (c) 2026 Michael Apel
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

@@ -37,12 +37,8 @@ type ApplyResult = {
 };
 type Status = {
   startup: string;
-  health: string;
-  health_kind: string; // "Running" | "Recovering" | "Terminal" | "-"
-  recoveries: number;
   config_dir: string;
   config_source: string;
-  sidecar: string;
 };
 // `invoke("status")` returns a fresh object every call, so a naive `setStatus(await invoke(...))`
 // on the 3s poll below re-renders the whole (large) App tree every 3s even when nothing in it
@@ -52,12 +48,8 @@ type Status = {
 function statusEqual(a: Status, b: Status): boolean {
   return (
     a.startup === b.startup &&
-    a.health === b.health &&
-    a.health_kind === b.health_kind &&
-    a.recoveries === b.recoveries &&
     a.config_dir === b.config_dir &&
-    a.config_source === b.config_source &&
-    a.sidecar === b.sidecar
+    a.config_source === b.config_source
   );
 }
 type LoudnessMode = "Comparison" | "FinalVolume";
@@ -1003,16 +995,6 @@ function App() {
       cancelled = true;
     };
   }, [measurementPath, targetPath, flat, activeSlot]);
-
-  async function retry() {
-    try {
-      setError("");
-      await invoke("retry");
-      setStatus(await invoke<Status>("status"));
-    } catch (e) {
-      setError(String(e));
-    }
-  }
 
   // Persist a loudness change; the backend re-applies the current config so the
   // shown preamp/config updates live (applied is null when nothing is applied yet).
@@ -2339,18 +2321,15 @@ function App() {
     [result, dryActive, i18n.language],
   );
 
-  // Fail-safe / startup banner (§5.1). Watchdog states are live; the startup verdicts
-  // only matter until the user applies something (they describe the state at launch).
+  // Startup banner (§5.1) — the verdicts only matter until the user applies something
+  // (they describe the state at launch). No watchdog/sidecar states any more: nothing
+  // to recover from or retry, since the app doesn't spawn a sidecar at all.
   const banner = (() => {
     if (!status) return null;
-    if (status.health_kind === "Terminal")
-      return { critical: true, text: tr("banner.terminal"), retry: true };
-    if (status.health_kind === "Recovering")
-      return { critical: false, text: tr("banner.recovering"), retry: false };
     if (!result && status.startup === "SafeStateStillActive")
-      return { critical: false, text: tr("banner.safeState"), retry: false };
+      return { critical: false, text: tr("banner.safeState") };
     if (!result && status.startup === "ExternallyModified")
-      return { critical: false, text: tr("banner.externallyModified"), retry: false };
+      return { critical: false, text: tr("banner.externallyModified") };
     return null;
   })();
 
@@ -2587,11 +2566,6 @@ function App() {
         >
           {banner.critical ? "⛔ " : "⚠ "}
           {banner.text}
-          {banner.retry && (
-            <button type="button" onClick={retry} style={{ marginLeft: "0.6em" }}>
-              {tr("banner.retry")}
-            </button>
-          )}
         </div>
       )}
 

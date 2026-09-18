@@ -1,15 +1,14 @@
 //! Old-vs-new comparison for `Core::measurement_curves` against the sidecar's own
 //! `measurement_curves` (kept working in `sidecar_dsp.py` as the reference — see
-//! `catalog.rs`'s module doc). Uses a real headphone/target from the AutoEq catalogue,
-//! so this needs network access; soft-skips on any error.
+//! `catalog.rs`'s module doc). The reference side spawns a `cageq_sidecar::Sidecar`
+//! directly (no `Core`/watchdog involved). Uses a real headphone/target from the
+//! AutoEq catalogue, so this needs network access; soft-skips on any error.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use cageq_core::{Core, EqApoBackend, EqBackend};
 use cageq_sidecar::Sidecar;
-use cageq_watchdog::WatchdogConfig;
 use serde_json::json;
 
 fn sidecar_manifest() -> PathBuf {
@@ -19,16 +18,6 @@ fn sidecar_manifest() -> PathBuf {
 fn venv_python() -> Option<PathBuf> {
     let p = sidecar_manifest().join(".venv").join("Scripts").join("python.exe");
     p.exists().then_some(p)
-}
-
-fn watchdog_cfg() -> WatchdogConfig {
-    WatchdogConfig {
-        idle_interval: Duration::from_secs(10),
-        idle_response: Duration::from_secs(5),
-        busy_response: Duration::from_secs(25),
-        tick: Duration::from_millis(200),
-        restart_backoffs: vec![Duration::from_secs(2)],
-    }
 }
 
 #[test]
@@ -43,13 +32,14 @@ fn rust_measurement_curves_matches_the_reference_sidecar() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let backend: Arc<dyn EqBackend> = Arc::new(EqApoBackend::new(&tmp));
-    let spawn = move || Sidecar::spawn(&python, &script);
-    let core = Core::start(backend, spawn, watchdog_cfg(), None).expect("start core");
+    let core = Core::start(backend, None).expect("start core");
 
     let headphone = "measurements/oratory1990/data/over-ear/Sennheiser HD 6XX.csv";
     let target = "targets/Harman over-ear 2018.csv";
 
-    let old_reply = match core.request_with_deadline("measurement_curves", json!({"headphone": headphone, "target": target}), Duration::from_secs(20)) {
+    let mut sidecar = Sidecar::spawn(&python, &script).expect("spawn dsp sidecar");
+    sidecar.ping().expect("ping (waits for the autoeq import)");
+    let old_reply = match sidecar.call("measurement_curves", json!({"headphone": headphone, "target": target})) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("skipping measurement_curves check: no network access ({e})");

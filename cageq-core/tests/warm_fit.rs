@@ -5,61 +5,13 @@
 //!
 //! Needs network access to fetch one real measurement CSV (`fetch_curve` isn't
 //! network-mockable here); soft-skips on any fetch error, same convention as
-//! `rust_vs_sidecar.rs`/`cageq-catalog`'s `live_fetch.rs`. Uses the lightweight Python
-//! stub, not the real AutoEq sidecar — the fit itself no longer touches the sidecar at
-//! all for a headphone-based request, so there's nothing for the real one to add here.
+//! `cageq-catalog`'s `live_fetch.rs`. No sidecar involved at all — `Core` doesn't spawn
+//! one any more, and the fit itself doesn't touch one for a headphone-based request.
 
-use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cageq_core::{CalcRequest, Core, EqApoBackend, EqBackend, Slot};
-use cageq_sidecar::{Sidecar, SidecarError};
-use cageq_watchdog::WatchdogConfig;
-
-fn stub_script() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("cageq-sidecar").join("python").join("sidecar_stub.py")
-}
-
-fn works(cmd: &str) -> bool {
-    Command::new(cmd).args(["-c", "print(1)"]).output().map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "1").unwrap_or(false)
-}
-
-fn find_python() -> PathBuf {
-    if let Ok(p) = std::env::var("CAGEQ_PYTHON") {
-        return PathBuf::from(p);
-    }
-    if let Ok(out) = Command::new("py").args(["-c", "import sys;print(sys.executable)"]).output()
-        && out.status.success()
-    {
-        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
-    }
-    for cand in ["python3", "python"] {
-        if works(cand) {
-            return PathBuf::from(cand);
-        }
-    }
-    panic!("no working Python found; set CAGEQ_PYTHON to a python.exe");
-}
-
-fn healthy_spawner() -> impl Fn() -> Result<Sidecar, SidecarError> + Send + 'static {
-    let (py, script) = (find_python(), stub_script());
-    move || Sidecar::spawn(&py, &script)
-}
-
-fn fast_cfg() -> WatchdogConfig {
-    WatchdogConfig {
-        idle_interval: Duration::from_millis(300),
-        idle_response: Duration::from_millis(250),
-        busy_response: Duration::from_millis(300),
-        tick: Duration::from_millis(40),
-        restart_backoffs: vec![Duration::from_millis(30); 3],
-    }
-}
 
 #[test]
 fn warm_fit_populates_the_cache_apply_to_slot_reads() {
@@ -67,7 +19,7 @@ fn warm_fit_populates_the_cache_apply_to_slot_reads() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let backend: Arc<dyn EqBackend> = Arc::new(EqApoBackend::new(&tmp));
-    let core = Core::start(backend, healthy_spawner(), fast_cfg(), None).expect("start core");
+    let core = Core::start(backend, None).expect("start core");
 
     let headphone = "measurements/oratory1990/data/over-ear/Sennheiser HD 6XX.csv".to_string();
 

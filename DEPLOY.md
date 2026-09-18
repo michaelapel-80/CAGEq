@@ -2,8 +2,10 @@
 
 **Platform:** Windows x64.
 
-The installer is **self-contained**: it bundles the Python DSP sidecar frozen with
-PyInstaller (numpy/scipy/matplotlib/autoeq), so the target machine needs **no Python**.
+The installer is **self-contained**: the AutoEq fitting pipeline (interpolation, the
+peak-detection/slope-limiting curve builder, the SLSQP parametric-EQ solver) and the
+measurement/target catalogue fetch are native Rust (`cageq-peq-solver`/`cageq-catalog`), so
+the target machine needs **no Python** — the app never spawns one.
 
 ## For end users (one-click)
 
@@ -52,40 +54,33 @@ having to reconstruct what changed from the raw log. It's overwritten each relea
 cumulative changelog — the previous release's text is still recoverable from git history if ever
 needed.
 
-The frozen sidecar (~177 MB) is a build artifact — gitignored, not committed. Rebuild it
-whenever `sidecar_dsp.py` or its deps change, then build the app:
+Build the app (no Python setup needed — `cageq-core` builds and drives the fitting pipeline
+directly):
 
 ```powershell
-# 1. One-time: the Python 3.10 venv (autoeq needs cp310 wheels; 3.11+ fail)
-cd cageq-sidecar
-py -3.10 -m venv .venv
-.\.venv\Scripts\python -m pip install -r python\requirements.txt
-
-# 2. Freeze the sidecar into cageq-app\src-tauri\sidecar\ (bundled as a Tauri resource)
-cd ..
-.\scripts\build-sidecar.ps1
-
-
-# 2b. Build CAGEq's own APO + its setup helper into cageq-app\src-tauri\apo\
+# 1. Build CAGEq's own APO + its setup helper into cageq-app\src-tauri\apo\
 cd cageq-app
 .\scripts\build-apo.ps1
 cd ..
-# 3. Build the installer
+# 2. Build the installer
 cd cageq-app
 npm run tauri build -- --bundles nsis
 #   -> src-tauri\target\release\bundle\nsis\CAGEq_<version>_x64-setup.exe  (~39 MB)
 ```
 
-Step 3 will **refuse to run** (`beforeBuildCommand` → `scripts\check-apo-staleness.ps1 -Block`) if
+Step 2 will **refuse to run** (`beforeBuildCommand` → `scripts\check-apo-staleness.ps1 -Block`) if
 anything under `cageq-apo`, `cageq-apo-backend`, or `cageq-backend` is newer than what's staged in
-`src-tauri\apo\` — i.e. if step 2b was skipped, or those crates changed after the last time it ran.
+`src-tauri\apo\` — i.e. if step 1 was skipped, or those crates changed after the last time it ran.
 Re-run `build-apo.ps1` and try again. (`npm run tauri dev` runs the same check but only warns, so a
 frontend-only dev session isn't blocked by an unrelated stale APO build.)
 
-How it resolves at runtime (`resolve_sidecar`): `CAGEQ_PYTHON`/`CAGEQ_SIDECAR_SCRIPT`
-env override → the **bundled frozen exe** next to the app → the dev `.venv` +
-`sidecar_dsp.py` → the dependency-free stub. So a dev checkout uses the venv, a released
-install uses the bundle, and either can be overridden with the env vars.
+Building `cageq-peq-solver` needs CMake (for `nlopt-sys`'s vendored NLopt build) on top of the
+usual MSVC Rust prerequisites — see that crate's own doc if `cargo build` fails looking for it.
+
+A Python 3.10 venv under `cageq-sidecar/.venv` (`autoeq`, `numpy`, `scipy`) is still useful for
+development — `cageq-core`'s `tests/*_vs_sidecar.rs` and `cageq-peq-solver`/`cageq-catalog`'s own
+comparison tests validate the Rust port against it — but it's dev-only tooling, never bundled
+into the installer and never spawned by the shipped app.
 
 ## CAGEq's own APO (filter.md §5.3c)
 

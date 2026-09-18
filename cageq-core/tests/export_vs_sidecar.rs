@@ -1,15 +1,14 @@
 //! Old-vs-new comparison for `Core::fit_export_eq`/`fit_fixed_band_eq` against the
 //! sidecar's `fit_export_eq`/`fit_fixed_band_eq` (kept working in `sidecar_dsp.py` as
-//! reference implementations — see `export.rs`'s module doc). Needs the AutoEq venv;
-//! soft-skips without it, like `rust_vs_sidecar.rs`.
+//! reference implementations — see `export.rs`'s module doc). The reference side
+//! spawns a `cageq_sidecar::Sidecar` directly (no `Core`/watchdog involved). Needs the
+//! AutoEq venv; soft-skips without it, like `rust_vs_sidecar.rs`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use cageq_core::{filter_curve_db, Core, EqApoBackend, EqBackend, Filter, FilterType};
 use cageq_sidecar::Sidecar;
-use cageq_watchdog::WatchdogConfig;
 use serde_json::json;
 
 fn sidecar_manifest() -> PathBuf {
@@ -23,16 +22,6 @@ fn venv_python() -> Option<PathBuf> {
 
 fn dsp_script() -> PathBuf {
     sidecar_manifest().join("python").join("sidecar_dsp.py")
-}
-
-fn watchdog_cfg() -> WatchdogConfig {
-    WatchdogConfig {
-        idle_interval: Duration::from_secs(10),
-        idle_response: Duration::from_secs(5),
-        busy_response: Duration::from_secs(25),
-        tick: Duration::from_millis(200),
-        restart_backoffs: vec![Duration::from_secs(2)],
-    }
 }
 
 /// A deliberately busy composed slot curve — a bass shelf, two peaking bands, a
@@ -50,30 +39,32 @@ fn rmse(a: &[f64], b: &[f64]) -> f64 {
     (a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / a.len() as f64).sqrt()
 }
 
-fn start_core() -> Option<(Core, PathBuf)> {
+/// The reference sidecar (called directly) plus a fresh `Core` (no sidecar of its own)
+/// and its scratch temp dir — `None` if there's no local AutoEq venv to soft-skip on.
+fn rig() -> Option<(Sidecar, Core, PathBuf)> {
     let python = venv_python()?;
     let script = dsp_script();
+    let mut sidecar = Sidecar::spawn(&python, &script).expect("spawn dsp sidecar");
+    sidecar.ping().expect("ping (waits for the autoeq import)");
+
     let tmp = std::env::temp_dir().join(format!("cageq-core-export-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let backend: Arc<dyn EqBackend> = Arc::new(EqApoBackend::new(&tmp));
-    let spawn = move || Sidecar::spawn(&python, &script);
-    let core = Core::start(backend, spawn, watchdog_cfg(), None).expect("start core");
-    Some((core, tmp))
+    let core = Core::start(backend, None).expect("start core");
+    Some((sidecar, core, tmp))
 }
 
 #[test]
 fn rust_export_eq_matches_the_reference_sidecar() {
-    let Some((core, tmp)) = start_core() else {
+    let Some((mut sidecar, core, tmp)) = rig() else {
         eprintln!("skipping export-vs-sidecar check: no .venv (run the AutoEq setup to enable)");
         return;
     };
     let filters = sample_filters();
     let band_count = 8u32;
 
-    let old_reply = core
-        .request_with_deadline("fit_export_eq", json!({"filters": filters, "band_count": band_count}), Duration::from_secs(20))
-        .expect("fit_export_eq");
+    let old_reply = sidecar.call("fit_export_eq", json!({"filters": filters, "band_count": band_count})).expect("fit_export_eq");
     let old_filters: Vec<Filter> = serde_json::from_value(old_reply["filters"].clone()).expect("old filters");
     let old_preamp = old_reply["preamp_db"].as_f64().expect("old preamp_db");
 
@@ -93,15 +84,15 @@ fn rust_export_eq_matches_the_reference_sidecar() {
 
 #[test]
 fn rust_fixed_band_eq_matches_the_reference_sidecar_for_both_presets() {
-    let Some((core, tmp)) = start_core() else {
+    let Some((mut sidecar, core, tmp)) = rig() else {
         eprintln!("skipping fixed-band-vs-sidecar check: no .venv (run the AutoEq setup to enable)");
         return;
     };
     let filters = sample_filters();
 
     for preset in ["10", "31"] {
-        let old_reply = core
-            .request_with_deadline("fit_fixed_band_eq", json!({"filters": filters, "preset": preset}), Duration::from_secs(20))
+        let old_reply = sidecar
+            .call("fit_fixed_band_eq", json!({"filters": filters, "preset": preset}))
             .unwrap_or_else(|e| panic!("fit_fixed_band_eq preset {preset}: {e}"));
         let old_filters: Vec<Filter> = serde_json::from_value(old_reply["filters"].clone()).expect("old filters");
         let old_preamp = old_reply["preamp_db"].as_f64().expect("old preamp_db");

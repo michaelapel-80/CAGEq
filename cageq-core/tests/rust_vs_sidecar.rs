@@ -1,19 +1,19 @@
 //! Old-vs-new comparison: the sidecar's `calculate_filters` (kept working in
-//! `sidecar_dsp.py` as the reference implementation, even though `cageq-core` no longer
-//! calls it in production — see `fit.rs`'s module doc) against the new Rust-driven
-//! pipeline, on the same real input, through the real `autoeq` package.
+//! `sidecar_dsp.py` as the reference implementation — `cageq-core` no longer depends
+//! on the sidecar at all, see `lib.rs`'s "No sidecar" module doc) against the new
+//! Rust-driven pipeline, on the same real input, through the real `autoeq` package.
 //!
+//! The reference side spawns a `cageq_sidecar::Sidecar` directly and calls it — no
+//! `Core`/watchdog involved, since `Core` has nothing to do with the sidecar any more.
 //! Needs the AutoEq venv; soft-skips without it, like `biquad_crosscheck.rs`. Uses a
 //! directly-supplied synthetic `measurement` array (not a named headphone), so this
 //! needs no network access and is fully reproducible.
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use cageq_core::{filter_curve_db, CalcRequest, Core, EqApoBackend, EqBackend, Slot};
 use cageq_sidecar::Sidecar;
-use cageq_watchdog::WatchdogConfig;
 use serde_json::json;
 
 fn sidecar_manifest() -> PathBuf {
@@ -27,19 +27,6 @@ fn venv_python() -> Option<PathBuf> {
 
 fn dsp_script() -> PathBuf {
     sidecar_manifest().join("python").join("sidecar_dsp.py")
-}
-
-/// Same real-world timings `cageq-app` uses (`watchdog_cfg` in
-/// `cageq-app/src-tauri/src/lib.rs`) — a real fit costs a Python cold-start plus
-/// ~1-2 s, so a short test-only deadline would false-trip the watchdog mid-comparison.
-fn watchdog_cfg() -> WatchdogConfig {
-    WatchdogConfig {
-        idle_interval: Duration::from_secs(10),
-        idle_response: Duration::from_secs(5),
-        busy_response: Duration::from_secs(25),
-        tick: Duration::from_millis(200),
-        restart_backoffs: vec![Duration::from_secs(2)],
-    }
 }
 
 /// A deliberately non-trivial synthetic deviation (a bass bump, a midrange dip, a
@@ -75,25 +62,22 @@ fn rust_pipeline_matches_the_reference_sidecar_calculate_filters() {
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let backend: Arc<dyn EqBackend> = Arc::new(EqApoBackend::new(&tmp_dir));
-
-    let spawn = {
-        let (py, sc) = (python.clone(), script.clone());
-        move || Sidecar::spawn(&py, &sc)
-    };
-    let core = Core::start(backend, spawn, watchdog_cfg(), None).expect("start core");
+    let core = Core::start(backend, None).expect("start core");
 
     let measurement = synthetic_measurement();
     let (max_gain, peaking_filters) = (6.0, 8);
 
-    // Reference: the live sidecar's own calculate_filters, called directly (the code
-    // path cageq-core used before fit.rs existed).
+    // Reference: the live sidecar's own calculate_filters, called directly — no Core
+    // involved on this side at all, just the transport `cageq-sidecar` provides.
+    let mut sidecar = Sidecar::spawn(&python, &script).expect("spawn dsp sidecar");
+    sidecar.ping().expect("ping (waits for the autoeq import)");
     let old_params = json!({
         "device": "REF",
         "measurement": measurement,
         "max_gain": max_gain,
         "peaking_filters": peaking_filters,
     });
-    let old_reply = core.request_with_deadline("calculate_filters", old_params, Duration::from_secs(20)).expect("calculate_filters");
+    let old_reply = sidecar.call("calculate_filters", old_params).expect("calculate_filters");
     let old_filters: Vec<cageq_core::Filter> = serde_json::from_value(old_reply["filters"].clone()).expect("old filters");
     let old_g_target = old_reply["g_target_db"].as_f64().expect("old g_target_db");
     let old_g_peak = old_reply["g_max_peak_db"].as_f64().expect("old g_max_peak_db");
