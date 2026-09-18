@@ -36,7 +36,7 @@ members = [
 # workspace, so it carries the same number in its own manifest + tauri.conf.json (the authoritative
 # product/bundle version that `getVersion()` surfaces in the UI). Bump all together per release.
 [workspace.package]
-version = "0.13.2"
+version = "0.14.0"
 license = "GPL-3.0-or-later"
 
 # Dependencies (not workspace members — this form of the key excludes those) compile at release-
