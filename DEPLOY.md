@@ -32,9 +32,10 @@ backend at a harmless scratch folder rather than erroring) and simply waits for 
 
 **Note:** with Equalizer APO as the active engine, **Apply** writes to its real config dir,
 changing playback there directly — set `CAGEQ_CONFIG_DIR=<folder>` to write to a scratch
-folder instead (the status line shows where it writes). This override is specific to the
-Equalizer APO path; CAGEq's own engine always keeps its per-endpoint configuration under the
-fixed `%ProgramData%\CAGEq\apo` (not redirectable — `audiodg` needs to read it as
+folder instead (there's no in-app indicator of this; check the folder itself to confirm).
+This override is specific to the Equalizer APO path; CAGEq's own engine always keeps its
+per-endpoint configuration under the fixed `%ProgramData%\CAGEq\apo` (not redirectable —
+`audiodg` needs to read it as
 LocalService, the same constraint the DLL's own install location is under, see "CAGEq's own
 APO" below). Launching CAGEq twice focuses the existing window (single instance).
 
