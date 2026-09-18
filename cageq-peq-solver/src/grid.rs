@@ -5,6 +5,14 @@
 pub const DEFAULT_F_MIN: f64 = 20.0;
 pub const DEFAULT_F_MAX: f64 = 20_000.0;
 pub const DEFAULT_STEP: f64 = 1.01;
+/// `DEFAULT_BIQUAD_OPTIMIZATION_F_STEP` (`constants.py`): a coarser grid than
+/// [`standard_grid`], used ONLY for the SLSQP band search, not FR-prep. AutoEq's
+/// `FrequencyResponse._optimize_peq_filters` re-interpolates the prepped equalization
+/// curve onto this grid before constructing `PEQ`/running `optimize()` — skipping this
+/// step and handing the optimizer the finer standard grid instead lets sub-noise-level
+/// ripples (left over after `smoothen()`) register as distinct peaks that a real AutoEq
+/// run never sees, since they're invisible at this grid's resolution.
+pub const DEFAULT_BIQUAD_OPTIMIZATION_F_STEP: f64 = 1.02;
 
 /// `generate_frequencies` (`autoeq/utils.py:8-14`): `f_min`, repeatedly `* f_step`,
 /// while `<= f_max`. AutoEq's "standard grid" is this at the module defaults.
@@ -21,6 +29,12 @@ pub fn generate_frequencies(f_min: f64, f_max: f64, f_step: f64) -> Vec<f64> {
 /// AutoEq's standard grid (every CAGEq call site uses the module defaults).
 pub fn standard_grid() -> Vec<f64> {
     generate_frequencies(DEFAULT_F_MIN, DEFAULT_F_MAX, DEFAULT_STEP)
+}
+
+/// The grid the SLSQP band search actually runs on — see
+/// [`DEFAULT_BIQUAD_OPTIMIZATION_F_STEP`]'s doc for why this isn't just [`standard_grid`].
+pub fn biquad_optimization_grid() -> Vec<f64> {
+    generate_frequencies(DEFAULT_F_MIN, DEFAULT_F_MAX, DEFAULT_BIQUAD_OPTIMIZATION_F_STEP)
 }
 
 /// `InterpolatedUnivariateSpline(log10(f), y, k=1)` evaluated at `query` — a degree-1

@@ -224,18 +224,26 @@ fn run_autoeq_fit(cache: &std::sync::Mutex<FitCache>, params: &FitParams) -> Res
     let prepped = cageq_peq_solver::prepare(&mf, &mr, &tf, &tr);
     let equalization = cageq_peq_solver::equalize(&prepped.f, &prepped.error_smoothed, MAX_SLOPE, params.max_gain);
 
+    // `FrequencyResponse._optimize_peq_filters` re-interpolates onto its own coarser
+    // grid before the SLSQP band search runs — see `grid::DEFAULT_BIQUAD_OPTIMIZATION_
+    // F_STEP`'s doc. `reference_curve` below still uses the finer standard-grid
+    // `equalization` untouched, matching `_autoeq_fit`'s own `reference_curve` (built
+    // from `fr.equalization` before that re-gridding).
+    let opt_f = cageq_peq_solver::grid::biquad_optimization_grid();
+    let opt_equalization = cageq_peq_solver::grid::linear_interp_log(&prepped.f, &equalization, &opt_f);
+
     // `sidecar_dsp.py`'s config: a low shelf at 105 Hz and a high shelf at 10 kHz
     // (both `q = 0.7`, gain free), plus `peaking_filters` fully-free peaking bands.
     let bands = cageq_peq_solver::cageq_default_bands(params.peaking_filters);
-    let mut solver = Solver::new(prepped.f.clone(), params.fs, bands, equalization.clone());
+    let mut solver = Solver::new(opt_f.clone(), params.fs, bands, opt_equalization);
     solver.optimize()?;
 
     let filters = cageq_peq_solver::bands_to_filters(&solver.bands);
     let curve = solver.fr();
     let reference_curve = subsample_curve(&prepped.f, &equalization, 140);
 
-    cache.lock().unwrap().insert(key, FitCacheEntry { filters: filters.clone(), f: prepped.f.clone(), curve: curve.clone(), reference_curve: reference_curve.clone() });
-    Ok((filters, prepped.f, curve, reference_curve))
+    cache.lock().unwrap().insert(key, FitCacheEntry { filters: filters.clone(), f: opt_f.clone(), curve: curve.clone(), reference_curve: reference_curve.clone() });
+    Ok((filters, opt_f, curve, reference_curve))
 }
 
 /// The whole replacement for `calculate_filters`: fit (or reuse) the AutoEq portion,
