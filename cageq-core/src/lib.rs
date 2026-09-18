@@ -284,6 +284,10 @@ pub enum CoreError {
     EmptySlot(Slot),
     #[error("invalid filter: {0}")]
     InvalidFilter(String),
+    /// `_measurement_fr`'s own guard (`sidecar_dsp.py`): an inline `measurement` array
+    /// needs at least 2 points to interpolate against.
+    #[error("invalid measurement: {0}")]
+    InvalidMeasurement(String),
     /// The Rust-side PEQ fit (`fit.rs`, `cageq-peq-solver`) failed — SLSQP setup/solve
     /// errors surfacing where `calculate_filters` used to just be a sidecar RPC error.
     #[error("PEQ fit failed: {0}")]
@@ -824,7 +828,18 @@ fn write_effective(
     let device_config =
         DeviceConfig { device: effective.device.clone(), preamp_db, filters: effective.filters.clone() };
     space_out_write(inner); // §5.3: honour whatever cadence this backend can take
-    let hash = inner.backend.apply(std::slice::from_ref(&device_config))?;
+    let hash = match inner.backend.apply(std::slice::from_ref(&device_config)) {
+        Ok(hash) => hash,
+        Err(e) => {
+            // No watchdog left to catch this (see the module doc's "No sidecar"
+            // section) — a failed write is exactly where the old fail-safe reconciler
+            // used to step in, so fall back to the backend's own safe state directly
+            // here rather than leaving whatever was last on disk playing unverified.
+            // Best-effort: if this also fails there's nothing further to fall back to.
+            let _ = inner.backend.write_safe_state();
+            return Err(e.into());
+        }
+    };
     inner.applied_count.fetch_add(1, Ordering::SeqCst);
     let applied = Applied {
         hash,

@@ -229,11 +229,15 @@ impl Solver {
         let band_frs: Vec<Vec<f64>> = self.bands.iter().map(|b| b.fr(&self.f, self.fs)).collect();
         let cascade = sum_vectors(&band_frs, self.f.len());
         let penalty_sum: f64 = self.bands.iter().zip(&band_frs).map(|(b, fr)| self.band_penalty_sum(b, fr)).sum();
-        self.mse_component(&cascade) + penalty_sum
+        // `_optimizer_loss` (peq.py:600) returns `np.sqrt(loss_val)`, not the raw MSE+penalty sum.
+        (self.mse_component(&cascade) + penalty_sum).sqrt()
     }
 
+    /// `_optimizer_loss` (peq.py:585-600) only ever sums `sharpness_penalty` into the
+    /// loss — `band_penalty` is computed elsewhere in `peq.py` but never added here, so
+    /// it's excluded to match what SLSQP actually minimizes in the reference.
     fn band_penalty_sum(&self, band: &Band, fr: &[f64]) -> f64 {
-        band.sharpness_penalty(fr) + band.band_penalty(&self.f, self.fs, fr)
+        band.sharpness_penalty(fr)
     }
 
     /// Loss at `params` (`map` describing which entry controls which band/field), and —
@@ -255,7 +259,9 @@ impl Solver {
         let band_pens: Vec<f64> = self.bands.iter().zip(&band_frs).map(|(b, fr)| self.band_penalty_sum(b, fr)).collect();
         let cascade = sum_vectors(&band_frs, self.f.len());
         let penalty_sum: f64 = band_pens.iter().sum();
-        let loss = self.mse_component(&cascade) + penalty_sum;
+        // Matches `loss`'s `np.sqrt(loss_val)` (peq.py:600) so the gradient sweep below
+        // differences the same scale `Solver::optimize`'s objective reports.
+        let loss = (self.mse_component(&cascade) + penalty_sum).sqrt();
 
         if let Some(g) = grad {
             for (i, slot) in map.iter().enumerate() {
@@ -294,7 +300,7 @@ impl Solver {
             cascade[i] += new_fr[i] - old_fr[i];
         }
         let penalty_sum = base_penalty_sum - band_pens[slot.band_ix] + new_pen;
-        self.mse_component(&cascade) + penalty_sum
+        (self.mse_component(&cascade) + penalty_sum).sqrt()
     }
 
     /// `PEQ.optimize` (peq.py:706-725). No-op if every band is fully pinned (no free fc/q/gain).

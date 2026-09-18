@@ -262,7 +262,9 @@ impl Band {
             return params;
         }
 
-        let biggest = candidates.iter().max_by(|a, b| (a.width * a.height).partial_cmp(&(b.width * b.height)).unwrap()).unwrap();
+        // `np.argmax` (peq.py:213) keeps the FIRST index on a tie; `Iterator::max_by`
+        // keeps the last, so ties are broken via [`argmax_by`] instead.
+        let biggest = argmax_by(candidates.iter().copied(), |p| p.width * p.height).unwrap();
         let ix = biggest.index;
 
         if self.optimize_fc {
@@ -293,12 +295,24 @@ impl Band {
 
         let mut params = Vec::with_capacity(self.n_free());
         if self.optimize_fc {
+            // `HighShelf.init` (peq.py:336) has an off-by-`min_ix` bug here: it selects
+            // via `np.argmax` over a 0-based list comprehension but then uses that
+            // local index directly into `f`/`target` with no `+= min_ix` correction
+            // (unlike `LowShelf.init`, peq.py:388-389, which does add it back) — so real
+            // AutoEq picks a HighShelf transition point about one octave lower than
+            // this search actually intends. Deliberately NOT reproduced here: CAGEq
+            // never optimizes a shelf's fc today (`cageq_default_bands` always pins
+            // both shelves via `Band::fixed_fc_q`), so this branch is presently dead
+            // code either way, and there is no reason to wire in an undocumented
+            // upstream bug for a path nothing exercises or tests against Python. If a
+            // free-fc shelf feature is ever added, evaluate the actual effect on the
+            // solver first (initial-guess quality feeding a non-convex SLSQP search)
+            // before deciding whether AutoEq-parity or a better guess wins.
+            let len = max_ix.saturating_sub(min_ix);
             let ix = if high {
-                (min_ix..max_ix).max_by(|&a, &b| mean(&target[a..]).abs().partial_cmp(&mean(&target[b..]).abs()).unwrap()).unwrap_or(min_ix)
+                argmax_by(0..len, |&local| mean(&target[min_ix + local..]).abs()).map(|local| local + min_ix).unwrap_or(min_ix)
             } else {
-                (min_ix..max_ix)
-                    .max_by(|&a, &b| mean(&target[..=a]).abs().partial_cmp(&mean(&target[..=b]).abs()).unwrap())
-                    .unwrap_or(min_ix)
+                argmax_by(0..len, |&local| mean(&target[..=min_ix + local]).abs()).map(|local| local + min_ix).unwrap_or(min_ix)
             };
             self.fc = f[ix].clamp(self.min_fc, self.max_fc);
             params.push(self.fc.log10());
@@ -321,6 +335,24 @@ impl Band {
 
 fn argmin_abs(xs: &[f64], target: f64) -> usize {
     xs.iter().enumerate().min_by(|(_, a), (_, b)| (*a - target).abs().partial_cmp(&(*b - target).abs()).unwrap()).map(|(i, _)| i).unwrap()
+}
+
+/// `np.argmax`'s tie-break rule (first index wins) applied to an arbitrary item/key
+/// pair: `Iterator::max_by` keeps the LAST maximal element on a tie, `np.argmax` keeps
+/// the FIRST.
+fn argmax_by<T>(items: impl IntoIterator<Item = T>, key: impl Fn(&T) -> f64) -> Option<T> {
+    let mut best: Option<(T, f64)> = None;
+    for item in items {
+        let k = key(&item);
+        let is_better = match &best {
+            Some((_, b)) => k > *b,
+            None => true,
+        };
+        if is_better {
+            best = Some((item, k));
+        }
+    }
+    best.map(|(item, _)| item)
 }
 
 fn mean(xs: &[f64]) -> f64 {

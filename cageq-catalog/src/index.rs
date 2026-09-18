@@ -108,6 +108,9 @@ pub fn build_index(refresh: bool) -> Result<Vec<HeadphoneEntry>, CatalogError> {
             .ok_or_else(|| CatalogError::Json(serde_json::Error::io(std::io::Error::other("no 'measurements' entry in the repo tree"))))?
             .to_string();
         let tree = http_get_json(&format!("{GH_API}/git/trees/{meas_sha}?recursive=1"))?;
+        if tree["truncated"].as_bool().unwrap_or(false) {
+            return Err(CatalogError::TruncatedTree { sha: meas_sha });
+        }
 
         let mut index: Vec<HeadphoneEntry> = Vec::new();
         for e in tree["tree"].as_array().into_iter().flatten() {

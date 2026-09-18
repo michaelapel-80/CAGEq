@@ -172,6 +172,14 @@ fn fetch_raw_curves(params: &FitParams) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>,
     let (measurement_f, measurement_raw) = if let Some(hp) = &params.headphone {
         cageq_catalog::fetch_curve(hp)?
     } else {
+        // `_measurement_fr` (sidecar_dsp.py:271-272) raises on fewer than 2 points
+        // rather than silently interpolating a single point into a flat curve.
+        if params.measurement.len() < 2 {
+            return Err(CoreError::InvalidMeasurement(format!(
+                "measurement array must have at least 2 points, got {}",
+                params.measurement.len()
+            )));
+        }
         (params.measurement.iter().map(|p| p.frequency).collect(), params.measurement.iter().map(|p| p.raw_db).collect())
     };
 

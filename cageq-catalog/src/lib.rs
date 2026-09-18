@@ -25,12 +25,21 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum CatalogError {
     #[error("network error fetching {url}: {source}")]
     Http { url: String, source: Box<ureq::Error> },
+    /// A 403 with `X-RateLimit-Remaining: 0`, or a 429 — distinguished from a generic
+    /// [`CatalogError::Http`] (a 404, DNS failure, etc.) so callers can tell "you're
+    /// rate-limited, try later" from "something is actually broken".
+    #[error("GitHub rate limit hit fetching {url}{}", retry_after.as_deref().map(|s| format!(" (retry after {s})")).unwrap_or_default())]
+    RateLimited { url: String, retry_after: Option<String> },
     #[error("cache I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("CSV parse error: {0}")]
     Csv(#[from] CsvError),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    /// GitHub's recursive tree API silently cuts a listing short past ~100k
+    /// entries/~7MB and sets `"truncated": true` instead of failing the request.
+    #[error("GitHub truncated the recursive tree listing for {sha} — catalogue would be incomplete")]
+    TruncatedTree { sha: String },
 }
 
 /// `_cache_dir` (`sidecar_dsp.py:99-102`): `$CAGEQ_CACHE_DIR`, else the system temp
@@ -66,7 +75,15 @@ pub(crate) fn http_get_binary(url: &str) -> Result<Vec<u8>, CatalogError> {
         .set("Accept", "application/vnd.github+json")
         .timeout(HTTP_TIMEOUT)
         .call()
-        .map_err(|e| CatalogError::Http { url: url.to_string(), source: Box::new(e) })?;
+        .map_err(|e| match &e {
+            ureq::Error::Status(code, resp)
+                if *code == 429 || (*code == 403 && resp.header("x-ratelimit-remaining") == Some("0")) =>
+            {
+                let retry_after = resp.header("retry-after").or_else(|| resp.header("x-ratelimit-reset")).map(str::to_string);
+                CatalogError::RateLimited { url: url.to_string(), retry_after }
+            }
+            _ => CatalogError::Http { url: url.to_string(), source: Box::new(e) },
+        })?;
     let mut buf = Vec::new();
     resp.into_reader().read_to_end(&mut buf)?;
     Ok(buf)
@@ -112,5 +129,16 @@ pub(crate) fn decode_text(bytes: &[u8]) -> String {
 pub fn fetch_curve(rel_path: &str) -> Result<(Vec<f64>, Vec<f64>), CatalogError> {
     let bytes = cached_download(rel_path)?;
     let text = decode_text(&bytes);
-    Ok(parse_csv(&text)?)
+    let (frequency, raw) = parse_csv(&text)?;
+    Ok(sort_by_frequency(frequency, raw))
+}
+
+/// `FrequencyResponse.__init__` sorts every column by frequency (`_sort`,
+/// `frequency_response.py`) before any interpolation runs; `parse_csv` itself doesn't
+/// (that's this function's job, not the parser's), and `cageq_peq_solver::grid`'s
+/// interpolation binary-searches assuming ascending order.
+fn sort_by_frequency(frequency: Vec<f64>, raw: Vec<f64>) -> (Vec<f64>, Vec<f64>) {
+    let mut pairs: Vec<(f64, f64)> = frequency.into_iter().zip(raw).collect();
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    pairs.into_iter().unzip()
 }
