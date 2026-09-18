@@ -71,12 +71,11 @@ A few things about the spectrum analyzer specifically:
   frontend, so the display reads as continuous motion rather than a stepped, sample-and-hold look.
 * **Still readable on fast-moving signals**, since the CRT-phosphor persistence above integrates
   rapid change into a legible trail instead of flickering into noise.
-* **A "Distribution" render-tuning preset for density, not just level** — pairs the fast redraw
-  above with a much longer persistence window, so brightness at a point reflects how often a bin
-  actually lands there rather than one value smeared over time. It's the same intensity-graded
-  read real-time spectrum analyzers use to show a signal's density, not just a single trace —
-  read here through the same phosphor-persistence renderer already described above, not a
-  separate implementation.
+* **A "Distribution" render-tuning preset for a denser read than a single trace** — a much longer
+  setting of the same phosphor decay above, so a bin that keeps recurring builds up brighter than
+  one that only flickered through once. Behaves like an analog CRT spectrum analyzer's persistence,
+  not a modern digital one's boxcar/linear-decay density display — a good qualitative read, not an
+  exact density measurement.
 
 ![The spectrum analyzer, with detected peaks marked and read out below the
 chart.](docs/SpectrumScope.png)
