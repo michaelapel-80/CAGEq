@@ -41,6 +41,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+mod catalog;
+mod export;
+mod fit;
 mod morph;
 
 use cageq_watchdog::{Supervisor, SupervisorError};
@@ -292,6 +295,14 @@ pub enum CoreError {
     RampAborted,
     #[error("invalid filter: {0}")]
     InvalidFilter(String),
+    /// The Rust-side PEQ fit (`fit.rs`, `cageq-peq-solver`) failed — SLSQP setup/solve
+    /// errors surfacing where `calculate_filters` used to just be a sidecar RPC error.
+    #[error("PEQ fit failed: {0}")]
+    Fit(#[from] cageq_peq_solver::SolverError),
+    /// Fetching a measurement/target CSV (`fit.rs`, `cageq-catalog`) failed — a network
+    /// or CSV-parse error surfacing where this used to just be a sidecar RPC error.
+    #[error("catalogue fetch failed: {0}")]
+    Catalog(#[from] cageq_catalog::CatalogError),
 }
 
 /// Reject a filter set before any curve/preamp math touches it (morph.rs's `coefficients()`
@@ -301,7 +312,7 @@ pub enum CoreError {
 /// outside it: the sidecar's `calculate_filters` reply (which echoes back hand-entered custom
 /// bands verbatim) and `apply_isolate`'s directly-supplied `freq_hz`/`q`. "No sound beats wrong
 /// sound" means refusing to apply here, not silently clamping to some plausible-looking value.
-fn validate_filters(filters: &[Filter]) -> Result<(), CoreError> {
+pub(crate) fn validate_filters(filters: &[Filter]) -> Result<(), CoreError> {
     for f in filters {
         if !f.freq_hz.is_finite() || f.freq_hz <= 0.0 {
             return Err(CoreError::InvalidFilter(format!("{:?} band: freq_hz must be positive and finite, got {}", f.kind, f.freq_hz)));
@@ -439,6 +450,18 @@ struct Inner {
     /// Bumped by every action that initiates a write. An in-flight morph that sees this
     /// change knows a newer intention has superseded it and stops writing (§5.3a).
     morph_gen: AtomicU32,
+    /// The AutoEq-only portion of a fit (`fit.rs`), cached the same way
+    /// `sidecar_dsp.py`'s own `_FIT_CACHE` was: keyed on measurement/target/max_gain/
+    /// peaking_filters/fs, *not* on custom filters, so editing a custom filter alone
+    /// (the common interactive case) reuses the cached SLSQP result instead of paying
+    /// its ~1-4 s cost again.
+    fit_cache: Mutex<fit::FitCache>,
+    /// §8 mobile-export caches (`export.rs`) — independent of `fit_cache` (keyed on the
+    /// slot's own composed filters, not a measurement/target selection), one per
+    /// export mode so a band-count slider drag and a preset switch don't evict
+    /// each other's cache.
+    export_cache: Mutex<export::ExportCache>,
+    fixed_band_cache: Mutex<export::FixedBandCache>,
 }
 
 /// The orchestrator handle.
@@ -489,6 +512,9 @@ impl Core {
             last_written: Mutex::new(None),
             last_applied: Mutex::new(None),
             morph_gen: AtomicU32::new(0),
+            fit_cache: Mutex::new(fit::FitCache::new()),
+            export_cache: Mutex::new(export::ExportCache::new()),
+            fixed_band_cache: Mutex::new(export::FixedBandCache::new()),
         });
 
         let reconciler = {
@@ -514,6 +540,59 @@ impl Core {
     /// [`Core::apply_to_slot`].
     pub fn apply(&self, request: CalcRequest) -> Result<Applied, CoreError> {
         self.apply_to_slot(Slot::A, request)
+    }
+
+    /// Pre-populate `fit.rs`'s AutoEq-only fit cache for `headphone`/`target` (§5.2
+    /// cache), so the first tone edit after a launch-from-cache seed (§3.5) is instant
+    /// rather than paying the cold ~1–4 s fit. Fire-and-forget by design: the result is
+    /// discarded (populating the cache is the whole point — a fetch/fit error here just
+    /// means the next real edit pays the cost it would have anyway), and this writes
+    /// nothing and changes no slot, so it can never race with a user edit. Uses the
+    /// same default `max_gain`/`peaking_filters`/`fs` a plain [`CalcRequest`] would
+    /// (nothing overrides them here, matching `sidecar_dsp.py`'s original `warm_fit`
+    /// call) — the cache only helps if the real apply later uses those same defaults.
+    pub fn warm_fit(&self, headphone: String, target: Option<String>) {
+        let mut inputs = Map::new();
+        inputs.insert("headphone".into(), Value::String(headphone));
+        if let Some(t) = target {
+            inputs.insert("target".into(), Value::String(t));
+        }
+        let request = CalcRequest { device: String::new(), inputs };
+        let _ = fit::compute(&self.inner.fit_cache, &request);
+    }
+
+    /// §8 mobile export: a second, independent AutoEq PEQ pass fitting `band_count`
+    /// filters (>= 3) directly to `filters`' own composed curve — see `export.rs`'s
+    /// module doc. Returns `(filters, preamp_db)`, the same shape the sidecar's
+    /// `fit_export_eq` did.
+    pub fn fit_export_eq(&self, filters: &[Filter], band_count: u32) -> Result<(Vec<Filter>, f64), CoreError> {
+        export::fit_export_eq(&self.inner.export_cache, filters, band_count)
+    }
+
+    /// §8 mobile export: AutoEq's own standard 10-/31-band graphic EQ (`preset`, any
+    /// value other than `"10"` is treated as `"31"`, matching `sidecar_dsp.py`'s own
+    /// fallback), fit the same way [`Core::fit_export_eq`] is but with fixed ISO center
+    /// frequencies/Q. Returns `(filters, preamp_db)`.
+    pub fn fit_fixed_band_eq(&self, filters: &[Filter], preset: &str) -> Result<(Vec<Filter>, f64), CoreError> {
+        export::fit_fixed_band_eq(&self.inner.fixed_band_cache, filters, preset)
+    }
+
+    /// The AutoEq headphone measurement catalogue: `[{source, form_factor, name, path,
+    /// rig}]`. `refresh` forces a fresh GitHub fetch instead of the on-disk cache.
+    pub fn list_headphones(&self, refresh: bool) -> Result<Vec<catalog::HeadphoneEntry>, CoreError> {
+        catalog::list_headphones(refresh)
+    }
+
+    /// The AutoEq target-curve catalogue: `[{name, path}]`.
+    pub fn list_targets(&self, refresh: bool) -> Result<Vec<catalog::TargetEntry>, CoreError> {
+        catalog::list_targets(refresh)
+    }
+
+    /// Raw headphone measurement + (if given) target curve, both centred the same way
+    /// for the §5.2 nerd overlays — UI-only, never written to EqAPO. Returns
+    /// `(raw_curve, target_curve)`; `target_curve` is empty when `target` is `None`.
+    pub fn measurement_curves(&self, headphone: &str, target: Option<&str>) -> Result<(Vec<CurvePoint>, Vec<CurvePoint>), CoreError> {
+        catalog::measurement_curves(headphone, target)
     }
 
     /// Load a **pre-computed** fit (persisted from a previous session, §3.5) into `slot`
@@ -771,8 +850,10 @@ impl Drop for Core {
 // The calc+write step and the reconciler
 // ---------------------------------------------------------------------------
 
-/// Fit `request` via the sidecar, cache the result in `slot`, make it active, and
-/// write it. Held under `apply_lock` so callers and the reconciler serialise.
+/// Fit `request` (`fit.rs` — a Rust-side FR-prep/optimize/loudness pipeline that only
+/// still reaches the sidecar for the raw measurement/target curve fetch, since AutoEq's
+/// database isn't bundled), cache the result in `slot`, make it active, and write it.
+/// Held under `apply_lock` so callers and the reconciler serialise.
 fn do_apply_to_slot(
     supervisor: &Supervisor,
     inner: &Inner,
@@ -783,9 +864,14 @@ fn do_apply_to_slot(
     {
         let _guard = inner.apply_lock.lock().unwrap();
 
-        let params = serde_json::to_value(&request)?;
-        let reply = supervisor.call("calculate_filters", params)?;
-        let result: CalcResult = serde_json::from_value(reply)?;
+        let outcome = fit::compute(&inner.fit_cache, &request)?;
+        let result = CalcResult {
+            device: outcome.device,
+            filters: outcome.filters,
+            g_target_db: outcome.g_target_db,
+            g_max_peak_db: outcome.g_max_peak_db,
+            reference_curve: outcome.reference_curve,
+        };
         validate_filters(&result.filters)?;
 
         let mut store = inner.slots.lock().unwrap();

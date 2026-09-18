@@ -364,22 +364,19 @@ fn seed_slot(
     }
 }
 
-/// Warm the sidecar's AutoEq fit cache for `headphone`/`target` (§5.2 cache) in the
+/// Warm `fit.rs`'s AutoEq fit cache for `headphone`/`target` (§5.2 cache) in the
 /// background, so the first tone edit after a launch-from-cache seed (§3.5) is instant
-/// rather than paying the cold fit. Fire-and-forget: the reply is discarded (populating
-/// the sidecar's in-process cache is the whole point). No write and no slot change, so it
-/// can never race with a user edit.
+/// rather than paying the cold fit. Fire-and-forget: the result is discarded (populating
+/// the cache is the whole point). No write and no slot change, so it can never race with
+/// a user edit. `device` is no longer needed here — the fit cache isn't keyed on it (see
+/// `Core::warm_fit`) — kept as a command parameter so the frontend call site is unchanged.
 #[tauri::command]
 fn warm_fit(device: String, headphone: String, target: Option<String>, state: State<Backend>) -> Result<(), String> {
+    let _ = device;
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, .. } => {
-            let mut inputs = Map::new();
-            inputs.insert("headphone".into(), Value::String(headphone));
-            if let Some(t) = target {
-                inputs.insert("target".into(), Value::String(t));
-            }
-            let _ = core.request("calculate_filters", serde_json::to_value(CalcRequest { device, inputs }).map_err(|e| e.to_string())?);
+            core.warm_fit(headphone, target);
             Ok(())
         }
     }
@@ -464,9 +461,10 @@ fn apply_result(applied: Applied, eq: &Arc<dyn EqBackend>) -> ApplyResult {
 fn list_headphones(state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, .. } => core
-            .request_with_deadline("list_headphones", json!({}), CATALOGUE_BUSY_RESPONSE)
-            .map_err(|e| e.to_string()),
+        Backend::Ready { core, .. } => {
+            let headphones = core.list_headphones(false).map_err(|e| e.to_string())?;
+            Ok(json!({ "headphones": headphones }))
+        }
     }
 }
 
@@ -1026,12 +1024,8 @@ fn measurement_curves(headphone: String, target: Option<String>, state: State<Ba
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, .. } => {
-            let mut params = Map::new();
-            params.insert("headphone".into(), Value::String(headphone));
-            if let Some(t) = target {
-                params.insert("target".into(), Value::String(t));
-            }
-            core.request("measurement_curves", Value::Object(params)).map_err(|e| e.to_string())
+            let (raw_curve, target_curve) = core.measurement_curves(&headphone, target.as_deref()).map_err(|e| e.to_string())?;
+            Ok(json!({ "raw_curve": raw_curve, "target_curve": target_curve }))
         }
     }
 }
@@ -1047,10 +1041,8 @@ fn export_eq_fit(filters: Vec<Filter>, band_count: u32, state: State<Backend>) -
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, .. } => {
-            let mut params = Map::new();
-            params.insert("filters".into(), serde_json::to_value(filters).map_err(|e| e.to_string())?);
-            params.insert("band_count".into(), Value::Number(band_count.into()));
-            core.request("fit_export_eq", Value::Object(params)).map_err(|e| e.to_string())
+            let (out_filters, preamp_db) = core.fit_export_eq(&filters, band_count).map_err(|e| e.to_string())?;
+            Ok(json!({ "filters": out_filters, "preamp_db": preamp_db }))
         }
     }
 }
@@ -1064,10 +1056,8 @@ fn fixed_band_eq_fit(filters: Vec<Filter>, preset: String, state: State<Backend>
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, .. } => {
-            let mut params = Map::new();
-            params.insert("filters".into(), serde_json::to_value(filters).map_err(|e| e.to_string())?);
-            params.insert("preset".into(), Value::String(preset));
-            core.request("fit_fixed_band_eq", Value::Object(params)).map_err(|e| e.to_string())
+            let (out_filters, preamp_db) = core.fit_fixed_band_eq(&filters, &preset).map_err(|e| e.to_string())?;
+            Ok(json!({ "filters": out_filters, "preamp_db": preamp_db }))
         }
     }
 }
@@ -1077,9 +1067,10 @@ fn fixed_band_eq_fit(filters: Vec<Filter>, preset: String, state: State<Backend>
 fn list_targets(state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
-        Backend::Ready { core, .. } => core
-            .request_with_deadline("list_targets", json!({}), CATALOGUE_BUSY_RESPONSE)
-            .map_err(|e| e.to_string()),
+        Backend::Ready { core, .. } => {
+            let targets = core.list_targets(false).map_err(|e| e.to_string())?;
+            Ok(json!({ "targets": targets }))
+        }
     }
 }
 
@@ -1496,16 +1487,6 @@ fn watchdog_cfg() -> WatchdogConfig {
         restart_backoffs: vec![Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(10)],
     }
 }
-
-/// Busy deadline for `list_headphones`/`list_targets` specifically, in place of
-/// `watchdog_cfg()`'s fit-tuned `busy_response` (25 s). A cold catalogue build fetches every
-/// distinct AutoEq source's name_index.tsv, now in parallel (see sidecar_dsp.py) rather than one
-/// at a time, but network conditions vary a lot more than a compute-bound fit's runtime does —
-/// 25 s was tight enough that a rebuild could blow it, which made the watchdog conclude the
-/// sidecar had hung and kill it *mid-fetch*, turning "slow" into a restart loop. This is only ever
-/// reached on a cold cache (build_index/list_targets both skip straight to the cached-on-disk
-/// result otherwise), so the cost of a generous ceiling here is rare and one-off, not per-request.
-const CATALOGUE_BUSY_RESPONSE: Duration = Duration::from_secs(120);
 
 /// Resolve where cageq.txt is written, plus a human label of how it was found (for
 /// the UI). Precedence: an explicit `CAGEQ_CONFIG_DIR` override (dev/tests) → the

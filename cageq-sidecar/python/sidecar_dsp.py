@@ -7,7 +7,14 @@ Speaks the same line-delimited JSON-RPC 2.0 as sidecar_stub.py. Methods:
   list_targets    {refresh?}   -> available AutoEq target curves
   calculate_filters {device, (headphone | measurement | flat), target?, ...}
                   `flat: true` skips AutoEq's own fit entirely (no measurement, no
-                  optimizer) — the custom filters alone become the whole correction
+                  optimizer) — the custom filters alone become the whole correction.
+                  No longer called by cageq-core in production (see fetch_raw_curves
+                  below) — kept working for the sidecar's own tests/tooling.
+  fetch_raw_curves {device, (headphone | measurement), target?} -> raw, unresampled
+                  measurement/target curves. What `cageq-core`'s `fit.rs` actually
+                  calls now: FR-prep/equalize/the SLSQP fit/loudness all moved to Rust
+                  (`cageq-peq-solver`), leaving only the measurement/target database
+                  fetch+cache here (it isn't bundled — see below)
   measurement_curves {headphone, target?} -> raw measurement + target curves for the §5.2
                   nerd overlays (see its own docstring)
   filter_response {filters, freqs, fs?} -> combined dB response of `filters` on `freqs`;
@@ -488,6 +495,40 @@ def calculate_filters(params):
     }
 
 
+def fetch_raw_curves(params):
+    """Raw, unresampled measurement + target curves — the one piece of
+    `calculate_filters`'s pipeline that still needs Python once `cageq-core`'s `fit.rs`
+    drives everything downstream (interpolate/center/compensate/smoothen/equalize/
+    optimize/loudness) itself via `cageq-peq-solver`: AutoEq's measurement/target
+    database (~4.4 GB) isn't bundled, so the catalogue fetch+cache stays here.
+
+    Deliberately returns curves *before* `FrequencyResponse.interpolate()` (unlike
+    `_target_raw`, which grids the target immediately) — the Rust side does its own
+    interpolation onto the same standard grid, so handing it already-gridded data would
+    just make it redo idempotent work for no benefit, and handing it the true raw
+    points keeps this method's contract simple: "whatever was fetched", nothing more.
+    `None` gaps (a measurement CSV's missing points) are preserved as JSON `null` for
+    the Rust side's own None-removal to drop, exactly as `interpolate()` does here."""
+    fr = _measurement_fr(params)
+    measurement_f = [float(x) for x in fr.frequency]
+    measurement_raw = [None if v is None or (isinstance(v, float) and math.isnan(v)) else float(v) for v in fr.raw]
+
+    if params.get("target"):
+        tfr = FrequencyResponse.read_csv(_cached_download(params["target"]))
+        target_f = [float(x) for x in tfr.frequency]
+        target_raw = [None if v is None or (isinstance(v, float) and math.isnan(v)) else float(v) for v in tfr.raw]
+    else:
+        target_f = [20.0, 20000.0]
+        target_raw = [0.0, 0.0]
+
+    return {
+        "measurement_f": measurement_f,
+        "measurement_raw": measurement_raw,
+        "target_f": target_f,
+        "target_raw": target_raw,
+    }
+
+
 # --- mobile export (§8) ----------------------------------------------------
 
 # A second, independent fit cache from `_FIT_CACHE` above — keyed on the *composed* filters
@@ -689,6 +730,8 @@ def main():
                 reply(rid, result={"targets": list_targets(refresh=bool(params.get("refresh")))})
             elif method == "calculate_filters":
                 reply(rid, result=calculate_filters(params))
+            elif method == "fetch_raw_curves":
+                reply(rid, result=fetch_raw_curves(params))
             elif method == "measurement_curves":
                 reply(rid, result=measurement_curves(params))
             elif method == "filter_response":

@@ -107,9 +107,16 @@ fn slots_switch_by_rewrite_without_refitting() {
     let tmp = TempDir::new("slots");
     let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
-    // Populate A and B with distinct device names (the stub echoes device).
-    core.apply_to_slot(Slot::A, CalcRequest::for_device("Device A")).expect("apply A");
-    core.apply_to_slot(Slot::B, CalcRequest::for_device("Device B")).expect("apply B");
+    // Populate A and B with distinct device names (the stub echoes device). Each gets a
+    // custom filter too — no headphone/measurement/flat means "nothing to fit" under the
+    // Rust pipeline, and this test needs something in the config to check A keeps.
+    let with_filter = |device: &str| {
+        let mut req = CalcRequest::for_device(device);
+        req.inputs.insert("custom_filters".into(), json!([{ "kind": "LowShelf", "freq_hz": 105.0, "gain_db": 3.0, "q": 0.7 }]));
+        req
+    };
+    core.apply_to_slot(Slot::A, with_filter("Device A")).expect("apply A");
+    core.apply_to_slot(Slot::B, with_filter("Device B")).expect("apply B");
     assert_eq!(core.active_slot(), Slot::B);
     assert!(tmp.cageq().contains("Device: Device B"));
 
@@ -352,19 +359,26 @@ fn apply_calculates_and_writes_config() {
     let tmp = TempDir::new("apply");
     let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
-    let applied = core.apply(CalcRequest::for_device("USB DAC")).expect("apply ok");
+    // No headphone/measurement/flat — the Rust fit pipeline treats that as "nothing to
+    // fit" (same as `flat: true`), so a custom filter is what actually reaches cageq.txt
+    // here; the point of this test is the write path, not the AutoEq fit itself.
+    let mut req = CalcRequest::for_device("USB DAC");
+    req.inputs.insert("custom_filters".into(), json!([{ "kind": "LowShelf", "freq_hz": 105.0, "gain_db": 3.0, "q": 0.7 }]));
+    let applied = core.apply(req).expect("apply ok");
     assert_eq!(applied.device, "USB DAC");
     assert_eq!(core.applied_count(), 1);
 
-    // The DSP's canned filters made it through to cageq.txt in EqAPO syntax...
+    // The custom filter made it through to cageq.txt in EqAPO syntax...
     let cageq = tmp.cageq();
     assert!(cageq.contains("Device: USB DAC"), "{cageq}");
     assert!(cageq.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"), "{cageq}");
-    // The core composes the preamp itself (§4.0/§4.2) and ignores any preamp the
-    // sidecar reports; the stub sends no loudness data, so this is just the default
-    // base pre-gain (-9.0 dB), and the §4.2 ceiling does not trip on a flat curve.
-    assert!(cageq.contains("Preamp: -9.0 dB"), "{cageq}");
-    assert_eq!(applied.preamp_db, DEFAULT_BASE_PREGAIN_DB);
+    // The core composes the preamp itself (§4.0/§4.2) from the curve's own loudness/peak
+    // rather than trusting any preamp the DSP might report — the exact composed value
+    // for a specific curve is `compose_preamp`'s own unit tests' job (`tests` module in
+    // lib.rs); this just checks a real (non-default, non-zero) preamp came out and the
+    // ceiling didn't trip on a curve nowhere near it.
+    assert!(cageq.contains("Preamp:"), "{cageq}");
+    assert_ne!(applied.preamp_db, 0.0);
     assert!(!applied.clipping_warning);
     // ...and config.txt got the Include block.
     assert!(tmp.config().contains("Include: cageq.txt"));
@@ -381,7 +395,12 @@ fn recovery_reapplies_last_config_and_leaves_safe_state() {
     let tmp = TempDir::new("reapply");
     let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
 
-    core.apply(CalcRequest::for_device("DAC")).unwrap();
+    // No headphone/measurement/flat — the Rust fit pipeline treats that as "nothing to
+    // fit", so a custom filter is what gives this test something to check survives a
+    // watchdog recovery.
+    let mut req = CalcRequest::for_device("DAC");
+    req.inputs.insert("custom_filters".into(), json!([{ "kind": "LowShelf", "freq_hz": 105.0, "gain_db": 3.0, "q": 0.7 }]));
+    core.apply(req).unwrap();
     assert_eq!(core.applied_count(), 1);
     assert!(tmp.cageq().contains("Filter 1: ON LSC"));
 

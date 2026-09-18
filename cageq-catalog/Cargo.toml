@@ -1,0 +1,23 @@
+[package]
+name = "cageq-catalog"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+
+[dependencies]
+# Blocking HTTP client, matching this codebase's style (no async runtime anywhere) —
+# fetches AutoEq measurement/target CSVs directly from raw.githubusercontent instead of
+# asking the Python sidecar to (`sidecar_dsp.py`'s `_http_get`/`_cached_download`).
+ureq = "2"
+# CSV format detection (`autoeq/csv.py`'s `parse_csv`) needs the same separator/column
+# heuristics the Python version does — see `csv_parse.rs`'s module doc for which of
+# its regex fast-paths this deliberately doesn't reproduce, and why.
+regex = "1"
+# A handful of real measurement files fail UTF-8 decoding; `FrequencyResponse.read_csv`
+# falls back to windows-1252 (`frequency_response.py:111-113`) rather than erroring.
+encoding_rs = "0.8"
+thiserror = "2.0"
+# The catalogue index (`index.rs`): GitHub's tree/contents API replies, and the on-disk
+# index cache, are both JSON; `HeadphoneEntry`/`TargetEntry` are the wire/cache shape.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
