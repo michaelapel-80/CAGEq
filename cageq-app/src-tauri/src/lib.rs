@@ -233,7 +233,15 @@ struct Status {
 /// it makes things worse than not fitting at all): `target` is meaningless without a
 /// measurement to compensate, so it's ignored in that case, and the sidecar's own
 /// `flat` flag is sent instead of `headphone`/`target`.
-#[tauri::command]
+///
+/// `async`: the AutoEq fit this runs (`cageq-peq-solver`'s SLSQP pass, ~1-4 s cold) used
+/// to be a blocking wait on the Python sidecar's RPC reply; either way this was always a
+/// plain (non-async) command, so Tauri ran it inline on the same thread that dispatches
+/// IPC — freezing the whole UI for the fit's duration. That was tolerable-ish for a
+/// cross-process wait; a genuinely synchronous, non-yielding CPU-bound Rust call in the
+/// same spot is worse. `async` here (Tauri's own attribute, not `async fn`) makes Tauri
+/// dispatch the still-synchronous body onto its runtime's blocking thread pool instead.
+#[tauri::command(async)]
 fn apply(
     device: String,
     headphone: Option<String>,
@@ -1005,7 +1013,10 @@ fn measurement_curves(headphone: String, target: Option<String>, state: State<Ba
 /// measurement. Relayed as-is (`{filters, preamp_db}`) — see `fit_export_eq`'s own Python
 /// docstring for why it doesn't also return curve samples (the frontend already has
 /// `composedCurveDb` to turn the returned bands back into a curve itself).
-#[tauri::command]
+///
+/// `async`: another independent SLSQP pass — see `apply`'s doc for why this needs Tauri's
+/// blocking-thread-pool dispatch rather than running inline on the IPC thread.
+#[tauri::command(async)]
 fn export_eq_fit(filters: Vec<Filter>, band_count: u32, state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
@@ -1020,7 +1031,9 @@ fn export_eq_fit(filters: Vec<Filter>, band_count: u32, state: State<Backend>) -
 /// `export_eq_fit` is but with fixed ISO-standard center frequencies/Q instead of a free band
 /// count — see `fit_fixed_band_eq`'s own Python docstring for why this needs a real optimizer
 /// pass rather than just sampling the curve at those frequencies. Relayed as-is.
-#[tauri::command]
+///
+/// `async`: same reason as `export_eq_fit`.
+#[tauri::command(async)]
 fn fixed_band_eq_fit(filters: Vec<Filter>, preset: String, state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
