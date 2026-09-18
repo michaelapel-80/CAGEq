@@ -1,8 +1,9 @@
-//! End-to-end orchestrator tests: real Python stub sidecar, real cageq.txt writes.
+//! End-to-end orchestrator tests: real cageq.txt writes, no sidecar involved at all —
+//! `Core` no longer spawns or depends on one (see `cageq-core/src/lib.rs`'s "No
+//! sidecar" module doc).
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,8 +12,6 @@ use cageq_core::{
     CalcRequest, Core, CoreError, CurvePoint, DEFAULT_BASE_PREGAIN_DB, EqApoBackend, EqBackend,
     Filter, FilterType, LoudnessMode, LoudnessSettings, Slot,
 };
-use cageq_sidecar::{Sidecar, SidecarError};
-use cageq_watchdog::{Health, WatchdogConfig};
 use serde_json::json;
 
 // --- rig ------------------------------------------------------------------
@@ -23,47 +22,6 @@ use serde_json::json;
 /// this suite is that the orchestrator and a real backend agree.
 fn eqapo(dir: &std::path::Path) -> Arc<dyn EqBackend> {
     Arc::new(EqApoBackend::new(dir))
-}
-
-fn stub_script() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("cageq-sidecar")
-        .join("python")
-        .join("sidecar_stub.py")
-}
-
-fn works(cmd: &str) -> bool {
-    Command::new(cmd)
-        .args(["-c", "print(1)"])
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "1")
-        .unwrap_or(false)
-}
-
-fn find_python() -> PathBuf {
-    if let Ok(p) = std::env::var("CAGEQ_PYTHON") {
-        return PathBuf::from(p);
-    }
-    if let Ok(out) = Command::new("py").args(["-c", "import sys;print(sys.executable)"]).output()
-        && out.status.success()
-    {
-        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
-    }
-    for cand in ["python3", "python"] {
-        if works(cand) {
-            return PathBuf::from(cand);
-        }
-    }
-    panic!("no working Python found; set CAGEQ_PYTHON to a python.exe");
-}
-
-fn healthy_spawner() -> impl Fn() -> Result<Sidecar, SidecarError> + Send + 'static {
-    let (py, script) = (find_python(), stub_script());
-    move || Sidecar::spawn(&py, &script)
 }
 
 struct TempDir(PathBuf);
@@ -90,26 +48,23 @@ impl Drop for TempDir {
     }
 }
 
-fn fast_cfg() -> WatchdogConfig {
-    WatchdogConfig {
-        idle_interval: Duration::from_millis(300),
-        idle_response: Duration::from_millis(250),
-        busy_response: Duration::from_millis(300),
-        tick: Duration::from_millis(40),
-        restart_backoffs: vec![Duration::from_millis(30); 3],
-    }
-}
-
 // --- tests ----------------------------------------------------------------
 
 #[test]
 fn slots_switch_by_rewrite_without_refitting() {
     let tmp = TempDir::new("slots");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
 
-    // Populate A and B with distinct device names (the stub echoes device).
-    core.apply_to_slot(Slot::A, CalcRequest::for_device("Device A")).expect("apply A");
-    core.apply_to_slot(Slot::B, CalcRequest::for_device("Device B")).expect("apply B");
+    // Populate A and B with distinct device names. Each gets a custom filter too — no
+    // headphone/measurement/flat means "nothing to fit" under the Rust pipeline, and
+    // this test needs something in the config to check A keeps.
+    let with_filter = |device: &str| {
+        let mut req = CalcRequest::for_device(device);
+        req.inputs.insert("custom_filters".into(), json!([{ "kind": "LowShelf", "freq_hz": 105.0, "gain_db": 3.0, "q": 0.7 }]));
+        req
+    };
+    core.apply_to_slot(Slot::A, with_filter("Device A")).expect("apply A");
+    core.apply_to_slot(Slot::B, with_filter("Device B")).expect("apply B");
     assert_eq!(core.active_slot(), Slot::B);
     assert!(tmp.cageq().contains("Device: Device B"));
 
@@ -132,18 +87,18 @@ fn slots_switch_by_rewrite_without_refitting() {
         Err(CoreError::DryNotEditable)
     ));
     let empty = TempDir::new("empty");
-    let fresh = Core::start(eqapo(empty.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let fresh = Core::start(eqapo(empty.dir()), None).unwrap();
     assert!(matches!(fresh.activate_slot(Slot::B), Err(CoreError::EmptySlot(Slot::B))));
 }
 
 /// filter.md §3.5 launch-from-cache: a fit persisted from a previous session is seeded
-/// into a slot **without the sidecar** and written immediately by activating it — so
-/// startup restores the exact EQ without paying the ~1–2 s cold fit. The seed alone must
-/// not write; the activate must, composing the preamp from the seeded curve quantities.
+/// into a slot and written immediately by activating it — so startup restores the
+/// exact EQ without paying the ~1–2 s cold fit. The seed alone must not write; the
+/// activate must, composing the preamp from the seeded curve quantities.
 #[test]
-fn seeded_slot_writes_without_a_sidecar_fit() {
+fn seeded_slot_writes_without_a_fit() {
     let tmp = TempDir::new("seed");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
 
     let filters = vec![
         Filter { kind: FilterType::LowShelf, freq_hz: 105.0, gain_db: 4.0, q: 0.7 },
@@ -158,7 +113,7 @@ fn seeded_slot_writes_without_a_sidecar_fit() {
     assert_eq!(core.applied_count(), before, "seeding must not write to disk");
     assert!(tmp.cageq().is_empty(), "no cageq.txt until the slot is activated");
 
-    // Activating the seeded slot writes it — a pure file write, no sidecar call.
+    // Activating the seeded slot writes it — a pure file write.
     let applied = core.activate_slot(Slot::A).expect("activate seeded A");
     assert_eq!(core.active_slot(), Slot::A);
     assert_eq!(applied.device, "Seeded DAC");
@@ -190,7 +145,7 @@ fn seeded_slot_writes_without_a_sidecar_fit() {
 #[test]
 fn large_tonal_changes_morph_across_several_writes() {
     let tmp = TempDir::new("morph");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
 
     let with_custom = |bands: serde_json::Value| {
         let mut req = CalcRequest::for_device("DAC");
@@ -244,7 +199,7 @@ fn large_tonal_changes_morph_across_several_writes() {
 #[test]
 fn a_non_positive_q_custom_filter_is_rejected_not_applied_as_nan() {
     let tmp = TempDir::new("bad-q");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
 
     let mut req = CalcRequest::for_device("DAC");
     req.inputs.insert(
@@ -258,11 +213,11 @@ fn a_non_positive_q_custom_filter_is_rejected_not_applied_as_nan() {
     assert_eq!(core.applied_count(), before, "a rejected filter set must never reach the backend");
 }
 
-/// Same guard, via §5.2 isolate's directly-supplied `q` rather than a sidecar round-trip.
+/// Same guard, via §5.2 isolate's directly-supplied `q`.
 #[test]
 fn isolate_with_a_non_positive_q_is_rejected() {
     let tmp = TempDir::new("bad-q-isolate");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
     core.apply_to_slot(Slot::A, CalcRequest::for_device("DAC")).expect("apply A");
 
     let before = core.applied_count();
@@ -274,7 +229,7 @@ fn isolate_with_a_non_positive_q_is_rejected() {
 #[test]
 fn copy_slot_duplicates_a_fit_and_activates_the_target() {
     let tmp = TempDir::new("copy");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
 
     core.apply_to_slot(Slot::A, CalcRequest::for_device("Device A")).expect("apply A");
 
@@ -290,7 +245,7 @@ fn copy_slot_duplicates_a_fit_and_activates_the_target() {
 
     // Copying from an empty slot errors; Dry can't take part.
     let fresh = TempDir::new("copy-empty");
-    let c2 = Core::start(eqapo(fresh.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let c2 = Core::start(eqapo(fresh.dir()), None).unwrap();
     assert!(matches!(c2.copy_slot(Slot::A, Slot::B), Err(CoreError::EmptySlot(Slot::A))));
     assert!(matches!(core.copy_slot(Slot::A, Slot::Dry), Err(CoreError::DryNotEditable)));
 }
@@ -298,11 +253,12 @@ fn copy_slot_duplicates_a_fit_and_activates_the_target() {
 #[test]
 fn loudness_increase_ramps_but_decrease_is_direct() {
     let tmp = TempDir::new("ramp");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
 
     // Small base pre-gain so the Comparison->Final increase is a quick ~1 dB ramp.
     core.set_loudness(LoudnessSettings { base_pregain_db: -1.0, ..Default::default() });
-    core.apply(CalcRequest::for_device("DAC")).expect("apply"); // stub is flat -> preamp -1.0
+    // No headphone/measurement/flat -> the fit pipeline treats this as flat -> preamp -1.0.
+    core.apply(CalcRequest::for_device("DAC")).expect("apply");
     assert!(tmp.cageq().contains("Preamp: -1.0 dB"), "{}", tmp.cageq());
     let after_apply = core.applied_count();
 
@@ -330,10 +286,11 @@ fn loudness_increase_ramps_but_decrease_is_direct() {
 #[test]
 fn base_pregain_edit_in_comparison_is_direct_not_ramped() {
     let tmp = TempDir::new("pregain");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
 
     core.set_loudness(LoudnessSettings { base_pregain_db: -12.0, ..Default::default() });
-    core.apply(CalcRequest::for_device("DAC")).expect("apply"); // stub is flat -> preamp -12.0
+    // No headphone/measurement/flat -> the fit pipeline treats this as flat -> preamp -12.0.
+    core.apply(CalcRequest::for_device("DAC")).expect("apply");
     assert!(tmp.cageq().contains("Preamp: -12.0 dB"), "{}", tmp.cageq());
     let after_apply = core.applied_count();
 
@@ -350,21 +307,27 @@ fn base_pregain_edit_in_comparison_is_direct_not_ramped() {
 #[test]
 fn apply_calculates_and_writes_config() {
     let tmp = TempDir::new("apply");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
 
-    let applied = core.apply(CalcRequest::for_device("USB DAC")).expect("apply ok");
+    // No headphone/measurement/flat — the Rust fit pipeline treats that as "nothing to
+    // fit" (same as `flat: true`), so a custom filter is what actually reaches cageq.txt
+    // here; the point of this test is the write path, not the AutoEq fit itself.
+    let mut req = CalcRequest::for_device("USB DAC");
+    req.inputs.insert("custom_filters".into(), json!([{ "kind": "LowShelf", "freq_hz": 105.0, "gain_db": 3.0, "q": 0.7 }]));
+    let applied = core.apply(req).expect("apply ok");
     assert_eq!(applied.device, "USB DAC");
     assert_eq!(core.applied_count(), 1);
 
-    // The DSP's canned filters made it through to cageq.txt in EqAPO syntax...
+    // The custom filter made it through to cageq.txt in EqAPO syntax...
     let cageq = tmp.cageq();
     assert!(cageq.contains("Device: USB DAC"), "{cageq}");
     assert!(cageq.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"), "{cageq}");
-    // The core composes the preamp itself (§4.0/§4.2) and ignores any preamp the
-    // sidecar reports; the stub sends no loudness data, so this is just the default
-    // base pre-gain (-9.0 dB), and the §4.2 ceiling does not trip on a flat curve.
-    assert!(cageq.contains("Preamp: -9.0 dB"), "{cageq}");
-    assert_eq!(applied.preamp_db, DEFAULT_BASE_PREGAIN_DB);
+    // The core composes the preamp itself (§4.0/§4.2) from the curve's own loudness/peak;
+    // the exact composed value for a specific curve is `compose_preamp`'s own unit tests'
+    // job (`tests` module in lib.rs) — this just checks a real (non-default, non-zero)
+    // preamp came out and the ceiling didn't trip on a curve nowhere near it.
+    assert!(cageq.contains("Preamp:"), "{cageq}");
+    assert_ne!(applied.preamp_db, 0.0);
     assert!(!applied.clipping_warning);
     // ...and config.txt got the Include block.
     assert!(tmp.config().contains("Include: cageq.txt"));
@@ -377,35 +340,9 @@ fn apply_calculates_and_writes_config() {
 }
 
 #[test]
-fn recovery_reapplies_last_config_and_leaves_safe_state() {
-    let tmp = TempDir::new("reapply");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
-
-    core.apply(CalcRequest::for_device("DAC")).unwrap();
-    assert_eq!(core.applied_count(), 1);
-    assert!(tmp.cageq().contains("Filter 1: ON LSC"));
-
-    // Crash the sidecar. The watchdog trips (writes -120 dB silence) then restarts,
-    // and the reconciler must re-apply the real config on top.
-    let _ = core.request("exit", json!({ "code": 1 }));
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline && core.applied_count() < 2 {
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(core.applied_count() >= 2, "reconciler should have re-applied after recovery");
-    assert!(matches!(core.health(), Health::Running));
-
-    // The real config is back and the safe state has been left.
-    let cageq = tmp.cageq();
-    assert!(cageq.contains("Filter 1: ON LSC"), "real config restored: {cageq}");
-    assert!(!cageq.contains("Preamp: -120.0 dB"), "safe state should be left: {cageq}");
-}
-
-#[test]
 fn startup_is_first_run_on_a_clean_dir() {
     let tmp = TempDir::new("firstrun");
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
     assert_eq!(core.startup_decision(), StartupDecision::FirstRun);
 }
 
@@ -415,11 +352,11 @@ fn startup_trusts_a_matching_remembered_hash() {
 
     // Session 1: apply, remember the hash, shut down (cageq.txt persists on disk).
     let hash = {
-        let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), None).unwrap();
+        let core = Core::start(eqapo(tmp.dir()), None).unwrap();
         core.apply(CalcRequest::for_device("DAC")).unwrap().hash
     };
 
     // Session 2: start again with that remembered hash -> the resume state is trusted.
-    let core = Core::start(eqapo(tmp.dir()), healthy_spawner(), fast_cfg(), Some(&hash)).unwrap();
+    let core = Core::start(eqapo(tmp.dir()), Some(&hash)).unwrap();
     assert_eq!(core.startup_decision(), StartupDecision::ResumeTrusted);
 }

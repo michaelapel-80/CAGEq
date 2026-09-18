@@ -1,0 +1,31 @@
+[package]
+name = "cageq-peq-solver"
+version.workspace = true
+# MIT rather than the workspace's GPL-3.0-or-later default: this crate is a from-scratch
+# Rust port of AutoEq's algorithms (see src/lib.rs), and AutoEq itself is MIT-licensed
+# (see the AutoEq repo's own LICENSE) — matching that keeps the port's licensing
+# consistent with the project it's derived from.
+license = "MIT"
+edition = "2024"
+
+[dependencies]
+# The output type: fitted bands hand back as the same `Filter`/`FilterType` every
+# backend already speaks, so callers need no adapter at the boundary.
+cageq-backend = { path = "../cageq-backend" }
+# SLSQP (box-bounded), the algorithm `peq.py` settled on after trying every SciPy
+# minimize method (see peq.py:717's comment). Vendors and statically links NLopt's C/C++
+# core, so building it needs CMake + a C++ toolchain on top of the usual MSVC Rust
+# prerequisites — missing on this machine as of the scaffold (MSVC is present, CMake is
+# not). Feature-gated (on by default) purely so `filter`/`peaks` — which need neither
+# `nlopt` nor CMake — stay buildable and testable with `--no-default-features` while
+# that gap is open; see the crate-level doc comment.
+nlopt = { version = "0.8", optional = true }
+thiserror = "2.0"
+
+[features]
+default = ["slsqp"]
+slsqp = ["dep:nlopt"]
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

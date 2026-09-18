@@ -9,9 +9,22 @@ edition = "2024"
 # `cageq-backend` trait, not a concrete backend — `cageq-config-writer` (the Equalizer
 # APO one) is still depended on only to re-export its constructor for the app layer.
 cageq-backend = { path = "../cageq-backend" }
+# The measurement/target CSV fetch+cache `fit.rs` drives directly now instead of
+# asking the sidecar's `fetch_raw_curves` to (see that module's doc): the AutoEq
+# database itself isn't bundled, but fetching a *known* catalogue path needs no Python.
+cageq-catalog = { path = "../cageq-catalog" }
 cageq-config-writer = { path = "../cageq-config-writer" }
-cageq-sidecar = { path = "../cageq-sidecar" }
-cageq-watchdog = { path = "../cageq-watchdog" }
+# The Rust-side FR-prep/fit/loudness pipeline `fit.rs` drives instead of the sidecar's
+# `calculate_filters` (see that module's doc) — needs CMake on top of the usual MSVC
+# Rust prerequisites to build `nlopt-sys` (`cageq-peq-solver`'s own dependency).
+cageq-peq-solver = { path = "../cageq-peq-solver" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+
+[dev-dependencies]
+# Not shipped, not a dependency of this crate's own code any more (see lib.rs's "No
+# sidecar" module doc) — only the tests/*_vs_sidecar.rs comparison tests spawn a real
+# Python sidecar directly (`cageq_sidecar::Sidecar::spawn`/`call`, no `Core`/watchdog
+# involved) to keep validating the Rust port against the AutoEq reference.
+cageq-sidecar = { path = "../cageq-sidecar" }

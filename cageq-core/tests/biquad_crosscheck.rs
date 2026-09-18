@@ -16,7 +16,8 @@
 
 use std::path::PathBuf;
 
-use cageq_core::{Filter, FilterType, Sidecar};
+use cageq_core::{Filter, FilterType};
+use cageq_sidecar::Sidecar;
 use serde_json::json;
 
 fn sidecar_manifest() -> PathBuf {

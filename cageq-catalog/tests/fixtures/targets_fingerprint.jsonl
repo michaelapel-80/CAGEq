@@ -1,0 +1,61 @@
+{"path": "targets/711 5128 delta.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 164.79999999999998, "raw_sumsq": 32078.5534}
+{"path": "targets/All Harman Targets.csv", "ok": false, "error": "Failed to find SPL column"}
+{"path": "targets/AutoEq in-ear.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -82.59000000000002, "raw_sumsq": 13919.0061}
+{"path": "targets/crinacle EARS + 711 Harman over-ear 2018 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -352.37, "raw_sumsq": 15923.3909}
+{"path": "targets/crinacle EARS + 711 Harman over-ear 2018.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 572.98, "raw_sumsq": 14010.6808}
+{"path": "targets/Diffuse field 5128 -1dB per octave.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 874.52, "raw_sumsq": 10535.4938}
+{"path": "targets/Diffuse field 5128.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 414.99, "raw_sumsq": 19209.0381}
+{"path": "targets/Diffuse field GRAS KEMAR.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 158.01999999999998, "raw_sumsq": 16965.5638}
+{"path": "targets/Diffuse field ISO 11904-1.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 26.58000000000006, "raw_sumsq": 16837.5428}
+{"path": "targets/Harman in-ear 2016 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -354.94999999999993, "raw_sumsq": 14805.9169}
+{"path": "targets/Harman in-ear 2016.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 1289.38, "raw_sumsq": 21621.541400000002}
+{"path": "targets/Harman in-ear 2017-1 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -407.09000000000003, "raw_sumsq": 39628.3777}
+{"path": "targets/Harman in-ear 2017-1.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 1116.45, "raw_sumsq": 46386.7801}
+{"path": "targets/Harman in-ear 2017-2 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -350.78, "raw_sumsq": 33670.6694}
+{"path": "targets/Harman in-ear 2017-2.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 1598.24, "raw_sumsq": 43950.4236}
+{"path": "targets/Harman in-ear 2019 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 52.88999999999999, "raw_sumsq": 17131.0821}
+{"path": "targets/Harman in-ear 2019.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 1557.36, "raw_sumsq": 23468.3566}
+{"path": "targets/Harman loudspeaker in-room flat 2013.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -270.87, "raw_sumsq": 19105.832300000002}
+{"path": "targets/Harman over-ear 2013 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -421.70000000000005, "raw_sumsq": 15318.5002}
+{"path": "targets/Harman over-ear 2013.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 196.32999999999998, "raw_sumsq": 14366.9453}
+{"path": "targets/Harman over-ear 2015 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -197.29999999999995, "raw_sumsq": 16238.216}
+{"path": "targets/Harman over-ear 2015.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 761.3, "raw_sumsq": 16279.468}
+{"path": "targets/Harman over-ear 2018 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -183.14, "raw_sumsq": 14984.1826}
+{"path": "targets/Harman over-ear 2018.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 819.87, "raw_sumsq": 15649.0637}
+{"path": "targets/Headphone.com Legacy AutoEq in-ear.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 131.25, "raw_sumsq": 13962.1331}
+{"path": "targets/Headphone.com Legacy Harman in-ear 2019 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 266.73, "raw_sumsq": 17200.6225}
+{"path": "targets/Headphone.com Legacy Harman in-ear 2019.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 1057.65, "raw_sumsq": 20698.3107}
+{"path": "targets/Headphone.com Legacy Harman over-ear 2018 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -137.62, "raw_sumsq": 12937.843}
+{"path": "targets/Headphone.com Legacy Harman over-ear 2018.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 675.94, "raw_sumsq": 13600.125}
+{"path": "targets/Headphone.com Legacy original.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 481.78, "raw_sumsq": 19437.478}
+{"path": "targets/Headphone.com Legacy SBAF-Serious.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -249.39000000000001, "raw_sumsq": 9973.6527}
+{"path": "targets/HMS II.3 AutoEq in-ear.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -26.500000000000018, "raw_sumsq": 14987.861}
+{"path": "targets/HMS II.3 Harman in-ear 2019 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 108.97999999999999, "raw_sumsq": 18344.8424}
+{"path": "targets/HMS II.3 Harman over-ear 2018 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -418.07, "raw_sumsq": 13224.5383}
+{"path": "targets/Innerfidelity 2016.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 2176.9, "raw_sumsq": 26107.9794}
+{"path": "targets/Innerfidelity 2017.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -295.81, "raw_sumsq": 11592.4355}
+{"path": "targets/Innerfidelity AutoEq in-ear.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 141.75, "raw_sumsq": 15626.7647}
+{"path": "targets/Innerfidelity Harman in-ear 2019 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 277.23, "raw_sumsq": 18854.7377}
+{"path": "targets/Innerfidelity Harman in-ear 2019.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 1047.29, "raw_sumsq": 23989.6817}
+{"path": "targets/Innerfidelity Harman over-ear 2018 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -140.48000000000002, "raw_sumsq": 14340.9154}
+{"path": "targets/Innerfidelity Harman over-ear 2018.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 779.0, "raw_sumsq": 15795.7548}
+{"path": "targets/Innerfidelity SBAF Serious.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -98.17000000000002, "raw_sumsq": 8555.8319}
+{"path": "targets/Innerfidelity transformation 2016 to 2017.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -2474.87, "raw_sumsq": 13410.2009}
+{"path": "targets/JM-1 with Harman filters.csv", "ok": true, "n": 481, "f0": 20.0, "f_last": 20000.0, "raw_sum": 1352.158, "raw_sumsq": 9248.026884}
+{"path": "targets/JM-1 with Harman treble filter.csv", "ok": true, "n": 481, "f0": 20.0, "f_last": 20000.0, "raw_sum": 589.5, "raw_sumsq": 7850.7288}
+{"path": "targets/LMG 5128 0.6 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 552.61, "raw_sumsq": 11947.0805}
+{"path": "targets/LMG 5128 0.6.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 1555.84, "raw_sumsq": 12714.4728}
+{"path": "targets/oratory1990 in-ear without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 499.41, "raw_sumsq": 10922.1217}
+{"path": "targets/oratory1990 in-ear.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 2107.85, "raw_sumsq": 22239.1963}
+{"path": "targets/oratory1990 optimum hifi over-ear.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 26.610000000000003, "raw_sumsq": 11162.9135}
+{"path": "targets/Rtings AutoEq in-ear.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 88.9, "raw_sumsq": 13373.752}
+{"path": "targets/Rtings Harman in-ear 2019 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 224.38, "raw_sumsq": 16945.7478}
+{"path": "targets/Rtings Harman in-ear 2019.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 1671.75, "raw_sumsq": 21288.1549}
+{"path": "targets/Rtings Harman over-ear 2018 without bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -167.19, "raw_sumsq": 15494.3169}
+{"path": "targets/Rtings Harman over-ear 2018.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 751.82, "raw_sumsq": 15339.0394}
+{"path": "targets/Rtings in-ear origianl with bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 2553.91, "raw_sumsq": 20558.6185}
+{"path": "targets/Rtings orginal average.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -486.6, "raw_sumsq": 10092.7762}
+{"path": "targets/Rtings original with bass.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 1920.46, "raw_sumsq": 12983.2768}
+{"path": "targets/Rtings original.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": -169.2, "raw_sumsq": 9105.7678}
+{"path": "targets/Rtings SBAF-Serious.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 411.3, "raw_sumsq": 9542.371}
+{"path": "targets/zero.csv", "ok": true, "n": 695, "f0": 20.0, "f_last": 19955.54, "raw_sum": 0.0, "raw_sumsq": 0.0}

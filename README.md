@@ -87,34 +87,37 @@ integrated, loudness range, peak max).](docs/Meter.png)
 ## Safety first
 
 CAGEq follows "no sound beats wrong sound": any inconsistency drops the system into a defined,
-silent safe state immediately — including a watchdog independent of the main calculation engine,
-which can still intervene even if that engine has crashed. Digital clipping (above 0 dBFS) is
-guarded against by several independent checks, not a single calculation anyone could get wrong.
+silent safe state immediately. Digital clipping (above 0 dBFS) is guarded against by several
+independent checks, not a single calculation anyone could get wrong.
 
 ## How it works
 
 ```
-Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──JSON-RPC over stdio──▶ Python sidecar
-                                                    │                                     │
-                                            process/watchdog                      AutoEq framework,
-                                               management                         NumPy/SciPy, DSP
-                                                    │                                     │
-                                                    └──────── biquad coefficients ────────┘
-                                                                       │
-                              ┌────────────────────────────────────────┴──────┐
-                              ▼                                               ▼
-             Equalizer APO (external, optional)                        CAGEq's own APO
-            — click-free config-reload crossfade              — live coefficient ramping over a
-                                                                shared-memory control channel
+Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──biquad coefficients──┐
+                                                    │                            │
+                                            AutoEq's fitting                     │
+                                          algorithm, ported to                   │
+                                             Rust (SLSQP)                        │
+                                                    │                            │
+                              ┌─────────────────────┴──────┐                    │
+                              ▼                             ▼                   │
+             Equalizer APO (external, optional)       CAGEq's own APO ◀─────────┘
+            — click-free config-reload crossfade    — live coefficient ramping over a
+                                                       shared-memory control channel
 ```
 
-* **Why Python in the sidecar:** reuse the established AutoEq framework (fitting algorithms plus
-  its curated target-curve database) instead of reimplementing it in Rust/JS. Not latency-critical
-  — the actual real-time audio path lives entirely in the two engines above.
-* **Why Rust/Tauri:** a lean native WebView2 shell instead of a bundled Chromium (Electron), plus
-  a fail-safe watchdog independent of Python. The orchestrator itself doesn't need Rust's
-  performance to do its job — but two other components in this same Rust codebase have their own
-  reasons: the spectrum analyzer's FFT runs on [`rustfft`](https://github.com/ejmahler/RustFFT),
+* **Why Rust, not Python:** CAGEq originally called out to a Python sidecar (NumPy/SciPy/AutoEq)
+  over JSON-RPC for the fit itself, to reuse AutoEq's established fitting algorithm rather than
+  reimplementing it. That algorithm — the FR-prep, the SLSQP parametric-EQ solver, the
+  measurement/target catalogue fetch — now runs natively in Rust (`cageq-peq-solver`,
+  `cageq-catalog`), validated against the original Python/AutoEq implementation on the full
+  measurement corpus rather than assumed equivalent. The app no longer starts a Python process at
+  all; the reference implementation still lives in the repo purely as the comparison target those
+  validation tests run against.
+* **Why Rust/Tauri:** a lean native WebView2 shell instead of a bundled Chromium (Electron). The
+  orchestrator itself doesn't need Rust's performance to do its job — but two other components in
+  this same Rust codebase have their own reasons: the spectrum analyzer's FFT runs on
+  [`rustfft`](https://github.com/ejmahler/RustFFT),
   which benchmarks itself against FFTW and claims to match or beat it; and CAGEq's own APO runs
   inside `audiodg.exe`'s real-time audio callback, where missing a deadline means an audible
   glitch rather than a slow UI — though it leans on a fair amount of `unsafe` to interop with its
@@ -136,7 +139,7 @@ Windows-specific audio engine, not restructuring the rest.
 
 Windows-on-Arm isn't natively built or tested, but should already work today via the Equalizer
 APO backend and its own ARM64 build: CAGEq there only ever writes `config.txt`, never loads
-anything into `audiodg.exe` itself, and the rest of the app (Tauri shell, Python sidecar) isn't
+anything into `audiodg.exe` itself, and the rest of the app (the Tauri shell) isn't
 real-time-critical code, so running under Windows' x64 emulation should be a non-issue. CAGEq's
 own custom APO is the one piece that doesn't work there — it loads in-process into `audiodg.exe`,
 which is genuinely architecture-matched on Arm, so it would need an actual native ARM64 build
@@ -151,9 +154,10 @@ taken on faith.
 
 ## Status
 
-Built and working: both audio engines, the fitting pipeline, the custom-filter editor, A/B/Dry
-comparison with loudness matching, the fail-safe watchdog, and the oscilloscope/vectorscope/
-spectrum-analyzer/meter instrument views. Actively developed — expect rough edges.
+Built and working: both audio engines, the fitting pipeline (now pure Rust, no Python at
+runtime), the custom-filter editor, A/B/Dry comparison with loudness matching, and the
+oscilloscope/vectorscope/spectrum-analyzer/meter instrument views. Actively developed — expect
+rough edges.
 
 ## Getting started
 
@@ -163,9 +167,9 @@ full installation walkthrough and building from source (maintainers).
 ## License
 
 [GPL-3.0-or-later](LICENSE). Third-party dependencies bundled into the built application (Rust
-crates, the frontend's npm packages, the frozen Python sidecar) are all permissively licensed
-(MIT/BSD/Apache-2.0 and similar) — see [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) for
-the full list and their license texts.
+crates, the frontend's npm packages) are all permissively licensed (MIT/BSD/Apache-2.0 and
+similar) — see [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) for the full list and their
+license texts.
 
 ## Acknowledgments
 
