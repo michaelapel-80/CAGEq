@@ -59,7 +59,7 @@ const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze:
 // number per bin). Numbers below are a starting point for that live tuning, not the final word.
 const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" | "glow">> = {
   fast: { trailTau: 0.05, tail: 4, glow: 0.1 },
-  distribution: { trailTau: 0.8, tail: 6, glow: 0.3 },
+  distribution: { trailTau: 1.4, tail: 6, glow: 0.3 },
 };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
