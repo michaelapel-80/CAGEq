@@ -1,9 +1,8 @@
-A fit-quality fix for the Rust port introduced in 0.14.0, plus a UI responsiveness fix.
+A responsiveness fix for the spectrum analyzer's larger FFT window sizes.
 
-- **Fixed:** the AutoEq fit could occasionally place one or two parametric bands at odd
-  very-low frequencies (near 20-30 Hz) that real AutoEq never produces, on some
-  headphone/target combinations. The Rust solver was running its band search on a finer
-  frequency grid than AutoEq actually uses for that step, letting sub-audible noise in the
-  measurement register as a "peak" worth fitting; it now matches AutoEq's own grid exactly.
-- **Fixed:** applying a correction or generating a mobile export could briefly freeze the
-  whole window - these now run in the background instead of blocking the UI thread.
+- **Fixed:** at the Medium and High FFT window sizes, the spectrum only refreshed about 6-12 times
+  per second (High waited ~171 ms between updates) instead of the ~23 the default size gets. The
+  update interval is now the same at every window size, so the larger sizes feel as responsive as
+  the default while keeping their finer frequency resolution — and the phosphor "Distribution"
+  preset now has a steady stream of frames to integrate at every size. The default size is
+  unchanged.
