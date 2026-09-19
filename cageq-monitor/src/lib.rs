@@ -93,7 +93,17 @@ pub struct SpectrumUpdate {
     /// Parseval-consistent for a concentrated source (recovers a swept tone's true level with none
     /// of `db`'s dilution droop — matches `peak_db` at the same bin to within ~1dB, verified for
     /// several frequencies) — and, for broadband content, reads pink noise flat, the conventional
-    /// RTA display. Computed unconditionally (cheap — reuses the same `gaussian_power` call
+    /// RTA display.
+    ///
+    /// **Below ~150 Hz those two properties can't both hold**, and pink noise wins: the display's
+    /// log bins there are narrower than the analysis window can resolve (e.g. 0.6 Hz bins at 20 Hz
+    /// against a ≥1.5 Hz-resolution window), so a tone's energy is genuinely spread across many
+    /// bins and each bin only owns its share of it. `db_raw` reports each bin's *band power*
+    /// (flat for pink noise, verified to ≈0.5 dB down to 20 Hz), so an isolated low tone reads
+    /// progressively lower in this curve — measured ≈ -4 dB at 100 Hz, ≈ -10 dB at 20 Hz — where
+    /// it used to read true but pink noise read up to +9 dB high (a constant-*bandwidth* sum on
+    /// what was meant to be a constant-*percentage* display). A low tone's true level is what
+    /// `peak_db` (and `peaks`) are for. Computed unconditionally (cheap — reuses the same `gaussian_power` call
     /// already made for `db`, just an extra multiply-and-log step) so SpectrumScope's Tilt toggle
     /// needs no backend coordination, the same "always compute both, let each view pick" pattern
     /// `db_lin` below already established.
@@ -975,7 +985,18 @@ mod windows_impl {
             wsum += w;
         }
         if wsum > 0.0 {
-            (acc / wsum, acc)
+            // `raw` is `acc` scaled by `half_width / sigma` — 1.0 wherever the kernel is exactly
+            // the bin's own width-matched one (everything above the `GAUSSIAN_FLOOR_SIGMA_BINS`
+            // crossover, ~167 Hz at 48 kHz), and < 1 only where the floor has *widened* the kernel
+            // past the bin's own span. `acc` sums over the kernel's whole effective width, so left
+            // alone, a floored bin would sum a constant-Hz bandwidth while its own nominal band
+            // keeps shrinking with frequency — and for pink noise (density ∝ 1/f) that reads +3
+            // dB/octave *higher* toward low frequencies, ≈ +9 dB at 20 Hz (measured; see the
+            // `pink_noise_reads_flat_...` test). Scaling by `half_width / sigma` restores what a
+            // kernel of the bin's own width would have summed, i.e. the band power the display bin
+            // actually spans. (`density` above needs no such correction — dividing by `wsum`
+            // already normalizes the kernel's width away.)
+            (acc / wsum, acc * (half_width / sigma))
         } else {
             (0.0, 0.0)
         }
@@ -2299,6 +2320,51 @@ mod windows_impl {
         /// just `db`'s own per-bin power rescaled by a *deterministic* per-bin span — that random
         /// component is identical in both, only the systematic slope differs. A spread-based check
         /// would conflate the two and wash out the improvement; the slope isolates it.
+        /// `db_raw` must read pink noise flat all the way down, not just in the mid range the
+        /// slope test below covers (~63 Hz-6.4 kHz, a generous fraction of `db`'s own slope). The
+        /// regression this guards: below the `GAUSSIAN_FLOOR_SIGMA_BINS` crossover (~167 Hz at 48
+        /// kHz) the raw Gaussian *sum* used to keep summing a constant-Hz bandwidth while each
+        /// display bin's own band kept shrinking, so pink noise read +3 dB/octave HIGH toward low
+        /// frequencies — measured +9 dB at 20 Hz, +4-5 dB at 50 Hz, on both the Base and High-res
+        /// tiers (the floor is in padded-bin units, so it doesn't move with the tier). Averaged
+        /// over many snapshots (in dB) so a single frame's chi-square scatter doesn't decide it;
+        /// `db` (already density-correct) is the tolerance's own noise-floor reference.
+        #[test]
+        fn db_raw_reads_pink_noise_flat_down_to_the_low_end() {
+            let rate = 48_000u32;
+            let ratio = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_BINS as f32 - 1.0));
+            let idx = |f: f32| ((f / SPEC_F_MIN).ln() / ratio.ln()).round() as usize;
+            for tier in [BASE_FFT_SIZE, HIGH_RES_FFT_SIZE] {
+                let mut spec = Spectrum::new(rate, tier, Arc::new(AtomicBool::new(false)));
+                let mut noise = crate::signal::PinkNoise::new();
+                let mut buf = vec![0.0f32; 4096];
+                let mut sum_raw = vec![0.0f32; N_LOG_BINS];
+                let mut frames = 0;
+                for k in 0..(rate as usize * 30 / 4096) {
+                    for s in buf.iter_mut() {
+                        *s = noise.next_pink() * 0.5;
+                    }
+                    spec.push(&buf);
+                    if k > 24 && k % 2 == 0 {
+                        let u = spec.snapshot(true);
+                        for (acc, v) in sum_raw.iter_mut().zip(&u.db_raw) {
+                            *acc += v;
+                        }
+                        frames += 1;
+                    }
+                }
+                let mean = |f: f32| sum_raw[idx(f)] / frames as f32;
+                let at_1k = mean(1000.0);
+                for f in [20.0f32, 30.0, 50.0, 70.0, 100.0, 150.0, 200.0, 300.0, 500.0, 3000.0, 10_000.0] {
+                    let err = mean(f) - at_1k;
+                    assert!(
+                        err.abs() < 2.0,
+                        "tier {tier}: db_raw on pink noise should read flat, but {f} Hz is {err:+.2} dB off its own 1 kHz level"
+                    );
+                }
+            }
+        }
+
         #[test]
         fn db_raw_reads_pink_noise_flatter_than_db() {
             let rate = 48_000u32;
