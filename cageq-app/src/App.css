@@ -501,6 +501,34 @@ select:disabled {
   border-radius: 5px;
   pointer-events: none;
 }
+/* Small indeterminate spinner (ExportDialog's "solver running" indicator) — sized in em so it
+   scales with whatever text it sits beside, ring drawn in the current text colour, accent on the
+   leading arc. Reduced-motion users get a slow opacity pulse instead of a spin. */
+.spinner {
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  box-sizing: border-box;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spinnerTurn 0.8s linear infinite;
+}
+@keyframes spinnerTurn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes spinnerPulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: spinnerPulse 1.6s ease-in-out infinite;
+  }
+}
 .clip-note-text {
   min-width: 0;
   display: -webkit-box;

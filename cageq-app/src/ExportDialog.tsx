@@ -49,6 +49,11 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
     setFitting(true);
     const method = format === "parametric" ? "export_eq_fit" : "fixed_band_eq_fit";
     const params = format === "parametric" ? { filters, bandCount } : { filters, preset: fixedBandPreset };
+    // Set by this effect's cleanup once a newer fit (or unmount) supersedes this one. The backend
+    // call itself can't be cancelled, so an older, slower solve can still resolve after a newer one
+    // started — without this it would flip `fitting` off (hiding the spinner) while the newer solve
+    // is still running, and briefly show its stale result in place of the one being waited for.
+    let superseded = false;
     const h = setTimeout(() => {
       invoke<ExportFit>(method, params)
         // Sorted ascending by Fc — AutoEq's optimizer returns bands in fit order (shelves
@@ -57,11 +62,20 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
         // in the table and as "Filter 1/2/3..." in the exported text. Sorted once here so
         // every consumer (the table, parametricEqText, the preview curve — order-independent
         // for that one) sees the same canonical order.
-        .then((r) => setFit({ ...r, filters: [...r.filters].sort((a, b) => a.freq_hz - b.freq_hz) }))
-        .catch(() => setFit(null))
-        .finally(() => setFitting(false));
+        .then((r) => {
+          if (!superseded) setFit({ ...r, filters: [...r.filters].sort((a, b) => a.freq_hz - b.freq_hz) });
+        })
+        .catch(() => {
+          if (!superseded) setFit(null);
+        })
+        .finally(() => {
+          if (!superseded) setFitting(false);
+        });
     }, DEBOUNCE_MS);
-    return () => clearTimeout(h);
+    return () => {
+      superseded = true;
+      clearTimeout(h);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [format, filters, bandCount, fixedBandPreset]);
 
@@ -201,6 +215,20 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
               {t("export.fitError", { rms: fitError.rms.toFixed(2), max: fitError.max.toFixed(2) })}
             </div>
           )}
+          {/* Solver-running indicator, in the same reserved corner-overlay style as the fit-error
+              label (top-right, so it never collides with it) — a high band count or the 31-band
+              preset takes long enough that, with nothing here, the previous result just sat there
+              looking current until the new one popped in. `fitting` covers the debounce wait too,
+              so it starts the instant the control moves. */}
+          {fitting && (
+            <div
+              role="status"
+              style={{ position: "absolute", top: 6, right: 8, display: "flex", alignItems: "center", gap: "0.4em", fontSize: "0.68em", opacity: 0.85, pointerEvents: "none" }}
+            >
+              <span className="spinner" aria-hidden="true" />
+              {t("export.fitting")}
+            </div>
+          )}
         </div>
         <div ref={setLegendHost} className="chart-legend-host" />
 
@@ -209,7 +237,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
           // row up to the cap (reported live as the dialog visibly expanding before the internal
           // scrollbar ever kicks in) — a fixed height scrolls internally from the very first row
           // past it, so the dialog's total size stops depending on the band count/preset at all.
-          <div style={{ height: "9.5em", overflowY: "auto" }}>
+          <div style={{ height: "9.5em", overflowY: "auto", opacity: fitting ? 0.45 : 1, transition: "opacity 0.15s" }}>
             <table className="export-table">
               <thead>
                 <tr>
@@ -243,9 +271,9 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
           readOnly
           rows={6}
           value={fitting && !fit ? t("export.fitting") : text}
-          style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.6em" }}
+          style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.6em", opacity: fitting ? 0.45 : 1, transition: "opacity 0.15s" }}
         />
-        <button type="button" disabled={!fit} onClick={copy}>
+        <button type="button" disabled={!fit || fitting} onClick={copy}>
           {copied ? t("export.copied") : t("export.copy")}
         </button>
 
