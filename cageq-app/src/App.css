@@ -471,6 +471,49 @@ select:disabled {
 .chart-legend-host {
   min-height: 1.9rem;
 }
+/* The "Emergency clipping protection" notice — a child of `.chart-wrap` (App.tsx), OVERLAID on the
+   instrument's top-left corner rather than laid out anywhere: it flips on/off as gain and preamp
+   change, often mid-drag on a band's fader in the panel below, so anything that changes a height (or
+   narrows something until it wraps) shifts the fader out from under the cursor. Absolutely
+   positioned it takes no space at all — `.chart-wrap`'s height is fixed by JS anyway — so nothing
+   moves whether it's showing or not, and normal operation pays no empty-row cost. Top-left because
+   EqChart's hover-cursor readout and the scopes' ⚙ toolbar own the right side.
+   `pointer-events: none` on the box, back on for the button only, so the notice never swallows
+   chart hover/drags (band nodes) beneath its own text. */
+.clip-note {
+  position: absolute;
+  top: 0.75rem;
+  left: 2.6rem; /* clears the Eq chart's dB axis labels */
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  box-sizing: border-box;
+  max-width: min(40rem, calc(100% - 5rem));
+  margin: 0;
+  padding: 0.15rem 0.45rem;
+  overflow: hidden;
+  font-size: 0.72rem;
+  line-height: 1.15;
+  color: #b8860b;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid color-mix(in srgb, #b8860b 45%, transparent);
+  border-radius: 5px;
+  pointer-events: none;
+}
+.clip-note-text {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.clip-note button {
+  flex: none;
+  font-size: inherit;
+  padding: 0.1em 0.5em;
+  pointer-events: auto;
+}
 .monitor-toggle {
   display: inline-flex;
   align-items: center;

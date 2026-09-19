@@ -2954,6 +2954,24 @@ function App() {
                         }}
                       />
                     )}
+                    {/* "Emergency clipping protection" notice, overlaid top-left on the instrument (see
+                        `.clip-note`). It flips on/off as gain and preamp change — very often mid-drag on
+                        a band's fader in the panel right below — so it must take no layout space at all:
+                        as a normal block under the chart each flip shifted everything under the cursor
+                        by a line and the fader fought the layout (grab moves, warning toggles, grab
+                        moves…), and a reserved empty slot cost a blank line in normal operation. */}
+                    {result.clipping_warning && (
+                      <p className="clip-note">
+                        <span className="clip-note-text" title={tr("correction.clipping")}>
+                          {tr("correction.clipping")}
+                        </span>
+                        {loudness?.mode === "Comparison" && headroomPregain != null && headroomPregain < loudness.base_pregain_db && (
+                          <button type="button" onClick={addHeadroom} title={tr("correction.addHeadroomTitle")}>
+                            {tr("correction.addHeadroom", { db: headroomPregain })}
+                          </button>
+                        )}
+                      </p>
+                    )}
                   </div>
                     {/* §5.3c post-EQ meters beside the chart (loopback, post-EQ) — always on. */}
                     <div className="meter-col">
@@ -2964,21 +2982,7 @@ function App() {
                       the meters too, so long/localized toggle labels have room. */}
                   <div ref={setLegendHost} className="chart-legend-host" />
                   </div>
-                  {result.clipping_warning && (
-                    <p style={{ color: "#b8860b", fontSize: "0.8em", margin: "0.2em 0 0" }}>
-                      {tr("correction.clipping")}
-                      {loudness?.mode === "Comparison" && headroomPregain != null && headroomPregain < loudness.base_pregain_db && (
-                        <button
-                          type="button"
-                          onClick={addHeadroom}
-                          style={{ marginLeft: "0.5em", fontSize: "0.9em", padding: "0.1em 0.5em" }}
-                          title={tr("correction.addHeadroomTitle")}
-                        >
-                          {tr("correction.addHeadroom", { db: headroomPregain })}
-                        </button>
-                      )}
-                    </p>
-                  )}
+
                 </>
               )}
             </div>
