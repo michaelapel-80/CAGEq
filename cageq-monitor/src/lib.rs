@@ -297,15 +297,15 @@ mod windows_impl {
     /// Top tier — 4x [`BASE_FFT_SIZE`], ≈683 ms at ≤48 kHz, ≈0.73 Hz raw bins instead of ≈2.9 Hz
     /// (both at [`ZERO_PAD_FACTOR`]).
     ///
-    /// Not a CPU tradeoff at all any more, in fact — not just "nearly free". Total FFT cost/sec is
-    /// `O(M log M) × hops/sec` where `hops/sec = rate / (analysis_size / FFT_OVERLAP_DIV)`, and
-    /// `M` is `padded_size` (see that local's own doc for the fixed-budget mechanism): at any
-    /// given sample rate, `M` is now the *same* fixed budget at all three tiers (padding just
-    /// shrinks as the real window grows into it), so raising the tier doesn't grow `M` at all —
-    /// only `analysis_size` grows, which *shrinks* `hops/sec`. A higher tier therefore runs the
-    /// *same-cost* FFT *less often* — genuinely cheaper per second, not merely close to free
-    /// (baseline is ~0.3% of one core at Base, per [`CAPTURE_RATE_CAP`]'s own measurement — CPU
-    /// was never the constraint here, at any of the three sizes, before or after this). Higher
+    /// Not a CPU tradeoff at all any more, in fact. Total FFT cost/sec is `O(M log M) × hops/sec`,
+    /// where `M` is `padded_size` (see that local's own doc for the fixed-budget mechanism) and
+    /// `hops/sec = rate / fft_hop`. At any given sample rate `M` is the *same* fixed budget at all
+    /// three tiers (padding just shrinks as the real window grows into it) and `fft_hop` is the
+    /// same duration at all three too (see `tier_params`), so the cost is *flat* across tiers —
+    /// exactly Base's (~0.3% of one core in release, per [`CAPTURE_RATE_CAP`]'s own measurement;
+    /// CPU was never the constraint here at any of the three sizes). (It used to *fall* with the
+    /// tier, when the hop scaled with the window — the cheaper-per-second side effect was bought
+    /// with 171 ms between updates at this tier, a bad trade for a saving nobody needed.) Higher
     /// sample rates are the real cost driver instead: `mult` scales `M` directly (see
     /// `padded_size`'s own doc), linearly, with no such cancellation. `FFT_OVERLAP_DIV` is a
     /// genuinely different knob from either: more overlap buys smoother/faster-updating output at
@@ -379,7 +379,10 @@ mod windows_impl {
     const GAUSSIAN_WIDTH_MULT: f32 = 1.2;
     /// The rate the base size is tuned for; higher rates scale the FFT proportionally.
     const BASE_RATE: f32 = 48_000.0;
-    /// Hop is a quarter of the (per-rate) FFT size → 75% overlap, Welch-style averaging.
+    /// Hop is a quarter of [`BASE_FFT_SIZE`]'s (per-rate) window → 75% overlap at Base, Welch-style
+    /// averaging. The hop is the same *duration* at every tier, so the larger tiers overlap more
+    /// (87.5% Med, 93.75% High): that buys update cadence/latency, not extra statistical averaging —
+    /// successive windows there are highly correlated.
     const FFT_OVERLAP_DIV: usize = 4;
     /// Number of log-frequency display bins spanning [SPEC_F_MIN, SPEC_F_MAX].
     const N_LOG_BINS: usize = 240;
@@ -465,17 +468,18 @@ mod windows_impl {
     ///
     /// **Deliberately a fixed number of seconds, not a fraction of the hop** — tried the latter
     /// (`SPEC_TAU_HOPS = 0.469`, reproducing this exact 0.02s/43ms ratio at the default window,
-    /// scaling proportionally at `HIGH_RES_FFT_SIZE`'s ~171 ms hop) on the reasoning that it kept
-    /// the *relative* damping-per-hop constant across window sizes, the same principle that
+    /// scaling proportionally at `HIGH_RES_FFT_SIZE`'s then-171 ms hop) on the reasoning that it
+    /// kept the *relative* damping-per-hop constant across window sizes, the same principle that
     /// correctly governs `GAUSSIAN_FLOOR_SIGMA_BINS`. Reverted after live use: at high-res that
     /// works out to an ≈80 ms time constant, and it "feels incredibly slow" — perceived
     /// sluggishness tracks *absolute* response latency, not a ratio to the update cadence, unlike
     /// the Gaussian floor's case (there, the physical thing being covered — the Hann window's own
     /// sidelobe spacing — itself shrinks in Hz as the window lengthens, so scaling proportionally
     /// is physically correct; here, nothing about human time-perception scales with FFT hop size).
-    /// The fixed 0.02s does mean *less* relative smoothing at high-res (barely more than one raw
-    /// hop's own noise gets through, confirmed live as "slightly steppy... but still felt ok") —
-    /// an accepted tradeoff, steppy-but-responsive beating smooth-but-laggy.
+    /// The fixed 0.02s left *less* relative smoothing at high-res, back when the hop grew with the
+    /// window (barely more than one raw hop's own noise got through — "slightly steppy... but
+    /// still felt ok"). The hop is now the same ~43 ms at every tier (see `fft_hop`), so this
+    /// constant smooths identically across tiers and that steppiness is gone at its source.
     const SPEC_TAU_SECS: f32 = 0.02;
     /// Spectrum emit cadence — 60 fps, matching the level meter. The FFT is heavier than the
     /// meter but the fold + emit is cheap enough that the full rate reads noticeably smoother.
@@ -1197,7 +1201,8 @@ mod windows_impl {
         base_fft_size: usize,      // current, already-snapped tier — reconfigure()'s change guard
         analysis_size: usize,      // real, windowed sample count (BASE_FFT_SIZE scaled to rate) —
                                     // governs window duration/hop timing, i.e. true resolution
-        fft_hop: usize,            // hop between windows = analysis_size / FFT_OVERLAP_DIV
+        fft_hop: usize,            // hop between windows = BASE_FFT_SIZE*mult / FFT_OVERLAP_DIV — the
+                                    // same duration at every tier, see `tier_params`
         in_buf: Vec<f32>,          // realfft input scratch, len padded_size (see that local's own
                                     // doc — the fixed per-rate budget, not analysis_size*ZERO_PAD_FACTOR
                                     // at every tier) — only the first analysis_size entries ever hold real samples,
@@ -1269,7 +1274,14 @@ mod windows_impl {
             // devices instead of coarsening at high rates.
             let mult = ((rate as f32 / BASE_RATE).round().max(1.0) as usize).next_power_of_two();
             let analysis_size = base_fft_size * mult;
-            let fft_hop = analysis_size / FFT_OVERLAP_DIV;
+            // Constant across all three tiers (≈42.7 ms at every rate — BASE_FFT_SIZE's own quarter-
+            // window), NOT a quarter of each tier's own, longer window: the transform is the same
+            // fixed-length `padded_size` FFT at every tier (see `new`), so a constant hop costs the
+            // same per second at every tier too — never more than Base already does — while a
+            // per-tier hop only ever made the larger tiers *less* responsive (171 ms between updates
+            // at High, i.e. ~6 spectra/sec feeding the front-end's phosphor accumulator instead of
+            // ~23) for a CPU saving nobody needed. Base itself is bit-identical either way.
+            let fft_hop = BASE_FFT_SIZE * mult / FFT_OVERLAP_DIV;
             // Windows only the real (analysis_size) portion — the padding is zeros regardless of
             // any window coefficient, so extending the window formula over it would be dead work.
             let window: Vec<f32> = (0..analysis_size)
@@ -2037,6 +2049,38 @@ mod windows_impl {
             let high = Spectrum::new(rate, HIGH_RES_FFT_SIZE, fold()).avg_power.len();
             assert_eq!(base, med, "Med should reuse Base's exact transform budget");
             assert_eq!(base, high, "High should reuse Base's exact transform budget too");
+        }
+
+        /// Companion to the test above: the transform is the same fixed size at every tier, so the
+        /// hop must be the same *duration* at every tier too — otherwise the larger tiers just
+        /// update less often (171 ms between spectra at High vs. Base's ~43 ms) for a saving the
+        /// fixed transform already made unnecessary. Base's own value (2048 at 48 kHz, ≈42.7 ms)
+        /// is the reference and must not move.
+        #[test]
+        fn fft_hop_is_constant_across_tiers_at_a_fixed_rate() {
+            let fold = || Arc::new(AtomicBool::new(false));
+            for rate in [44_100u32, 48_000, 96_000] {
+                let base = Spectrum::new(rate, BASE_FFT_SIZE, fold()).fft_hop;
+                let med = Spectrum::new(rate, MED_FFT_SIZE, fold()).fft_hop;
+                let high = Spectrum::new(rate, HIGH_RES_FFT_SIZE, fold()).fft_hop;
+                assert_eq!(base, med, "Med's hop should match Base's at {rate} Hz");
+                assert_eq!(base, high, "High's hop should match Base's at {rate} Hz");
+            }
+            assert_eq!(Spectrum::new(48_000, BASE_FFT_SIZE, fold()).fft_hop, 2048);
+            assert_eq!(Spectrum::new(96_000, BASE_FFT_SIZE, fold()).fft_hop, 4096, "hop duration holds at 96 kHz");
+        }
+
+        /// `reconfigure` recomputes the hop from `tier_params` too — a live tier change must land
+        /// on the same constant, and never leave a stale per-tier value behind.
+        #[test]
+        fn reconfigure_keeps_the_hop_constant() {
+            let rate = 48_000u32;
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
+            let base_hop = spec.fft_hop;
+            spec.reconfigure(rate, HIGH_RES_FFT_SIZE);
+            assert_eq!(spec.fft_hop, base_hop);
+            spec.reconfigure(rate, BASE_FFT_SIZE);
+            assert_eq!(spec.fft_hop, base_hop);
         }
 
         /// The budget itself still scales with the sample-rate `mult`, same as before this
