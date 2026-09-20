@@ -280,43 +280,35 @@ mod windows_impl {
     const GLOW_SPAN_DB: f32 = 3.0;
 
     // --- spectrum analyzer (post-EQ loopback FFT) ---
-    /// Base *analysis window* size at ≤48 kHz (≈171 ms — decent low-end for resonance hunting).
-    /// Scaled up with the sample rate in [`Spectrum::new`] so the window *duration* — and thus the
-    /// true frequency resolution, Δf = rate/analysis_size, i.e. how well two close tones can be
-    /// told apart — stays constant at 96/192 kHz instead of halving/quartering. We only ever
-    /// display up to 20 kHz, so analysing the whole (wider) band and ignoring the bins above 20 kHz
-    /// is simpler and alias-free vs. decimating the input.
+    /// Shortest *analysis window* the analyzer offers, and its default, at ≤48 kHz (8192 samples ≈
+    /// 171 ms — decent low-end for resonance hunting). Scaled up with the sample rate in
+    /// [`Spectrum::new`] so the window *duration* — and thus the true frequency resolution, Δf =
+    /// rate/analysis_size, i.e. how well two close tones can be told apart — stays constant at
+    /// 96/192 kHz instead of halving/quartering. We only ever display up to 20 kHz, so analysing
+    /// the whole (wider) band and ignoring the bins above 20 kHz is simpler and alias-free vs.
+    /// decimating the input.
     ///
     /// This is the *real* window length, not the FFT transform length — see `ZERO_PAD_FACTOR`
     /// below for why those are no longer the same number.
     ///
-    /// The default, not the only option — one of three explicit tiers the UI's FFT-size slider
-    /// picks between (`Spectrum::new`'s `base_fft_size` argument, passed straight through from
-    /// the frontend — see [`MED_FFT_SIZE`]/[`HIGH_RES_FFT_SIZE`] for the tradeoff a larger window
-    /// buys, and, just as important, doesn't cost).
+    /// The default, not the only option: the UI's window-size slider is stepless between this and
+    /// [`MAX_FFT_SIZE`] (in [`FFT_SIZE_STEP`] increments — see [`snap_fft_size`]), passed straight
+    /// through as `Spectrum::new`'s `base_fft_size`. Shorter than this is deliberately not offered:
+    /// `GAUSSIAN_FLOOR_SIGMA_BINS` and the peak-detection tuning were all settled at ≥ this size.
     const BASE_FFT_SIZE: usize = 8192;
-    /// Middle tier — 2x [`BASE_FFT_SIZE`], ≈341 ms at ≤48 kHz, ≈1.5 Hz raw bins instead of ≈2.9 Hz
-    /// (both at [`ZERO_PAD_FACTOR`]). This exact size was tried once as the *default* and rejected
-    /// ("neither here nor there" — see [`HIGH_RES_FFT_SIZE`]'s doc for the full reasoning that
-    /// judgment rests on), but that's a verdict about the default, not about offering it as a
-    /// real, explicit choice between [`BASE_FFT_SIZE`] and [`HIGH_RES_FFT_SIZE`] for whoever wants
-    /// it — which is what the slider's middle position is. `Spectrum::new` treats this the same as
-    /// [`HIGH_RES_FFT_SIZE`] for the resolution-dependent peak-detection tuning (anything above
-    /// `BASE_FFT_SIZE` counts as "high res" there — see its own `high_res` local).
-    const MED_FFT_SIZE: usize = 16384;
-    /// Top tier — 4x [`BASE_FFT_SIZE`], ≈683 ms at ≤48 kHz, ≈0.73 Hz raw bins instead of ≈2.9 Hz
-    /// (both at [`ZERO_PAD_FACTOR`]).
+    /// Longest window — 4x [`BASE_FFT_SIZE`], ≈683 ms at ≤48 kHz, ≈0.73 Hz raw bins instead of
+    /// ≈2.9 Hz (both at [`ZERO_PAD_FACTOR`]). The window can grow this far and no further because
+    /// it must fit inside the fixed transform (`padded_size`); it reaches it exactly, i.e. zero
+    /// padding, at this size.
     ///
-    /// Not a CPU tradeoff at all any more, in fact. Total FFT cost/sec is `O(M log M) × hops/sec`,
-    /// where `M` is `padded_size` (see that local's own doc for the fixed-budget mechanism) and
-    /// `hops/sec = rate / fft_hop`. At any given sample rate `M` is the *same* fixed budget at all
-    /// three tiers (padding just shrinks as the real window grows into it) and `fft_hop` is the
-    /// same duration at all three too (see `tier_params`), so the cost is *flat* across tiers —
-    /// exactly Base's (~0.3% of one core in release, per [`CAPTURE_RATE_CAP`]'s own measurement;
-    /// CPU was never the constraint here at any of the three sizes). (It used to *fall* with the
-    /// tier, when the hop scaled with the window — the cheaper-per-second side effect was bought
-    /// with 171 ms between updates at this tier, a bad trade for a saving nobody needed.) Higher
-    /// sample rates are the real cost driver instead: `mult` scales `M` directly (see
+    /// Not a CPU tradeoff at all, in fact. Total FFT cost/sec is `O(M log M) × hops/sec`, where
+    /// `M` is `padded_size` (see that local's own doc for the fixed-budget mechanism) and
+    /// `hops/sec = rate / fft_hop`. At any given sample rate `M` is the *same* fixed budget at every
+    /// window size (padding just shrinks as the real window grows into it) and `fft_hop` is the
+    /// same duration at every window size too (see `window_params`), so the cost is *flat* across
+    /// the whole range — exactly the default's (~0.3% of one core in release, per
+    /// [`CAPTURE_RATE_CAP`]'s own measurement; CPU was never the constraint here at any size).
+    /// Higher sample rates are the real cost driver instead: `mult` scales `M` directly (see
     /// `padded_size`'s own doc), linearly, with no such cancellation. `FFT_OVERLAP_DIV` is a
     /// genuinely different knob from either: more overlap buys smoother/faster-updating output at
     /// whichever resolution is already chosen, linearly in CPU — it cannot buy more resolution
@@ -325,15 +317,36 @@ mod windows_impl {
     ///
     /// The actual price is smearing content that changes within the window's own duration —
     /// fine for hunting a stationary headphone/room resonance, worse for anything transient (a
-    /// fast sweep, a percussive test tone) — which is exactly why this and [`MED_FFT_SIZE`] are
-    /// opt-in slider positions (defaulting to [`BASE_FFT_SIZE`]) rather than replacing it outright:
-    /// the smearing cost is paid on *everything*, all the time, for a resolution win that only
-    /// matters when specifically hunting a narrow low-frequency feature.
-    const HIGH_RES_FFT_SIZE: usize = 32768;
-    /// Defines the *fixed* interpolation budget every tier shares: `BASE_FFT_SIZE ×
+    /// fast sweep, a percussive test tone) — which is exactly why the default sits at the short
+    /// end of the range rather than here: the smearing cost is paid on *everything*, all the time,
+    /// for a resolution win that only matters when specifically hunting a narrow low-frequency
+    /// feature.
+    const MAX_FFT_SIZE: usize = 32768;
+    /// Granularity of the window-size setting, in samples at the ≤48 kHz base rate (≈5.3 ms per
+    /// step; 97 positions across `BASE_FFT_SIZE..=MAX_FFT_SIZE`). Effectively stepless as far as
+    /// resolution goes, but not arbitrary: every window length stays a multiple of 256 samples
+    /// (1 KiB of `f32`, a multiple of both a cache line and any SIMD width the windowing loop
+    /// could be vectorized to), and a slider drag can only ever produce a bounded set of distinct
+    /// windows — each change rebuilds the Hann window and its S1/S2 sums, so the granularity also
+    /// bounds that churn. The FFT itself is unaffected either way: every window is zero-padded
+    /// into the same fixed power-of-two transform, so no size ever replans it or hands the FFT an
+    /// awkward length.
+    const FFT_SIZE_STEP: usize = 256;
+
+    /// Clamp a requested window size into `BASE_FFT_SIZE..=MAX_FFT_SIZE` and snap it to the nearest
+    /// [`FFT_SIZE_STEP`]. The one defensive gate for whatever crosses the Tauri IPC boundary (the
+    /// frontend's slider only ever sends valid values, but this is where an arbitrary huge one
+    /// would otherwise mean an arbitrarily huge window/allocation). The previous three fixed sizes
+    /// (8192/16384/32768) are all multiples of the step, so a saved setting keeps meaning the same
+    /// thing.
+    fn snap_fft_size(requested: usize) -> usize {
+        let clamped = requested.clamp(BASE_FFT_SIZE, MAX_FFT_SIZE);
+        (clamped + FFT_SIZE_STEP / 2) / FFT_SIZE_STEP * FFT_SIZE_STEP
+    }
+    /// Defines the *fixed* interpolation budget every window size shares: `BASE_FFT_SIZE ×
     /// ZERO_PAD_FACTOR × mult` (see `Spectrum::new`'s `padded_size`) is the total FFT transform
-    /// length at [`BASE_FFT_SIZE`], and [`MED_FFT_SIZE`]/[`HIGH_RES_FFT_SIZE`] reuse that exact
-    /// same budget rather than multiplying their own, larger real window by this factor again —
+    /// length at [`BASE_FFT_SIZE`], and every larger window reuses that exact same budget rather
+    /// than multiplying its own, larger real window by this factor again —
     /// see `padded_size`'s own doc for why growing both independently double-pays for the same
     /// thing. This is NOT the same thing as more resolution: resolution (how well two close tones
     /// can be told apart) is fixed by the analysis window's time *duration*, unaffected by this.
@@ -351,7 +364,7 @@ mod windows_impl {
     /// crossover drops to ~50 Hz, shrinking the affected range by roughly the same factor, for a
     /// modest one-time FFT cost (O(N log N), so ×4 the points costs well under ×4) and zero added
     /// latency — same real samples, same hop cadence, just more (interpolated) output bins. That
-    /// ~1.5 Hz figure is also what the *budget* is pegged to, at any tier — see `padded_size`.
+    /// ~1.5 Hz figure is also what the *budget* is pegged to, at any window size — see `padded_size`.
     const ZERO_PAD_FACTOR: usize = 4;
     /// Floor on `gaussian_power`'s sigma, in the same padded-linear-bin units `ranges` already
     /// uses — see that function's doc for the full case history this closes out. Width-matching
@@ -436,18 +449,18 @@ mod windows_impl {
     /// own ripples could fill every remaining slot. In octaves rather than a flat Hz/percent gap
     /// so it means the same thing at 100 Hz and 10 kHz.
     const PEAK_MIN_SEPARATION_OCTAVES: f32 = 1.0;
-    /// Tighter minimum spacing at high resolution, where genuinely close content is actually
-    /// resolved and the default 1-octave gate would needlessly hide it. Live-tuned against the
-    /// real readout, not derived.
+    /// Tighter minimum spacing when the "Hi-res peaks" toggle is on (`Spectrum::hires_peaks`),
+    /// for material where genuinely close content is actually resolved and the default 1-octave
+    /// gate would needlessly hide it. Live-tuned against the real readout, not derived.
     const PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES: f32 = 0.25;
     /// A candidate more than this many dB below the loudest thing in the frame is inaudible
     /// against it and gated out — real content the ear can't use in context, not a false peak
     /// worth relaxing the gate for.
     const PEAK_MAX_RANGE_DB: f32 = 30.0;
-    /// Looser range at high resolution: `SPEC_TAU_SECS` (cageq-monitor's power-spectrum smoothing
-    /// time constant) is deliberately fixed rather than scaled to the longer hop at high-res, so a
-    /// real, quiet, transient partial is likelier to get momentarily cut off by the tighter
-    /// default gate. Live-tuned, not derived, like `PEAK_MAX_RANGE_DB` itself originally was.
+    /// Looser range when "Hi-res peaks" is on: with fine resolution a quiet partial sitting well
+    /// below the loudest peak is more often real, resolved content than noise-floor ripple, so the
+    /// default 30 dB audibility gate would hide it. Live-tuned, not derived, like
+    /// `PEAK_MAX_RANGE_DB` itself originally was.
     const PEAK_MAX_RANGE_DB_HIGH_RES: f32 = 60.0;
     /// How far (in cents — 1200ths of an octave) a candidate may drift from an exact integer
     /// multiple of a lower peak and still fold into its harmonic series, rather than being an
@@ -478,7 +491,7 @@ mod windows_impl {
     ///
     /// **Deliberately a fixed number of seconds, not a fraction of the hop** — tried the latter
     /// (`SPEC_TAU_HOPS = 0.469`, reproducing this exact 0.02s/43ms ratio at the default window,
-    /// scaling proportionally at `HIGH_RES_FFT_SIZE`'s then-171 ms hop) on the reasoning that it
+    /// scaling proportionally at the longest window's then-171 ms hop) on the reasoning that it
     /// kept the *relative* damping-per-hop constant across window sizes, the same principle that
     /// correctly governs `GAUSSIAN_FLOOR_SIGMA_BINS`. Reverted after live use: at high-res that
     /// works out to an ≈80 ms time constant, and it "feels incredibly slow" — perceived
@@ -542,13 +555,16 @@ mod windows_impl {
         /// the loopback only accumulates and emits the (heavier) `scope` stream while it's > 0, so
         /// nothing's serialized when no one is watching the scope.
         ///
-        /// `fft_size` selects the spectrum analyzer's window size — one of `BASE_FFT_SIZE`,
-        /// `MED_FFT_SIZE`, or `HIGH_RES_FFT_SIZE` (see those constants' own docs for the
-        /// tradeoff), read live off the shared atomic every read (see `Spectrum::reconfigure`) —
-        /// changing it does *not* restart the monitor, same as `harmonic_fold` below, which
-        /// toggles `find_peaks`' harmonic folding live the same way. Both are shared with the
-        /// Tauri layer (`HarmonicFoldState`/`SpecFftSizeState`) so they survive a monitor restart
-        /// (e.g. a device change) too.
+        /// `fft_size` selects the spectrum analyzer's window size — any value in
+        /// `BASE_FFT_SIZE..=MAX_FFT_SIZE`, snapped to `FFT_SIZE_STEP` (see [`snap_fft_size`] and
+        /// those constants' own docs for the tradeoff), read live off the shared atomic every read
+        /// (see `Spectrum::reconfigure`) — changing it does *not* restart the monitor, same as
+        /// `harmonic_fold` below, which toggles `find_peaks`' harmonic folding live the same way,
+        /// and `hires_peaks`, which switches `find_peaks` to its tighter fine-resolution gates
+        /// (`PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES`/`PEAK_MAX_RANGE_DB_HIGH_RES`) — a separate
+        /// choice from the window size, no longer implied by it. All three are shared with the
+        /// Tauri layer (`HarmonicFoldState`/`SpecFftSizeState`/`HiResPeaksState`) so they survive a
+        /// monitor restart (e.g. a device change) too.
         ///
         /// `reset_lufs` is the same shape again: set it once (from the Tauri layer's
         /// `LufsResetState`) to restart the Integrated/Loudness Range/Peak Max measurement on the
@@ -559,6 +575,7 @@ mod windows_impl {
             scope_viewers: Arc<AtomicUsize>,
             fft_size: Arc<AtomicUsize>,
             harmonic_fold: Arc<AtomicBool>,
+            hires_peaks: Arc<AtomicBool>,
             reset_lufs: Arc<AtomicBool>,
             on_update: F,
             on_spectrum: G,
@@ -580,6 +597,7 @@ mod windows_impl {
                         &scope_viewers,
                         fft_size,
                         harmonic_fold,
+                        hires_peaks,
                         reset_lufs,
                         on_update,
                         on_spectrum,
@@ -1219,11 +1237,11 @@ mod windows_impl {
     /// bins. No peak-hold here — the front-end's own persistence covers that job now.
     struct Spectrum {
         fft: Arc<dyn RealToComplex<f32>>,
-        base_fft_size: usize,      // current, already-snapped tier — reconfigure()'s change guard
+        base_fft_size: usize,      // current, already-snapped window size — reconfigure()'s change guard
         analysis_size: usize,      // real, windowed sample count (BASE_FFT_SIZE scaled to rate) —
                                     // governs window duration/hop timing, i.e. true resolution
         fft_hop: usize,            // hop between windows = BASE_FFT_SIZE*mult / FFT_OVERLAP_DIV — the
-                                    // same duration at every tier, see `tier_params`
+                                    // same duration at every window size, see `window_params`
         in_buf: Vec<f32>,          // realfft input scratch, len padded_size (see that local's own
                                     // doc — the fixed per-rate budget, not analysis_size*ZERO_PAD_FACTOR
                                     // at every tier) — only the first analysis_size entries ever hold real samples,
@@ -1248,17 +1266,18 @@ mod windows_impl {
                                     // it again to recompute `raw_power_scale` on a tier change
         bin_hz: f32,               // Hz per linear (padded) FFT bin — uniform, unlike a log bin's
         harmonic_fold: Arc<AtomicBool>, // live-toggleable; see `find_peaks`'s own doc
-        min_sep_octaves: f32,      // resolution-dependent PEAK_MIN_SEPARATION_OCTAVES(_HIGH_RES)
-        max_range_db: f32,         // resolution-dependent PEAK_MAX_RANGE_DB(_HIGH_RES)
+        hires_peaks: Arc<AtomicBool>,   // live-toggleable; picks PEAK_MIN_SEPARATION_OCTAVES(_HIGH_RES)
+                                        // and PEAK_MAX_RANGE_DB(_HIGH_RES) at snapshot time — a
+                                        // separate choice from the window size (see `start`'s doc)
     }
 
-    /// The tier-dependent half of `Spectrum::new`'s computation — everything that depends on
-    /// `base_fft_size` (the FFT-size slider's tier) at a fixed `rate`. Shared by `Spectrum::new`
+    /// The window-dependent half of `Spectrum::new`'s computation — everything that depends on
+    /// `base_fft_size` (the window-size slider's value) at a fixed `rate`. Shared by `Spectrum::new`
     /// and `Spectrum::reconfigure`, the latter of which live-changes exactly these fields without
     /// touching the FFT plan/`padded_size`/bin ranges — see that method's own doc for why those
-    /// don't belong here (they're rate-only, not tier-dependent).
-    struct TierParams {
-        base_fft_size: usize, // snapped to the nearest real tier
+    /// don't belong here (they're rate-only, not window-dependent).
+    struct WindowParams {
+        base_fft_size: usize, // clamped and snapped by `snap_fft_size`
         mult: usize,
         analysis_size: usize,
         fft_hop: usize,
@@ -1270,24 +1289,13 @@ mod windows_impl {
         // `power_scale`'s own comment above). Combined into the actual `raw_power_scale` constant
         // by whichever of those two callers has `padded_size` on hand.
         s2: f32,
-        min_sep_octaves: f32,
-        max_range_db: f32,
     }
 
     impl Spectrum {
-        /// `base_fft_size` is one of [`BASE_FFT_SIZE`]/[`MED_FFT_SIZE`]/[`HIGH_RES_FFT_SIZE`] — the
-        /// app's 3-position FFT-size slider. Also selects which of `find_peaks`'s
-        /// resolution-dependent gates apply (anything above `BASE_FFT_SIZE` counts as "high res"
-        /// there — see `high_res` below), the same way it already selects the FFT size itself.
-        fn tier_params(rate: u32, base_fft_size: usize) -> TierParams {
-            // Snap to the nearest of the three real tiers — defensive against whatever crosses the
-            // Tauri IPC boundary (the frontend's slider only ever sends one of the three exactly,
-            // but this is the one place that assumption would actually matter: an arbitrary huge
-            // value here means an arbitrarily huge FFT plan/allocation in `Spectrum::new`).
-            let base_fft_size = [BASE_FFT_SIZE, MED_FFT_SIZE, HIGH_RES_FFT_SIZE]
-                .into_iter()
-                .min_by_key(|&sz| (sz as i64 - base_fft_size as i64).abs())
-                .unwrap();
+        /// `base_fft_size` is the app's stepless window-size slider value — clamped and snapped by
+        /// [`snap_fft_size`] (the one defensive gate for whatever crosses the Tauri IPC boundary).
+        fn window_params(rate: u32, base_fft_size: usize) -> WindowParams {
+            let base_fft_size = snap_fft_size(base_fft_size);
             // Scale the real analysis window up with the rate so its *duration* (≈171 ms at the
             // default base size) stays constant: analysis_size = base × next_pow2(round(rate /
             // 48 kHz)). At BASE_FFT_SIZE: 48 k→8192, 96 k→16384, 192 k→32768 (44.1/88.2/176.4
@@ -1295,13 +1303,13 @@ mod windows_impl {
             // devices instead of coarsening at high rates.
             let mult = ((rate as f32 / BASE_RATE).round().max(1.0) as usize).next_power_of_two();
             let analysis_size = base_fft_size * mult;
-            // Constant across all three tiers (≈42.7 ms at every rate — BASE_FFT_SIZE's own quarter-
-            // window), NOT a quarter of each tier's own, longer window: the transform is the same
-            // fixed-length `padded_size` FFT at every tier (see `new`), so a constant hop costs the
-            // same per second at every tier too — never more than Base already does — while a
-            // per-tier hop only ever made the larger tiers *less* responsive (171 ms between updates
-            // at High, i.e. ~6 spectra/sec feeding the front-end's phosphor accumulator instead of
-            // ~23) for a CPU saving nobody needed. Base itself is bit-identical either way.
+            // Constant across every window size (≈42.7 ms at every rate — BASE_FFT_SIZE's own
+            // quarter-window), NOT a quarter of the chosen window: the transform is the same
+            // fixed-length `padded_size` FFT at every size (see `new`), so a constant hop costs the
+            // same per second at every size too — never more than the default does — while a hop
+            // scaling with the window only ever made the longer windows *less* responsive (171 ms
+            // between updates at the longest, i.e. ~6 spectra/sec feeding the front-end's phosphor
+            // accumulator instead of ~23) for a CPU saving nobody needed.
             let fft_hop = BASE_FFT_SIZE * mult / FFT_OVERLAP_DIV;
             // Windows only the real (analysis_size) portion — the padding is zeros regardless of
             // any window coefficient, so extending the window formula over it would be dead work.
@@ -1319,20 +1327,12 @@ mod windows_impl {
             let s1: f32 = window.iter().sum();
             let power_scale = (2.0 / s1).powi(2);
             // Input to `db_raw`'s own calibration constant (`raw_power_scale`, computed by `new`/
-            // `reconfigure` once `padded_size` is in scope — see `TierParams::s2`'s own doc) — see
+            // `reconfigure` once `padded_size` is in scope — see `WindowParams::s2`'s own doc) — see
             // `gaussian_power`'s doc ("A FOURTH correction") for why it needs S2 (energetic gain,
             // `Σw[n]²`) rather than S1 (coherent gain) above: derived from Parseval's theorem
             // rather than the single-peak-bin relation `power_scale` is built on.
             let s2: f32 = window.iter().map(|w| w * w).sum();
-            // Medium and High both count as "high res" for tuning purposes — only Base gets the
-            // tighter defaults. `>`, not `== HIGH_RES_FFT_SIZE`, so this doesn't need updating if
-            // another tier is ever added.
-            let high_res = base_fft_size > BASE_FFT_SIZE;
-            let min_sep_octaves =
-                if high_res { PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES } else { PEAK_MIN_SEPARATION_OCTAVES };
-            let max_range_db =
-                if high_res { PEAK_MAX_RANGE_DB_HIGH_RES } else { PEAK_MAX_RANGE_DB };
-            TierParams {
+            WindowParams {
                 base_fft_size,
                 mult,
                 analysis_size,
@@ -1341,30 +1341,28 @@ mod windows_impl {
                 smoothing,
                 power_scale,
                 s2,
-                min_sep_octaves,
-                max_range_db,
             }
         }
 
-        /// `base_fft_size` is one of [`BASE_FFT_SIZE`]/[`MED_FFT_SIZE`]/[`HIGH_RES_FFT_SIZE`] — the
-        /// app's 3-position FFT-size slider, passed straight through — see those constants' own
+        /// `base_fft_size` is the app's stepless window-size slider value, passed straight through
+        /// (clamped/snapped by [`snap_fft_size`]) — see [`BASE_FFT_SIZE`]/[`MAX_FFT_SIZE`]'s own
         /// docs for what a larger one trades away. `harmonic_fold` is shared with the Tauri layer
         /// (`HarmonicFoldState`) so toggling it takes effect immediately, no restart — same as
         /// `base_fft_size` itself now, via `reconfigure` (see that method's own doc).
         fn new(rate: u32, base_fft_size: usize, harmonic_fold: Arc<AtomicBool>) -> Self {
-            let tp = Self::tier_params(rate, base_fft_size);
+            let tp = Self::window_params(rate, base_fft_size);
             // The FFT is planned and run at a fixed total length — BASE_FFT_SIZE's own
             // ZERO_PAD_FACTOR×mult budget (see that constant's doc) — not analysis_size's own
             // ZERO_PAD_FACTOR× every time: at BASE_FFT_SIZE this is exactly analysis_size ×
             // ZERO_PAD_FACTOR as before (real + padding both scale with mult identically), but at
-            // MED_FFT_SIZE/HIGH_RES_FFT_SIZE the larger real window increasingly eats into that
+            // larger window sizes the larger real window increasingly eats into that
             // same fixed budget instead of multiplying it further — padding shrinks as real
             // resolution grows, rather than both growing together and interpolating the same
-            // ~1.5 Hz-at-48kHz crossover redundantly. `max` covers HIGH_RES_FFT_SIZE, whose real
+            // ~1.5 Hz-at-48kHz crossover redundantly. `max` covers MAX_FFT_SIZE, whose real
             // window already meets (not exceeds) the budget, i.e. zero padding, not negative.
             // Still always a power of two (every term is), so this transform is exactly as cheap
             // per-point as an unpadded one of the same total length, same as before. Rate-only —
-            // unlike everything in `TierParams`, never changes on a `reconfigure`.
+            // unlike everything in `WindowParams`, never changes on a `reconfigure`.
             let padded_size = tp.analysis_size.max(BASE_FFT_SIZE * ZERO_PAD_FACTOR * tp.mult);
             // `db_raw`'s calibration constant (see its own doc, and `gaussian_power`'s "A FOURTH
             // correction"): Parseval's theorem relates a windowed tone's *total* power, summed
@@ -1428,40 +1426,42 @@ mod windows_impl {
                 padded_size,
                 bin_hz,
                 harmonic_fold,
-                min_sep_octaves: tp.min_sep_octaves,
-                max_range_db: tp.max_range_db,
+                hires_peaks: Arc::new(AtomicBool::new(false)),
             }
         }
 
-        /// Live-reconfigure the analysis window when the shared fft-size tier changes — called
+        /// Share a live "Hi-res peaks" flag with the Tauri layer (`HiResPeaksState`) — kept out of
+        /// `new`'s signature because it only matters to the real capture loop, not the analysis
+        /// itself, and defaults to off (the default gates) for everything else.
+        fn with_hires_peaks(mut self, hires_peaks: Arc<AtomicBool>) -> Self {
+            self.hires_peaks = hires_peaks;
+            self
+        }
+
+        /// Live-reconfigure the analysis window when the shared window-size setting changes — called
         /// every read from `run_session`'s main loop (see `capture_loop`). Unlike a rate change
         /// (which invalidates the whole WASAPI session and rebuilds `Spectrum` from scratch), a
         /// tier change never touches the FFT plan, `padded_size`, or the bin `ranges`/`ranges_lin`
-        /// (all rate-only, not tier-dependent — see `padded_size`'s own doc in `new`), so this only
-        /// replaces the real-window-derived fields from `TierParams`. `avg_power` is left as-is:
+        /// (all rate-only, not window-dependent — see `padded_size`'s own doc in `new`), so this only
+        /// replaces the real-window-derived fields from `WindowParams`. `avg_power` is left as-is:
         /// its bins mean the same thing either way, so the running average just blends across the
         /// change instead of resetting.
         fn reconfigure(&mut self, rate: u32, base_fft_size: usize) {
-            let snapped = [BASE_FFT_SIZE, MED_FFT_SIZE, HIGH_RES_FFT_SIZE]
-                .into_iter()
-                .min_by_key(|&sz| (sz as i64 - base_fft_size as i64).abs())
-                .unwrap();
+            let snapped = snap_fft_size(base_fft_size);
             if snapped == self.base_fft_size {
-                return; // already at the requested tier — the common case, checked on every read
+                return; // already at the requested size — the common case, checked on every read
             }
-            let tp = Self::tier_params(rate, snapped);
+            let tp = Self::window_params(rate, snapped);
             self.base_fft_size = tp.base_fft_size;
             self.analysis_size = tp.analysis_size;
             self.fft_hop = tp.fft_hop;
             self.window = tp.window;
             self.smoothing = tp.smoothing;
             self.power_scale = tp.power_scale;
-            // padded_size is tier-invariant (unlike everything else here) so self.padded_size,
-            // set once in `new`, is still correct — only S2 (from the new tier's own window)
-            // changed. See `new`'s own comment on `raw_power_scale` for the formula.
+            // padded_size is window-invariant (unlike everything else here) so self.padded_size,
+            // set once in `new`, is still correct — only S2 (from the new window) changed. See
+            // `new`'s own comment on `raw_power_scale` for the formula.
             self.raw_power_scale = 4.0 / (self.padded_size as f32 * tp.s2);
-            self.min_sep_octaves = tp.min_sep_octaves;
-            self.max_range_db = tp.max_range_db;
         }
 
         /// Feed mono samples; runs an FFT for every full hop and folds it into the running average.
@@ -1562,13 +1562,14 @@ mod windows_impl {
                 Self::reduce(&self.avg_power, self.power_scale, self.raw_power_scale, &self.ranges);
             let (db_lin, db_lin_raw, peak_db_lin) =
                 Self::reduce(&self.avg_power, self.power_scale, self.raw_power_scale, &self.ranges_lin);
+            let hires = self.hires_peaks.load(Ordering::Relaxed);
             let peaks = find_peaks(
                 &self.avg_power,
                 self.power_scale,
                 self.bin_hz,
                 self.harmonic_fold.load(Ordering::Relaxed),
-                self.min_sep_octaves,
-                self.max_range_db,
+                if hires { PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES } else { PEAK_MIN_SEPARATION_OCTAVES },
+                if hires { PEAK_MAX_RANGE_DB_HIGH_RES } else { PEAK_MAX_RANGE_DB },
             );
             SpectrumUpdate {
                 db,
@@ -1675,6 +1676,7 @@ mod windows_impl {
         scope_viewers: &AtomicUsize,
         fft_size: Arc<AtomicUsize>,
         harmonic_fold: Arc<AtomicBool>,
+        hires_peaks: Arc<AtomicBool>,
         reset_lufs: Arc<AtomicBool>,
         on_update: F,
         on_spectrum: G,
@@ -1700,6 +1702,7 @@ mod windows_impl {
                 scope_viewers,
                 &fft_size,
                 &harmonic_fold,
+                &hires_peaks,
                 &reset_lufs,
                 &on_update,
                 &on_spectrum,
@@ -1761,6 +1764,7 @@ mod windows_impl {
         scope_viewers: &AtomicUsize,
         fft_size: &Arc<AtomicUsize>,
         harmonic_fold: &Arc<AtomicBool>,
+        hires_peaks: &Arc<AtomicBool>,
         reset_lufs: &Arc<AtomicBool>,
         on_update: &F,
         on_spectrum: &G,
@@ -1812,7 +1816,8 @@ mod windows_impl {
         // firing it pointlessly on the first tick below.
         reset_lufs.store(false, Ordering::Relaxed);
 
-        let mut spectrum = Spectrum::new(rate, fft_size.load(Ordering::Relaxed), harmonic_fold.clone());
+        let mut spectrum = Spectrum::new(rate, fft_size.load(Ordering::Relaxed), harmonic_fold.clone())
+            .with_hires_peaks(hires_peaks.clone());
 
         audio_client.start_stream()?;
 
@@ -2056,6 +2061,10 @@ mod windows_impl {
         // instead of needing a live screenshot to notice again.
         use super::*;
 
+        /// A representative mid-range window size for the tests below (the old "Med" tier) — any
+        /// size in `BASE_FFT_SIZE..=MAX_FFT_SIZE` behaves the same, this is just a fixed sample.
+        const MID_FFT_SIZE: usize = 16384;
+
         /// The whole point of `padded_size`'s fixed-budget formula (see its own doc): at a fixed
         /// sample rate, the FFT transform length — and so its CPU cost — must be *identical*
         /// across all three window tiers, not grow with them the way a flat `analysis_size ×
@@ -2066,8 +2075,8 @@ mod windows_impl {
             let rate = 48_000u32;
             let fold = || Arc::new(AtomicBool::new(false));
             let base = Spectrum::new(rate, BASE_FFT_SIZE, fold()).avg_power.len();
-            let med = Spectrum::new(rate, MED_FFT_SIZE, fold()).avg_power.len();
-            let high = Spectrum::new(rate, HIGH_RES_FFT_SIZE, fold()).avg_power.len();
+            let med = Spectrum::new(rate, MID_FFT_SIZE, fold()).avg_power.len();
+            let high = Spectrum::new(rate, MAX_FFT_SIZE, fold()).avg_power.len();
             assert_eq!(base, med, "Med should reuse Base's exact transform budget");
             assert_eq!(base, high, "High should reuse Base's exact transform budget too");
         }
@@ -2082,8 +2091,8 @@ mod windows_impl {
             let fold = || Arc::new(AtomicBool::new(false));
             for rate in [44_100u32, 48_000, 96_000] {
                 let base = Spectrum::new(rate, BASE_FFT_SIZE, fold()).fft_hop;
-                let med = Spectrum::new(rate, MED_FFT_SIZE, fold()).fft_hop;
-                let high = Spectrum::new(rate, HIGH_RES_FFT_SIZE, fold()).fft_hop;
+                let med = Spectrum::new(rate, MID_FFT_SIZE, fold()).fft_hop;
+                let high = Spectrum::new(rate, MAX_FFT_SIZE, fold()).fft_hop;
                 assert_eq!(base, med, "Med's hop should match Base's at {rate} Hz");
                 assert_eq!(base, high, "High's hop should match Base's at {rate} Hz");
             }
@@ -2091,17 +2100,83 @@ mod windows_impl {
             assert_eq!(Spectrum::new(96_000, BASE_FFT_SIZE, fold()).fft_hop, 4096, "hop duration holds at 96 kHz");
         }
 
-        /// `reconfigure` recomputes the hop from `tier_params` too — a live tier change must land
+        /// `reconfigure` recomputes the hop from `window_params` too — a live size change must land
         /// on the same constant, and never leave a stale per-tier value behind.
         #[test]
         fn reconfigure_keeps_the_hop_constant() {
             let rate = 48_000u32;
             let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
             let base_hop = spec.fft_hop;
-            spec.reconfigure(rate, HIGH_RES_FFT_SIZE);
+            spec.reconfigure(rate, MAX_FFT_SIZE);
             assert_eq!(spec.fft_hop, base_hop);
             spec.reconfigure(rate, BASE_FFT_SIZE);
             assert_eq!(spec.fft_hop, base_hop);
+        }
+
+        /// The window size is stepless now, not three fixed tiers: any request is clamped into
+        /// `BASE_FFT_SIZE..=MAX_FFT_SIZE` and snapped to the nearest `FFT_SIZE_STEP`, and the three
+        /// sizes the old tiers used (and so any saved setting) pass through unchanged.
+        #[test]
+        fn window_size_is_stepless_snapped_and_clamped() {
+            assert_eq!(snap_fft_size(12_345), 12_288, "nearest multiple of the step");
+            assert_eq!(snap_fft_size(20_000), 19_968);
+            assert_eq!(snap_fft_size(100), BASE_FFT_SIZE, "below the range clamps up");
+            assert_eq!(snap_fft_size(usize::MAX), MAX_FFT_SIZE, "above the range clamps down, however huge");
+            for legacy in [8192usize, 16384, 32768] {
+                assert_eq!(snap_fft_size(legacy), legacy, "a legacy tier value must keep meaning itself");
+            }
+            for request in (0..40_000).step_by(37) {
+                let got = snap_fft_size(request);
+                assert_eq!(got % FFT_SIZE_STEP, 0, "{request} -> {got} is not on the step grid");
+                assert!((BASE_FFT_SIZE..=MAX_FFT_SIZE).contains(&got), "{request} -> {got} out of range");
+            }
+        }
+
+        /// A live change to an *arbitrary* size (not just one of the old three) must land on the
+        /// snapped value while leaving the FFT plan/transform length and hop untouched — the same
+        /// invariants `reconfigure_changes_tier_in_place_without_replanning_the_fft` holds for the
+        /// endpoints, now for the whole continuous range.
+        #[test]
+        fn reconfigure_to_an_arbitrary_size_keeps_the_plan_and_hop() {
+            let rate = 48_000u32;
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
+            let padded = spec.avg_power.len();
+            let hop = spec.fft_hop;
+            spec.reconfigure(rate, 20_000);
+            assert_eq!(spec.analysis_size, 19_968);
+            assert_eq!(spec.window.len(), 19_968);
+            assert_eq!(spec.avg_power.len(), padded, "no replan: same transform length");
+            assert_eq!(spec.fft_hop, hop, "hop stays the same duration");
+            spec.reconfigure(rate, 20_050); // still within half a step of 19_968: a no-op, not a rebuild
+            assert_eq!(spec.analysis_size, 19_968);
+        }
+
+        /// "Hi-res peaks" is its own live switch now, not implied by the window size: two equal
+        /// tones half an octave apart are both resolved at the *default* window, but the default
+        /// 1-octave separation gate collapses them into one reported peak until the flag is on —
+        /// and flipping it takes effect on the very next snapshot, with no new audio.
+        #[test]
+        fn hires_peaks_toggle_switches_the_separation_gate_live() {
+            let rate = 48_000u32;
+            let hires = Arc::new(AtomicBool::new(false));
+            let mut spec =
+                Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false))).with_hires_peaks(hires.clone());
+            let (f1, f2) = (1000.0f64, 1000.0 * 2f64.powf(0.5));
+            let mut buf = vec![0.0f32; 4096];
+            let mut n = 0u64;
+            while n < rate as u64 * 2 {
+                for s in buf.iter_mut() {
+                    let t = n as f64 / rate as f64;
+                    *s = (0.4 * (2.0 * std::f64::consts::PI * f1 * t).sin() + 0.4 * (2.0 * std::f64::consts::PI * f2 * t).sin()) as f32;
+                    n += 1;
+                }
+                spec.push(&buf);
+            }
+            let default_gate = spec.snapshot(true).peaks.len();
+            hires.store(true, Ordering::Relaxed);
+            let hires_gate = spec.snapshot(true).peaks.len();
+            assert_eq!(default_gate, 1, "0.5 octave apart is inside the default 1-octave gate");
+            assert!(hires_gate >= 2, "with Hi-res peaks on both tones should be reported, got {hires_gate}");
         }
 
         /// The budget itself still scales with the sample-rate `mult`, same as before this
@@ -2124,14 +2199,14 @@ mod windows_impl {
             let padded_before = spec.avg_power.len();
             assert_eq!(spec.analysis_size, BASE_FFT_SIZE);
 
-            spec.reconfigure(rate, HIGH_RES_FFT_SIZE);
-            assert_eq!(spec.analysis_size, HIGH_RES_FFT_SIZE, "tier should have taken effect");
-            assert_eq!(spec.window.len(), HIGH_RES_FFT_SIZE);
+            spec.reconfigure(rate, MAX_FFT_SIZE);
+            assert_eq!(spec.analysis_size, MAX_FFT_SIZE, "the new window size should have taken effect");
+            assert_eq!(spec.window.len(), MAX_FFT_SIZE);
             assert_eq!(spec.avg_power.len(), padded_before, "padded_size must not change");
 
             // Reconfiguring to the tier it's already at is a documented no-op.
-            spec.reconfigure(rate, HIGH_RES_FFT_SIZE);
-            assert_eq!(spec.analysis_size, HIGH_RES_FFT_SIZE);
+            spec.reconfigure(rate, MAX_FFT_SIZE);
+            assert_eq!(spec.analysis_size, MAX_FFT_SIZE);
             assert_eq!(spec.avg_power.len(), padded_before);
 
             spec.reconfigure(rate, BASE_FFT_SIZE);
@@ -2334,7 +2409,7 @@ mod windows_impl {
             let rate = 48_000u32;
             let ratio = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_BINS as f32 - 1.0));
             let idx = |f: f32| ((f / SPEC_F_MIN).ln() / ratio.ln()).round() as usize;
-            for tier in [BASE_FFT_SIZE, HIGH_RES_FFT_SIZE] {
+            for tier in [BASE_FFT_SIZE, MAX_FFT_SIZE] {
                 let mut spec = Spectrum::new(rate, tier, Arc::new(AtomicBool::new(false)));
                 let mut noise = crate::signal::PinkNoise::new();
                 let mut buf = vec![0.0f32; 4096];
@@ -2668,6 +2743,7 @@ mod stub {
             _scope_viewers: std::sync::Arc<std::sync::atomic::AtomicUsize>,
             _fft_size: std::sync::Arc<std::sync::atomic::AtomicUsize>,
             _harmonic_fold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            _hires_peaks: std::sync::Arc<std::sync::atomic::AtomicBool>,
             _reset_lufs: std::sync::Arc<std::sync::atomic::AtomicBool>,
             _on_update: F,
             _on_spectrum: G,

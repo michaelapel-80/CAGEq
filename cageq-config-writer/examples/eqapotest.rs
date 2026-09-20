@@ -43,11 +43,12 @@ fn main() {
     let idle = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let fold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // 8192 = cageq_monitor's BASE_FFT_SIZE (private to that crate) — the spectrum analyzer isn't
-    // what this example is recording, so any tier would do. Live-adjustable now (see
+    // what this example is recording, so any window size would do. Live-adjustable now (see
     // `Spectrum::reconfigure`), but this example never touches it after starting.
     let fft_size = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(8192));
+    let hires_peaks = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reset_lufs = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let monitor = match cageq_monitor::Monitor::start(None, idle, fft_size, fold, reset_lufs, |_| {}, |_| {}, |_| {}) {
+    let monitor = match cageq_monitor::Monitor::start(None, idle, fft_size, fold, hires_peaks, reset_lufs, |_| {}, |_| {}, |_| {}) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("could not start the loopback recorder: {e}");

@@ -64,14 +64,22 @@ struct ScopeViewers(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 #[derive(Default)]
 struct HarmonicFoldState(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
-/// Live tier for the spectrum analyzer's FFT-size slider (`cageq_monitor`'s
-/// `BASE_FFT_SIZE`/`MED_FFT_SIZE`/`HIGH_RES_FFT_SIZE`). Shared into the monitor exactly like
-/// `HarmonicFoldState` — survives monitor restarts (device changes) and, the whole point of an
-/// atomic here rather than a `start_monitor` parameter, changes without restarting anything,
-/// set by `set_spectrum_fft_size`. Defaults to 8192 (`BASE_FFT_SIZE`, private to `cageq_monitor`
-/// so hardcoded here the same way a couple of its own examples already do — `Spectrum`'s own
-/// snap-to-nearest-tier defends against any drift if that constant's value ever changes).
+/// Live setting for the spectrum analyzer's window-size slider — stepless between
+/// `cageq_monitor`'s `BASE_FFT_SIZE` and `MAX_FFT_SIZE` (8192..=32768, in 256-sample steps).
+/// Shared into the monitor exactly like `HarmonicFoldState` — survives monitor restarts (device
+/// changes) and, the whole point of an atomic here rather than a `start_monitor` parameter,
+/// changes without restarting anything, set by `set_spectrum_fft_size`. Defaults to 8192
+/// (`BASE_FFT_SIZE`, private to `cageq_monitor` so hardcoded here the same way a couple of its own
+/// examples already do — `Spectrum`'s own clamp-and-snap defends against any drift if that
+/// constant's value ever changes, or against an out-of-range value from the frontend).
 struct SpecFftSizeState(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+/// Live toggle for the spectrum analyzer's "Hi-res peaks" peak-detection gates (tighter minimum
+/// peak separation and a looser audibility range, for material where close partials are actually
+/// resolved). A separate switch from the window size — it used to be implied by picking a
+/// larger window tier. Same shape as `HarmonicFoldState`, set by `set_spectrum_hires_peaks`.
+#[derive(Default)]
+struct HiResPeaksState(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl Default for SpecFftSizeState {
     fn default() -> Self {
         Self(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(8192)))
@@ -706,10 +714,10 @@ fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
 ///
 /// `fft_size` is *not* a parameter here — like harmonic folding, it rides `SpecFftSizeState`,
 /// live-adjustable via `set_spectrum_fft_size` without restarting the monitor (`Spectrum` inside
-/// `cageq_monitor` reconfigures itself in place; see its `reconfigure`'s own doc for why a tier
-/// change never needs to touch the FFT plan or reopen the WASAPI session). Harmonic folding is
-/// the same shape — it rides `HarmonicFoldState`, live-toggleable via
-/// `set_spectrum_harmonic_fold`. The meter's Integrated/Loudness Range/Peak Max reset rides
+/// `cageq_monitor` reconfigures itself in place; see its `reconfigure`'s own doc for why a window
+/// size change never needs to touch the FFT plan or reopen the WASAPI session). Harmonic folding
+/// and Hi-res peaks are the same shape — they ride `HarmonicFoldState`/`HiResPeaksState`,
+/// live-toggleable via `set_spectrum_harmonic_fold`/`set_spectrum_hires_peaks`. The meter's Integrated/Loudness Range/Peak Max reset rides
 /// `LufsResetState` the same way, via `reset_lufs_meter`.
 #[tauri::command]
 fn start_monitor(
@@ -717,6 +725,7 @@ fn start_monitor(
     state: State<MonitorState>,
     scope_viewers: State<ScopeViewers>,
     harmonic_fold: State<HarmonicFoldState>,
+    hires_peaks: State<HiResPeaksState>,
     spec_fft_size: State<SpecFftSizeState>,
     lufs_reset: State<LufsResetState>,
     subs: State<StreamSubs>,
@@ -735,6 +744,7 @@ fn start_monitor(
         scope_viewers.0.clone(),
         spec_fft_size.0.clone(),
         harmonic_fold.0.clone(),
+        hires_peaks.0.clone(),
         lufs_reset.0.clone(),
         move |update| fan_out(&meter_subs, &meter_alive, update),
         move |spectrum| fan_out(&spectrum_subs, &spectrum_alive, spectrum),
@@ -751,6 +761,13 @@ fn set_spectrum_harmonic_fold(fold: bool, state: State<HarmonicFoldState>) {
     state.0.store(fold, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Live-toggle the spectrum analyzer's Hi-res peak-detection gates — see `HiResPeaksState`'s own
+/// doc.
+#[tauri::command]
+fn set_spectrum_hires_peaks(hires: bool, state: State<HiResPeaksState>) {
+    state.0.store(hires, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Restart the meter's Integrated LUFS / Loudness Range / Peak Max measurement — see
 /// `LufsResetState`'s own doc. Takes effect on the capture thread's very next tick; momentary,
 /// short-term and the rest of the meter are untouched by the request itself, though
@@ -760,7 +777,7 @@ fn reset_lufs_meter(state: State<LufsResetState>) {
     state.0.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Live-adjust the spectrum analyzer's FFT-size tier — see `SpecFftSizeState`'s own doc for why
+/// Live-adjust the spectrum analyzer's window size — see `SpecFftSizeState`'s own doc for why
 /// this is a standalone command rather than a `start_monitor` parameter.
 #[tauri::command]
 fn set_spectrum_fft_size(fft_size: usize, state: State<SpecFftSizeState>) {
@@ -1501,6 +1518,7 @@ pub fn run() {
             app.manage(TestSignalState::default());
             app.manage(ScopeViewers::default());
             app.manage(HarmonicFoldState::default());
+            app.manage(HiResPeaksState::default());
             app.manage(SpecFftSizeState::default());
             app.manage(LufsResetState::default());
             app.manage(StreamSubs::default());
@@ -1526,6 +1544,7 @@ pub fn run() {
             stop_monitor,
             set_scope_viewer,
             set_spectrum_harmonic_fold,
+            set_spectrum_hires_peaks,
             set_spectrum_fft_size,
             reset_lufs_meter,
             subscribe_meter,

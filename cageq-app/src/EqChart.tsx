@@ -275,18 +275,46 @@ const fmtCursorHz = (hz: number) => (hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 1
 // SpectrumScope's identically-named constant.
 const CURSOR_LINE_COLOR = "rgba(230,240,255,0.55)";
 
-/** The backend's three FFT-window-size tiers for the loopback spectrum analyzer — mirrors
- *  cageq-monitor's `BASE_FFT_SIZE`/`MED_FFT_SIZE`/`HIGH_RES_FFT_SIZE` by value (see those
- *  constants' own docs for the resolution/smearing tradeoff each step buys). The one shared place
- *  both this chart's and SpectrumScope's FFT-size sliders get their three positions from, and the
- *  values `App.tsx`'s `specFftSize` state/the `start_monitor` invoke actually send. */
-export const SPEC_FFT_SIZES = [8192, 16384, 32768] as const;
-/** `fftSize`'s slider position (0-2), defaulting to Base for an unset/unrecognized value rather
- *  than `indexOf`'s `-1` (which would otherwise look up a nonsense locale key downstream). Shared
- *  by both this chart's and SpectrumScope's sliders. */
-export function fftSizeIndex(fftSize: number | undefined): number {
-  const i = SPEC_FFT_SIZES.indexOf((fftSize ?? SPEC_FFT_SIZES[0]) as (typeof SPEC_FFT_SIZES)[number]);
-  return i < 0 ? 0 : i;
+/** The backend's window-size range for the loopback spectrum analyzer — mirrors cageq-monitor's
+ *  `BASE_FFT_SIZE`/`MAX_FFT_SIZE`/`FFT_SIZE_STEP` by value (see those constants' own docs for the
+ *  resolution/smearing tradeoff a longer window buys, and why the step is 256 rather than 1). The
+ *  window is stepless in that range — it used to be three fixed tiers (8192/16384/32768, all still
+ *  valid values, so a saved setting keeps meaning the same thing). The one shared place both this
+ *  chart's and SpectrumScope's window-size sliders get their range from, and the values
+ *  `App.tsx`'s `specFftSize` state/the `set_spectrum_fft_size` invoke actually send. */
+export const SPEC_FFT_MIN = 8192;
+export const SPEC_FFT_MAX = 32768;
+export const SPEC_FFT_STEP = 256;
+/** Clamp + snap a window size to the slider's grid — the same rule as the backend's
+ *  `snap_fft_size`, so a stored/unset/garbage value always lands on a size the backend would
+ *  accept unchanged. (`Math.round` and the backend's `(x + step/2) / step` agree on ties.) */
+export function snapFftSize(v: number | undefined): number {
+  const n = v !== undefined && Number.isFinite(v) ? v : SPEC_FFT_MIN;
+  const clamped = Math.min(SPEC_FFT_MAX, Math.max(SPEC_FFT_MIN, n));
+  return Math.round(clamped / SPEC_FFT_STEP) * SPEC_FFT_STEP;
+}
+
+/** The window-size slider row, shared by this chart's and SpectrumScope's tuning panels. Reads
+ *  the window length as milliseconds at the nominal 48 kHz base rate (the backend scales the real
+ *  size with the mix rate to keep the duration constant, so that's the number that means the same
+ *  thing on every device). Linear in window length: the step is fixed in samples. */
+export function FftSizeRow({ fftSize, onChange }: { fftSize?: number; onChange: (v: number) => void }) {
+  const { t } = useTranslation();
+  const size = snapFftSize(fftSize);
+  return (
+    <label className="vs-tune-row vs-tune-fft" title={t("scope.fftSizeHint")}>
+      <span className="vs-tune-label">{t("scope.fftSize")}</span>
+      <input
+        type="range"
+        min={SPEC_FFT_MIN}
+        max={SPEC_FFT_MAX}
+        step={SPEC_FFT_STEP}
+        value={size}
+        onChange={(e) => onChange(snapFftSize(Number(e.currentTarget.value)))}
+      />
+      <b>{Math.round(size / 48)} ms</b>
+    </label>
+  );
 }
 
 export function EqChart({
@@ -329,7 +357,7 @@ export function EqChart({
    *  Vectorscope uses for its sample stream. */
   spectrumRef?: RefObject<SpectrumData | null>;
   /** The backend's analysis window size for the (one, shared) loopback spectrum — one of
-   *  `SPEC_FFT_SIZES`, same setting SpectrumScope's tune panel exposes, App.tsx-owned since it's
+   *  `SPEC_FFT_MIN..SPEC_FFT_MAX`, same setting SpectrumScope's tune panel exposes, App.tsx-owned since it's
    *  backend-side and global to the one running monitor (see that component's identically-named
    *  props for the full doc — changing it live-reconfigures the running `Spectrum`, no monitor
    *  restart). Both views' sliders just read/write this one shared value, since there's only ever
@@ -1408,20 +1436,7 @@ export function EqChart({
               </button>
             </div>
           </div>
-          {onFftSizeChange && (
-            <label className="vs-tune-row" title={t("scope.fftSizeHint")}>
-              <span className="vs-tune-label">{t("scope.fftSize")}</span>
-              <input
-                type="range"
-                min={0}
-                max={SPEC_FFT_SIZES.length - 1}
-                step={1}
-                value={fftSizeIndex(fftSize)}
-                onChange={(e) => onFftSizeChange(SPEC_FFT_SIZES[Number(e.currentTarget.value)])}
-              />
-              <b>{t(`scope.fftSizeTier${fftSizeIndex(fftSize)}`)}</b>
-            </label>
-          )}
+          {onFftSizeChange && <FftSizeRow fftSize={fftSize} onChange={onFftSizeChange} />}
         </div>
       )}
 

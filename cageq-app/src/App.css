@@ -1135,6 +1135,11 @@ select:disabled {
 .vs-tune-check {
   grid-template-columns: 5.4em 1fr;
 }
+/* The window-size row's value is a duration ("683 ms"), wider than the 2.6em the other rows' plain
+   numbers get. */
+.vs-tune-fft {
+  grid-template-columns: 5.4em 1fr 3.6em;
+}
 .vs-tune-check input[type="checkbox"] {
   justify-self: end;
   width: 1em;

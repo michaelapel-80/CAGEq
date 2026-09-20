@@ -7,7 +7,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
 import { Band, composedCurveDb, logGrid } from "./biquad";
-import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_SIZES } from "./EqChart";
+import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_MIN, snapFftSize } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import { ScrubNumber } from "./ScrubNumber";
@@ -571,22 +571,30 @@ function App() {
     localStorage.setItem("cageq-theme", theme);
   }, [theme]);
   const cycleTheme = () => setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
-  // Spectrum analyzer window size and harmonic folding — both lifted out of SpectrumScope's own
+  // Spectrum analyzer window size, harmonic folding and Hi-res peaks — all lifted out of SpectrumScope's own
   // per-view tune-panel state because both run backend-side, on the one shared monitor
   // (cageq-monitor's `Spectrum`/`find_peaks`), so two open spectrum views would otherwise show
   // inconsistent control state while only one is actually in effect. Both are live-adjustable
   // without restarting the monitor: `fftSize` reconfigures the running `Spectrum` in place (see
-  // `Spectrum::reconfigure`'s own doc for why a tier change never needs to reopen the WASAPI
+  // `Spectrum::reconfigure`'s own doc for why a window-size change never needs to reopen the WASAPI
   // session), the same way harmonic folding already toggled live. Each fires its own Tauri
   // command directly from the setter's effect below, independent of Meter's start/stop lifecycle.
-  const [specFftSize, setSpecFftSize] = useState<number>(() => {
-    const stored = Number(localStorage.getItem("cageq-spec-fft-size"));
-    return (SPEC_FFT_SIZES as readonly number[]).includes(stored) ? stored : SPEC_FFT_SIZES[0];
-  });
+  const [specFftSize, setSpecFftSize] = useState<number>(() => snapFftSize(Number(localStorage.getItem("cageq-spec-fft-size"))));
   useEffect(() => {
     localStorage.setItem("cageq-spec-fft-size", String(specFftSize));
     invoke("set_spectrum_fft_size", { fftSize: specFftSize }).catch(() => {});
   }, [specFftSize]);
+  // "Hi-res peaks" is its own switch now. Before it existed, the backend implied it for any window
+  // longer than the default — so with no stored choice yet, carry that over rather than silently
+  // changing how peaks behave for someone who'd picked a long window.
+  const [specHiResPeaks, setSpecHiResPeaks] = useState<boolean>(() => {
+    const stored = localStorage.getItem("cageq-spec-hires");
+    return stored === null ? snapFftSize(Number(localStorage.getItem("cageq-spec-fft-size"))) > SPEC_FFT_MIN : stored === "1";
+  });
+  useEffect(() => {
+    localStorage.setItem("cageq-spec-hires", specHiResPeaks ? "1" : "0");
+    invoke("set_spectrum_hires_peaks", { hires: specHiResPeaks }).catch(() => {});
+  }, [specHiResPeaks]);
   const [specHarmonicFold, setSpecHarmonicFold] = useState<boolean>(() => localStorage.getItem("cageq-spec-fold") === "1");
   useEffect(() => {
     localStorage.setItem("cageq-spec-fold", specHarmonicFold ? "1" : "0");
@@ -2917,6 +2925,8 @@ function App() {
                         onFftSizeChange={setSpecFftSize}
                         harmonicFold={specHarmonicFold}
                         onHarmonicFoldChange={setSpecHarmonicFold}
+                        hiResPeaks={specHiResPeaks}
+                        onHiResPeaksChange={setSpecHiResPeaks}
                       />
                     ) : (
                       <EqChart
