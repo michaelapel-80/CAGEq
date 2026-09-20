@@ -1083,7 +1083,7 @@ export function SpectrumScope({
                 <input type="checkbox" checked={!!hiResPeaks} onChange={(e) => onHiResPeaksChange(e.currentTarget.checked)} />
               </label>
             )}
-            {onFftSizeChange && <FftSizeRow fftSize={fftSize} onChange={onFftSizeChange} />}
+            {onFftSizeChange && <FftSizeRow fftSize={fftSize} sampleRate={sampleRate} onChange={onFftSizeChange} />}
           </div>
         )}
       </div>

@@ -166,7 +166,7 @@
     "linear": "Linear",
     "linearHint": "Linear (constant-Hz) frequency axis instead of log — reads a harmonic series as an evenly-spaced comb",
     "fftSize": "Window",
-    "fftSizeHint": "Analysis window length: longer means better low-frequency resolution, at the cost of smearing anything that changes faster than the window itself (~171–683 ms, in 5 ms steps)",
+    "fftSizeHint": "Analysis window length: longer means better low-frequency resolution, at the cost of smearing anything that changes faster than the window itself (~171–683 ms at 48 kHz, ~186–743 ms at 44.1 kHz)",
     "hiResPeaks": "Hi-res",
     "hiResPeaksHint": "Hi-res peak detection, for long windows and dense material: reports peaks as close as ¼ octave apart (instead of 1 octave) and up to 60 dB below the loudest (instead of 30 dB)",
     "undistortHintSpectrum": "Undo the applied filters and preamp to show the pre-EQ spectrum, not the post-EQ capture",

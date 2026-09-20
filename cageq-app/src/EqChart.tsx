@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefOb
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, logGrid, phaseDeg, type FadingCurve, retargetFadingCurve, stepFadingCurve } from "./biquad";
+import { fftWindowMs } from "./fftWindow";
 import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
 import { TiltGlyph } from "./TiltGlyph";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
@@ -294,11 +295,12 @@ export function snapFftSize(v: number | undefined): number {
   return Math.round(clamped / SPEC_FFT_STEP) * SPEC_FFT_STEP;
 }
 
-/** The window-size slider row, shared by this chart's and SpectrumScope's tuning panels. Reads
- *  the window length as milliseconds at the nominal 48 kHz base rate (the backend scales the real
- *  size with the mix rate to keep the duration constant, so that's the number that means the same
- *  thing on every device). Linear in window length: the step is fixed in samples. */
-export function FftSizeRow({ fftSize, onChange }: { fftSize?: number; onChange: (v: number) => void }) {
+/** The window-size slider row, shared by this chart's and SpectrumScope's tuning panels. The
+ *  readout is the window's real duration on the current device (`fftWindowMs`), not a fixed
+ *  samples/48 kHz — the slider value is in base-rate samples, and the same value lasts 186 ms at
+ *  44.1 kHz but 171 ms at 48. Display only: the window itself is unchanged. Linear in window
+ *  length: the step is fixed in samples. */
+export function FftSizeRow({ fftSize, sampleRate, onChange }: { fftSize?: number; sampleRate?: number; onChange: (v: number) => void }) {
   const { t } = useTranslation();
   const size = snapFftSize(fftSize);
   return (
@@ -312,7 +314,7 @@ export function FftSizeRow({ fftSize, onChange }: { fftSize?: number; onChange: 
         value={size}
         onChange={(e) => onChange(snapFftSize(Number(e.currentTarget.value)))}
       />
-      <b>{Math.round(size / 48)} ms</b>
+      <b>{Math.round(fftWindowMs(size, sampleRate))} ms</b>
     </label>
   );
 }
@@ -1436,7 +1438,7 @@ export function EqChart({
               </button>
             </div>
           </div>
-          {onFftSizeChange && <FftSizeRow fftSize={fftSize} onChange={onFftSizeChange} />}
+          {onFftSizeChange && <FftSizeRow fftSize={fftSize} sampleRate={sampleRate} onChange={onFftSizeChange} />}
         </div>
       )}
 

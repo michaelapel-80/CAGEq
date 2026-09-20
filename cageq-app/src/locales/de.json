@@ -166,7 +166,7 @@
     "linear": "Linear",
     "linearHint": "Lineare (konstante Hz-Schritte) statt logarithmische Frequenzachse — zeigt eine Obertonreihe als gleichmäßig verteilten Kamm",
     "fftSize": "Fenster",
-    "fftSizeHint": "Länge des Analysefensters: länger bedeutet bessere Auflösung im Bass, auf Kosten der Verschmierung von allem, was sich schneller als das Fenster selbst ändert (~171–683 ms, in 5-ms-Schritten)",
+    "fftSizeHint": "Länge des Analysefensters: länger bedeutet bessere Auflösung im Bass, auf Kosten der Verschmierung von allem, was sich schneller als das Fenster selbst ändert (~171–683 ms bei 48 kHz, ~186–743 ms bei 44,1 kHz)",
     "hiResPeaks": "Hi-Res",
     "hiResPeaksHint": "Hochauflösende Peak-Erkennung, für lange Fenster und dichtes Material: meldet Peaks bis zu ¼ Oktave Abstand (statt 1 Oktave) und bis zu 60 dB unter dem lautesten (statt 30 dB)",
     "undistortHintSpectrum": "Angewendete Filter und Vorverstärkung rückgängig machen, um das Spektrum vor der EQ-Korrektur statt der Aufnahme danach zu zeigen",
