@@ -348,6 +348,16 @@ export function TimeScope() {
     let peakDb: number[] = [];
     let peakHoldUntil: number[] = [];
     let magScratch = new Float64Array(0); // reused rectified-magnitude buffer for kthLargest
+    // Per-scope-window work buffers, reused across windows (grown when a bigger one is needed, never
+    // shrunk — every reader is bounded by `n`/`dispN`, never by `.length`, so spare capacity and
+    // stale tail contents are harmless). These used to be fresh `new Float64Array`s per window, at
+    // the ~60 Hz scope rate: up to ~5 MB/s of typed-array backing stores at the widest ms/div, which
+    // V8 accounts as *external* memory — a classic trigger for full mark-compact GCs (the ~20 ms
+    // "Major GC" frames in the profiler), unlike small on-heap garbage that scavenges cheaply.
+    let outLBuf = new Float64Array(0);
+    let outRBuf = new Float64Array(0);
+    let dispLBuf = new Float64Array(0);
+    let dispRBuf = new Float64Array(0);
 
     // Triggering: a circular buffer of the (possibly undistorted) display samples, plus a parallel
     // buffer of a lowpass-filtered mono trigger-detector value at the same indices — both written
@@ -449,8 +459,12 @@ export function TimeScope() {
         // carries the §4.1 loudness-match gain but no EQ) — pure gain recovery, no filtering —
         // or while fading out a departing cascade that had either.
         const undistort = iv !== null && (iv.to.coeffs.length > 0 || iv.to.gain !== 1 || iv.from !== null);
-        outL = new Float64Array(n);
-        outR = new Float64Array(n);
+        if (outLBuf.length < n) {
+          outLBuf = new Float64Array(n);
+          outRBuf = new Float64Array(n);
+        }
+        outL = outLBuf;
+        outR = outRBuf;
         for (let i = 0; i < n; i++) {
           let l = xy[2 * i];
           let r = xy[2 * i + 1];
@@ -519,8 +533,12 @@ export function TimeScope() {
             }
           }
           dispN = windowSamples;
-          dispL = new Float64Array(windowSamples);
-          dispR = new Float64Array(windowSamples);
+          if (dispLBuf.length < windowSamples) {
+            dispLBuf = new Float64Array(windowSamples);
+            dispRBuf = new Float64Array(windowSamples);
+          }
+          dispL = dispLBuf;
+          dispR = dispRBuf;
           for (let j = 0; j < windowSamples; j++) {
             const idx = phys(t - preSamples + j);
             dispL[j] = ringL[idx];
