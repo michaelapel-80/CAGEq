@@ -63,9 +63,13 @@ with the CRT-phosphor persistence trail.](docs/Scope.png)
 
 A few things about the spectrum analyzer specifically:
 
-* **A fast update rate from heavy window overlap** — each analysis window advances by only a
-  quarter of its own length (75% overlap), so a new result lands roughly every 43 ms instead of
-  waiting out a full window per update.
+* **A fast, constant update rate whatever the window size** — heavy window overlap means a new
+  result lands every ~43 ms (a quarter of the shortest window) instead of waiting out a full window
+  per update, and that rate doesn't change with the window length: a longer window buys finer
+  frequency resolution without slowing the display, it just overlaps more (75% at the shortest,
+  ~94% at the longest). The window length itself is tuned smoothly (~171-683 ms at 48 kHz, in ~5 ms
+  steps) rather than in the usual power-of-two jumps — every window is zero-padded into the same
+  fixed-size FFT, so an arbitrary length costs nothing extra.
 * **Interpolated on top of that**, both in frequency (zero-padding resolves the same window's
   transform more finely, not adding fake information) and between successive updates on the
   frontend, so the display reads as continuous motion rather than a stepped, sample-and-hold look.
