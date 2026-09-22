@@ -75,8 +75,9 @@ const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
 const SQRT2 = Math.SQRT2;
 // Brightness quantisation for velocity glow (batched strokes, not per-segment) — the per-bucket draw
-// loop is the only cost that scales with this: one Path2D + one stroke() call per bucket, gated to
-// the ~60Hz real scope-window rate, not every rAF frame (see the render loop's own doc). Had been
+// loop is the only cost that scales with this: one beginPath()+stroke() call per bucket (reused
+// typed-array buffers, not a fresh Path2D — see the render loop's own doc), gated to the ~60Hz real
+// scope-window rate, not every rAF frame (see the render loop's own doc). Had been
 // raised to 64 after removing beam blanking's hard cutoff exposed visible banding at the
 // bright/first-draw end, before the phosphor trail's own accumulation across frames smooths it out —
 // but "raising it is cheap" was asserted, never measured, and 64 non-trivial stroke() calls a
@@ -331,6 +332,26 @@ export function Vectorscope({
     let bloomGrad: CanvasGradient | null = null;
     let coreGrad: CanvasGradient | null = null;
 
+    // Per-velocity-bucket segment buffers, reused across frames — replaces a fresh `Path2D` per
+    // bucket (VEL_BUCKETS) per scope window (~60/s from the backend). Path2D has no reset/clear
+    // method, so the original code had no way to reuse the objects themselves; these plain
+    // typed-array buffers sidestep that by storing each segment's (prevX,prevY)-(px,py) endpoints
+    // directly and replaying them through `ctx.beginPath()`/`moveTo`/`lineTo`/`stroke()` at draw
+    // time instead, which draws identically (same calls, same order, just not wrapped in a Path2D
+    // object first). Only grown when a scope window brings more samples than any seen before (tied
+    // to the device rate / SCOPE_MAX_POINTS, effectively fixed for a session), never shrunk —
+    // `bucketCount[b]` (reset to 0 every window) bounds how much of each buffer is actually read, so
+    // stale tail contents are harmless. Same fix as Meter.tsx's identical pattern (see that file's
+    // own doc for why per-window allocation churn is worth avoiding — V8 accounts a typed array's
+    // backing store as external memory, a trigger for full mark-compact GCs) — here it only matters
+    // while this view is actually open, not always-on like the meter.
+    let bucketCap = 0;
+    const bucketX0: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
+    const bucketY0: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
+    const bucketX1: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
+    const bucketY1: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
+    const bucketCount = new Int32Array(VEL_BUCKETS);
+
     const render = () => {
       const now = performance.now();
       const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
@@ -421,13 +442,24 @@ export function Vectorscope({
         lastTrace = now;
         const rateRatio = dt > 0 ? Math.min(4, dtSinceTrace / dt) : 1;
         doseMult = rateRatio * SCOPE_DOSE_RATIO * (TAU_REF / p.trailTau);
-        const buckets: Path2D[] = [];
-        for (let b = 0; b < VEL_BUCKETS; b++) buckets.push(new Path2D());
         // Full-bright segment length (px), scaled to a reference rate: at a higher rate the beam
         // moves less per sample, so shrink the threshold to match → the velocity glow tracks beam
         // *speed* (px/s), not px/sample, and the intensity no longer jumps with the sample rate.
         const kRef = Math.max(0.001, p.focus * (S / REF_SIZE) * (VEL_REF_RATE / rate));
         const xy = s.xy;
+        // Upper bound on segments any one bucket could need this window — grown only when a bigger
+        // window arrives than any buffer seen so far (see the buffers' own doc above).
+        const maxSegments = Math.max(1, Math.floor(xy.length / 2));
+        if (bucketCap < maxSegments) {
+          bucketCap = maxSegments;
+          for (let b = 0; b < VEL_BUCKETS; b++) {
+            bucketX0[b] = new Float64Array(bucketCap);
+            bucketY0[b] = new Float64Array(bucketCap);
+            bucketX1[b] = new Float64Array(bucketCap);
+            bucketY1[b] = new Float64Array(bucketCap);
+          }
+        }
+        bucketCount.fill(0);
         let sumX = 0;
         let sumY = 0;
         let cnt = 0;
@@ -455,8 +487,11 @@ export function Vectorscope({
             const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
             let b = (f * VEL_BUCKETS) | 0;
             if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
-            buckets[b].moveTo(prevX, prevY);
-            buckets[b].lineTo(px, py);
+            const seg = bucketCount[b]++;
+            bucketX0[b][seg] = prevX;
+            bucketY0[b][seg] = prevY;
+            bucketX1[b][seg] = px;
+            bucketY1[b][seg] = py;
           }
           sumX += px;
           sumY += py;
@@ -478,8 +513,19 @@ export function Vectorscope({
         // storage fixed that stall at its source (see phosphor.ts), and with only VEL_BUCKETS
         // buckets to tune a cutoff across, it wasn't worth keeping as a tunable either.
         for (let b = 0; b < VEL_BUCKETS; b++) {
+          const count = bucketCount[b];
+          if (count === 0) continue;
           ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * (b + 1)) / VEL_BUCKETS})`;
-          ctx.stroke(buckets[b]);
+          ctx.beginPath();
+          const x0 = bucketX0[b];
+          const y0 = bucketY0[b];
+          const x1 = bucketX1[b];
+          const y1 = bucketY1[b];
+          for (let i = 0; i < count; i++) {
+            ctx.moveTo(x0[i], y0[i]);
+            ctx.lineTo(x1[i], y1[i]);
+          }
+          ctx.stroke();
         }
         // Dwell spot: the window's whole beam energy concentrated where it barely moved. refL small,
         // so ordinary (moving) material gives ~0 while a still window (DC / silence zeros) saturates.

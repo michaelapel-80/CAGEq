@@ -224,6 +224,23 @@ export function Meter({
     let drawn: ScopeData | null = null; // last payload already traced (draw each once)
     let lastTrace = performance.now(); // when `drawn` last actually changed — see doseMult below
 
+    // Per-velocity-bucket segment buffers, reused across frames — replaces a fresh `Path2D` per
+    // bucket (16) per scope window (~60/s from the backend). Path2D has no reset/clear method, so
+    // the original code had no way to reuse the objects themselves; these plain typed-array buffers
+    // sidestep that by storing the (cx, prevY)-(cx, y) endpoints directly and replaying them through
+    // `ctx.beginPath()`/`moveTo`/`lineTo`/`stroke()` at draw time instead, which draws identically
+    // (same calls, same order, just not wrapped in a Path2D object first). Only grown when a scope
+    // window brings more samples than any seen before (tied to the device rate / SCOPE_MAX_POINTS,
+    // effectively fixed for a session), never shrunk — `bucketCount[b]` (reset to 0 every frame)
+    // bounds how much of each buffer is actually read, so stale tail contents are harmless. This is
+    // the always-on twin of TimeScope's identical typed-array reuse fix (see that file's own doc for
+    // why per-window allocation churn is worth avoiding — V8 accounts a typed array's backing store
+    // as external memory, a trigger for full mark-compact GCs).
+    let bucketCap = 0;
+    const bucketY0: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
+    const bucketY1: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
+    const bucketCount = new Int32Array(VEL_BUCKETS);
+
     const render = () => {
       const now = performance.now();
       const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
@@ -267,9 +284,18 @@ export function Meter({
         const cx = W / 2;
         const rate = s.rate > 0 ? s.rate : 48000;
         const kRef = Math.max(0.001, p.focus * (VEL_REF_RATE / rate));
-        const buckets: Path2D[] = [];
-        for (let b = 0; b < VEL_BUCKETS; b++) buckets.push(new Path2D());
         const xy = s.xy;
+        // Upper bound on segments any one bucket could need this frame — grown only when a bigger
+        // window arrives than any buffer seen so far (see the buffers' own doc above).
+        const maxSegments = Math.max(1, Math.floor(xy.length / 2));
+        if (bucketCap < maxSegments) {
+          bucketCap = maxSegments;
+          for (let b = 0; b < VEL_BUCKETS; b++) {
+            bucketY0[b] = new Float64Array(bucketCap);
+            bucketY1[b] = new Float64Array(bucketCap);
+          }
+        }
+        bucketCount.fill(0);
         let prevY = NaN;
         let prevLin = NaN;
         for (let i = 0; i + 1 < xy.length; i += 2) {
@@ -282,8 +308,9 @@ export function Meter({
             const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
             let b = (f * VEL_BUCKETS) | 0;
             if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
-            buckets[b].moveTo(cx, prevY);
-            buckets[b].lineTo(cx, y);
+            const c = bucketCount[b]++;
+            bucketY0[b][c] = prevY;
+            bucketY1[b][c] = y;
           }
           prevY = y;
           prevLin = lin;
@@ -297,8 +324,17 @@ export function Meter({
         // Beam blanking: brightness ∝ velocity factor, reaching zero at the fastest bucket (a beam
         // moving too fast to expose the phosphor draws nothing) — skip bucket 0.
         for (let b = 1; b < VEL_BUCKETS; b++) {
+          const count = bucketCount[b];
+          if (count === 0) continue;
           ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * b) / (VEL_BUCKETS - 1)})`;
-          ctx.stroke(buckets[b]);
+          ctx.beginPath();
+          const y0 = bucketY0[b];
+          const y1 = bucketY1[b];
+          for (let i = 0; i < count; i++) {
+            ctx.moveTo(cx, y0[i]);
+            ctx.lineTo(cx, y1[i]);
+          }
+          ctx.stroke();
         }
         ctx.globalCompositeOperation = "source-over";
       } else if (!s || !s.signal) {
