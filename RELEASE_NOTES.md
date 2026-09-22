@@ -1,13 +1,9 @@
-A stepless spectrum window, plus two small UI fixes.
+A round of frontend performance fixes for the scope views and level meter.
 
-- **Added:** the spectrum analyzer's window size is now a stepless slider (~171–683 ms) instead of
-  three fixed steps, and the readout shows the window's real duration at your device's sample rate
-  (it was off by ~8% at 44.1 kHz).
-- **Added:** "Hi-res" peak detection is now its own checkbox in the Spectrum tuning panel instead of
-  being implied by a longer window. If you'd already picked a longer window, it starts enabled.
-- **Added:** the mobile export dialog shows a spinner while the solver runs, so a high band count no
-  longer looks frozen until the result pops in. The stale result is dimmed and Copy is disabled
-  until the new fit lands.
-- **Fixed:** the "Emergency clipping protection" notice appearing or disappearing shifted the layout
-  and could fight a band's gain fader mid-drag. It's now overlaid on the chart's top-left corner and
-  takes no space.
+- **Fixed:** the time scope, vectorscope, and level meter each allocated fresh buffers (typed
+  arrays, or a `Path2D` per beam-velocity bucket) on every incoming audio window, tens of times a
+  second — a steady stream of short-lived allocations that could trigger full "Major GC" pauses
+  well above the frame-time budget. They now reuse the same buffers across windows instead.
+- **Fixed:** the level meter re-rendered its whole React component on every single backend update
+  (~60/s) because the update always arrived as a freshly-parsed object, defeating React's normal
+  same-value skip. Its peak/RMS/LUFS marks now update directly instead of through a full re-render.
