@@ -115,22 +115,32 @@
 //! spectrum-shape or true-peak check, but a *robustness* one, for whatever's downstream on this
 //! shared WASAPI endpoint — this project's own APO included. It plays an ordinary sine at
 //! `carrier_hz`, but substitutes a literal NaN, then +Inf, then -Inf (cycling) for one whole
-//! sample every `interval_ms` milliseconds. WASAPI gives no guarantee a shared IEEE-float stream
-//! stays free of non-finite samples — any other application on the endpoint, the engine's own
-//! mixer/resampler, or an earlier APO in the chain could introduce one — and a filter that
-//! carries its delay registers forever (`cageq_apo::dsp::BiquadState`, by design, so retuning
-//! live never re-triggers EqAPO's own reload bloom) has no natural way to recover from one NaN:
-//! every arithmetic op on a NaN yields a NaN, so it would otherwise poison the cascade permanently
-//! rather than for one sample. Requires `--unsafe`: not because the carrier itself is loud (it
-//! isn't — ordinary `--level` rules apply to it) but because deliberately pushing a non-finite
-//! sample onto a *shared* endpoint is reckless towards anything else mixed with it downstream, so
-//! this needs the same explicit opt-in as `--isp`.
+//! sample every `interval_ms` milliseconds. Requires `--unsafe`: not because the carrier itself
+//! is loud (it isn't — ordinary `--level` rules apply to it) but because deliberately pushing a
+//! non-finite sample onto a *shared* endpoint is reckless towards anything else mixed with it
+//! downstream, so this needs the same explicit opt-in as `--isp`.
 //!
 //!   cargo run -p cageq-monitor --example testtone -- --poison 1000 250 --unsafe
 //!
 //! plays a 1 kHz carrier and injects one non-finite sample every 250 ms. Point it at CAGEq (or any
 //! other APO you want to check) and confirm the output stays audible and finite straight through
 //! each injection rather than glitching into silence or noise and staying that way.
+//!
+//! **What this actually found, live, against `cageq-apo`'s EFX registration on a real endpoint**:
+//! audiodg silently scrubs the non-finite sample to silence before an endpoint-effect APO ever
+//! sees it — real behavior, but undocumented and unversioned, and specific to that one slot (a
+//! shared-mode mixer summing concurrent app streams — `NaN + anything = NaN` — has an obvious
+//! incentive to contain one misbehaving stream there before it takes every other app on the
+//! endpoint down with it). It says nothing about an SFX/LFX registration (per-stream, *before*
+//! the mix that motivates the scrub exists at all) or an exclusive-mode stream (bypasses the
+//! engine's mixer/APO graph entirely), and it could stop happening on a future Windows/driver
+//! build with no notice. `cageq_apo::dsp::BiquadState` carries its delay registers forever by
+//! design (so retuning live never re-triggers EqAPO's own reload bloom), and has no natural way
+//! to recover from a NaN that does get through — every arithmetic op on one yields a NaN, so it
+//! would poison the cascade permanently rather than for one sample. This signal is what let that
+//! sanitization (see `Cascade::process`'s own comment) get verified as a live regression test
+//! rather than staying an untested hypothesis, and it's still the tool for checking whatever
+//! slot/registration an APO runs in that a shared mixer doesn't already stand in front of.
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {

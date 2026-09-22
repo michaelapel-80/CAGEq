@@ -1120,15 +1120,25 @@ impl Cascade {
             }
             for ch in 0..channels {
                 let i = frame * channels + ch;
-                // WASAPI gives no guarantee that a shared IEEE-float stream is free of NaN/Inf
-                // — any other application feeding the same endpoint can push one, and nothing
-                // upstream (the engine's mixer, the SRC, another APO earlier in the chain) is
-                // obliged to catch it. A single non-finite sample would otherwise poison
-                // `x1`/`x2`/`y1`/`y2` permanently: that state is deliberately carried forever
-                // (see `BiquadState`'s doc — it is the entire point of this APO), so unlike a
-                // plugin that resets state on the next block, there is no natural recovery.
-                // Silence for the one bad sample is inaudible; a cascade wedged at NaN forever
-                // is not.
+                // Defense-in-depth, not a fix for an observed leak: live testing (`--poison` in
+                // `testtone.rs`) against this APO's actual EFX registration found that a real
+                // WASAPI/audiodg render chain already scrubs a NaN/Inf sample to silence before
+                // an endpoint-effect APO ever sees it — undocumented, but real, and consistent
+                // with a shared mixer needing to contain one misbehaving app's stream rather
+                // than let plain summation (NaN + anything = NaN) take every other app sharing
+                // the endpoint down with it.
+                //
+                // That protection is unversioned and slot-specific, though: nothing says it
+                // holds for an SFX/LFX registration (per-stream, *before* the mix that motivates
+                // it exists at all), for exclusive-mode streams (which bypass the engine's
+                // mixer/APO graph entirely), or for a future Windows/driver build. This check
+                // costs one predictable branch per sample against a hazard that, if it ever did
+                // reach here unfiltered, would be unrecoverable: `x1`/`x2`/`y1`/`y2` are carried
+                // forever by design (see `BiquadState`'s doc — it's the entire point of this
+                // APO), so a single non-finite sample would poison every future output on this
+                // channel with no natural recovery, unlike a plugin that resets state on the
+                // next block. Silence for the one bad sample is inaudible; a cascade wedged at
+                // NaN forever is not.
                 let raw = input[i] as f64;
                 let raw = if raw.is_finite() { raw } else { 0.0 };
                 let mut x = raw * self.preamp;
@@ -1338,14 +1348,18 @@ mod tests {
         assert_eq!(out, buf);
     }
 
-    /// WASAPI gives an IEEE-float APO no guarantee the stream is free of NaN/Inf — any other
-    /// application sharing the endpoint can push one. Because `BiquadState` deliberately
-    /// carries its delay registers forever (that persistence is the entire reason this APO
-    /// exists — see its own doc), a single unsanitized non-finite sample would poison
-    /// `x1`/`x2`/`y1`/`y2` permanently: every arithmetic op on a NaN yields a NaN, so nothing
-    /// afterwards — not silence, not a settled ramp, not a config reload's `reset_state` — would
-    /// ever recover it. This must not happen: the bad sample is dropped (treated as silence),
-    /// and clean audio right after it must come out clean.
+    /// Defense-in-depth (see the sanitization site's own comment in `process`): a real
+    /// EFX-registered instance of this APO was found, by live testing, to already sit behind
+    /// an undocumented WASAPI/audiodg scrub that silences a NaN/Inf sample before it arrives —
+    /// but that's unversioned behavior at one specific slot, not something an SFX/LFX
+    /// registration or an exclusive-mode stream can be assumed to get for free. This test pins
+    /// the code's own behavior independent of whatever the engine happens to do: because
+    /// `BiquadState` deliberately carries its delay registers forever (that persistence is the
+    /// entire reason this APO exists — see its own doc), a single unsanitized non-finite sample
+    /// would poison `x1`/`x2`/`y1`/`y2` permanently — every arithmetic op on a NaN yields a NaN,
+    /// so nothing afterwards — not silence, not a settled ramp, not a config reload's
+    /// `reset_state` — would ever recover it. This must not happen: the bad sample is dropped
+    /// (treated as silence), and clean audio right after it must come out clean.
     #[test]
     fn non_finite_input_sample_does_not_poison_the_cascade() {
         for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {

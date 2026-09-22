@@ -145,14 +145,23 @@ pub enum Signal {
     /// Deliberately unsafe: an ordinary sine carrier at `carrier_hz` with a literal NaN/+Inf/-Inf
     /// sample substituted once every `every_n_frames` (cycling through the three) — a live
     /// torture test for whatever sits downstream of a shared WASAPI render endpoint, this
-    /// project's own APO included. WASAPI gives no guarantee a shared IEEE-float stream stays
-    /// free of non-finite samples: any other application on the same endpoint, the engine's own
-    /// mixer/resampler, or an earlier APO in the chain can introduce one, and a persistent-state
-    /// filter (`cageq_apo::dsp::BiquadState`) that never saw this coming would latch to NaN
-    /// forever rather than recovering on the next good sample. See [`poison_override`] for how
-    /// the injection itself is applied — bypassing gain and the clamp entirely, since both would
-    /// otherwise quietly launder a non-finite value back into a finite one before it ever reached
-    /// the wire.
+    /// project's own APO included. See [`poison_override`] for how the injection itself is
+    /// applied — bypassing gain and the clamp entirely, since both would otherwise quietly
+    /// launder a non-finite value back into a finite one before it ever reached the wire.
+    ///
+    /// **What this actually found, live, against `cageq-apo`'s EFX registration**: audiodg
+    /// scrubs the non-finite sample to silence before the endpoint-effect APO ever sees it —
+    /// real, but undocumented, and specific to that one slot (a plain shared-mode mixer summing
+    /// concurrent app streams — `NaN + anything = NaN` — has an obvious incentive to contain one
+    /// misbehaving stream there, before it can take every other app on the endpoint down with
+    /// it). That protection is unversioned and says nothing about an SFX/LFX registration
+    /// (per-stream, *before* the mix that motivates it exists at all) or an exclusive-mode
+    /// stream (bypasses the engine's mixer/APO graph entirely) — which is exactly why this
+    /// signal stays useful: it's what let `cageq_apo::dsp::BiquadState`'s own defense-in-depth
+    /// sanitization (see that module's `process`) get verified as a live regression test rather
+    /// than staying an untested hypothesis, and it's still the tool for checking any future
+    /// slot/registration this APO might run in that a shared mixer doesn't already stand in
+    /// front of.
     ///
     /// Requires `unsafe_mode` wherever it's driven from (mirrors `Isp`'s own gate) — not because
     /// the carrier itself is loud, but because deliberately pushing a non-finite sample onto a
