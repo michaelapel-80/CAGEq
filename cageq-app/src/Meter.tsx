@@ -124,7 +124,23 @@ export function Meter({
   onSampleRate?: (hz: number | null) => void;
 }) {
   const { t } = useTranslation();
-  const [bar, setBar] = useState<MeterData | null>(null); // fast: bars + marks
+  // `live` used to be derived inline from a `bar` state object holding the *whole* latest
+  // MeterData, replaced on every single backend tick (~60 Hz — MeterUpdate's own emit cadence).
+  // That object is a fresh JSON-parse every time, so its reference is never `===` the previous
+  // one even when nothing meaningful changed, which meant React's own same-value bail-out for
+  // `useState` could never kick in — `setBar` forced a full re-render of this component 60 times
+  // a second, confirmed live in the profiler as ~24% of total render time versus ~0% for the
+  // canvas beam painter it sits next to. The RMS/peak/LUFS marks (the only things that actually
+  // read those fast-changing numbers) now update via direct DOM writes on refs instead — the same
+  // "ref, not state, so the stream drives things without re-rendering React" pattern `scopeRef`
+  // below already uses for the canvas. `live` itself is now real state again, but only set on an
+  // actual signal on/off transition (`liveRef` below), which is rare — so it costs nothing extra.
+  const [live, setLive] = useState(false);
+  const liveRef = useRef(false); // last value handed to setLive — guards against a redundant call every tick
+  const rmsMarkRef = useRef<HTMLElement | null>(null);
+  const peakMarkRef = useRef<HTMLElement | null>(null);
+  const lufsFillRef = useRef<HTMLElement | null>(null);
+  const lufsMarkRef = useRef<HTMLElement | null>(null);
   const [nums, setNums] = useState<MeterData | null>(null); // throttled: readouts
   const [err, setErr] = useState<string | null>(null);
   const lastNums = useRef(0);
@@ -136,8 +152,21 @@ export function Meter({
 
   useEffect(() => {
     lastRate.current = null; // a new session may report a different (or the same) rate — re-emit it
+    liveRef.current = false; // a new session starts idle regardless of the last one's final state
     const unsub = meterStream.subscribe((update) => {
-      setBar(update);
+      const isLive = update.signal === true;
+      if (isLive !== liveRef.current) {
+        liveRef.current = isLive;
+        setLive(isLive);
+      }
+      // Imperative mark positions, every tick, bypassing React entirely — these elements only
+      // exist in the DOM while `live` (see the JSX below), so a null ref here just means "not
+      // mounted yet" (the very tick `live` flips true, before React has committed that render) —
+      // harmless, the next tick a few ms later catches up.
+      if (rmsMarkRef.current) rmsMarkRef.current.style.bottom = mark(pctOf(update.rms_db, LEVEL_MIN_DB));
+      if (peakMarkRef.current) peakMarkRef.current.style.bottom = mark(pctOf(update.peak_db, LEVEL_MIN_DB));
+      if (lufsFillRef.current) lufsFillRef.current.style.height = `${pctOf(update.short_term_lufs, LUFS_MIN)}%`;
+      if (lufsMarkRef.current) lufsMarkRef.current.style.bottom = mark(pctOf(update.momentary_lufs, LUFS_MIN));
       const rate = update.sample_rate || null;
       if (rate !== lastRate.current) {
         lastRate.current = rate;
@@ -241,6 +270,13 @@ export function Meter({
     const bucketY1: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
     const bucketCount = new Int32Array(VEL_BUCKETS);
 
+    // The 16 `rgba(...)` stroke-colour strings, one per bucket — depend only on the (fixed) accent
+    // colour and `p.glow`, so they're rebuilt only when `glow` actually changes (a tuning-panel
+    // drag) instead of every window (~60/s): a template-literal rebuild is a fresh string plus
+    // float-to-string formatting each time, for a value that's usually identical frame to frame.
+    let strokeCacheGlow = NaN;
+    const strokeStyles: string[] = new Array(VEL_BUCKETS);
+
     const render = () => {
       const now = performance.now();
       const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
@@ -321,12 +357,16 @@ export function Meter({
         // stroked separately, and round caps at their shared point would overlap and add into a
         // bright dot at every such sample — see Vectorscope's identical note.
         ctx.lineCap = "butt";
+        if (strokeCacheGlow !== p.glow) {
+          strokeCacheGlow = p.glow;
+          for (let b = 0; b < VEL_BUCKETS; b++) strokeStyles[b] = `rgba(${ar},${ag},${ab},${(p.glow * b) / (VEL_BUCKETS - 1)})`;
+        }
         // Beam blanking: brightness ∝ velocity factor, reaching zero at the fastest bucket (a beam
         // moving too fast to expose the phosphor draws nothing) — skip bucket 0.
         for (let b = 1; b < VEL_BUCKETS; b++) {
           const count = bucketCount[b];
           if (count === 0) continue;
-          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * b) / (VEL_BUCKETS - 1)})`;
+          ctx.strokeStyle = strokeStyles[b];
           ctx.beginPath();
           const y0 = bucketY0[b];
           const y1 = bucketY1[b];
@@ -353,7 +393,6 @@ export function Meter({
 
   if (err) return <div className="meter meter-err">{t("meter.unavailable", { error: err })}</div>;
 
-  const live = bar?.signal === true;
   const showNums = live && nums != null;
 
   const num = (v: number | undefined) => (showNums && v != null ? fmt(v) : "—");
@@ -437,8 +476,8 @@ export function Meter({
           <div className="vbar" ref={levelBarRef} aria-hidden="true">
             <canvas ref={beamCanvasRef} className="vbar-beam" width={beamSize.w} height={beamSize.h} />
             <i className="vbar-ticks" />
-            {live && <i className="vbar-rms" style={{ bottom: mark(pctOf(bar!.rms_db, LEVEL_MIN_DB)) }} />}
-            {live && <i className="vbar-peak" style={{ bottom: mark(pctOf(bar!.peak_db, LEVEL_MIN_DB)) }} />}
+            {live && <i ref={rmsMarkRef} className="vbar-rms" />}
+            {live && <i ref={peakMarkRef} className="vbar-peak" />}
           </div>
           <span className="vbar-cap">dBFS</span>
         </div>
@@ -454,9 +493,9 @@ export function Meter({
         </div>
         <div className="vbar-group" title={t("meter.lufsTitle")}>
           <div className="vbar" aria-hidden="true">
-            <i className="vbar-lufs" style={{ height: live ? `${pctOf(bar!.short_term_lufs, LUFS_MIN)}%` : "0%" }} />
+            <i ref={lufsFillRef} className="vbar-lufs" style={{ height: live ? undefined : "0%" }} />
             <i className="vbar-ticks" />
-            {live && <i className="vbar-lufs-m" style={{ bottom: mark(pctOf(bar!.momentary_lufs, LUFS_MIN)) }} />}
+            {live && <i ref={lufsMarkRef} className="vbar-lufs-m" />}
           </div>
           <span className="vbar-cap">LUFS</span>
         </div>
