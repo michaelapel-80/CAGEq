@@ -1120,7 +1120,17 @@ impl Cascade {
             }
             for ch in 0..channels {
                 let i = frame * channels + ch;
+                // WASAPI gives no guarantee that a shared IEEE-float stream is free of NaN/Inf
+                // — any other application feeding the same endpoint can push one, and nothing
+                // upstream (the engine's mixer, the SRC, another APO earlier in the chain) is
+                // obliged to catch it. A single non-finite sample would otherwise poison
+                // `x1`/`x2`/`y1`/`y2` permanently: that state is deliberately carried forever
+                // (see `BiquadState`'s doc — it is the entire point of this APO), so unlike a
+                // plugin that resets state on the next block, there is no natural recovery.
+                // Silence for the one bad sample is inaudible; a cascade wedged at NaN forever
+                // is not.
                 let raw = input[i] as f64;
+                let raw = if raw.is_finite() { raw } else { 0.0 };
                 let mut x = raw * self.preamp;
                 let base = ch * MAX_BANDS;
                 for b in 0..self.process_count {
@@ -1326,6 +1336,35 @@ mod tests {
         b.process(&copy, &mut buf, frames);
 
         assert_eq!(out, buf);
+    }
+
+    /// WASAPI gives an IEEE-float APO no guarantee the stream is free of NaN/Inf — any other
+    /// application sharing the endpoint can push one. Because `BiquadState` deliberately
+    /// carries its delay registers forever (that persistence is the entire reason this APO
+    /// exists — see its own doc), a single unsanitized non-finite sample would poison
+    /// `x1`/`x2`/`y1`/`y2` permanently: every arithmetic op on a NaN yields a NaN, so nothing
+    /// afterwards — not silence, not a settled ramp, not a config reload's `reset_state` — would
+    /// ever recover it. This must not happen: the bad sample is dropped (treated as silence),
+    /// and clean audio right after it must come out clean.
+    #[test]
+    fn non_finite_input_sample_does_not_poison_the_cascade() {
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut c = Cascade::new(1, FS);
+            assert!(c.set_bands(&[peaking(1000.0, 6.0, 2.0)]));
+            c.settle();
+
+            let mut out = [0.0f32; 1];
+            c.process(&[poison], &mut out, 1);
+            assert!(out[0].is_finite(), "a {poison} input sample must not reach the output");
+
+            // Keep driving it with ordinary audio: if the registers had actually been
+            // poisoned, every following sample would be NaN too, forever.
+            for n in 0..1000 {
+                let x = (n as f64 * 0.05).sin() as f32 * 0.5;
+                c.process(&[x], &mut out, 1);
+                assert!(out[0].is_finite(), "sample {n} after a {poison} input is still non-finite");
+            }
+        }
     }
 
     /// No bands and no preamp is exact identity — the state the APO holds until CAGEq
