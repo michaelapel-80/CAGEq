@@ -24,6 +24,10 @@ type GeneratorRequest = {
   unsafe_mode: boolean;
 };
 type AudioDevice = { id: string; name: string; eqapo_pattern: string; eqapo_enabled: boolean };
+// The §3.5 resume blob is an opaque, UI-owned JSON shape (App.tsx's `Resume` type, not shared
+// here — see this window's own doc for why it carries no state from the main window otherwise).
+// Only `deviceId` is read, to default to whatever output the main window currently has selected.
+type ResumeDeviceOnly = { deviceId?: string } | null;
 
 // The one flat selection the UI offers — mirrors testtone.rs's mutually-exclusive CLI flags
 // (--sine/--square/--triangle/--sawtooth/--pulse/--chirp-log/--chirp-linear/--am/--fm/--pink/
@@ -79,7 +83,18 @@ export function ToneWindow() {
     invoke<AudioDevice[]>("list_devices")
       .then((ds) => {
         setDevices(ds);
-        if (ds.length > 0) setDeviceId((cur) => cur || ds[0].id);
+        if (ds.length === 0) return;
+        // Default to the main window's currently selected output device — the §3.5 resume
+        // blob it persists (debounced) on every device change — not just whichever device the
+        // enumeration happens to list first. Otherwise this window opens pointed at a device
+        // the user isn't even listening on, silently. Falls back to the first device when
+        // there's no resume blob yet (clean install) or it names a device that's gone.
+        invoke<ResumeDeviceOnly>("get_resume")
+          .then((resume) => {
+            const match = resume?.deviceId ? ds.find((d) => d.id === resume.deviceId) : undefined;
+            setDeviceId((cur) => cur || match?.id || ds[0].id);
+          })
+          .catch(() => setDeviceId((cur) => cur || ds[0].id));
       })
       .catch((e) => setError(String(e)));
     // Belt-and-suspenders: the backend also force-stops on window-destroy (it can't rely on this
