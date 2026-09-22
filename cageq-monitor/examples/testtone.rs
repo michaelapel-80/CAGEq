@@ -31,10 +31,11 @@
 //!   cargo run -p cageq-monitor --example testtone -- --chirp-linear 20 20000 8  # linear sweep, same range
 //!   cargo run -p cageq-monitor --example testtone -- --am 1000 5 1.0    # 1kHz carrier, 5Hz/100% AM
 //!   cargo run -p cageq-monitor --example testtone -- --fm 1000 5 200    # 1kHz carrier, ±200Hz/5Hz FM
+//!   cargo run -p cageq-monitor --example testtone -- --poison 1000 250 --unsafe  # inject NaN/Inf every 250ms
 //!
 //! `--sine`/`--square`/`--triangle`/`--sawtooth`/`--pulse`/`--pink`/`--white`/`--isp`/
-//! `--chirp-log`/`--chirp-linear`/`--am`/`--fm` are all mutually exclusive (one signal at a time);
-//! omitting every one of them plays pink noise, same as passing `--pink` explicitly.
+//! `--chirp-log`/`--chirp-linear`/`--am`/`--fm`/`--poison` are all mutually exclusive (one signal
+//! at a time); omitting every one of them plays pink noise, same as passing `--pink` explicitly.
 //!
 //! `--chirp-log`/`--chirp-linear <f0> <f1> <seconds>` sweep from `f0` to `f1` Hz over `<seconds>`,
 //! then repeat — useful for watching the loopback spectrum sweep across the whole band in one
@@ -109,12 +110,33 @@
 //! at 0 dBTP) the sample-domain level it needs is -3.0103 dBFS — already past the default -3 dBFS
 //! ceiling — and every `--isp` value above 0 needs a sample level closer to 0 dBFS still. There's
 //! no in-between "safe" `--isp` setting the way there is for the other signals.
+//!
+//! `--poison <carrier_hz> <interval_ms>` is a different kind of torture test again: not a
+//! spectrum-shape or true-peak check, but a *robustness* one, for whatever's downstream on this
+//! shared WASAPI endpoint — this project's own APO included. It plays an ordinary sine at
+//! `carrier_hz`, but substitutes a literal NaN, then +Inf, then -Inf (cycling) for one whole
+//! sample every `interval_ms` milliseconds. WASAPI gives no guarantee a shared IEEE-float stream
+//! stays free of non-finite samples — any other application on the endpoint, the engine's own
+//! mixer/resampler, or an earlier APO in the chain could introduce one — and a filter that
+//! carries its delay registers forever (`cageq_apo::dsp::BiquadState`, by design, so retuning
+//! live never re-triggers EqAPO's own reload bloom) has no natural way to recover from one NaN:
+//! every arithmetic op on a NaN yields a NaN, so it would otherwise poison the cascade permanently
+//! rather than for one sample. Requires `--unsafe`: not because the carrier itself is loud (it
+//! isn't — ordinary `--level` rules apply to it) but because deliberately pushing a non-finite
+//! sample onto a *shared* endpoint is reckless towards anything else mixed with it downstream, so
+//! this needs the same explicit opt-in as `--isp`.
+//!
+//!   cargo run -p cageq-monitor --example testtone -- --poison 1000 250 --unsafe
+//!
+//! plays a 1 kHz carrier and injects one non-finite sample every 250 ms. Point it at CAGEq (or any
+//! other APO you want to check) and confirm the output stays audible and finite straight through
+//! each injection rather than glitching into silence or noise and staying that way.
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cageq_monitor::signal::{
-        am_sample, build_wavetable, chirp_phase, fm_phase, wavetable_sample, wavetable_step, ISP_MAX_OVER_DB,
-        PinkNoise, Signal, Waveform,
+        am_sample, build_wavetable, chirp_phase, fm_phase, poison_override, wavetable_sample, wavetable_step,
+        ISP_MAX_OVER_DB, PinkNoise, Signal, Waveform,
     };
     use std::time::Duration;
     use wasapi::{initialize_mta, Direction, SampleType, StreamMode, WaveFormat};
@@ -126,6 +148,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut device_match: Option<String> = None;
     let mut rate_override: Option<u32> = None;
     let mut unsafe_mode = false;
+    // `--poison`'s second argument is a duration (ms), but `Signal::Poison::every_n_frames` is a
+    // frame count, which needs `rate` to compute — not known until the device is opened further
+    // down. Held here and converted once `rate` is in hand (see the conversion right after it).
+    let mut poison_interval_ms: Option<f64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         // Shared by every signal flag: only one at a time, so a leftover --square from a
@@ -133,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // erroring.
         let mut set_signal = |sig: Signal| -> Result<(), Box<dyn std::error::Error>> {
             if signal.is_some() {
-                return Err("only one of --sine/--square/--triangle/--sawtooth/--pulse/--pink/--white/--isp/--chirp-log/--chirp-linear/--am/--fm may be given".into());
+                return Err("only one of --sine/--square/--triangle/--sawtooth/--pulse/--pink/--white/--isp/--chirp-log/--chirp-linear/--am/--fm/--poison may be given".into());
             }
             signal = Some(sig);
             Ok(())
@@ -169,6 +195,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mod_hz: args.next().ok_or("--fm needs <carrier_hz> <mod_hz> <deviation_hz>")?.parse()?,
                 deviation_hz: args.next().ok_or("--fm needs <carrier_hz> <mod_hz> <deviation_hz>")?.parse()?,
             })?,
+            "--poison" => {
+                let carrier_hz: f64 = args.next().ok_or("--poison needs <carrier_hz> <interval_ms>")?.parse()?;
+                let interval_ms: f64 = args.next().ok_or("--poison needs <carrier_hz> <interval_ms>")?.parse()?;
+                poison_interval_ms = Some(interval_ms);
+                // every_n_frames is a placeholder here — rate isn't known until the device opens
+                // below, where this gets recomputed from poison_interval_ms and reassigned.
+                set_signal(Signal::Poison { carrier_hz, every_n_frames: 0 })?
+            }
             "--level" => level_dbfs = args.next().ok_or("--level needs a value")?.parse()?,
             "--seconds" => seconds = Some(args.next().ok_or("--seconds needs a value")?.parse()?),
             "--device" => device_match = Some(args.next().ok_or("--device needs a name")?),
@@ -180,7 +214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (0 dBFS) torture test. Opt-in and deliberate — mind your ears and gear.
             "--unsafe" => unsafe_mode = true,
             "-h" | "--help" => {
-                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth|--pulse <hz>] [--pink|--white] [--isp <db-over> --unsafe] [--chirp-log|--chirp-linear <f0> <f1> <seconds>] [--am <carrier_hz> <mod_hz> <depth>] [--fm <carrier_hz> <mod_hz> <deviation_hz>] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
+                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth|--pulse <hz>] [--pink|--white] [--isp <db-over> --unsafe] [--chirp-log|--chirp-linear <f0> <f1> <seconds>] [--am <carrier_hz> <mod_hz> <depth>] [--fm <carrier_hz> <mod_hz> <deviation_hz>] [--poison <carrier_hz> <interval_ms> --unsafe] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
                 return Ok(());
             }
             other => return Err(format!("unknown arg: {other}").into()),
@@ -226,6 +260,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!(
             "[testtone] --isp: true (reconstructed) peak targeted at {over:.4} dBTP, sample peak {sample_peak_dbfs:.4} dBFS; --level is ignored for this signal."
         );
+    }
+    // §Poison: same "no in-between safe setting" posture as §ISP above, checked before the
+    // device even opens rather than after — see the file header doc for why this needs --unsafe
+    // at all (it isn't about loudness).
+    if matches!(signal, Signal::Poison { .. }) && !unsafe_mode {
+        return Err("--poison requires --unsafe — it deliberately injects non-finite samples onto the endpoint (see the file header doc)".into());
     }
     // Clamp the level below full scale so a boosted EQ can't drive it into a blast — unless the
     // caller opts into a full-scale (0 dBFS) torture test with --unsafe. `--isp` is exempt: its
@@ -277,6 +317,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Source rate: the device mix rate unless forced. When it differs, AUTOCONVERT below makes the
     // engine resample us up/down to the mix rate — the whole point of --rate.
     let rate = rate_override.unwrap_or(mix_rate);
+    // §Poison: now that rate is known, convert the requested interval from ms to frames and
+    // replace the placeholder `every_n_frames: 0` set at parse time.
+    if let Signal::Poison { carrier_hz, .. } = signal {
+        let interval_ms = poison_interval_ms.expect("poison_interval_ms is set whenever signal is Poison — same --poison arm sets both");
+        let every_n_frames = ((interval_ms / 1000.0) * rate as f64).round().max(1.0) as u64;
+        signal = Signal::Poison { carrier_hz, every_n_frames };
+    }
     let desired = WaveFormat::new(32, 32, &SampleType::Float, rate as usize, channels as usize, None);
     let block_align = desired.get_blockalign() as usize;
 
@@ -327,6 +374,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         Signal::Fm { carrier_hz, mod_hz, deviation_hz } => eprintln!(
             "[testtone] FM: {carrier_hz} Hz carrier, {mod_hz} Hz modulator, ±{deviation_hz} Hz deviation @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}"
+        ),
+        Signal::Poison { carrier_hz, every_n_frames } => eprintln!(
+            "[testtone] POISON: {carrier_hz} Hz carrier @ {level_dbfs} dBFS, injecting NaN/+Inf/-Inf (cycling) every {every_n_frames} frames (~{:.0} ms) @ {rate} Hz{resample} — the output should stay audible and finite straight through every injection.",
+            every_n_frames as f64 / rate as f64 * 1000.0
         ),
     }
     eprintln!("[testtone] Ctrl+C to stop.");
@@ -419,8 +470,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let t = frame as f64 / rate as f64;
                     fm_phase(carrier_hz, mod_hz, deviation_hz, t).sin() as f32 * gain
                 }
+                Signal::Poison { carrier_hz, .. } => {
+                    let t = frame as f64 / rate as f64;
+                    (std::f64::consts::TAU * carrier_hz * t).sin() as f32 * gain
+                }
             };
-            let s = (mono * env).clamp(-sample_ceil, sample_ceil);
+            let mut s = (mono * env).clamp(-sample_ceil, sample_ceil);
+            // Must come after the clamp above, never folded into `mono` — see
+            // `poison_override`'s own doc for why the clamp would otherwise launder a genuinely
+            // non-finite value back into a finite one before it ever reached the wire.
+            if let Some(poison) = poison_override(signal, frame, fade_frames) {
+                s = poison;
+            }
             let bytes = s.to_le_bytes();
             for _ in 0..channels {
                 buf.extend_from_slice(&bytes);

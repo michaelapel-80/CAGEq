@@ -773,7 +773,8 @@ mod windows_impl {
         stop: &AtomicBool,
     ) -> Result<(), Box<dyn Error>> {
         use crate::signal::{
-            am_sample, build_wavetable, chirp_phase, fm_phase, wavetable_sample, wavetable_step, PinkNoise, Signal,
+            am_sample, build_wavetable, chirp_phase, fm_phase, poison_override, wavetable_sample, wavetable_step,
+            PinkNoise, Signal,
         };
 
         initialize_mta().ok()?;
@@ -875,8 +876,18 @@ mod windows_impl {
                         let t = frame as f64 / rate as f64;
                         fm_phase(carrier_hz, mod_hz, deviation_hz, t).sin() as f32 * gain
                     }
+                    Signal::Poison { carrier_hz, .. } => {
+                        let t = frame as f64 / rate as f64;
+                        (std::f64::consts::TAU * carrier_hz * t).sin() as f32 * gain
+                    }
                 };
-                let s = (mono * env).clamp(-params.sample_ceil, params.sample_ceil);
+                let mut s = (mono * env).clamp(-params.sample_ceil, params.sample_ceil);
+                // Must come after the clamp above, never folded into `mono` — see
+                // `poison_override`'s own doc for why the clamp would otherwise launder a
+                // genuinely non-finite value back into a finite one.
+                if let Some(poison) = poison_override(params.signal, frame, fade_frames) {
+                    s = poison;
+                }
                 let bytes = s.to_le_bytes();
                 for _ in 0..channels {
                     buf.extend_from_slice(&bytes);

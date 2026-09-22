@@ -903,6 +903,13 @@ fn start_test_generator(req: GeneratorRequest, state: State<TestSignalState>) ->
     if is_isp && !req.unsafe_mode {
         return Err("Isp requires unsafe_mode".to_string());
     }
+    // Same gate as Isp, same reason as testtone.rs's own --poison (see Signal::Poison's doc):
+    // not because the carrier is loud, but because deliberately pushing a non-finite sample onto
+    // a shared endpoint is inherently reckless towards anything else mixed with it downstream.
+    let is_poison = matches!(req.signal, Signal::Poison { .. });
+    if is_poison && !req.unsafe_mode {
+        return Err("Poison requires unsafe_mode".to_string());
+    }
     let signal = match req.signal {
         Signal::Isp { db_over } => Signal::Isp { db_over: db_over.clamp(0.0, ISP_MAX_OVER_DB) },
         // Same posture as Isp above: re-clamp server-side rather than trust the window's own

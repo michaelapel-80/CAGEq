@@ -142,6 +142,54 @@ pub enum Signal {
     Am { carrier_hz: f64, mod_hz: f64, depth: f64 },
     /// Frequency-modulated sine — see [`fm_phase`] for the construction.
     Fm { carrier_hz: f64, mod_hz: f64, deviation_hz: f64 },
+    /// Deliberately unsafe: an ordinary sine carrier at `carrier_hz` with a literal NaN/+Inf/-Inf
+    /// sample substituted once every `every_n_frames` (cycling through the three) — a live
+    /// torture test for whatever sits downstream of a shared WASAPI render endpoint, this
+    /// project's own APO included. WASAPI gives no guarantee a shared IEEE-float stream stays
+    /// free of non-finite samples: any other application on the same endpoint, the engine's own
+    /// mixer/resampler, or an earlier APO in the chain can introduce one, and a persistent-state
+    /// filter (`cageq_apo::dsp::BiquadState`) that never saw this coming would latch to NaN
+    /// forever rather than recovering on the next good sample. See [`poison_override`] for how
+    /// the injection itself is applied — bypassing gain and the clamp entirely, since both would
+    /// otherwise quietly launder a non-finite value back into a finite one before it ever reached
+    /// the wire.
+    ///
+    /// Requires `unsafe_mode` wherever it's driven from (mirrors `Isp`'s own gate) — not because
+    /// the carrier itself is loud, but because deliberately pushing a non-finite sample onto a
+    /// *shared* endpoint is inherently reckless towards anything else mixed with it downstream.
+    Poison { carrier_hz: f64, every_n_frames: u64 },
+}
+
+/// If `signal` is [`Signal::Poison`] and `frame` lands on an injection point, the literal
+/// non-finite value to substitute in place of the normal sample — `None` otherwise, meaning "use
+/// the ordinary sample unchanged".
+///
+/// **Must be applied after gain and the caller's own sample-ceiling clamp, never folded into
+/// `mono` and left to run through them.** `f32::clamp` is built from `max`/`min`, and IEEE 754's
+/// `max`/`min` pick the non-NaN operand — so `f32::NAN.clamp(-c, c)` silently returns `-c` (or
+/// `c`, whichever `min`/`max` happens to prefer), not NaN, and `f32::INFINITY.clamp(-c, c)`
+/// returns `c`, a perfectly ordinary finite sample. Either would quietly launder the poison value
+/// back to something finite before it ever reached the wire, defeating the entire point of this
+/// signal. So every render loop calls this last, after its own `(mono * env).clamp(..)` line, and
+/// overwrites that result outright on an injection frame.
+///
+/// Injection starts only once the startup fade has finished (`frame >= fade_frames`), so the
+/// first non-finite sample a downstream APO ever sees is a clean, isolated one rather than
+/// tangled up with the fade-in envelope's own multiply. `every_n_frames` is floored to `1` so a
+/// hand-typed `0` can't divide by zero.
+pub fn poison_override(signal: Signal, frame: u64, fade_frames: u64) -> Option<f32> {
+    let Signal::Poison { every_n_frames, .. } = signal else { return None };
+    let every_n_frames = every_n_frames.max(1);
+    if frame < fade_frames || frame % every_n_frames != 0 {
+        return None;
+    }
+    // Cycle NaN → +Inf → -Inf → repeat, so a long-running session exercises all three failure
+    // modes in turn rather than hammering the same one.
+    Some(match (frame / every_n_frames) % 3 {
+        0 => f32::NAN,
+        1 => f32::INFINITY,
+        _ => f32::NEG_INFINITY,
+    })
 }
 
 /// Amplitude-modulated sine, envelope peak-normalized to exactly 1.0 regardless of `depth` (so
@@ -537,6 +585,55 @@ mod tests {
                 "t={t}: {actual_hz} not near expected {expected_hz}"
             );
         }
+    }
+
+    /// The whole point of the construction (see `poison_override`'s own doc): it must hand back
+    /// a genuinely non-finite value, on schedule, and leave every other frame alone.
+    #[test]
+    fn poison_override_fires_on_schedule_and_cycles_through_nan_and_both_infinities() {
+        let signal = Signal::Poison { carrier_hz: 1000.0, every_n_frames: 10 };
+
+        // No fade gating here (fade_frames: 0) — frame 0 is itself a due frame (a multiple of
+        // every_n_frames), so the cycle's starting point is deterministic: NaN.
+        let first = poison_override(signal, 0, 0).unwrap();
+        assert!(first.is_nan(), "first injection should be NaN, got {first}");
+
+        assert_eq!(poison_override(signal, 7, 0), None, "not due yet");
+
+        // Cycles NaN → +Inf → -Inf → repeat on successive due frames.
+        let second = poison_override(signal, 10, 0).unwrap();
+        assert_eq!(second, f32::INFINITY);
+        let third = poison_override(signal, 20, 0).unwrap();
+        assert_eq!(third, f32::NEG_INFINITY);
+        let fourth = poison_override(signal, 30, 0).unwrap();
+        assert!(fourth.is_nan(), "cycle should repeat back to NaN, got {fourth}");
+    }
+
+    /// The fade-in gate (`frame < fade_frames`) suppresses injection even on an otherwise-due
+    /// frame, so the very first non-finite sample a downstream APO sees is clean and isolated
+    /// rather than tangled up with the startup envelope's own multiply.
+    #[test]
+    fn poison_override_is_gated_behind_the_startup_fade() {
+        let signal = Signal::Poison { carrier_hz: 1000.0, every_n_frames: 10 };
+        let fade_frames = 15;
+
+        assert_eq!(poison_override(signal, 0, fade_frames), None, "due by schedule but still fading in");
+        assert_eq!(poison_override(signal, 10, fade_frames), None, "due by schedule but still fading in");
+        assert!(poison_override(signal, 20, fade_frames).is_some(), "fade has finished by now");
+    }
+
+    #[test]
+    fn poison_override_is_none_for_every_other_signal() {
+        assert_eq!(poison_override(Signal::Pink, 100, 0), None);
+        assert_eq!(poison_override(Signal::Tone { waveform: Waveform::Sine, hz: 440.0 }, 100, 0), None);
+    }
+
+    #[test]
+    fn poison_override_floors_a_zero_interval_instead_of_dividing_by_it() {
+        let signal = Signal::Poison { carrier_hz: 1000.0, every_n_frames: 0 };
+        // Must not panic, and must fire every frame (floored to 1).
+        assert!(poison_override(signal, 0, 0).is_some());
+        assert!(poison_override(signal, 1, 0).is_some());
     }
 
     #[test]
