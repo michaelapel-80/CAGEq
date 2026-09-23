@@ -428,6 +428,13 @@ pub fn vicanek_butterworth_shelf(band: &Band, fs: f64) -> Result<Coeffs, Failure
 /// are his (tuned for Butterworth), so how well they carry over to other Q is exactly what
 /// the spike measures. Low shelf as `g·HS(1/g)`, which holds for RBJ shelves at any Q.
 pub fn vicanek_shelf(band: &Band, fs: f64) -> Result<Coeffs, Failure> {
+    let fc = band.freq_hz / (fs / 2.0);
+    vicanek_shelf_at(band, fs, fc / (0.160 + 1.543 * fc * fc).sqrt(), fc / (0.947 + 3.806 * fc * fc).sqrt())
+}
+
+/// [`vicanek_shelf`] with the two match points `f1`, `f2` given explicitly (Nyquist units) —
+/// the knob Stage 0b tunes.
+pub fn vicanek_shelf_at(band: &Band, fs: f64, f1: f64, f2: f64) -> Result<Coeffs, Failure> {
     let high = match band.kind {
         Kind::HighShelf => true,
         Kind::LowShelf => false,
@@ -451,8 +458,8 @@ pub fn vicanek_shelf(band: &Band, fs: f64) -> Result<Coeffs, Failure> {
     };
     let s = 4.0 * k / (w0 * w0);
     let point = |f: f64| (h_at(f), (PI / 2.0 * f).sin().powi(2));
-    let (h1, phi1) = point(fc / (0.160 + 1.543 * fc * fc).sqrt());
-    let (h2, phi2) = point(fc / (0.947 + 3.806 * fc * fc).sqrt());
+    let (h1, phi1) = point(f1);
+    let (h2, phi2) = point(f2);
     let row = |h: f64, phi: f64| (phi * (1.0 - phi) * (1.0 - h), phi * phi * (hny - h), (h - 1.0) * (1.0 - phi) - s * phi * (1.0 - phi));
     let (c11, c12, d1) = row(h1, phi1);
     let (c21, c22, d2) = row(h2, phi2);
@@ -484,6 +491,83 @@ pub fn vicanek_shelf(band: &Band, fs: f64) -> Result<Coeffs, Failure> {
         c.b2 *= g;
     }
     if c.is_finite() { Ok(c) } else { Err(Failure::NoSolution) }
+}
+
+/// Stage 0b match-point schedule for [`vicanek_shelf_at`]: `(p1, r1, p2, r2)` in
+/// `f_i = fc/√(p_i + r_i·fc²)` as a function of Q. Anchor sets are per-Q Nelder–Mead optima
+/// from `examples/shelf_tune.rs` (worst error over fc 20 Hz–20 kHz × ±20 dB at 44.1/48 kHz),
+/// interpolated linearly in log Q and held constant outside the anchors, so the schedule —
+/// and with it the design — is continuous in Q.
+pub fn shelf_match_points(q: f64) -> [f64; 4] {
+    const ANCHORS: [(f64, [f64; 4]); 5] = [
+        (0.65, [0.132, 1.425, 0.919, 7.129]),
+        (0.7, [0.085, 1.401, 0.748, 3.052]),
+        (1.41, [0.223, 1.125, 0.805, 2.175]),
+        (2.0, [0.236, 1.668, 0.898, 1.683]),
+        (3.0, [0.356, 1.458, 0.994, 0.995]),
+    ];
+    if q <= ANCHORS[0].0 {
+        return ANCHORS[0].1;
+    }
+    for w in ANCHORS.windows(2) {
+        let ((q0, p0), (q1, p1)) = (w[0], w[1]);
+        if q <= q1 {
+            let t = (q / q0).ln() / (q1 / q0).ln();
+            return std::array::from_fn(|k| p0[k] + t * (p1[k] - p0[k]));
+        }
+    }
+    ANCHORS[ANCHORS.len() - 1].1
+}
+
+/// The Stage 0b shelf: generalised Vicanek with the tuned [`shelf_match_points`] schedule
+/// where that is realisable, [`ivantsov`] (σ = 2) where it is not, coefficient-[`blend`]ed
+/// across smoothstep windows in log Q.
+///
+/// The windows sit strictly inside the Q ranges the dense scan (`shelf_tune --schedule`)
+/// found realisable for every fc 20 Hz–20 kHz and gain ±20 dB at 44.1/48 kHz: Q ≤ 0.42 and
+/// 0.652 ≤ Q ≤ 3.42 (with the Q 0.65 anchor). Outside them lie (a) a structural singularity around Q = 0.5, where the
+/// shelf's |H|² becomes a perfect square (two identical first-order shelves) and the
+/// five-condition system loses rank, and (b) resonant shelves Q ≳ 3.5. Ivantsov covers both
+/// and is stable/minimum-phase by construction.
+///
+/// Returns `Err` rather than silently switching method if Vicanek ever fails where its weight
+/// is non-zero — a silent switch would be a discontinuity, and the verification should see it.
+pub fn shelf(band: &Band, fs: f64) -> Result<Coeffs, Failure> {
+    if !matches!(band.kind, Kind::LowShelf | Kind::HighShelf) {
+        return Err(Failure::Unsupported);
+    }
+    let lq = band.q.ln();
+    let ramp = |lo: f64, hi: f64| smoothstep(lo.ln(), hi.ln(), lq);
+    // Vicanek weight: 1 → 0 over [0.38, 0.42], 0 → 1 over [0.655, 0.69], 1 → 0 over [2.8, 3.3].
+    // Q 0.7 (the fit's fixed shelves) and 1/√2 sit at full weight, clear of the window.
+    let w = (1.0 - ramp(0.38, 0.42)) + ramp(0.655, 0.69) * (1.0 - ramp(2.8, 3.3));
+    let iv = || ivantsov(band, fs, 2.0);
+    if w <= 0.0 {
+        return iv();
+    }
+    let fc = band.freq_hz / (fs / 2.0);
+    let [p1, r1, p2, r2] = shelf_match_points(band.q);
+    let vk = vicanek_shelf_at(band, fs, fc / (p1 + r1 * fc * fc).sqrt(), fc / (p2 + r2 * fc * fc).sqrt())?;
+    if w >= 1.0 {
+        return Ok(vk);
+    }
+    Ok(blend(&iv()?, &vk, w))
+}
+
+/// Linear coefficient blend `(1 − t)·a + t·b`. Safe for any two stable, minimum-phase
+/// biquads: with `a0 = 1` stability is the triangle `|a2| < 1, |a1| < 1 + a2`, and minimum
+/// phase is the cone `|b2| < b0, |b1| < b0 + b2` — both convex, so every blend is stable and
+/// minimum phase too. Continuous in `t`, which is the point.
+pub fn blend(a: &Coeffs, b: &Coeffs, t: f64) -> Coeffs {
+    let l = |x: f64, y: f64| x + t * (y - x);
+    Coeffs { b0: l(a.b0, b.b0), b1: l(a.b1, b.b1), b2: l(a.b2, b.b2), a1: l(a.a1, b.a1), a2: l(a.a2, b.a2) }
+}
+
+/// `0` at/below `lo`, `1` at/above `hi`, smoothstep between (C¹, so the optimizer's gradient
+/// has no kink at the window edges).
+fn smoothstep(lo: f64, hi: f64, x: f64) -> f64 {
+    let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 // ---------------------------------------------------------------------------------------

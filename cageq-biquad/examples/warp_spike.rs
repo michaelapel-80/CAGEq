@@ -25,6 +25,8 @@ enum Method {
     Cons(&'static str, fn(&Band) -> [Con; 3]),
     Ivantsov(f64),
     VicanekShelf,
+    /// The Stage 0b composite shelf.
+    Shelf,
 }
 
 impl Method {
@@ -35,6 +37,7 @@ impl Method {
             Method::Cons(name, _) => name.into(),
             Method::Ivantsov(sigma) => format!("ivantsov{sigma:.2}"),
             Method::VicanekShelf => "vicanek-gen".into(),
+            Method::Shelf => "shelf(0b)".into(),
         }
     }
 
@@ -45,6 +48,7 @@ impl Method {
             Method::Cons(_, cons) => matched::constrained(band, fs, cons(band)),
             Method::Ivantsov(sigma) => matched::ivantsov(band, fs, sigma),
             Method::VicanekShelf => matched::vicanek_shelf(band, fs),
+            Method::Shelf => matched::shelf(band, fs),
         }
     }
 }
@@ -135,6 +139,7 @@ fn methods_for(kind: Kind) -> Vec<Method> {
         Kind::LowShelf | Kind::HighShelf => {
             m.push(Method::Cons("v1s1/v.5", |_| [V(1.0), S(1.0), V(0.5)]));
             m.push(Method::VicanekShelf);
+            m.push(Method::Shelf);
         }
     }
     m.push(Method::Ivantsov(2.0));

@@ -1,39 +1,21 @@
-//! Scratch probe (Stage 0): generalised Vicanek shelf vs the others, by Q — worst |error| dB
-//! over fc 20 Hz–20 kHz and gains ±0.1..±20 ([n] = design failures of 480).
-use std::f64::consts::PI;
-use cageq_biquad::matched::{self, Con::{Slope as S, Value as V}};
-use cageq_biquad::{analog, rbj, Band, Coeffs, Kind};
-
+//! Scratch probe (Stage 0b): is the Q = 0.5 degeneracy structural? Sweep the two match
+//! points (as multiples of fc) at fc 1 kHz, +1 dB, and count feasible designs per Q.
+use cageq_biquad::{matched, Band, Kind};
 fn main() {
-    for kind in [Kind::HighShelf, Kind::LowShelf] {
-        for fs in [44_100.0, 48_000.0, 96_000.0] {
-            let freqs: Vec<f64> = (0..400).map(|i| 20.0 * 1000f64.powf(i as f64 / 399.0)).collect();
-            let err = |c: &Coeffs, b: &Band| freqs.iter().map(|&f| { let w = 2.0 * PI * f / fs; (c.db(w) - analog::db(b, fs, w)).abs() }).fold(0.0, f64::max);
-            println!("{kind:?} fs {fs}:        rbj   constrained   ivantsov2   vicanek-gen   (+ minphase/stable violations)");
-            for q in [0.1, 0.3, 0.5, 0.6, 0.7, 0.7071, 0.8, 1.0, 1.41, 2.0, 4.0, 10.0, 20.0] {
-                let mut w = [0.0f64; 4];
-                let mut f = [0usize; 4];
-                let mut bad = 0;
-                for i in 0..40 {
-                    let fc = 20.0 * 1000f64.powf(i as f64 / 39.0);
-                    for g in [-20.0, -12.0, -6.0, -3.0, -1.0, -0.1, 0.1, 1.0, 3.0, 6.0, 12.0, 20.0] {
-                        let b = Band { kind, freq_hz: fc, gain_db: g, q };
-                        let ds = [Ok(rbj::coefficients(&b, fs)), matched::constrained(&b, fs, [V(1.0), S(1.0), V(0.5)]), matched::ivantsov(&b, fs, 2.0), matched::vicanek_shelf(&b, fs)];
-                        for (i, d) in ds.iter().enumerate() {
-                            match d {
-                                Ok(c) => {
-                                    w[i] = w[i].max(err(c, &b));
-                                    if i == 3 && (c.pole_radius() >= 1.0 || c.zero_radius() >= 1.0) { bad += 1; }
-                                }
-                                Err(_) => f[i] += 1,
-                            }
-                        }
-                    }
-                }
-                print!("  Q{q:<6}");
-                for i in 0..4 { print!(" {:>12}", format!("{:.2}[{}]", w[i], f[i])); }
-                println!("   {bad}");
+    let fs = 48_000.0;
+    let fc = 1000.0 / (fs / 2.0);
+    let ks: Vec<f64> = (0..25).map(|i| 0.2 * 30f64.powf(i as f64 / 24.0)).collect(); // 0.2..6 × fc
+    for q in [0.45, 0.49, 0.5, 0.51, 0.55] {
+        let mut ok = 0;
+        let mut n = 0;
+        for &k1 in &ks {
+            for &k2 in &ks {
+                if k1 >= k2 { continue; }
+                n += 1;
+                let b = Band { kind: Kind::HighShelf, freq_hz: 1000.0, gain_db: 1.0, q };
+                if matched::vicanek_shelf_at(&b, fs, k1 * fc, k2 * fc).is_ok() { ok += 1; }
             }
         }
+        println!("Q {q}: {ok}/{n} match-point pairs feasible");
     }
 }

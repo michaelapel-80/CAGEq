@@ -140,3 +140,42 @@ fn ivantsov_is_stable_and_minimum_phase_everywhere() {
         }
     }
 }
+
+/// The Stage 0b composite shelf: always designs, always stable and minimum phase (it blends
+/// only stable, minimum-phase designs, and those sets are convex), across the UI's full range.
+#[test]
+fn composite_shelf_always_designs_a_safe_filter() {
+    for fs in [44_100.0, 48_000.0, 96_000.0] {
+        for kind in [Kind::LowShelf, Kind::HighShelf] {
+            for i in 0..25 {
+                let fc = 20.0 * 1000f64.powf(i as f64 / 24.0);
+                for j in 0..40 {
+                    let q = 0.1 * 200f64.powf(j as f64 / 39.0);
+                    for gain in [-20.0, -3.0, -0.01, 0.01, 6.0, 20.0] {
+                        let b = band(kind, fc, gain, q);
+                        let c = matched::shelf(&b, fs).unwrap_or_else(|e| panic!("{b:?} at {fs}: {e:?}"));
+                        assert!(c.pole_radius() < 1.0 && c.zero_radius() < 1.0, "{b:?} at {fs}: {c:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The band every AutoEq fit carries — a 10 kHz, Q 0.7 high shelf — at the rates CAGEq meets:
+/// within 0.25 dB of the analog prototype from 20 Hz to 20 kHz for gains up to ±12 dB (RBJ is
+/// ~1.3–1.6 dB off). Guards the headline result against a regression in the schedule.
+#[test]
+fn composite_shelf_nails_the_fits_10k_shelf() {
+    for fs in [44_100.0, 48_000.0] {
+        for gain in [-12.0, -6.0, 6.0, 12.0] {
+            let b = band(Kind::HighShelf, 10_000.0, gain, 0.7);
+            let c = matched::shelf(&b, fs).unwrap();
+            for i in 0..300 {
+                let f = 20.0 * 1000f64.powf(i as f64 / 299.0);
+                let w = 2.0 * PI * f / fs;
+                close(c.db(w), analog::db(&b, fs, w), 0.25, &format!("{b:?} at {fs}, {f:.0} Hz"));
+            }
+        }
+    }
+}
