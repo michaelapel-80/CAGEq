@@ -142,10 +142,11 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──biquad
   expect — coefficients from exactly these formulas, so matching them bit-for-bit keeps a
   CAGEq-fitted curve numerically identical to what either tool would produce from the same
   parameters; a "more correct" warping-corrected design would quietly diverge from the very target
-  it's meant to match. Warping error is worst for a narrow (high-Q) band sitting close to Nyquist —
-  but AutoEq's own error signal is heavily smoothed above ~6-8kHz (a 2-octave smoothing window
-  there, versus 1/12-octave everywhere else it fits against), by explicit design: its own changelog
-  states it "treats +10kHz range as average value instead of trying to fix it precisely." A fit
+  it's meant to match. These designs matter most as the target frequency approaches Nyquist — the
+  regime these papers' own full-spectrum magnitude-response comparisons demonstrate it in — but
+  AutoEq's own error signal is heavily smoothed above ~6-8kHz (a 2-octave smoothing window there,
+  versus 1/12-octave everywhere else it fits against), by explicit design: its own changelog states
+  it "treats +10kHz range as average value instead of trying to fix it precisely." A fit
   that never asks for a precise, narrow correction anywhere near Nyquist in the first place has
   nothing left for a warping-corrected design to actually improve.
 * **Why a second, custom audio engine alongside Equalizer APO:** the whole point of this app is a
