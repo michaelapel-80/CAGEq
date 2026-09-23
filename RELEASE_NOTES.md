@@ -1,9 +1,12 @@
-A round of frontend performance fixes for the scope views and level meter.
+A round of small robustness and accessibility fixes.
 
-- **Fixed:** the time scope, vectorscope, and level meter each allocated fresh buffers (typed
-  arrays, or a `Path2D` per beam-velocity bucket) on every incoming audio window, tens of times a
-  second — a steady stream of short-lived allocations that could trigger full "Major GC" pauses
-  well above the frame-time budget. They now reuse the same buffers across windows instead.
-- **Fixed:** the level meter re-rendered its whole React component on every single backend update
-  (~60/s) because the update always arrived as a freshly-parsed object, defeating React's normal
-  same-value skip. Its peak/RMS/LUFS marks now update directly instead of through a full re-render.
+- **Fixed:** cageq-apo now sanitizes non-finite (NaN/Inf) input samples before the biquad cascade —
+  a bad sample from anywhere upstream (another app, a mixer, an SRC) could otherwise poison the
+  filter's carried-forward state permanently, with no recovery until restart.
+- **Fixed:** a stalled meter/spectrum/scope stream (a dropped subscriber, a failed fetch) could
+  freeze silently until the app was restarted. Streams now self-heal a few seconds after going
+  quiet, and stopping/restarting monitoring can no longer race itself.
+- **Fixed:** the tone generator window could default to the wrong output device instead of
+  whatever the main window actually has selected.
+- Cleared several accessibility warnings (unlabeled form fields, missing field names).
+- Trimmed some unnecessary vertical padding the app window no longer needs.
