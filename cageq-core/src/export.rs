@@ -23,7 +23,7 @@ use std::sync::Mutex;
 
 use cageq_peq_solver::{grid::linear_interp_log, grid::standard_grid, Band, BandKind, Solver};
 
-use crate::{filter_curve_db, validate_filters, CoreError, Filter};
+use crate::{filter_curve_db_in, validate_filters, CoreError, Filter, ResponseModel};
 
 const FS: f64 = 48_000.0;
 /// `_FIXED_BAND_GAIN_RANGE_DB` (`sidecar_dsp.py:629`) — see its own doc for why an
@@ -82,8 +82,11 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> BoundedCache<K, V> {
     }
 }
 
-type ExportKey = (Vec<(u8, i64, i64, i64)>, u32);
-type FixedBandKey = (Vec<(u8, i64, i64, i64)>, &'static str);
+// The model is part of both keys: the export fits the curve the slot's bands actually
+// produce, which depends on it. (The exported bands themselves are always RBJ — that is what
+// every phone EQ app runs.)
+type ExportKey = (Vec<(u8, i64, i64, i64)>, u32, ResponseModel);
+type FixedBandKey = (Vec<(u8, i64, i64, i64)>, &'static str, ResponseModel);
 type FitResult = (Vec<Filter>, f64);
 
 pub(crate) type ExportCache = BoundedCache<ExportKey, FitResult>;
@@ -100,16 +103,25 @@ fn preamp_db(achieved_curve: &[f64]) -> f64 {
 /// `fit_export_eq` (`sidecar_dsp.py:551-609`): fits `band_count` filters (>= 3; one low
 /// shelf + one high shelf + the rest free peaking, same shape as the main fit's own
 /// config) directly to `filters`' own composed curve.
-pub(crate) fn fit_export_eq(cache: &Mutex<ExportCache>, filters: &[Filter], band_count: u32) -> Result<FitResult, CoreError> {
+///
+/// `model` is how `filters` are realised on the desktop — the curve being approximated. The
+/// exported bands are RBJ regardless (phone EQ apps are), so a warping-corrected desktop curve
+/// is simply what the RBJ fit aims at.
+pub(crate) fn fit_export_eq(
+    cache: &Mutex<ExportCache>,
+    filters: &[Filter],
+    band_count: u32,
+    model: ResponseModel,
+) -> Result<FitResult, CoreError> {
     validate_filters(filters)?;
     let band_count = band_count.max(3);
-    let key = (filters_key(filters), band_count);
+    let key = (filters_key(filters), band_count, model);
     if let Some(cached) = cache.lock().unwrap().get(&key) {
         return Ok(cached);
     }
 
     let f = standard_grid();
-    let target = filter_curve_db(filters, &f);
+    let target = filter_curve_db_in(filters, &f, model);
     let bands = cageq_peq_solver::cageq_default_bands((band_count - 2) as usize);
 
     let mut solver = Solver::new(f, FS, bands, target);
@@ -146,16 +158,21 @@ fn preset_key(preset: &str) -> &'static str {
 /// that band's exact `fc` (`optimize_fixed_band_eq`'s `gain_range`, `frequency_response.
 /// py:182-190`) — left unconstrained, a dense preset's neighbouring bands measurably
 /// overshoot/ripple against each other (see `sidecar_dsp.py`'s own doc on that constant).
-pub(crate) fn fit_fixed_band_eq(cache: &Mutex<FixedBandCache>, filters: &[Filter], preset: &str) -> Result<FitResult, CoreError> {
+pub(crate) fn fit_fixed_band_eq(
+    cache: &Mutex<FixedBandCache>,
+    filters: &[Filter],
+    preset: &str,
+    model: ResponseModel,
+) -> Result<FitResult, CoreError> {
     validate_filters(filters)?;
     let preset = preset_key(preset);
-    let key = (filters_key(filters), preset);
+    let key = (filters_key(filters), preset, model);
     if let Some(cached) = cache.lock().unwrap().get(&key) {
         return Ok(cached);
     }
 
     let f = standard_grid();
-    let target = filter_curve_db(filters, &f);
+    let target = filter_curve_db_in(filters, &f, model);
     let mut bands = preset_bands(preset);
     for band in &mut bands {
         let target_at_fc = linear_interp_log(&f, &target, &[band.fc])[0];

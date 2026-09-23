@@ -9,6 +9,9 @@ license = "MIT"
 edition = "2024"
 
 [dependencies]
+# The warping-corrected model's coefficient design (`Band::model`). Dependency-free, so it
+# does not reintroduce the `cageq-core` dependency this crate exists to avoid.
+cageq-biquad = { path = "../cageq-biquad" }
 # The output type: fitted bands hand back as the same `Filter`/`FilterType` every
 # backend already speaks, so callers need no adapter at the boundary.
 cageq-backend = { path = "../cageq-backend" }
@@ -29,6 +32,3 @@ slsqp = ["dep:nlopt"]
 [dev-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# Parity only (tests/biquad_parity.rs): the shared design crate's RBJ response must match
-# `Band::fr` before the fit is switched over to it.
-cageq-biquad = { path = "../cageq-biquad" }

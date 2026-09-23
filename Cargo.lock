@@ -105,6 +105,7 @@ name = "cageq-core"
 version = "0.14.5"
 dependencies = [
  "cageq-backend",
+ "cageq-biquad",
  "cageq-catalog",
  "cageq-config-writer",
  "cageq-peq-solver",

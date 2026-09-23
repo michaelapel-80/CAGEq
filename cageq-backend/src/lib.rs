@@ -99,7 +99,7 @@ pub fn expand_tilts(filters: &[Filter]) -> Vec<Filter> {
 /// Only [`ResponseModel::Rbj`] is universal — it is what Equalizer APO computes from its
 /// `PK`/`LSC`/`HSC` lines. [`ResponseModel::AnalogMatched`] is gated by
 /// [`Capabilities::analog_matched`]; a backend without it refuses a config that asks for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum ResponseModel {
     /// RBJ cookbook (bilinear transform, pre-warped at Fc) — what CAGEq has always applied.
     #[default]

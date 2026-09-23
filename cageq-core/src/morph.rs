@@ -36,6 +36,7 @@
 //! 5 kHz literally sweeps a resonance across the spectrum. That is a filter sweep, an
 //! effect in its own right. Gain-only morphing has no moving parts.
 
+use cageq_backend::ResponseModel;
 use cageq_config_writer::{Filter, FilterType};
 use std::sync::OnceLock;
 
@@ -108,90 +109,28 @@ fn k_weight_power(f: f64) -> f64 {
     biquad_power(&KW_S1_B, &KW_S1_A, w) * biquad_power(&KW_S2_B, &KW_S2_A, w)
 }
 
-/// AutoEq's `biquad_coefficients()` — `[a0, a1, a2, b0, b1, b2]` with `a1`/`a2` already
-/// negated, exactly as `peq.py` produces them (and as `biquad.ts` mirrors for the chart).
-fn coefficients(band: &Filter) -> [f64; 6] {
-    let a = 10.0_f64.powf(band.gain_db / 40.0);
-    let w0 = 2.0 * std::f64::consts::PI * band.freq_hz / FS;
-    let alpha = w0.sin() / (2.0 * band.q);
-    let cosw = w0.cos();
-    let sqrt_a = a.sqrt();
-
-    // Every coefficient is divided through by `a0`, so the returned `a0` is always 1.0.
-    let (a1, a2, b0, b1, b2) = match band.kind {
-        FilterType::Peaking => {
-            let a0 = 1.0 + alpha / a;
-            (
-                -(-2.0 * cosw) / a0,
-                -(1.0 - alpha / a) / a0,
-                (1.0 + alpha * a) / a0,
-                (-2.0 * cosw) / a0,
-                (1.0 - alpha * a) / a0,
-            )
-        }
-        FilterType::LowShelf => {
-            let a0 = a + 1.0 + (a - 1.0) * cosw + 2.0 * sqrt_a * alpha;
-            (
-                -(-2.0 * (a - 1.0 + (a + 1.0) * cosw)) / a0,
-                -(a + 1.0 + (a - 1.0) * cosw - 2.0 * sqrt_a * alpha) / a0,
-                (a * (a + 1.0 - (a - 1.0) * cosw + 2.0 * sqrt_a * alpha)) / a0,
-                (2.0 * a * (a - 1.0 - (a + 1.0) * cosw)) / a0,
-                (a * (a + 1.0 - (a - 1.0) * cosw - 2.0 * sqrt_a * alpha)) / a0,
-            )
-        }
-        FilterType::HighShelf => {
-            let a0 = a + 1.0 - (a - 1.0) * cosw + 2.0 * sqrt_a * alpha;
-            (
-                -(2.0 * (a - 1.0 - (a + 1.0) * cosw)) / a0,
-                -(a + 1.0 - (a - 1.0) * cosw - 2.0 * sqrt_a * alpha) / a0,
-                (a * (a + 1.0 + (a - 1.0) * cosw + 2.0 * sqrt_a * alpha)) / a0,
-                (-2.0 * a * (a - 1.0 + (a + 1.0) * cosw)) / a0,
-                (a * (a + 1.0 + (a - 1.0) * cosw - 2.0 * sqrt_a * alpha)) / a0,
-            )
-        }
-        // RBJ band-pass, 0 dB peak (gain is ignored — the isolate audition uses unity peak).
-        FilterType::Bandpass => {
-            let a0 = 1.0 + alpha;
-            (
-                -(-2.0 * cosw) / a0,
-                -(1.0 - alpha) / a0,
-                alpha / a0,
-                0.0,
-                -alpha / a0,
-            )
-        }
-        FilterType::Tilt => unreachable!("curve_db_on expands tilts before calling coefficients"),
-    };
-    [1.0, a1, a2, b0, b1, b2]
-}
-
 /// The composed EQ curve of `bands` in dB on the module's shared grid (a biquad cascade
-/// adds in dB). Mirrors `PEQFilter.fr`'s numerically-stable `phi` form.
-pub(crate) fn curve_db(bands: &[Filter]) -> Vec<f64> {
-    curve_db_on(bands, &grid().f)
+/// adds in dB), realised in `model`.
+pub(crate) fn curve_db(bands: &[Filter], model: ResponseModel) -> Vec<f64> {
+    curve_db_on(bands, &grid().f, model)
 }
 
 /// The same curve on an arbitrary frequency grid. Split out so a cross-language test can
 /// evaluate it on exactly the grid it feeds the reference Python (`peq.py`) and compare
-/// point-for-point — the guard against the three biquad copies drifting apart.
+/// point-for-point.
 ///
-/// Expands any `Tilt` band into its constituent shelf pair first
-/// (`cageq_backend::expand_tilts`) — `coefficients()` has no tilt formula of its own, by
-/// construction: see `expand_tilts`'s doc.
-pub(crate) fn curve_db_on(bands: &[Filter], freqs: &[f64]) -> Vec<f64> {
+/// Coefficients come from `cageq-biquad` (the single source of truth — this module used to
+/// carry its own RBJ transcription), evaluated in the numerically-stable `φ` form AutoEq's
+/// `PEQFilter.fr` uses. Expands any `Tilt` band into its constituent shelf pair first
+/// (`cageq_backend::expand_tilts`) — no model has a single-stage tilt, by construction: see
+/// `expand_tilts`'s doc.
+pub(crate) fn curve_db_on(bands: &[Filter], freqs: &[f64], model: ResponseModel) -> Vec<f64> {
     let expanded = cageq_backend::expand_tilts(bands);
     let mut total = vec![0.0; freqs.len()];
     for band in &expanded {
-        let [a0, a1, a2, b0, b1, b2] = coefficients(band);
-        let (a1, a2) = (-a1, -a2); // AutoEq flips these back before evaluating
-        let b_sum = (b0 + b1 + b2).powi(2);
-        let a_sum = (a0 + a1 + a2).powi(2);
+        let c = cageq_biquad::design(&crate::biquad_band(band), FS, crate::biquad_model(model));
         for (i, &f) in freqs.iter().enumerate() {
-            let w = 2.0 * std::f64::consts::PI * f / FS;
-            let phi = 4.0 * (w / 2.0).sin().powi(2);
-            let num = b_sum + (b0 * b2 * phi - (b1 * (b0 + b2) + 4.0 * b0 * b2)) * phi;
-            let den = a_sum + (a0 * a2 * phi - (a1 * (a0 + a2) + 4.0 * a0 * a2)) * phi;
-            total[i] += 10.0 * num.log10() - 10.0 * den.log10();
+            total[i] += c.db(2.0 * std::f64::consts::PI * f / FS);
         }
     }
     total
@@ -216,8 +155,8 @@ pub(crate) fn loudness_target_db(curve: &[f64]) -> f64 {
 
 /// How far apart two curves are perceptually, in dB — see the module header. Zero for
 /// identical band sets; exactly `|Δgain|` for a uniform shift.
-pub(crate) fn tonal_distance_db(a: &[Filter], b: &[Filter]) -> f64 {
-    let (ca, cb) = (curve_db(a), curve_db(b));
+pub(crate) fn tonal_distance_db(a: &[Filter], b: &[Filter], model: ResponseModel) -> f64 {
+    let (ca, cb) = (curve_db(a, model), curve_db(b, model));
     let g = grid();
     let ms: f64 = g.w.iter().zip(ca.iter().zip(&cb)).map(|(w, (x, y))| w * (y - x).powi(2)).sum();
     ms.sqrt()
@@ -310,7 +249,7 @@ mod tests {
     #[test]
     fn identical_curves_are_zero_apart() {
         let bands = vec![peak(1000.0, 4.0, 1.4), peak(80.0, -3.0, 0.7)];
-        approx(tonal_distance_db(&bands, &bands), 0.0, 1e-12);
+        approx(tonal_distance_db(&bands, &bands, ResponseModel::Rbj), 0.0, 1e-12);
     }
 
     /// A narrow notch and a broad tilt of the *same* peak gain are not the same event:
@@ -320,8 +259,8 @@ mod tests {
     fn narrow_bands_move_the_metric_far_less_than_wide_ones() {
         let narrow = vec![peak(4000.0, 12.0, 12.0)];
         let wide = vec![peak(4000.0, 12.0, 0.5)];
-        let d_narrow = tonal_distance_db(&[], &narrow);
-        let d_wide = tonal_distance_db(&[], &wide);
+        let d_narrow = tonal_distance_db(&[], &narrow, ResponseModel::Rbj);
+        let d_wide = tonal_distance_db(&[], &wide, ResponseModel::Rbj);
         assert!(d_wide > 3.0 * d_narrow, "wide={d_wide} narrow={d_narrow}");
     }
 
@@ -329,8 +268,8 @@ mod tests {
     fn lerp_endpoints_reproduce_each_side() {
         let a = vec![peak(100.0, 6.0, 0.7)];
         let b = vec![peak(5000.0, 6.0, 0.7)];
-        approx(tonal_distance_db(&lerp_bands(&a, &b, 0.0), &a), 0.0, 1e-9);
-        approx(tonal_distance_db(&lerp_bands(&a, &b, 1.0), &b), 0.0, 1e-9);
+        approx(tonal_distance_db(&lerp_bands(&a, &b, 0.0), &a, ResponseModel::Rbj), 0.0, 1e-9);
+        approx(tonal_distance_db(&lerp_bands(&a, &b, 1.0), &b, ResponseModel::Rbj), 0.0, 1e-9);
     }
 
     /// The anti-swoosh guarantee: morphing a low peak into a high one must never move a
@@ -372,7 +311,7 @@ mod tests {
     fn curve_matches_the_reference_biquad_model() {
         let g = grid();
         // A peaking band's response at its own centre frequency is its gain.
-        let c = curve_db(&[peak(1000.0, 6.0, 1.0)]);
+        let c = curve_db(&[peak(1000.0, 6.0, 1.0)], ResponseModel::Rbj);
         let i = g.f.iter().enumerate().min_by(|(_, a), (_, b)| {
             (*a - 1000.0).abs().partial_cmp(&(*b - 1000.0).abs()).unwrap()
         });
@@ -391,8 +330,8 @@ mod tests {
             Filter { kind: FilterType::LowShelf, freq_hz: 1000.0, gain_db: -3.0, q: 0.9 },
             Filter { kind: FilterType::HighShelf, freq_hz: 1000.0, gain_db: 3.0, q: 0.9 },
         ];
-        let c_tilt = curve_db(&tilt);
-        let c_shelves = curve_db(&shelves);
+        let c_tilt = curve_db(&tilt, ResponseModel::Rbj);
+        let c_shelves = curve_db(&shelves, ResponseModel::Rbj);
         for (a, b) in c_tilt.iter().zip(&c_shelves) {
             approx(*a, *b, 1e-9);
         }

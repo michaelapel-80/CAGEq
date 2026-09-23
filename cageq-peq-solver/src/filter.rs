@@ -45,6 +45,11 @@ pub struct Band {
     pub max_q: f64,
     pub min_gain: f64,
     pub max_gain: f64,
+    /// Which digital realisation [`Band::fr`] evaluates — the fit must optimise the curve
+    /// the backend will actually run. RBJ (the constructors' default) is the untouched
+    /// `peq.py` port the fixture cross-checks pin; `AnalogMatched` designs through
+    /// `cageq-biquad`.
+    pub model: cageq_biquad::ResponseModel,
 }
 
 impl Band {
@@ -67,6 +72,7 @@ impl Band {
             max_q,
             min_gain,
             max_gain,
+            model: cageq_biquad::ResponseModel::Rbj,
         }
     }
 
@@ -88,6 +94,7 @@ impl Band {
             max_q,
             min_gain,
             max_gain,
+            model: cageq_biquad::ResponseModel::Rbj,
         }
     }
 
@@ -148,7 +155,20 @@ impl Band {
     /// `PEQFilter.fr` (`peq.py:110-128`): this band's own frequency response in dB on
     /// `f`, via the numerically-stable `phi` form (avoids evaluating `cos`/`sin` at
     /// every bin for the magnitude, unlike the naive `|H(e^jw)|` route).
+    ///
+    /// For [`cageq_biquad::ResponseModel::AnalogMatched`] the coefficients come from
+    /// `cageq-biquad` instead, evaluated in the same `φ` form (its `Coeffs::db`).
     pub fn fr(&self, f: &[f64], fs: f64) -> Vec<f64> {
+        if self.model != cageq_biquad::ResponseModel::Rbj {
+            let kind = match self.kind {
+                BandKind::Peaking => cageq_biquad::Kind::Peaking,
+                BandKind::LowShelf => cageq_biquad::Kind::LowShelf,
+                BandKind::HighShelf => cageq_biquad::Kind::HighShelf,
+            };
+            let band = cageq_biquad::Band { kind, freq_hz: self.fc, gain_db: self.gain, q: self.q };
+            let c = cageq_biquad::design(&band, fs, self.model);
+            return f.iter().map(|&freq| c.db(2.0 * std::f64::consts::PI * freq / fs)).collect();
+        }
         let [a0, a1, a2, b0, b1, b2] = self.biquad_coefficients(fs);
         let (a1, a2) = (-a1, -a2); // peq.py's fr() flips these back before evaluating
         let b_sum = (b0 + b1 + b2).powi(2);
