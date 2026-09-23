@@ -178,9 +178,12 @@ export function Meter({
         setNums(update);
       }
     });
+    // Pairs this effect's start with its own cleanup's stop, so a stop that the IPC layer happens to
+    // deliver after the *next* effect's start can't kill that newer monitor (see `MonitorState`).
+    const session = crypto.randomUUID();
     (async () => {
       try {
-        await invoke("start_monitor", { device: deviceId || null });
+        await invoke("start_monitor", { device: deviceId || null, session });
         setErr(null);
       } catch (e) {
         setErr(String(e));
@@ -189,7 +192,7 @@ export function Meter({
     return () => {
       unsub();
       onSampleRate?.(null); // monitor is stopping — the header rate is no longer live
-      invoke("stop_monitor").catch(() => {});
+      invoke("stop_monitor", { session }).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceId]);

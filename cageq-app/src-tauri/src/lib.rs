@@ -40,8 +40,14 @@ enum Backend {
 
 /// Holds the running §5.3c loopback monitor so start/stop commands can replace or end it.
 /// Capture is Windows-only (`cageq_monitor::Monitor::start` errors elsewhere).
+///
+/// Keyed by a caller-chosen session token so a stale `stop_monitor` can't kill a newer session.
+/// `Meter` fires stop (effect cleanup) and start (next effect) back to back without awaiting
+/// either, and IPC requests are not guaranteed to be handled in the order they were issued — if
+/// the stop landed second it used to tear down the monitor that had just replaced it, leaving the
+/// loopback silently dead until an app restart.
 #[derive(Default)]
-struct MonitorState(std::sync::Mutex<Option<cageq_monitor::Monitor>>);
+struct MonitorState(std::sync::Mutex<Option<(String, cageq_monitor::Monitor)>>);
 
 /// Holds whatever test signal is currently playing — the §5.4 self-test's pink noise, or the
 /// tone-generator window's output (`start_test_generator`, any waveform) — so start/stop can
@@ -165,7 +171,16 @@ fn fan_out<T: Clone + serde::Serialize>(
             // windows, which is fine — those views aren't painting either, and they pick straight
             // back up on the next beat). Skip the send rather than park a payload nobody will
             // fetch, but keep the entry, so this is fully reversible.
-            !draining || ch.send(value.clone()).is_ok()
+            !draining
+                || match ch.send(value.clone()) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        // The frontend re-registers a stream that goes quiet (streams.ts), so this
+                        // is recoverable — but it must not be invisible.
+                        eprintln!("[cageq] dropping stream subscriber '{label}': {e}");
+                        false
+                    }
+                }
         });
     }
 }
@@ -722,6 +737,7 @@ fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
 #[tauri::command]
 fn start_monitor(
     device: Option<String>,
+    session: String,
     state: State<MonitorState>,
     scope_viewers: State<ScopeViewers>,
     harmonic_fold: State<HarmonicFoldState>,
@@ -731,7 +747,7 @@ fn start_monitor(
     subs: State<StreamSubs>,
 ) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    if let Some(existing) = guard.take() {
+    if let Some((_, existing)) = guard.take() {
         existing.stop();
     }
     let meter_subs = subs.meter.clone();
@@ -750,7 +766,7 @@ fn start_monitor(
         move |spectrum| fan_out(&spectrum_subs, &spectrum_alive, spectrum),
         move |scope| fan_out(&scope_subs, &scope_alive, scope),
     )?;
-    *guard = Some(monitor);
+    *guard = Some((session, monitor));
     Ok(())
 }
 
@@ -843,12 +859,15 @@ fn set_scope_viewer(active: bool, scope_viewers: State<ScopeViewers>) {
     }
 }
 
-/// §5.3c: stop loopback monitoring (idempotent — no-op if nothing is running).
+/// §5.3c: stop loopback monitoring `session` (idempotent — no-op if nothing is running, or if a
+/// newer session has already replaced it; see [`MonitorState`]).
 #[tauri::command]
-fn stop_monitor(state: State<MonitorState>) -> Result<(), String> {
+fn stop_monitor(session: String, state: State<MonitorState>) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    if let Some(existing) = guard.take() {
-        existing.stop();
+    if guard.as_ref().is_some_and(|(s, _)| *s == session) {
+        if let Some((_, existing)) = guard.take() {
+            existing.stop();
+        }
     }
     Ok(())
 }
