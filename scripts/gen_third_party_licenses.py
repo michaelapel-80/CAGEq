@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
-"""Merge cargo-about / license-checker / pip-licenses output into one
-THIRD_PARTY_LICENSES.txt. Regenerate whenever a dependency changes (Rust,
-npm, or the sidecar's requirements.txt) — don't hand-edit the output file.
+"""Merge cargo-about / license-checker output, plus NLopt's own license files, into one
+THIRD_PARTY_LICENSES.txt. Regenerate whenever a dependency changes (Rust or npm) — don't
+hand-edit the output file.
 
 Run from the repo root, in order:
 
-    # 1. Rust — two separate cargo workspaces, so two separate reports.
-    #    about.toml's `accepted` list may need a new SPDX id if a fresh
-    #    dependency uses one cargo-about hasn't seen yet; it refuses to run
-    #    (rather than silently omit anything) until you add it there.
+    # 1. Rust — one report per shipped binary's crate. about.toml scopes every run to the
+    #    Windows target and drops dev-/build-dependencies; its `accepted` list may need a new
+    #    SPDX id if a fresh dependency uses one it hasn't seen yet — cargo-about refuses to run
+    #    (rather than silently omit anything) until you review it and add it there.
+    #    cageq-app/src-tauri is its own workspace, so it gets its own run; the other two are
+    #    scoped with -m (without --workspace) so dev-only root members (cageq-sidecar,
+    #    cageq-watchdog — test tooling since the Rust port) never leak in.
     cargo install cargo-about --features cli   # once
-    cargo about generate --format json -o rust_licenses_root.json
+    cargo about generate --format json -c about.toml -m cageq-apo/Cargo.toml \\
+        -o rust_licenses_apo.json
+    cargo about generate --format json -c about.toml -m cageq-apo-backend/Cargo.toml \\
+        -o rust_licenses_apo_backend.json
     (cd cageq-app/src-tauri && cargo about generate --format json \\
-        --config ../../about.toml -o ../../rust_licenses_tauri.json)
+        -c ../../about.toml -o ../../rust_licenses_tauri.json)
 
     # 2. npm — production dependencies only; --production doesn't perfectly
     #    exclude devDependencies on a hoisted tree, hence NPM_SHIPPED below
@@ -20,40 +26,26 @@ Run from the repo root, in order:
     (cd cageq-app && npx --yes license-checker --production --json \\
         --out ../npm_licenses.json)
 
-    # 3. Python — install pip-licenses somewhere OTHER than the sidecar's own venv (a
-    #    scratch/system Python) and point it at that venv with --python, rather than
-    #    installing into it directly. Installing pip-licenses into the sidecar's venv itself
-    #    once genuinely contaminated a real release build: it drags in prettytable + wcwidth
-    #    + tomli as its own dependencies, PyInstaller's analysis doesn't know those weren't
-    #    really autoeq's, and they silently rode along into the frozen sidecar.exe.
-    python -m pip install --quiet pip-licenses   # any Python except the sidecar's venv
-    python -m piplicenses --python cageq-sidecar/.venv/Scripts/python.exe --with-system \\
-        --format=json --with-license-file --no-license-path --with-urls \\
-        > python_licenses.json
-    # --with-system: pip-licenses hides "system" packages (pip, setuptools, ...) by default.
-    # setuptools genuinely ships in the frozen output (confirmed via _internal/setuptools-
-    # *.dist-info and xref-cageq-sidecar.html — apparently a NumPy/PyInstaller compatibility
-    # shim); pip itself doesn't and is filtered back out below, in PY_BUILD_ONLY.
-
-    # Cross-check periodically that this list still matches what actually gets bundled
-    # (PyInstaller's static analysis can drop things pip installed but nothing imports, the
-    # way it does for matplotlib's own dependency chain — see PY_MATPLOTLIB_ONLY below):
-    #   ./scripts/build-sidecar.ps1
-    #   grep -c '"<package>' cageq-sidecar/build/cageq-sidecar/xref-cageq-sidecar.html
-
-    # 4. Merge.
+    # 3. Merge. Also reads NLopt's own license files straight from the `nlopt` crate's source
+    #    (located via `cargo metadata`, so it needs the crate downloaded — any build does that)
+    #    and the vendored licenses/LGPL-2.1.txt.
     python scripts/gen_third_party_licenses.py
 
-The four intermediate *_licenses*.json files are gitignored — regenerate
-them fresh each time rather than trusting stale ones.
+The *_licenses*.json intermediates are gitignored — regenerate them fresh each time rather
+than trusting stale ones.
 """
-import json
 import io
+import json
+import os
+import subprocess
 
-REPO = "."
+RUST_REPORTS = ["rust_licenses_apo.json", "rust_licenses_apo_backend.json", "rust_licenses_tauri.json"]
 
+# CAGEq's own GPL-3.0-or-later crates — not third-party, so left out of the listing.
+# cageq-peq-solver is deliberately NOT here: it's MIT, a port of AutoEq's fitting code that
+# carries AutoEq's own copyright notice, which the MIT terms require reproducing.
 OWN_RUST_CRATES = {
-    "cageq-apo", "cageq-apo-backend", "cageq-backend", "cageq-config-writer",
+    "cageq-apo", "cageq-apo-backend", "cageq-backend", "cageq-catalog", "cageq-config-writer",
     "cageq-sidecar", "cageq-watchdog", "cageq-core", "cageq-monitor", "cageq-app",
 }
 
@@ -67,28 +59,9 @@ NPM_SHIPPED = {
     "scheduler", "use-sync-external-store",
 }
 
-# Two different reasons a venv-installed package doesn't end up in the frozen sidecar.exe,
-# both verified against a real build (`grep`-ing build/cageq-sidecar/xref-cageq-sidecar.html
-# and checking sidecar/cageq-sidecar/_internal directly — pip list / requirements.txt alone
-# describe the venv, not what PyInstaller actually traced and bundled):
-#
-# * PyInstaller's own build-time dependencies (Windows PE analysis, packaging metadata) —
-#   needed to *produce* cageq-sidecar.exe, never imported by it. PyInstaller itself stays
-#   (its bootloader is compiled into the output — see the note attached to it below).
-# * matplotlib's own dependency chain — build-sidecar.ps1 explicitly excludes matplotlib
-#   itself (sidecar_dsp.py stubs it in sys.modules before `import autoeq`, so it's never
-#   really imported, but static analysis can't always see through that trick), and once
-#   matplotlib is gone, nothing else reaches contourpy/cycler/fonttools/kiwisolver/
-#   python-dateutil/six either — they exist purely to serve it.
-PY_BUILD_ONLY = {"altgraph", "pefile", "pyinstaller-hooks-contrib", "pywin32-ctypes", "pip"}
-PY_MATPLOTLIB_ONLY = {"matplotlib", "contourpy", "cycler", "fonttools", "kiwisolver", "python-dateutil", "six"}
-
-PYINSTALLER_NOTE = (
-    "PyInstaller's bootloader (not its build-time tooling) is compiled into "
-    "cageq-sidecar.exe. PyInstaller is GPLv2-or-later WITH a bootloader "
-    "exception that explicitly permits this for a program under any license, "
-    "commercial or otherwise, without requiring that program itself be GPL."
-)
+# NLopt algorithms whose own license file applies only if NLopt's C++ code is compiled. The
+# `nlopt` crate's build.rs turns NLOPT_CXX off (checked below, not assumed), which drops both.
+NLOPT_CXX_ONLY_ALGS = {"stogo", "ags"}
 
 
 def load(name):
@@ -96,13 +69,15 @@ def load(name):
         return json.load(f)
 
 
-def rust_section():
-    root = load("rust_licenses_root.json")
-    tauri = load("rust_licenses_tauri.json")
+def read(path):
+    with io.open(path, encoding="utf-8", errors="replace") as f:
+        return f.read().strip()
 
-    # key: exact license text -> {"id": spdx-ish name, "crates": {(name,version)}}
+
+def rust_section():
+    # key: exact license text -> {"name": spdx-ish name, "crates": {(name, version)}}
     groups = {}
-    for report in (root, tauri):
+    for report in map(load, RUST_REPORTS):
         for lic in report["licenses"]:
             text = lic["text"]
             g = groups.setdefault(text, {"name": lic["name"], "crates": set()})
@@ -153,8 +128,7 @@ def npm_section():
         text = ""
         if license_file:
             try:
-                with io.open(license_file, encoding="utf-8", errors="replace") as f:
-                    text = f.read().strip()
+                text = read(license_file)
             except OSError:
                 text = ""
         key2 = text if text else f"__notext__:{lic}"
@@ -177,42 +151,79 @@ def npm_section():
     return "\n".join(out)
 
 
-def python_section():
-    data = load("python_licenses.json")
+def nlopt_source():
+    """The NLopt C sources the `nlopt` crate vendors and builds, found via cargo metadata."""
+    meta = json.loads(subprocess.check_output(
+        ["cargo", "metadata", "--format-version", "1"],
+        cwd=os.path.join("cageq-app", "src-tauri"),
+    ))
+    pkgs = [p for p in meta["packages"] if p["name"] == "nlopt"]
+    if len(pkgs) != 1:
+        raise SystemExit(f"expected exactly one `nlopt` crate in the app's dependency graph, found {len(pkgs)}")
+    crate_dir = os.path.dirname(pkgs[0]["manifest_path"])
+    src = [d for d in os.listdir(crate_dir) if d.startswith("nlopt-") and os.path.isdir(os.path.join(crate_dir, d))]
+    if len(src) != 1:
+        raise SystemExit(f"expected one vendored nlopt-* source dir in {crate_dir}, found {src}")
+    return pkgs[0]["version"], crate_dir, os.path.join(crate_dir, src[0])
+
+
+def nlopt_section():
+    crate_version, crate_dir, src = nlopt_source()
+    nlopt_version = os.path.basename(src).split("-", 1)[1]
+    build_rs = read(os.path.join(crate_dir, "build.rs"))
+    # What gets compiled is decided by the crate's build.rs, so read it rather than assume it:
+    # a future crate version that switches C++ on or Luksan off changes both what's listed here
+    # and which license governs the combined library.
+    cxx_off = '"NLOPT_CXX", "OFF"' in build_rs
+    luksan_off = '"NLOPT_LUKSAN", "OFF"' in build_rs
+    if not cxx_off:
+        raise SystemExit("nlopt's build.rs no longer turns NLOPT_CXX off — revisit NLOPT_CXX_ONLY_ALGS")
+    if luksan_off:
+        raise SystemExit("nlopt's build.rs now turns NLOPT_LUKSAN off — NLopt is then MIT, not LGPL; update this section")
+
     out = []
     out.append("=" * 80)
-    out.append("PYTHON — frozen into the DSP sidecar executable (PyInstaller)")
+    out.append("C — compiled into cageq-app.exe (statically linked by the `nlopt` Rust crate)")
     out.append("=" * 80)
     out.append("")
-
-    groups = {}
-    for pkg in data:
-        name = pkg["Name"]
-        if name in PY_BUILD_ONLY or name in PY_MATPLOTLIB_ONLY:
+    out.append("-" * 80)
+    out.append("License: GNU Lesser General Public License v2.1 or later (combined library);")
+    out.append("         MIT and other permissive terms for the individual algorithms")
+    out.append("-" * 80)
+    out.append("")
+    out.append(f"  NLopt {nlopt_version} (via the nlopt crate {crate_version}) — https://github.com/stevengj/nlopt")
+    out.append("")
+    out.append(
+        "Used for the SLSQP parametric-EQ fit. The `nlopt` crate builds NLopt from source with its\n"
+        "default algorithm set, which includes the LGPL-licensed Luksan solvers, so — per NLopt's own\n"
+        "COPYING below — the compiled library as a whole is governed by the GNU LGPL v2.1 or later.\n"
+        "CAGEq's complete source code is available under the GPL v3.0 or later, so the application\n"
+        "can be rebuilt against a modified NLopt as the LGPL requires."
+    )
+    out.append("")
+    out.append("NLopt's COPYING:")
+    out.append("")
+    out.append(read(os.path.join(src, "COPYING")))
+    out.append("")
+    algs = os.path.join(src, "src", "algs")
+    for alg in sorted(os.listdir(algs)):
+        if alg in NLOPT_CXX_ONLY_ALGS:
             continue
-        text = pkg.get("LicenseText") or ""
-        key = text if text.strip() else f"__nolicensetext__:{pkg['License']}"
-        g = groups.setdefault(key, {"license": pkg["License"], "text": text, "pkgs": []})
-        g["pkgs"].append((name, pkg["Version"], pkg.get("URL", "")))
-
-    for key, g in sorted(groups.items(), key=lambda kv: kv[1]["license"]):
-        out.append("-" * 80)
-        out.append(f"License: {g['license']}")
-        out.append("-" * 80)
-        out.append("")
-        for name, version, url in sorted(g["pkgs"]):
-            line = f"  {name} {version}"
-            if url and url != "UNKNOWN":
-                line += f" — {url}"
-            out.append(line)
-        out.append("")
-        if g["pkgs"][0][0] == "pyinstaller":
-            out.append(PYINSTALLER_NOTE)
-        elif g["text"].strip():
-            out.append(g["text"].strip())
-        else:
-            out.append(f"(No bundled license file; standard {g['license']} text applies.)")
-        out.append("")
+        for fname in sorted(os.listdir(os.path.join(algs, alg))):
+            if fname.upper().startswith(("COPYING", "COPYRIGHT", "LICENSE")):
+                out.append(f"NLopt src/algs/{alg}/{fname}:")
+                out.append("")
+                out.append(read(os.path.join(algs, alg, fname)))
+                out.append("")
+                if alg == "luksan":
+                    # The Luksan license asks that documentation of code using it cite the
+                    # copyright, license and availability note above, and say "Used by permission."
+                    out.append("The Luksan subroutines above are used by permission.")
+                    out.append("")
+    out.append("GNU Lesser General Public License v2.1 (full text):")
+    out.append("")
+    out.append(read(os.path.join("licenses", "LGPL-2.1.txt")))
+    out.append("")
     return "\n".join(out)
 
 
@@ -222,22 +233,27 @@ THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
 
 CAGEq's own code is licensed under the GNU General Public License v3.0 or
 later (see LICENSE). This file lists the third-party software actually
-bundled inside the *built* application — compiled into the Rust binaries,
-bundled into the frontend's JavaScript build, or frozen into the Python DSP
-sidecar — as distinct from tooling that only runs at build time and never
-ships (TypeScript, Vite, cargo itself, PyInstaller's own build-time
-dependencies, etc.). None of it is GPL-incompatible; every entry below is
-under a permissive license (MIT, BSD, Apache-2.0, and similar).
+bundled inside the *built* Windows application — compiled into its Rust
+binaries (including NLopt's C library, statically linked through the `nlopt`
+crate) or bundled into the frontend's JavaScript build — as distinct from
+tooling that only runs at build time and never ships (TypeScript, Vite,
+cargo itself, build scripts, etc.).
+
+Almost all of it is under a permissive license (MIT, BSD, Apache-2.0, ISC and
+similar). The exceptions are weak-copyleft, and all are compatible with the
+GPL v3.0 or later: a few Rust crates under the Mozilla Public License 2.0,
+and NLopt, which as compiled here is governed by the GNU Lesser General
+Public License v2.1 or later (see its section).
 
 Generated, not hand-written — see scripts/gen_third_party_licenses.py for
-the exact commands (cargo-about for Rust, license-checker for npm,
-pip-licenses for the Python sidecar) and regenerate with that script rather
+the exact commands (cargo-about for Rust, license-checker for npm, NLopt's
+own license files for its section) and regenerate with that script rather
 than editing this file directly.
 """
 
 
 def main():
-    parts = [HEADER, rust_section(), npm_section(), python_section()]
+    parts = [HEADER, rust_section(), nlopt_section(), npm_section()]
     with io.open("THIRD_PARTY_LICENSES.txt", "w", encoding="utf-8") as f:
         f.write("\n\n".join(parts))
     print("wrote THIRD_PARTY_LICENSES.txt")

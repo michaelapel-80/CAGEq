@@ -4,6 +4,13 @@
 # by design — a new dependency with an unreviewed license should stop the generator, not get
 # silently included. GPL-3.0-or-later is CAGEq's own crates, not a third party; the generator
 # filters them back out of the actual output.
+#
+# Scoped to what actually ships: the Windows build only (both lockfiles also resolve Linux/macOS/
+# Android-only crates — gtk, webkit2gtk, objc2, jni, … — that are never compiled on Windows), and
+# no dev- or build-dependencies (test harnesses and build scripts like `cc`/`cmake` never ship).
+targets = ["x86_64-pc-windows-msvc"]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
 accepted = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -14,4 +21,8 @@ accepted = [
     "BSD-3-Clause",
     "MPL-2.0",
     "Zlib",
+    # Arrived with cageq-catalog's HTTPS fetch (rustls): ISC for ring/rustls-webpki/untrusted,
+    # CDLA-Permissive-2.0 for webpki-roots' bundled CA-certificate data. Both permissive.
+    "ISC",
+    "CDLA-Permissive-2.0",
 ]
