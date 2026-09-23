@@ -307,6 +307,7 @@ export function FftSizeRow({ fftSize, sampleRate, onChange }: { fftSize?: number
     <label className="vs-tune-row vs-tune-fft" title={t("scope.fftSizeHint")}>
       <span className="vs-tune-label">{t("scope.fftSize")}</span>
       <input
+        name="fft-size"
         type="range"
         min={SPEC_FFT_MIN}
         max={SPEC_FFT_MAX}
@@ -1352,6 +1353,7 @@ export function EqChart({
           <label className="vs-tune-row" title={t("scope.trailHint")}>
             <span className="vs-tune-label">{t("scope.trail")}</span>
             <input
+              name="spectrum-trail"
               type="range"
               min={0.1}
               max={2.0}
@@ -1367,6 +1369,7 @@ export function EqChart({
           <label className="vs-tune-row" title={t("scope.tailHint")}>
             <span className="vs-tune-label">{t("scope.tail")}</span>
             <input
+              name="spectrum-tail"
               type="range"
               min={1}
               max={64}
@@ -1382,6 +1385,7 @@ export function EqChart({
           <label className="vs-tune-row" title={t("scope.glowHint")}>
             <span className="vs-tune-label">{t("scope.glow")}</span>
             <input
+              name="spectrum-glow"
               type="range"
               min={0.02}
               max={1}
@@ -1398,6 +1402,7 @@ export function EqChart({
           <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHintSpectrum")}>
             <span className="vs-tune-label">{t("scope.undistort")}</span>
             <input
+              name="spectrum-undistort"
               type="checkbox"
               checked={specParams.undistort}
               onChange={(e) => {

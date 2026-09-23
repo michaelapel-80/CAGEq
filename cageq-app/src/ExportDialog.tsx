@@ -180,6 +180,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
           <label className="vs-tune-row" style={{ marginTop: "0.6em" }}>
             <span className="vs-tune-label">{t("export.bandCount")}</span>
             <input
+              name="band-count"
               type="range"
               min={BAND_COUNT_MIN}
               max={BAND_COUNT_MAX}
@@ -268,6 +269,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
             at all, not just a cap" reasoning as the table's own fixed height just above. The
             textarea's native scrollbar shows the rest. */}
         <textarea
+          name="export-text"
           readOnly
           rows={6}
           value={fitting && !fit ? t("export.fitting") : text}

@@ -509,6 +509,7 @@ function PreampField({
       arrowStep={1}
       decimals={0}
       disabled={disabled}
+      name="headroom"
       ariaLabel={ariaLabel}
       style={{ width: "2em", textAlign: "right" }}
       onInput={(v) => {
@@ -2361,7 +2362,7 @@ function App() {
               <Trans i18nKey="dialog.finalTitle" values={{ jump: pendingFinal.jump.toFixed(1) }} components={[<b />, <b />]} />
             </p>
             <label style={{ fontSize: "0.85em", display: "block", margin: "0.6em 0" }}>
-              <input type="checkbox" checked={dontAskAgain} onChange={(e) => setDontAskAgain(e.currentTarget.checked)} />{" "}
+              <input name="dont-ask-again" type="checkbox" checked={dontAskAgain} onChange={(e) => setDontAskAgain(e.currentTarget.checked)} />{" "}
               {tr("dialog.dontAskAgain")}
             </label>
             <div className="row" style={{ justifyContent: "flex-end", gap: "0.5em" }}>
@@ -2643,8 +2644,10 @@ function App() {
                 apply();
               }}
             >
-              <label style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("header.headphone")}</label>
+              <label htmlFor="model-input" style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("header.headphone")}</label>
               <input
+                id="model-input"
+                name="model-query"
                 list="model-list"
                 value={query}
                 onChange={(e) => onModelInput(e.currentTarget.value)}
@@ -2658,11 +2661,13 @@ function App() {
                   <option key={name} value={name} />
                 ))}
               </datalist>
-              <label style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("header.measurement")}</label>
+              <label htmlFor="measurement-select" style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("header.measurement")}</label>
               {/* §3.4a "flat start" folded in as the select's own first option — see
                   FLAT_MEASUREMENT's doc — rather than a separate control, so it costs no extra
                   header width and stays reachable whatever the Headphone box currently holds. */}
               <select
+                id="measurement-select"
+                name="measurement"
                 value={flat ? FLAT_MEASUREMENT : measurementPath}
                 onChange={(e) => {
                   const v = e.currentTarget.value;
@@ -2694,6 +2699,7 @@ function App() {
           </>
         )}
         <select
+          name="language"
           className="lang-select"
           value={i18n.language.startsWith("de") ? "de" : "en"}
           onChange={(e) => setLang(e.currentTarget.value as LangCode)}
@@ -2834,11 +2840,13 @@ function App() {
                 )}
               </div>
               <div className="row" style={{ gap: "0.5em" }}>
-                <label style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("correction.target")}</label>
+                <label htmlFor={flat ? undefined : "target-select"} style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("correction.target")}</label>
                 {flat ? (
                   <span style={{ fontSize: "0.85em", opacity: 0.6 }}>{tr("correction.targetFlat")}</span>
                 ) : (
                   <select
+                    id="target-select"
+                    name="target"
                     value={targetPath}
                     onChange={(e) => setTargetPath(e.currentTarget.value)}
                     disabled={dryActive}
@@ -3268,6 +3276,7 @@ function App() {
               </p>
               <label style={{ fontSize: "0.75em", opacity: 0.8, display: "flex", alignItems: "center", gap: "0.4em", marginTop: "0.5em" }}>
                 <input
+                  name="confirm-final-volume"
                   type="checkbox"
                   checked={confirmFinalVolume}
                   onChange={(e) => toggleConfirmFinalVolume(e.currentTarget.checked)}
@@ -3329,6 +3338,7 @@ function App() {
                   </p>
                   <div className="row" style={{ gap: "0.3em" }}>
                     <input
+                      name="preset-name"
                       type="text"
                       placeholder={tr("presets.namePlaceholder")}
                       autoFocus
@@ -3377,6 +3387,7 @@ function App() {
                       )}
                       {renaming?.kind === "template" && renaming.id === t.id ? (
                         <input
+                          name="template-rename"
                           className="pl-rename"
                           autoFocus
                           value={renaming.name}
@@ -3440,6 +3451,7 @@ function App() {
                         <div className="pl-item">
                           {renaming?.kind === "preset" && renaming.id === p.id ? (
                             <input
+                              name="preset-rename"
                               className="pl-rename"
                               autoFocus
                               value={renaming.name}

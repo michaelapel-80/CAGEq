@@ -32,6 +32,8 @@ export type ScrubNumberProps = {
   format?: (v: number) => string;
   suffix?: string;
   disabled?: boolean;
+  /** Form-field name (DevTools flags inputs with neither id nor name). */
+  name: string;
   ariaLabel: string;
   className?: string;
   /** Extra inline style merged onto the input (after the internal cursor/touch style) — the
@@ -71,6 +73,7 @@ export function ScrubNumber({
   format,
   suffix,
   disabled,
+  name,
   ariaLabel,
   className,
   style,
@@ -222,6 +225,7 @@ export function ScrubNumber({
   return (
     <input
       ref={inputRef}
+      name={name}
       className={`${className ?? ""}${invalid ? " scrub-invalid" : ""}`}
       type="text"
       inputMode="decimal"

@@ -1016,6 +1016,7 @@ export function SpectrumScope({
               <label key={cc.key} className="vs-tune-row" title={cc.hint}>
                 <span className="vs-tune-label">{cc.label}</span>
                 <input
+                  name={`spectrum-${cc.key}`}
                   type="range"
                   min={cc.min}
                   max={cc.max}
@@ -1029,7 +1030,7 @@ export function SpectrumScope({
             <div className="vs-tune-sep" />
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
               <span className="vs-tune-label">{t("scope.undistort")}</span>
-              <input type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
+              <input name="spectrum-undistort" type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
             </label>
             <div className="vs-tune-row vs-tune-check" title={t("scope.tiltHint")}>
               <span className="vs-tune-label">{t("scope.tilt")}</span>
@@ -1065,12 +1066,13 @@ export function SpectrumScope({
             </div>
             <label className="vs-tune-row vs-tune-check" title={t("scope.linearHint")}>
               <span className="vs-tune-label">{t("scope.linear")}</span>
-              <input type="checkbox" checked={params.linear} onChange={(e) => set("linear", e.currentTarget.checked)} />
+              <input name="spectrum-linear" type="checkbox" checked={params.linear} onChange={(e) => set("linear", e.currentTarget.checked)} />
             </label>
             {onHarmonicFoldChange && (
               <label className="vs-tune-row vs-tune-check" title={t("scope.harmonicFoldHint")}>
                 <span className="vs-tune-label">{t("scope.harmonicFold")}</span>
                 <input
+                  name="harmonic-fold"
                   type="checkbox"
                   checked={!!harmonicFold}
                   onChange={(e) => onHarmonicFoldChange(e.currentTarget.checked)}
@@ -1080,7 +1082,7 @@ export function SpectrumScope({
             {onHiResPeaksChange && (
               <label className="vs-tune-row vs-tune-check" title={t("scope.hiResPeaksHint")}>
                 <span className="vs-tune-label">{t("scope.hiResPeaks")}</span>
-                <input type="checkbox" checked={!!hiResPeaks} onChange={(e) => onHiResPeaksChange(e.currentTarget.checked)} />
+                <input name="hi-res-peaks" type="checkbox" checked={!!hiResPeaks} onChange={(e) => onHiResPeaksChange(e.currentTarget.checked)} />
               </label>
             )}
             {onFftSizeChange && <FftSizeRow fftSize={fftSize} sampleRate={sampleRate} onChange={onFftSizeChange} />}

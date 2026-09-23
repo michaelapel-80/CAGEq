@@ -695,6 +695,7 @@ export function TimeScope() {
             <label className="vs-tune-row" title={t("scope.msPerDivHint", { total: (msPerDiv * DIVISIONS).toFixed(1) })}>
               <span className="vs-tune-label">{t("scope.msPerDiv")}</span>
               <input
+                name="ms-per-div"
                 type="range"
                 min={0}
                 max={MS_PER_DIV_STEPS.length - 1}
@@ -745,6 +746,7 @@ export function TimeScope() {
               <label key={cc.key} className="vs-tune-row" title={cc.hint}>
                 <span className="vs-tune-label">{cc.label}</span>
                 <input
+                  name={`scope-${cc.key}`}
                   type="range"
                   min={cc.min}
                   max={cc.max}
@@ -758,7 +760,7 @@ export function TimeScope() {
             <div className="vs-tune-sep" />
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
               <span className="vs-tune-label">{t("scope.undistort")}</span>
-              <input type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
+              <input name="scope-undistort" type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
             </label>
           </div>
         )}

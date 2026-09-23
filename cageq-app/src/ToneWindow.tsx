@@ -167,7 +167,7 @@ export function ToneWindow() {
 
       <label className="row">
         {t("toneGen.signal")}
-        <select value={selected} onChange={(e) => setSelected(e.currentTarget.value as Selected)}>
+        <select name="signal" value={selected} onChange={(e) => setSelected(e.currentTarget.value as Selected)}>
           {SELECTIONS.map((s) => (
             <option key={s} value={s} disabled={s === "Isp" && !unsafeMode}>
               {t(`toneGen.waveform.${s}`)}
@@ -188,6 +188,7 @@ export function ToneWindow() {
             mode="mult"
             arrowStep={1.05}
             decimals={0}
+            name="tone-frequency"
             ariaLabel={t("toneGen.frequency")}
             style={{ width: "5em" }}
           />
@@ -208,6 +209,7 @@ export function ToneWindow() {
               mode="mult"
               arrowStep={1.05}
               decimals={0}
+              name="tone-chirpF0"
               ariaLabel={t("toneGen.chirpF0")}
               style={{ width: "5em" }}
             />
@@ -224,6 +226,7 @@ export function ToneWindow() {
               mode="mult"
               arrowStep={1.05}
               decimals={0}
+              name="tone-chirpF1"
               ariaLabel={t("toneGen.chirpF1")}
               style={{ width: "5em" }}
             />
@@ -240,13 +243,14 @@ export function ToneWindow() {
               mode="add"
               arrowStep={0.5}
               decimals={1}
+              name="tone-chirpDuration"
               ariaLabel={t("toneGen.chirpDuration")}
               style={{ width: "4em" }}
             />
             s
           </label>
           <label className="row" style={{ alignItems: "center", gap: "0.4em" }}>
-            <input type="checkbox" checked={chirpLog} onChange={(e) => setChirpLog(e.currentTarget.checked)} />
+            <input name="chirp-log" type="checkbox" checked={chirpLog} onChange={(e) => setChirpLog(e.currentTarget.checked)} />
             {t("toneGen.chirpLog")}
           </label>
           <p style={{ fontSize: "0.75em", opacity: 0.7 }}>{t("toneGen.chirpLogHint")}</p>
@@ -266,6 +270,7 @@ export function ToneWindow() {
               mode="mult"
               arrowStep={1.05}
               decimals={0}
+              name="tone-amCarrier"
               ariaLabel={t("toneGen.amCarrier")}
               style={{ width: "5em" }}
             />
@@ -282,6 +287,7 @@ export function ToneWindow() {
               mode="mult"
               arrowStep={1.05}
               decimals={1}
+              name="tone-amMod"
               ariaLabel={t("toneGen.amMod")}
               style={{ width: "5em" }}
             />
@@ -298,6 +304,7 @@ export function ToneWindow() {
               mode="add"
               arrowStep={0.05}
               decimals={2}
+              name="tone-amDepth"
               ariaLabel={t("toneGen.amDepth")}
               style={{ width: "4em" }}
             />
@@ -318,6 +325,7 @@ export function ToneWindow() {
               mode="mult"
               arrowStep={1.05}
               decimals={0}
+              name="tone-fmCarrier"
               ariaLabel={t("toneGen.fmCarrier")}
               style={{ width: "5em" }}
             />
@@ -334,6 +342,7 @@ export function ToneWindow() {
               mode="mult"
               arrowStep={1.05}
               decimals={1}
+              name="tone-fmMod"
               ariaLabel={t("toneGen.fmMod")}
               style={{ width: "5em" }}
             />
@@ -350,6 +359,7 @@ export function ToneWindow() {
               mode="add"
               arrowStep={10}
               decimals={0}
+              name="tone-fmDeviation"
               ariaLabel={t("toneGen.fmDeviation")}
               style={{ width: "5em" }}
             />
@@ -371,6 +381,7 @@ export function ToneWindow() {
               mode="add"
               arrowStep={0.1}
               decimals={4}
+              name="tone-dbOver"
               ariaLabel={t("toneGen.dbOver")}
               style={{ width: "5em" }}
             />
@@ -390,6 +401,7 @@ export function ToneWindow() {
             mode="add"
             arrowStep={1}
             decimals={1}
+            name="tone-level"
             ariaLabel={t("toneGen.level")}
             style={{ width: "4em" }}
           />
@@ -399,7 +411,7 @@ export function ToneWindow() {
 
       <label className="row">
         {t("toneGen.device")}
-        <select value={deviceId} onChange={(e) => setDeviceId(e.currentTarget.value)}>
+        <select name="device" value={deviceId} onChange={(e) => setDeviceId(e.currentTarget.value)}>
           {devices.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name}
@@ -413,6 +425,7 @@ export function ToneWindow() {
         <label className="row">
           {t("toneGen.rateOverride")}
           <input
+            name="rate-override"
             type="text"
             inputMode="decimal"
             placeholder={t("toneGen.rateOverridePlaceholder")}
@@ -424,6 +437,7 @@ export function ToneWindow() {
         <label className="row">
           {t("toneGen.seconds")}
           <input
+            name="seconds"
             type="text"
             inputMode="decimal"
             placeholder={t("toneGen.secondsPlaceholder")}
@@ -434,7 +448,7 @@ export function ToneWindow() {
       </details>
 
       <label className="row" style={{ alignItems: "center", gap: "0.4em" }}>
-        <input type="checkbox" checked={unsafeMode} onChange={(e) => setUnsafeMode(e.currentTarget.checked)} />
+        <input name="unsafe-mode" type="checkbox" checked={unsafeMode} onChange={(e) => setUnsafeMode(e.currentTarget.checked)} />
         {t("toneGen.unsafe")}
       </label>
       {unsafeMode && <p style={{ color: "#b8860b", fontSize: "0.8em" }}>{t("toneGen.unsafeWarning")}</p>}

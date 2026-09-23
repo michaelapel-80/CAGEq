@@ -286,6 +286,7 @@ export function ToneGrid({
               format={fmtGain}
               disabled={inert}
               style={tint(gainTint, gainAmt)}
+              name="band-gain"
               ariaLabel={t("bands.gainAria", { name, unit: "dB" })}
               onInput={(v) => onInput(i, { gain_db: v })}
               onCommit={(v) => onCommit(i, { gain_db: v })}
@@ -293,6 +294,7 @@ export function ToneGrid({
 
             <div className="tg-fader-wrap">
               <input
+                name="band-gain-fader"
                 type="range"
                 className="tg-fader"
                 min={GAIN_MIN}
@@ -322,6 +324,7 @@ export function ToneGrid({
                 format={fmtHz}
                 disabled={inert}
                 style={tint(fcHue(f.freq_hz), 100)}
+                name="band-fc"
                 ariaLabel={t("bands.fcAria", { kind: f.kind, unit: "Hz" })}
                 beginEditSignal={focusIndex === i ? focusNonce : undefined}
                 onInput={(v) => onInput(i, { freq_hz: v })}
@@ -341,6 +344,7 @@ export function ToneGrid({
                 decimals={2}
                 disabled={inert}
                 style={tint(qTint, qAmt)}
+                name="band-q"
                 ariaLabel={t("bands.qAria", { kind: f.kind, hz: fmtHzUnit(f.freq_hz) })}
                 onInput={(v) => onInput(i, { q: v })}
                 onCommit={(v) => onCommit(i, { q: v })}

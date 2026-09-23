@@ -439,6 +439,7 @@ export function Meter({
               <label key={cc.key} className="vs-tune-row" title={cc.hint}>
                 <span className="vs-tune-label">{cc.label}</span>
                 <input
+                  name={`meter-${cc.key}`}
                   type="range"
                   min={cc.min}
                   max={cc.max}

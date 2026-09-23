@@ -657,6 +657,7 @@ export function Vectorscope({
                 <label key={cc.key} className="vs-tune-row" title={cc.hint}>
                   <span className="vs-tune-label">{cc.label}</span>
                   <input
+                    name={`vectorscope-${cc.key}`}
                     type="range"
                     min={cc.min}
                     max={cc.max}
@@ -708,11 +709,11 @@ export function Vectorscope({
             <div className="vs-tune-sep" />
             <label className="vs-tune-row vs-tune-check" title={t("scope.rotateHint")}>
               <span className="vs-tune-label">{t("scope.rotate")}</span>
-              <input type="checkbox" checked={params.rotate} onChange={(e) => set("rotate", e.currentTarget.checked)} />
+              <input name="vectorscope-rotate" type="checkbox" checked={params.rotate} onChange={(e) => set("rotate", e.currentTarget.checked)} />
             </label>
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
               <span className="vs-tune-label">{t("scope.undistort")}</span>
-              <input type="checkbox" checked={params.invert} onChange={(e) => set("invert", e.currentTarget.checked)} />
+              <input name="vectorscope-invert" type="checkbox" checked={params.invert} onChange={(e) => set("invert", e.currentTarget.checked)} />
             </label>
           </div>
         )}
