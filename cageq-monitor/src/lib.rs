@@ -16,7 +16,8 @@ use serde::Serialize;
 
 pub mod signal;
 
-/// One meter reading, pushed to the UI ~20×/s. Plain data, so it's platform-independent.
+/// One meter reading, pushed to the UI ~60×/s (every `TICK`). Plain data, so it's
+/// platform-independent.
 #[derive(Clone, Debug, Serialize)]
 pub struct MeterUpdate {
     /// Peak level, dBTP (BS.1770 oversampled true peak — catches inter-sample overs a plain
