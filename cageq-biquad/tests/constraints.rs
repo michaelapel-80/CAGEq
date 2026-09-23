@@ -5,7 +5,8 @@
 
 use std::f64::consts::PI;
 
-use cageq_biquad::matched::{self, MidPoint};
+use cageq_biquad::matched;
+use cageq_biquad::spike::{self, MidPoint};
 use cageq_biquad::{analog, rbj, Band, Kind};
 
 const FS: f64 = 48_000.0;
@@ -90,7 +91,7 @@ fn mz_matches_the_prototype_at_its_three_points() {
     for kind in Kind::ALL {
         for (fc, gain, q) in [(10_000.0, 6.0, 0.7), (12_000.0, -6.0, 1.0), (200.0, 4.0, 2.0)] {
             let b = band(kind, fc, gain, q);
-            let c = matched::mz(&b, FS, MidPoint::W0).unwrap();
+            let c = spike::mz(&b, FS, MidPoint::W0).unwrap();
             let w0 = b.w0(FS);
             // DC is a match point too, except for the band-pass whose DC gain is exactly
             // zero on both sides (-inf dB, so not a comparable number).
@@ -108,11 +109,11 @@ fn mz_matches_the_prototype_at_its_three_points() {
 /// independently, so agreement checks both.
 #[test]
 fn constrained_reproduces_the_thesis_peaking() {
-    use cageq_biquad::matched::{rbj_peak_bandwidth_point, Con};
+    use cageq_biquad::spike::{rbj_peak_bandwidth_point, Con};
     for (fc, gain, q) in [(15_000.0, 10.0, 0.5623), (10_000.0, -6.0, 1.0), (18_000.0, -10.0, 0.4), (3_000.0, 4.0, 3.0), (200.0, 12.0, 0.7)] {
         let b = band(Kind::Peaking, fc, gain, q);
         let thesis = matched::prescribed(&b, FS).unwrap();
-        let general = matched::constrained(&b, FS, [Con::Value(1.0), Con::Slope(1.0), Con::Value(rbj_peak_bandwidth_point(q))]).unwrap();
+        let general = cageq_biquad::spike::constrained(&b, FS, [Con::Value(1.0), Con::Slope(1.0), Con::Value(rbj_peak_bandwidth_point(q))]).unwrap();
         for f in [20.0, 200.0, 1000.0, 5000.0, 10_000.0, 15_000.0, 20_000.0, 23_900.0] {
             let w = 2.0 * PI * f / FS;
             close(general.db(w), thesis.db(w), 1e-7, &format!("{b:?} at {f} Hz"));

@@ -9,9 +9,10 @@ edition = "2024"
 # `cageq-core`), `cageq-core`, and later the frontend via WASM. That is what lets it become
 # the single source of truth for the biquad math instead of a sixth transcription of it.
 #
-# Stage 0 (the frequency-warping spike, filter.md / `warping-corrected-filters-plan`):
-# for now this crate holds the analog ground truth, today's RBJ filters, and the candidate
-# warping-corrected designs, plus `examples/warp_spike.rs`, which measures them against the
-# analog prototype. Nothing else in the workspace depends on it yet.
+# Stage 1: the production entry point is `design(band, fs, ResponseModel)` — RBJ (bit-identical
+# to what CAGEq has always run; pinned by cageq-apo/tests/biquad_parity.rs) or the
+# warping-corrected `AnalogMatched` designs chosen by the Stage 0/0b spike. The spike's tools
+# stay as examples (`warp_spike`, `shelf_tune`, `per_band_scan`) and its rejected candidates in
+# `src/spike.rs`, so every decision can be re-run. No consumer is wired to it yet (Stage 2).
 
 [dependencies]

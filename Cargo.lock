@@ -47,6 +47,9 @@ dependencies = [
 [[package]]
 name = "cageq-apo"
 version = "0.14.5"
+dependencies = [
+ "cageq-biquad",
+]
 
 [[package]]
 name = "cageq-apo-backend"
@@ -126,6 +129,7 @@ name = "cageq-peq-solver"
 version = "0.14.5"
 dependencies = [
  "cageq-backend",
+ "cageq-biquad",
  "nlopt",
  "serde",
  "serde_json",

@@ -21,3 +21,8 @@ build = "build.rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+
+[dev-dependencies]
+# Parity only (tests/biquad_parity.rs): the shared design crate's RBJ path must reproduce this
+# crate's `dsp::coefficients` bit for bit before the APO is switched over to it.
+cageq-biquad = { path = "../cageq-biquad" }

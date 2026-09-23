@@ -11,7 +11,8 @@
 use std::f64::consts::PI;
 use std::fmt::Write as _;
 
-use cageq_biquad::matched::{self, Con};
+use cageq_biquad::matched;
+use cageq_biquad::spike::{self, Con};
 use cageq_biquad::{analog, rbj, Band, Coeffs, Kind};
 
 const RATES: [f64; 3] = [44_100.0, 48_000.0, 96_000.0];
@@ -45,9 +46,9 @@ impl Method {
         match self {
             Method::Rbj => Ok(rbj::coefficients(band, fs)),
             Method::Prescribed => matched::prescribed(band, fs),
-            Method::Cons(_, cons) => matched::constrained(band, fs, cons(band)),
+            Method::Cons(_, cons) => spike::constrained(band, fs, cons(band)),
             Method::Ivantsov(sigma) => matched::ivantsov(band, fs, sigma),
-            Method::VicanekShelf => matched::vicanek_shelf(band, fs),
+            Method::VicanekShelf => spike::vicanek_shelf(band, fs),
             Method::Shelf => matched::shelf(band, fs),
         }
     }

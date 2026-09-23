@@ -1,6 +1,13 @@
-//! Biquad design math for CAGEq: the analog prototypes the filters are *meant* to be, the
-//! RBJ-cookbook digital filters CAGEq (and Equalizer APO, and AutoEq) actually run today, and
-//! the candidate designs that correct the bilinear transform's frequency warping.
+//! Biquad design math for CAGEq — the single source of truth for turning a band (kind, Fc,
+//! gain, Q) into coefficients, in either [`ResponseModel`]:
+//!
+//! * [`ResponseModel::Rbj`] — the RBJ-cookbook filters CAGEq, Equalizer APO and AutoEq have
+//!   always run (bilinear transform, pre-warped at Fc).
+//! * [`ResponseModel::AnalogMatched`] — designs that correct the bilinear transform's
+//!   frequency warping, so the digital response follows the analog prototype up to Nyquist
+//!   ([`matched`]; chosen by the Stage 0/0b spike, whose rejected candidates live in [`spike`]).
+//!
+//! Entry point: [`design`]. [`analog`] is the ground truth both are measured against.
 //!
 //! ## Why the analog prototype is the reference
 //! Every RBJ filter is the bilinear transform of an analog second-order section, pre-warped
@@ -24,7 +31,40 @@
 
 pub mod analog;
 pub mod matched;
+pub mod spike;
 pub mod rbj;
+
+/// Which digital approximation of the analog prototype a band is realised with.
+///
+/// A property of the whole cascade, not of one band: CAGEq applies one model globally, and
+/// only on a backend that can honour it (Equalizer APO computes its own RBJ coefficients from
+/// `PK`/`LSC`/`HSC` lines, so it is [`ResponseModel::Rbj`] by construction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResponseModel {
+    /// RBJ cookbook — what every backend has always run. The default, so anything that does
+    /// not ask for a model keeps today's exact behaviour.
+    #[default]
+    Rbj,
+    /// Warping-corrected: follows the analog prototype up to Nyquist.
+    AnalogMatched,
+}
+
+/// Coefficients for `band` at sample rate `fs` in `model`. Infallible by design: every caller
+/// (the APO's config load inside audiodg, the fit's hot loop, a live drag) needs *a* safe
+/// filter, never an error to handle.
+///
+/// [`ResponseModel::AnalogMatched`] falls back to RBJ where the matched design has no answer
+/// — outside [`matched::design`]'s documented domain (Fc must lie below 0.95·Nyquist), or if
+/// it ever produced a filter that is not stable and minimum phase. The domain covers every
+/// band CAGEq's UI can make at every rate it meets (Fc ≤ 20 kHz, fs ≥ 44.1 kHz), which
+/// `tests/design.rs` pins — so in practice the fallback only catches parameters RBJ cannot
+/// handle sensibly either.
+pub fn design(band: &Band, fs: f64, model: ResponseModel) -> Coeffs {
+    match model {
+        ResponseModel::Rbj => rbj::coefficients(band, fs),
+        ResponseModel::AnalogMatched => matched::design(band, fs).unwrap_or_else(|_| rbj::coefficients(band, fs)),
+    }
+}
 
 /// The filter shapes CAGEq builds cascades from. Mirrors `cageq_apo::dsp::FilterKind`; Tilt
 /// never reaches this level (it is expanded into a shelf pair upstream).
