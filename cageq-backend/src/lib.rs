@@ -92,6 +92,22 @@ pub fn expand_tilts(filters: &[Filter]) -> Vec<Filter> {
     out
 }
 
+/// How a backend turns a [`Filter`] into a biquad. Mirrors `cageq_biquad::ResponseModel`
+/// (that crate stays dependency-free, so it cannot carry serde; the backend that owns the
+/// math maps one onto the other).
+///
+/// Only [`ResponseModel::Rbj`] is universal — it is what Equalizer APO computes from its
+/// `PK`/`LSC`/`HSC` lines. [`ResponseModel::AnalogMatched`] is gated by
+/// [`Capabilities::analog_matched`]; a backend without it refuses a config that asks for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ResponseModel {
+    /// RBJ cookbook (bilinear transform, pre-warped at Fc) — what CAGEq has always applied.
+    #[default]
+    Rbj,
+    /// Warping-corrected: follows the analog prototype up to Nyquist.
+    AnalogMatched,
+}
+
 /// One device's managed configuration. Deserializable so the sidecar's
 /// `calculate_filters` reply maps straight onto it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +117,12 @@ pub struct DeviceConfig {
     pub device: String,
     pub preamp_db: f64,
     pub filters: Vec<Filter>,
+    /// Which model `filters` are realised with — part of the correction, not a backend
+    /// setting, because the same Fc/gain/Q sound different in each near Nyquist, and the chart
+    /// must draw whichever one is actually applied. Absent in anything serialised before it
+    /// existed, which therefore stays RBJ.
+    #[serde(default)]
+    pub model: ResponseModel,
 }
 
 /// A Windows audio playback (render) endpoint the user can scope the EQ to (§3.0).
@@ -194,6 +216,13 @@ pub struct Capabilities {
     /// can stack on top of CAGEq's correction and may need disabling (§7.4). EqAPO-only:
     /// an in-process APO has no shared config surface to collide over.
     pub manages_foreign_config: bool,
+    /// The backend can realise [`ResponseModel::AnalogMatched`] (warping-corrected filters).
+    ///
+    /// False for EqAPO: it computes RBJ coefficients itself from `PK`/`LSC`/`HSC` lines, so
+    /// the model is not CAGEq's to choose there — and its feature-frozen backend refuses a
+    /// config that asks. True for CAGEq's own APO, which runs whatever coefficients it is
+    /// handed.
+    pub analog_matched: bool,
 }
 
 // ---------------------------------------------------------------------------

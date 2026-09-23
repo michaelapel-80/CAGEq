@@ -192,10 +192,21 @@ impl EqBackend for EqApoBackend {
             owns_transitions: false,
             // config.txt is shared with EqAPO itself and any other tool writing to it.
             manages_foreign_config: true,
+            // EqAPO designs its own RBJ biquads from the `PK`/`LSC`/`HSC` lines written here;
+            // there is no way to hand it CAGEq's warping-corrected coefficients (feature-frozen
+            // backend — see cageq-backend's crate doc).
+            analog_matched: false,
         }
     }
 
     fn apply(&self, configs: &[DeviceConfig]) -> Result<String, BackendError> {
+        // Refused, not quietly downgraded: writing RBJ lines for a correction the core asked
+        // to realise warping-corrected would apply a different curve from the one the chart
+        // draws. The core gates on `Capabilities::analog_matched` and never sends one here;
+        // this is the loud failure for a mis-gated call.
+        if configs.iter().any(|c| c.model != cageq_backend::ResponseModel::Rbj) {
+            return Err(BackendError::Unsupported("warping-corrected (analog-matched) filters"));
+        }
         apply(&self.config_dir, configs).map_err(BackendError::backend)
     }
 
@@ -753,6 +764,7 @@ mod tests {
 
     fn sample() -> Vec<DeviceConfig> {
         vec![DeviceConfig {
+            model: Default::default(),
             device: "USB DAC".to_string(),
             preamp_db: -9.0,
             filters: vec![
@@ -777,6 +789,7 @@ mod tests {
         // low->high so the file preview is stable (the combined response is identical
         // either way — a biquad cascade is commutative).
         let cfg = DeviceConfig {
+            model: Default::default(),
             device: "DAC".into(),
             preamp_db: -9.0,
             filters: vec![

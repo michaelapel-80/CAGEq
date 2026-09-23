@@ -21,8 +21,6 @@ build = "build.rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-
-[dev-dependencies]
-# Parity only (tests/biquad_parity.rs): the shared design crate's RBJ path must reproduce this
-# crate's `dsp::coefficients` bit for bit before the APO is switched over to it.
+# The single source of truth for coefficient design (RBJ and the warping-corrected model).
+# Dependency-free itself, so nothing new is linked into audiodg beyond its own math.
 cageq-biquad = { path = "../cageq-biquad" }

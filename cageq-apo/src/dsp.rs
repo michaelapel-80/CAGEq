@@ -7,10 +7,10 @@
 //! doesn't, the chart quietly becomes a lie about what you are hearing, and every downstream
 //! measurement is off by an amount nobody can see.
 //!
-//! So the coefficient formulas below are a deliberate transcription of `morph.rs`'s
-//! `coefficients()`, and the tests check the *realised* response of the actual sample loop
-//! against the analytic one — see the test module, which is the point of this file as much
-//! as the code is.
+//! So the coefficients come from `cageq-biquad` — the one place the design math lives, RBJ
+//! bit-identical to the `morph.rs`/`peq.py` transcription that used to sit here — and the
+//! tests check the *realised* response of the actual sample loop against the analytic one —
+//! see the test module, which is the point of this file as much as the code is.
 //!
 //! ## Sign convention (easy to get backwards, so stated once)
 //! `morph.rs::coefficients` returns `a1`/`a2` **pre-negated**, AutoEq-style; `biquad.ts`'s
@@ -221,50 +221,30 @@ impl Coeffs {
 fn db_to_gain(db: f64) -> f64 {
     10.0_f64.powf(db / 20.0)
 }
-/// RBJ cookbook coefficients for one band at `sample_rate`.
-///
-/// Transcribed from `cageq-core`'s `morph.rs::coefficients` (itself matching AutoEq's
-/// `peq.py`), then un-negated into the standard convention — see the module doc. Keep the
-/// two in step: the chart and the audio must not drift apart.
+pub use cageq_biquad::ResponseModel;
+
+/// RBJ cookbook coefficients for one band at `sample_rate` — [`coefficients_in`] with
+/// [`ResponseModel::Rbj`], kept as the short name because RBJ is what every existing caller
+/// and test means.
 pub fn coefficients(band: &Band, sample_rate: f64) -> Coeffs {
-    let a = 10.0_f64.powf(band.gain_db / 40.0);
-    let w0 = 2.0 * std::f64::consts::PI * band.freq_hz / sample_rate;
-    let alpha = w0.sin() / (2.0 * band.q);
-    let cosw = w0.cos();
-    let sqrt_a = a.sqrt();
+    coefficients_in(band, sample_rate, ResponseModel::Rbj)
+}
 
-    // (a0, a1, a2, b0, b1, b2) in the RAW RBJ convention, before normalising by a0.
-    let (a0, a1, a2, b0, b1, b2) = match band.kind {
-        FilterKind::Peaking => (
-            1.0 + alpha / a,
-            -2.0 * cosw,
-            1.0 - alpha / a,
-            1.0 + alpha * a,
-            -2.0 * cosw,
-            1.0 - alpha * a,
-        ),
-        FilterKind::LowShelf => (
-            a + 1.0 + (a - 1.0) * cosw + 2.0 * sqrt_a * alpha,
-            -2.0 * (a - 1.0 + (a + 1.0) * cosw),
-            a + 1.0 + (a - 1.0) * cosw - 2.0 * sqrt_a * alpha,
-            a * (a + 1.0 - (a - 1.0) * cosw + 2.0 * sqrt_a * alpha),
-            2.0 * a * (a - 1.0 - (a + 1.0) * cosw),
-            a * (a + 1.0 - (a - 1.0) * cosw - 2.0 * sqrt_a * alpha),
-        ),
-        FilterKind::HighShelf => (
-            a + 1.0 - (a - 1.0) * cosw + 2.0 * sqrt_a * alpha,
-            2.0 * (a - 1.0 - (a + 1.0) * cosw),
-            a + 1.0 - (a - 1.0) * cosw - 2.0 * sqrt_a * alpha,
-            a * (a + 1.0 + (a - 1.0) * cosw + 2.0 * sqrt_a * alpha),
-            -2.0 * a * (a - 1.0 + (a + 1.0) * cosw),
-            a * (a + 1.0 + (a - 1.0) * cosw - 2.0 * sqrt_a * alpha),
-        ),
-        FilterKind::Bandpass => {
-            (1.0 + alpha, -2.0 * cosw, 1.0 - alpha, alpha, 0.0, -alpha)
-        }
+/// Coefficients for one band at `sample_rate` in `model`, designed by `cageq-biquad` — the
+/// single source of truth for the math. Its RBJ path is bit-identical to the transcription
+/// that used to live here (`tests/biquad_parity.rs` keeps that transcription as a frozen
+/// reference), so the switch changed nothing anyone hears. `AnalogMatched` never fails: it
+/// falls back to RBJ outside its domain, which [`Cascade::set_bands_in`]'s Nyquist gate
+/// (0.45·fs) already keeps every band out of.
+pub fn coefficients_in(band: &Band, sample_rate: f64, model: ResponseModel) -> Coeffs {
+    let kind = match band.kind {
+        FilterKind::Peaking => cageq_biquad::Kind::Peaking,
+        FilterKind::LowShelf => cageq_biquad::Kind::LowShelf,
+        FilterKind::HighShelf => cageq_biquad::Kind::HighShelf,
+        FilterKind::Bandpass => cageq_biquad::Kind::Bandpass,
     };
-
-    Coeffs { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 }
+    let c = cageq_biquad::design(&cageq_biquad::Band { kind, freq_hz: band.freq_hz, gain_db: band.gain_db, q: band.q }, sample_rate, model);
+    Coeffs { b0: c.b0, b1: c.b1, b2: c.b2, a1: c.a1, a2: c.a2 }
 }
 
 /// One biquad's Direct-Form-I delay registers, for one channel.
@@ -901,6 +881,13 @@ impl Cascade {
     /// coefficient change and decays, instead of the cold-start transient a reload causes.
     /// See [`BiquadState`].
     pub fn set_bands(&mut self, bands: &[Band]) -> bool {
+        self.set_bands_in(bands, ResponseModel::Rbj)
+    }
+
+    /// [`Cascade::set_bands`], realised in `model` — how a persisted config that asks for the
+    /// warping-corrected model is loaded. Same validation, same ramp: the model only changes
+    /// which coefficients the bands become.
+    pub fn set_bands_in(&mut self, bands: &[Band], model: ResponseModel) -> bool {
         if bands.len() > MAX_BANDS {
             return false;
         }
@@ -922,7 +909,7 @@ impl Cascade {
         // that turns out to be too loud leaves the running correction untouched.
         let mut candidate = [Coeffs::PASSTHROUGH; MAX_BANDS];
         for (slot, band) in candidate.iter_mut().zip(bands) {
-            *slot = coefficients(band, self.sample_rate);
+            *slot = coefficients_in(band, self.sample_rate, model);
         }
         if self.would_be_too_loud(&candidate[..bands.len()], self.preamp) {
             return false;
@@ -1242,6 +1229,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The warping-corrected model reaches the *realised* sample loop, not just the analytic
+    /// curve: a 10 kHz high shelf at 48 kHz follows its analog prototype at 16 kHz, where the
+    /// RBJ version of the same band is measurably cramped.
+    #[test]
+    fn analog_matched_bands_follow_the_analog_prototype_in_the_sample_loop() {
+        let band = Band { kind: FilterKind::HighShelf, freq_hz: 10_000.0, gain_db: 6.0, q: 0.7 };
+        let proto = cageq_biquad::Band { kind: cageq_biquad::Kind::HighShelf, freq_hz: 10_000.0, gain_db: 6.0, q: 0.7 };
+        let analog = |f: f64| cageq_biquad::analog::db(&proto, FS, 2.0 * std::f64::consts::PI * f / FS);
+
+        let mut matched = Cascade::new(2, FS);
+        assert!(matched.set_bands_in(&[band], ResponseModel::AnalogMatched));
+        let mut rbj = Cascade::new(2, FS);
+        assert!(rbj.set_bands(&[band]));
+        for &f in &[1000.0, 8000.0, 12_000.0, 16_000.0] {
+            let m = measured_db(&mut matched, f);
+            assert!((m - analog(f)).abs() < 0.1, "matched at {f} Hz: {m:.3} dB vs analog {:.3} dB", analog(f));
+        }
+        let r = measured_db(&mut rbj, 16_000.0);
+        assert!((r - analog(16_000.0)).abs() > 0.4, "RBJ should be cramped at 16 kHz: {r:.3} vs {:.3}", analog(16_000.0));
     }
 
     /// A biquad cascade multiplies, so its dB response is the sum of the bands' — the

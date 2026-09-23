@@ -826,7 +826,14 @@ fn write_effective(
     clipping_warning: bool,
 ) -> Result<Applied, CoreError> {
     let device_config =
-        DeviceConfig { device: effective.device.clone(), preamp_db, filters: effective.filters.clone() };
+        DeviceConfig {
+            device: effective.device.clone(),
+            preamp_db,
+            filters: effective.filters.clone(),
+            // RBJ until the core carries the user's model setting (warping-correction plan,
+            // Stage 3) — exactly what every backend applied before the field existed.
+            model: cageq_backend::ResponseModel::Rbj,
+        };
     space_out_write(inner); // §5.3: honour whatever cadence this backend can take
     let hash = match inner.backend.apply(std::slice::from_ref(&device_config)) {
         Ok(hash) => hash,

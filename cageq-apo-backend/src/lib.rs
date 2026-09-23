@@ -423,7 +423,7 @@ impl CageqApoBackend {
             .iter()
             .map(|slot| {
                 let c = match slot {
-                    Some(b) => dsp::coefficients(b, rate as f64),
+                    Some(b) => dsp::coefficients_in(b, rate as f64, cfg.model),
                     // A slot whose band is gone this push — held here (not dropped from the
                     // array) so whatever is running in it fades to identity in place, the same
                     // "ramp toward PASSTHROUGH" `Cascade::start_ramp` already does when a
@@ -471,6 +471,10 @@ impl EqBackend for CageqApoBackend {
             // Nothing else writes these files; there is no shared config surface to collide
             // over, which is one of the things dropping the EqAPO dependency buys.
             manages_foreign_config: false,
+            // The engine runs whatever coefficients it is handed (live) or computes them with
+            // the model its config names (at load), so the warping-corrected model is ours to
+            // offer here — unlike EqAPO, which designs its own RBJ filters from text.
+            analog_matched: true,
         }
     }
 
@@ -578,7 +582,7 @@ impl EqBackend for CageqApoBackend {
 /// *passthrough* — full-volume audio. A safe state that removed the correction would make a
 /// runaway louder, not quieter.
 pub fn safe_state() -> ApoConfig {
-    ApoConfig { preamp_db: -120.0, bands: Vec::new() }
+    ApoConfig { preamp_db: -120.0, bands: Vec::new(), model: dsp::ResponseModel::Rbj }
 }
 
 fn is_safe_state(cfg: ApoConfig) -> bool {
@@ -592,6 +596,10 @@ pub fn to_apo_config(cfg: &DeviceConfig) -> ApoConfig {
     ApoConfig {
         preamp_db: cfg.preamp_db,
         bands: cageq_backend::expand_tilts(&cfg.filters).iter().map(to_band).collect(),
+        model: match cfg.model {
+            cageq_backend::ResponseModel::Rbj => dsp::ResponseModel::Rbj,
+            cageq_backend::ResponseModel::AnalogMatched => dsp::ResponseModel::AnalogMatched,
+        },
     }
 }
 
@@ -1043,6 +1051,7 @@ mod tests {
 
     fn device(id: &str, preamp: f64) -> DeviceConfig {
         DeviceConfig {
+            model: Default::default(),
             device: id.to_string(),
             preamp_db: preamp,
             filters: vec![
@@ -1071,6 +1080,25 @@ mod tests {
         assert_eq!(parsed.bands[0].freq_hz, 105.0);
         assert_eq!(parsed.bands[0].gain_db, 6.0);
         assert_eq!(parsed.bands[1].kind, FilterKind::HighShelf);
+    }
+
+    /// The warping-corrected model is part of the correction, so it must survive the round
+    /// trip to the APO's own parser (as a v2 file), give a different integrity hash from the
+    /// same bands in RBJ — they sound different — and resume trusted from its own hash.
+    #[test]
+    fn the_analog_matched_model_is_persisted_and_hashed() {
+        let (backend, dir) = temp_backend("model");
+        let rbj_hash = backend.apply(&[device(EP, -6.0)]).unwrap();
+        let matched = DeviceConfig { model: cageq_backend::ResponseModel::AnalogMatched, ..device(EP, -6.0) };
+        let matched_hash = backend.apply(&[matched]).unwrap();
+        backend.flush_pending().unwrap();
+
+        let text = fs::read_to_string(config::config_path_in(&dir, EP)).unwrap();
+        let parsed = config::parse(&text).expect("the APO's own parser must accept a v2 file");
+        assert_eq!(parsed.model, dsp::ResponseModel::AnalogMatched);
+        assert_eq!(parsed.bands.len(), 2);
+        assert_ne!(rbj_hash, matched_hash, "same bands, different model, must not hash alike");
+        assert_eq!(backend.startup_decision(Some(&matched_hash)).unwrap(), StartupDecision::ResumeTrusted);
     }
 
     /// The generalised version of the isolate fix: it was never really about isolate
@@ -1135,6 +1163,7 @@ mod tests {
         cageq_apo::control::set_sample_rate(channel.block(), 48_000);
 
         let isolate = DeviceConfig {
+            model: Default::default(),
             device: EP_LIVE_ISOLATE_ONLY.to_string(),
             preamp_db: 0.0,
             filters: vec![Filter { kind: FilterType::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 }],
@@ -1238,6 +1267,7 @@ mod tests {
     fn the_isolate_audition_never_writes_the_config_file() {
         let (backend, dir) = temp_backend("isolate-no-write");
         let isolate = DeviceConfig {
+            model: Default::default(),
             device: EP.to_string(),
             preamp_db: 0.0,
             filters: vec![Filter { kind: FilterType::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 }],
@@ -1257,6 +1287,7 @@ mod tests {
     fn an_ordinary_apply_after_an_isolate_one_still_writes_the_file() {
         let (backend, dir) = temp_backend("isolate-then-ordinary");
         let isolate = DeviceConfig {
+            model: Default::default(),
             device: EP.to_string(),
             preamp_db: 0.0,
             filters: vec![Filter { kind: FilterType::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 }],
@@ -1352,6 +1383,7 @@ mod tests {
 
         // Put the endpoint into "last live push was isolate" state.
         let isolate = DeviceConfig {
+            model: Default::default(),
             device: EP_LIVE_OK.to_string(),
             preamp_db: 0.0,
             filters: vec![Filter { kind: FilterType::Bandpass, freq_hz: 31.0, gain_db: 0.0, q: 8.0 }],
@@ -1394,6 +1426,7 @@ mod tests {
         let mut snap = cageq_apo::control::Snapshot::default();
 
         let isolate_at = |freq_hz: f64| DeviceConfig {
+            model: Default::default(),
             device: EP_ISOLATE_WIRE.to_string(),
             preamp_db: 0.0,
             filters: vec![Filter { kind: FilterType::Bandpass, freq_hz, gain_db: 0.0, q: 8.0 }],
@@ -1457,7 +1490,7 @@ mod tests {
     #[test]
     fn a_flat_correction_is_not_the_safe_state() {
         let (backend, _dir) = temp_backend("flat");
-        let flat = DeviceConfig { device: EP.to_string(), preamp_db: 0.0, filters: vec![] };
+        let flat = DeviceConfig { device: EP.to_string(), preamp_db: 0.0, filters: vec![], model: Default::default() };
         let hash = backend.apply(&[flat]).unwrap();
         backend.flush_pending().unwrap(); // the write is debounced; force it to land now
         assert_eq!(
@@ -1491,7 +1524,7 @@ mod tests {
         let too_many: Vec<Filter> = (0..dsp::MAX_BANDS + 1)
             .map(|i| Filter { kind: FilterType::Peaking, freq_hz: 100.0 + i as f64, gain_db: 1.0, q: 1.0 })
             .collect();
-        let cfg = DeviceConfig { device: EP_LIVE_REFUSED.to_string(), preamp_db: -3.0, filters: too_many };
+        let cfg = DeviceConfig { device: EP_LIVE_REFUSED.to_string(), preamp_db: -3.0, filters: too_many, model: Default::default() };
 
         let err = backend.apply(&[cfg]).expect_err("a channel that refuses the push must fail the apply");
         assert!(matches!(err, BackendError::Backend(_)), "should be a backend error, not e.g. a bad-args one");
