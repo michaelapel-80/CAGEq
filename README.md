@@ -142,11 +142,12 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──biquad
   expect — coefficients from exactly these formulas, so matching them bit-for-bit keeps a
   CAGEq-fitted curve numerically identical to what either tool would produce from the same
   parameters; a "more correct" warping-corrected design would quietly diverge from the very target
-  it's meant to match. Warping itself isn't a real issue for what headphone correction actually
-  asks of it, either: what drives its error is the centre-frequency-to-sample-rate ratio, not Q on
-  its own — a correction band can run fairly narrow (AutoEq's own peaking-filter search allows Q up
-  to 6) and still warp negligibly, as long as it sits well below Nyquist, which real correction
-  bands do.
+  it's meant to match. Warping error is worst for a narrow (high-Q) band sitting close to Nyquist —
+  but AutoEq's own error signal is heavily smoothed above ~6-8kHz (a 2-octave smoothing window
+  there, versus 1/12-octave everywhere else it fits against), by explicit design: its own changelog
+  states it "treats +10kHz range as average value instead of trying to fix it precisely." A fit
+  that never asks for a precise, narrow correction anywhere near Nyquist in the first place has
+  nothing left for a warping-corrected design to actually improve.
 * **Why a second, custom audio engine alongside Equalizer APO:** the whole point of this app is a
   meaningful A/B. Equalizer APO's config-reload crossfade puts a bloom on every switch, not just
   every edit — not a hard click, but measurable, and audible with real program material. Read
