@@ -1,6 +1,12 @@
-//! Diagnostic: every cached headphone, fitted in both response models. Flags implausible
-//! gains, bands pressed against the matched refinement's trust region, and realised curves
-//! that drift apart. `CAGEQ_CACHE_DIR=<app cache> cargo run --release -p cageq-core --example fit_sweep`
+//! Diagnostic: headphones fitted in both response models, reporting each fit's largest gain and
+//! its error against the fit's own target (RMS below 10 kHz, mean error above) for three
+//! variants — RBJ fit, the same RBJ bands realised warping-corrected, and the matched refit.
+//!
+//! `CAGEQ_CACHE_DIR=<catalogue cache> cargo run --release -p cageq-core --example fit_sweep [-- <headphone path>...]`
+//!
+//! Without paths: every measurement in the cache plus 40 seeded synthetic headphones (offline).
+//! With paths (e.g. `measurements/oratory1990/data/over-ear/AKG K812.csv`): those, fetched into
+//! the cache if missing. `CAGEQ_SWEEP_BANDS=1` also prints every band of both fits.
 use std::sync::Arc;
 
 use cageq_core::{filter_curve_db_in, BackendError, CalcRequest, Capabilities, Core, DeviceConfig, EqBackend, ResponseModel, StartupDecision};
@@ -19,16 +25,21 @@ impl EqBackend for Mem {
 
 fn main() {
     let dir = std::env::var("CAGEQ_CACHE_DIR").expect("set CAGEQ_CACHE_DIR");
-    let grid: Vec<f64> = (0..400).map(|i| 20.0 * 1000f64.powf(i as f64 / 399.0)).collect();
     // The cached real measurement(s), plus seeded synthetic ones (offline — other real
     // measurements would have to be downloaded).
     let mut cases: Vec<(String, serde_json::Value)> = std::fs::read_dir(format!("{dir}/files")).unwrap()
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter(|n| n.starts_with("measurements__") && n.ends_with(".csv"))
         .map(|n| { let hp = n.replace("__", "/"); (hp.clone(), serde_json::Value::String(hp)) }).collect();
+    // Headphone catalogue paths given on the command line are fitted instead of the synthetic set
+    // (fetched into CAGEQ_CACHE_DIR if not there yet).
+    let named: Vec<String> = std::env::args().skip(1).collect();
+    if !named.is_empty() {
+        cases = named.into_iter().map(|hp| (hp.clone(), serde_json::Value::String(hp))).collect();
+    }
     let mut seed: u64 = 0x5eed_cafe;
     let mut rnd = move || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (seed >> 11) as f64 / (1u64 << 53) as f64 };
-    for k in 0..40 {
+    for k in 0..if std::env::args().len() > 1 { 0 } else { 40 } {
         let bumps: Vec<(f64, f64, f64)> = (0..5).map(|_| ((30f64.ln() + rnd() * (18_000f64 / 30.0).ln()).exp(), 0.08 + rnd() * 0.9, (rnd() - 0.5) * 10.0)).collect();
         let tilt = (rnd() - 0.5) * 6.0;
         let mut pts = Vec::new();
@@ -44,7 +55,7 @@ fn main() {
     println!("{:<14} {:>7} {:>7} | {:^14} | {:^14} | {:^14}", "", "", "", "RBJ fit/RBJ", "RBJ fit/match", "refit/match");
     println!("{:<14} {:>7} {:>7} | {:>6} {:>6} | {:>6} {:>6} | {:>6} {:>6}", "headphone", "max|g|R", "max|g|M", "rms<10k", "tail", "rms<10k", "tail", "rms<10k", "tail");
     for (hp, input) in cases {
-        let target = "targets/Harman over-ear 2018.csv";
+        let target = if hp.contains("/in-ear/") || hp.contains("/earbud/") { "targets/Harman in-ear 2019.csv" } else { "targets/Harman over-ear 2018.csv" };
         let core = Core::start(Arc::new(Mem), None).unwrap();
         let mut fits = Vec::new();
         for model in [ResponseModel::Rbj, ResponseModel::AnalogMatched] {
@@ -55,14 +66,15 @@ fn main() {
             match core.apply(req) { Ok(a) => fits.push(a), Err(e) => { println!("{hp}: {e}"); break; } }
         }
         if fits.len() < 2 { continue; }
+        if std::env::var("CAGEQ_SWEEP_BANDS").is_ok() {
+            for (m, a) in ["RBJ", "matched"].iter().zip(&fits) {
+                println!("  {hp} — {m}");
+                for f in &a.filters {
+                    println!("     {:<9?} {:>8.1} Hz {:>+7.2} dB  Q {:.3}", f.kind, f.freq_hz, f.gain_db, f.q);
+                }
+            }
+        }
         let maxg = |i: usize| fits[i].filters.iter().map(|f| f.gain_db.abs()).fold(0.0, f64::max);
-        // Bands whose matched value sits on the trust-region edge (±3 dB / ±1/3 oct / ×÷1.5 from RBJ).
-        let edge = fits[0].filters.iter().zip(&fits[1].filters).filter(|(r, m)| {
-            (m.gain_db - r.gain_db).abs() > 2.99 || (m.freq_hz / r.freq_hz).log2().abs() > 0.333 || (m.q / r.q).ln().abs() > 1.5f64.ln() - 1e-3
-        }).count();
-        let c: Vec<Vec<f64>> = [ResponseModel::Rbj, ResponseModel::AnalogMatched].iter().zip(&fits).map(|(m, a)| filter_curve_db_in(&a.filters, &grid, *m)).collect();
-        let below = grid.iter().zip(c[0].iter().zip(&c[1])).filter(|(f, _)| **f < 10_000.0).map(|(_, (a, b))| (a - b).abs()).fold(0.0, f64::max);
-        let tail = |v: &[f64]| { let t: Vec<f64> = grid.iter().zip(v).filter(|(f, _)| **f >= 10_000.0).map(|(_, x)| *x).collect(); t.iter().sum::<f64>() / t.len() as f64 };
         // Fit quality against the fit's own target (the AutoEq reference curve): RMS below 10 kHz
         // (where the loss matches shape) and the error of the mean above it (all it matches there).
         // Three variants: RBJ fit realised RBJ; the same RBJ bands realised matched (no refit);
@@ -79,7 +91,6 @@ fn main() {
         let a = quality(&fits[0].filters, ResponseModel::Rbj);
         let b = quality(&fits[0].filters, ResponseModel::AnalogMatched);
         let c2 = quality(&fits[1].filters, ResponseModel::AnalogMatched);
-        let _ = (&c, below, edge);
         let short: String = hp.rsplit('/').next().unwrap().trim_end_matches(".csv").chars().take(14).collect();
         println!("{:<14} {:>7.2} {:>7.2} | {:>6.3} {:>+6.2} | {:>6.3} {:>+6.2} | {:>6.3} {:>+6.2}", short, maxg(0), maxg(1), a.0, a.1, b.0, b.1, c2.0, c2.1);
     }
