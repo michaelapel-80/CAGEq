@@ -87,8 +87,9 @@ chart.](docs/SpectrumScope.png)
 The level meter (phosphor-beam rendered, like the scopes) carries true-peak (BS.1770 oversampled —
 catches inter-sample overs a plain sample-peak read misses) and true-RMS marks, and a full BS.1770
 loudness readout sits beside it — momentary, short-term, integrated, and loudness range (EBU Tech
-3342 LRA), plus a peak-max high-water mark, all restartable on demand — making the auto-loudness
-compensation this app is built around actually visible rather than just trusted to work.
+3342 LRA), plus a peak-max high-water mark, the cumulative ones (integrated, LRA, peak max)
+restartable on demand — making the auto-loudness compensation this app is built around actually
+visible rather than just trusted to work.
 
 ![The level/LUFS meter: peak and RMS bars, and the full BS.1770 readout (momentary, short-term,
 integrated, loudness range, peak max).](docs/Meter.png)
@@ -119,10 +120,17 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──biquad
   over JSON-RPC for the fit itself, to reuse AutoEq's established fitting algorithm rather than
   reimplementing it. That algorithm — the FR-prep, the SLSQP parametric-EQ solver, the
   measurement/target catalogue fetch — now runs natively in Rust (`cageq-peq-solver`,
-  `cageq-catalog`), validated against the original Python/AutoEq implementation on the full
-  measurement corpus rather than assumed equivalent. The app no longer starts a Python process at
-  all; the reference implementation still lives in the repo purely as the comparison target those
-  validation tests run against.
+  `cageq-catalog`), validated against the original Python/AutoEq implementation rather than
+  assumed equivalent: the fit against AutoEq-generated fixtures and side-by-side comparison tests
+  against the live Python code, the CSV parser exhaustively against every one of AutoEq's 6,815
+  measurement and 61 target files. The main reason was startup cost: a frozen Python sidecar
+  with NumPy/SciPy took noticeably long to come up on every launch (different packaging, e.g.
+  uv, might have narrowed that gap). Package size was a secondary one — trivial in absolute terms
+  these days, but a large share of the installer for one fitting routine. And with AutoEq's
+  upstream inactive for over a year, owning the algorithm directly costs little in keeping up
+  with upstream changes. The app no longer starts a Python process at all; the reference
+  implementation still lives in the repo purely as the comparison target those validation tests
+  run against.
 * **Why Rust/Tauri:** a lean native WebView2 shell instead of a bundled Chromium (Electron). The
   orchestrator itself doesn't need Rust's performance to do its job — but two other components in
   this same Rust codebase have their own reasons: the spectrum analyzer's FFT runs on
@@ -138,17 +146,18 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──biquad
   it leans on a fair amount of `unsafe` to interop with its C++ COM shim, so it isn't a clean
   memory-safety win either.
 * **Why the plain RBJ cookbook filter formulas, not a warping-corrected design** (Massberg/
-  Vicanek/Muranov): AutoEq's own reference implementation and Equalizer APO both compute — and
-  expect — coefficients from exactly these formulas, so matching them bit-for-bit keeps a
-  CAGEq-fitted curve numerically identical to what either tool would produce from the same
-  parameters; a "more correct" warping-corrected design would quietly diverge from the very target
-  it's meant to match. These designs matter most as the target frequency approaches Nyquist — the
-  regime these papers' own full-spectrum magnitude-response comparisons demonstrate it in — but
-  AutoEq's own error signal is heavily smoothed above ~6-8kHz (a 2-octave smoothing window there,
-  versus 1/12-octave everywhere else it fits against), by explicit design: its own changelog states
-  it "treats +10kHz range as average value instead of trying to fix it precisely." A fit
-  that never asks for a precise, narrow correction anywhere near Nyquist in the first place has
-  nothing left for a warping-corrected design to actually improve.
+  Vicanek/Muranov): AutoEq fits its filter parameters (Fc, gain, Q) against the RBJ cookbook's
+  response, and Equalizer APO turns those same parameters back into coefficients with the same
+  formulas — so an engine that realizes them any other way no longer reproduces the curve the fit
+  actually optimized; a "more correct" warping-corrected design would quietly diverge from its own
+  target. Those designs pay off as the centre frequency approaches Nyquist — the regime the
+  papers' full-spectrum comparisons demonstrate them in — and the fit stays well short of it:
+  AutoEq caps every filter's centre frequency at 10 kHz (peaking and shelf alike, mirrored in
+  `cageq-peq-solver`), under half of Nyquist even at 44.1 kHz, and above ~6-8 kHz deliberately
+  fits only a smoothed average (a 2-octave smoothing window there, versus 1/12-octave below) — its
+  own changelog says it "treats +10kHz range as average value instead of trying to fix it
+  precisely." Hand-placed bands can go higher, but the chart draws each band's actual digital
+  response at the device's sample rate, warping included, so what you tune is what runs.
 * **Why a second, custom audio engine alongside Equalizer APO:** the whole point of this app is a
   meaningful A/B. Equalizer APO's config-reload crossfade puts a bloom on every switch, not just
   every edit — not a hard click, but measurable, and audible with real program material. Read
@@ -165,8 +174,9 @@ data model, DSP math, and most of the UI are platform-agnostic — a port would 
 Windows-specific audio engine, not restructuring the rest.
 
 Windows-on-Arm isn't natively built or tested, but should already work today via the Equalizer
-APO backend and its own ARM64 build: CAGEq there only ever writes `config.txt`, never loads
-anything into `audiodg.exe` itself, and the rest of the app (the Tauri shell) isn't
+APO backend and its own ARM64 build: CAGEq there only ever writes Equalizer APO's config files
+(its own `cageq.txt`, plus one `Include:` line in `config.txt`), never loads anything into
+`audiodg.exe` itself, and the rest of the app (the Tauri shell) isn't
 real-time-critical code, so running under Windows' x64 emulation should be a non-issue. CAGEq's
 own custom APO is the one piece that doesn't work there — it loads in-process into `audiodg.exe`,
 which is genuinely architecture-matched on Arm, so it would need an actual native ARM64 build
@@ -193,10 +203,12 @@ full installation walkthrough and building from source (maintainers).
 
 ## License
 
-[GPL-3.0-or-later](LICENSE). Third-party dependencies bundled into the built application (Rust
-crates, the frontend's npm packages) are all permissively licensed (MIT/BSD/Apache-2.0 and
-similar) — see [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) for the full list and their
-license texts.
+[GPL-3.0-or-later](LICENSE). Third-party code bundled into the built application (Rust crates,
+the NLopt C library the fit's SLSQP solver links, the frontend's npm packages) is almost all
+permissively licensed (MIT/BSD/Apache-2.0/ISC and similar); the exceptions are weak-copyleft and
+GPL-compatible — a few Rust crates under MPL-2.0, and NLopt, which as built here falls under
+LGPL-2.1-or-later. See [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) for the full list and
+their license texts.
 
 ## Acknowledgments
 
