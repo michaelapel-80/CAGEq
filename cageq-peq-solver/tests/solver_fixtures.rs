@@ -104,7 +104,7 @@ fn check_fixture(path: &Path) -> Result<(), String> {
     let python_rmse = rmse(&python_fr, &fixture.input.target);
     eprintln!(
         "{:<22} rust loss {:>10.6}  python loss {:>10.6}   rust rmse {:>7.4}  python rmse {:>7.4}",
-        fixture.name, report.loss, fixture.output.loss, rust_rmse, python_rmse
+        fixture.name, report.autoeq_loss, fixture.output.loss, rust_rmse, python_rmse
     );
 
     // Not bit-exact filter parameters — a different SLSQP implementation need not land
@@ -114,10 +114,12 @@ fn check_fixture(path: &Path) -> Result<(), String> {
     // 50% slack plus a small floor absorbs near-zero-loss cases (`flat.json`) where a
     // tiny absolute difference is a huge ratio.
     let loss_ceiling = fixture.output.loss * 1.5 + 1e-4;
-    if report.loss > loss_ceiling {
+    // `autoeq_loss`, not `loss`: the Rust solve also minimises a cancellation penalty that
+    // Python AutoEq has no counterpart for, so only AutoEq's own loss compares like with like.
+    if report.autoeq_loss > loss_ceiling {
         return Err(format!(
             "{}: rust loss {:.6} exceeds python loss {:.6} by more than the 1.5x+1e-4 slack",
-            fixture.name, report.loss, fixture.output.loss
+            fixture.name, report.autoeq_loss, fixture.output.loss
         ));
     }
 

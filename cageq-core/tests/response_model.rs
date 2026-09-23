@@ -211,13 +211,12 @@ fn the_export_band_model_is_independent_of_the_playback_model() {
     assert!(differ(&graphic_rbj, &graphic_matched), "the graphic-EQ export honours the app design too");
 }
 
-/// Regression for degenerate warping-corrected fits. Refitting in the matched model once
-/// produced opposing, very wide ±15–20 dB bands and shelves that cancelled to nearly the same
-/// curve (AKG K812 vs Harman 2018: a −15.9 dB 10 kHz shelf against a +20 dB, Q 0.24 bell). The
-/// matched fit is now the RBJ fit refined within a trust region, so every matched band must stay
-/// close to its RBJ counterpart — checked over seeded synthetic headphones (offline).
+/// No self-cancelling band sets in either model: every fit's largest gain stays sane on seeded
+/// synthetic headphones (offline), and no two bands oppose each other at double-digit gains
+/// within an octave. The cold warping-corrected refit, and the fully converged RBJ fit of the
+/// Sennheiser HD 800 S (`tests/fit_real_headphones.rs`), used to produce exactly that.
 #[test]
-fn the_matched_refit_stays_the_rbj_correction() {
+fn fits_have_no_self_cancelling_band_pairs() {
     let mut seed: u64 = 0x5eed_cafe;
     let mut rnd = move || {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -241,11 +240,13 @@ fn the_matched_refit_stays_the_rbj_correction() {
         let (core, _backend) = start(true);
         let rbj = core.apply(req).unwrap();
         let matched = core.update_response_model(ResponseModel::AnalogMatched).unwrap().unwrap();
-        assert_eq!(rbj.filters.len(), matched.filters.len());
-        for (r, m) in rbj.filters.iter().zip(&matched.filters) {
-            assert!((m.gain_db - r.gain_db).abs() <= 3.0 + 1e-9, "case {case}: {r:?} -> {m:?} (gain)");
-            assert!((m.freq_hz / r.freq_hz).log2().abs() <= 1.0 / 3.0 + 1e-9, "case {case}: {r:?} -> {m:?} (Fc)");
-            assert!((m.q / r.q).ln().abs() <= 1.5f64.ln() + 1e-9, "case {case}: {r:?} -> {m:?} (Q)");
+        for (name, fit) in [("rbj", &rbj.filters), ("matched", &matched.filters)] {
+            for a in fit.iter() {
+                for b in fit.iter() {
+                    let opposed = a.gain_db > 10.0 && b.gain_db < -10.0 && (a.freq_hz / b.freq_hz).log2().abs() < 1.0;
+                    assert!(!opposed, "case {case} {name}: self-cancelling pair {a:?} / {b:?}");
+                }
+            }
         }
     }
 }

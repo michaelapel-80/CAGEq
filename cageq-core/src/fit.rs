@@ -77,15 +77,6 @@ struct MeasurementPoint {
     raw_db: f64,
 }
 
-/// Trust region for the warping-corrected refinement of an RBJ fit (see `run_autoeq_fit`):
-/// how far each band may move from its RBJ value. Wide enough to take up the realisation
-/// difference near the top (a few dB, a fraction of an octave), narrow enough that the band set
-/// stays the RBJ correction rather than a new, degenerate one.
-const MATCHED_TRUST_GAIN_DB: f64 = 3.0;
-/// ±⅓ octave.
-const MATCHED_TRUST_FC_RATIO: f64 = 1.259_921_049_894_873_2;
-const MATCHED_TRUST_Q_RATIO: f64 = 1.5;
-
 /// AutoEq's `DEFAULT_MAX_SLOPE` — CAGEq never overrides `equalize()`'s `max_slope`, only
 /// `max_gain` (see `cageq-peq-solver::equalize`'s own doc for the rest of the
 /// parameters CAGEq's call site lets it skip).
@@ -255,29 +246,15 @@ fn run_autoeq_fit(
     let warm = if model == ResponseModel::Rbj {
         false
     } else {
-        // Warping-corrected: refine the RBJ fit (from this cache when it was already made) rather
-        // than search from scratch — see `Solver::optimize_warm` for the degenerate fits a cold
-        // start produced. `bands_to_filters` keeps band order, so the two line up one to one.
+        // Warping-corrected: start from the RBJ fit (from this cache when it was already made)
+        // rather than AutoEq's init heuristic. Not a constraint — what keeps either fit sane is
+        // the solver's cancellation penalty (`Solver::cancellation_penalty`) — but the two
+        // realisations only differ near the top, so the RBJ answer is the natural start, and a
+        // model toggle then moves the bands a little instead of reshuffling them.
+        // `bands_to_filters` keeps band order, so the two line up one to one.
         let (rbj_filters, ..) = run_autoeq_fit(cache, params, ResponseModel::Rbj)?;
         for (band, f) in bands.iter_mut().zip(&rbj_filters) {
             (band.fc, band.q, band.gain) = (f.freq_hz, f.q, f.gain_db);
-            // A trust region around the RBJ answer, inside the band's own bounds. A warm start
-            // alone was not enough: AutoEq's loss sees only the *mean* above 10 kHz, and a
-            // warping-corrected 10 kHz shelf rises toward it far more slowly than a cramped RBJ
-            // one, so the loss genuinely prefers a much larger shelf gain whose skirt is then
-            // cancelled below 10 kHz by stacked opposing peaks (sharpness_penalty only restrains
-            // positive ones) — SLSQP walked there even from the RBJ solution. Bounding the
-            // refinement keeps it what it is meant to be: the same correction, realised without
-            // cramping. Measured (`examples/fit_sweep.rs`, AKG K812 + 40 synthetic headphones):
-            // no matched band set strays past RBJ ± the allowance, against 15/41 degenerate sets
-            // without it, at a fit error below 10 kHz ~1.3× RBJ's on average (≲0.35 dB RMS). A
-            // symmetric sharpness penalty was tried as well and added nothing on top of this.
-            band.min_gain = band.min_gain.max(f.gain_db - MATCHED_TRUST_GAIN_DB);
-            band.max_gain = band.max_gain.min(f.gain_db + MATCHED_TRUST_GAIN_DB);
-            band.min_fc = band.min_fc.max(f.freq_hz / MATCHED_TRUST_FC_RATIO);
-            band.max_fc = band.max_fc.min(f.freq_hz * MATCHED_TRUST_FC_RATIO);
-            band.min_q = band.min_q.max(f.q / MATCHED_TRUST_Q_RATIO);
-            band.max_q = band.max_q.min(f.q * MATCHED_TRUST_Q_RATIO);
         }
         true
     };
