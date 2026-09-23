@@ -453,5 +453,13 @@
 
   "footer": {
     "text": "Headphone corrections and target curves from <0>AutoEq</0> by Jaakko Pasanen, MIT-licensed. <2>CAGEq</2>, by Michael Apel, is an independent project, not affiliated with AutoEq — itself licensed under the <1>GNU GPL v3.0 or later</1>."
+  },
+
+  "model": {
+    "toggle": "Warping-corrected filters (analog-matched)",
+    "desc": "Filters keep their analog shape up to 20 kHz instead of being squeezed toward Nyquist by the standard (RBJ) design, and sound the same at 44.1, 48 or 96 kHz. Mostly audible on treble bands; the AutoEq fit is redone for it. Resonant shelves (Q above ~1) stay RBJ, where it is the more accurate design.",
+    "unavailable": "Needs CAGEq's own audio engine — Equalizer APO designs its own (RBJ) filters.",
+    "inactive": "Switched on, but inactive: Equalizer APO is the active engine and designs its own (RBJ) filters. It takes effect with CAGEq's own engine.",
+    "refitting": "re-fitting…"
   }
 }

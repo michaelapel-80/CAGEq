@@ -1,0 +1,17 @@
+[package]
+name = "cageq-biquad-wasm"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+
+# `cageq-biquad` compiled for the frontend (wasm32-unknown-unknown), so the chart, the
+# undistort inverse filters and every other client-side curve are designed by the very code
+# the APO and the fit run — no TypeScript transcription to drift. Plain `extern "C"` exports,
+# no wasm-bindgen: the interface is one function taking numbers, so glue would only add a
+# build tool. Built and copied into cageq-app by `npm run wasm` (cageq-app/package.json).
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cageq-biquad = { path = "../cageq-biquad" }

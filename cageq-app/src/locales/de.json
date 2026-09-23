@@ -453,5 +453,13 @@
 
   "footer": {
     "text": "Kopfhörer-Korrekturen und Zielkurven von <0>AutoEq</0> von Jaakko Pasanen, MIT-lizenziert. <2>CAGEq</2>, von Michael Apel, ist ein unabhängiges Projekt, nicht mit AutoEq affiliiert — selbst lizenziert unter der <1>GNU GPL v3.0 oder später</1>."
+  },
+
+  "model": {
+    "toggle": "Verzerrungskorrigierte Filter (analog-angepasst)",
+    "desc": "Filter behalten ihre analoge Form bis 20 kHz, statt vom Standardentwurf (RBJ) Richtung Nyquist gestaucht zu werden, und klingen bei 44,1, 48 und 96 kHz gleich. Vor allem bei Höhenbändern hörbar; der AutoEq-Fit wird dafür neu berechnet. Resonante Shelves (Q über ~1) bleiben RBJ, dort ist es der genauere Entwurf.",
+    "unavailable": "Benötigt CAGEqs eigene Audio-Engine — Equalizer APO berechnet seine eigenen (RBJ-)Filter.",
+    "inactive": "Eingeschaltet, aber inaktiv: Equalizer APO ist die aktive Engine und berechnet seine eigenen (RBJ-)Filter. Wirkt mit CAGEqs eigener Engine.",
+    "refitting": "Neuberechnung…"
   }
 }

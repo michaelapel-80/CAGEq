@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { type Band, type FadingInverse, retargetFadingInverse, stepFadingInverse } from "./biquad";
+import { type Band, type FadingInverse, type ResponseModel, retargetFadingInverse, stepFadingInverse } from "./biquad";
 import { scopeStream } from "./streams";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { useTunableParams } from "./useTunableParams";
@@ -14,7 +14,9 @@ export type ScopeData = { xy: number[]; signal: boolean; rate: number };
 /** The active EQ cascade, broadcast by the main window (App) so a scope view can inverse-filter the
  *  post-EQ loopback back to the pre-EQ source image (the "undistort" mode) — shared with TimeScope,
  *  which broadcasts/consumes the identical `scope-eq` event for its own undistort toggle. */
-export type ScopeEq = { filters: Band[]; preampDb: number };
+/** `model`: the effective model `filters` are realised in — the same bands in another model are a
+ *  different correction to undo, so every consumer retargets on a change of it too. */
+export type ScopeEq = { filters: Band[]; preampDb: number; model: ResponseModel };
 
 // The scope's dark "instrument screen" backdrop is a CSS background on .vs-screen (theme-independent).
 // The trace lives on a **transparent** canvas over it, whose persistence is owned by the shared
@@ -214,7 +216,7 @@ export function Vectorscope({
   // The active EQ cascade (for undistort) + the built, crossfading inverse cascade. Rebuilt by
   // the rAF loop when the filters/rate change; state persists across frames. `null` until the
   // first EQ arrives.
-  const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0 });
+  const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0, model: "Rbj" }); // placeholder until the first `scope-eq` arrives
   const invRef = useRef<FadingInverse | null>(null);
 
   // Own the loopback scope-stream subscription (samples, a Channel-backed bus — see streams.ts
@@ -379,8 +381,8 @@ export function Vectorscope({
       const rate = scopeRef.current?.rate && scopeRef.current.rate > 0 ? scopeRef.current.rate : 48000;
       if (p.invert) {
         const prev = invRef.current;
-        if (prev === null || prev.filtersRef !== eq.filters || prev.rate !== rate) {
-          invRef.current = retargetFadingInverse(prev, eq.filters, eq.preampDb, rate);
+        if (prev === null || prev.filtersRef !== eq.filters || prev.model !== eq.model || prev.rate !== rate) {
+          invRef.current = retargetFadingInverse(prev, eq.filters, eq.preampDb, eq.model, rate);
         }
       } else {
         invRef.current = null; // dropped while off; turning back on starts a fresh cascade, no crossfade to a mode that wasn't running

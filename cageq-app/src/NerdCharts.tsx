@@ -1,7 +1,7 @@
 import { useMemo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { Band, FS, impulseResponse } from "./biquad";
+import { Band, FS, impulseResponse, type ResponseModel } from "./biquad";
 import { EQ_V_INSET_FRAC } from "./EqChart";
 
 /**
@@ -29,12 +29,15 @@ const DB_TICKS = [0, -20, -40, -60];
 
 export function ImpulseChart({
   bands,
+  model,
   color,
   height = 215,
   fs = FS,
   legendHost,
 }: {
   bands: Band[];
+  /** The effective model `bands` are realised in (see EqChart's `model`). */
+  model: ResponseModel;
   color: string;
   height?: number;
   fs?: number;
@@ -51,7 +54,7 @@ export function ImpulseChart({
 
   const { env, n, peak } = useMemo(() => {
     const CAP = 16384; // ~340 ms at 48 kHz
-    const h = impulseResponse(bands, CAP, fs);
+    const h = impulseResponse(bands, model, CAP, fs);
     let peak = 1e-12;
     for (const v of h) peak = Math.max(peak, Math.abs(v));
     // Decay window: last sample whose envelope is still above WINDOW_DB of the peak.
@@ -70,7 +73,7 @@ export function ImpulseChart({
       env[c] = m;
     }
     return { env, n, peak };
-  }, [bands, fs, plotW]);
+  }, [bands, fs, plotW, model]);
 
   const msTotal = (n / fs) * 1000;
   const xCol = (c: number) => PAD.l + (c / (env.length - 1)) * plotW;

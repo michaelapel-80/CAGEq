@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
-import { Band, composedCurveDb, logGrid } from "./biquad";
+import { Band, composedCurveDb, logGrid, type ResponseModel } from "./biquad";
 import { EqChart, RefCurve, Series } from "./EqChart";
 import { parametricEqText } from "./exportFormats";
 
@@ -29,7 +29,10 @@ type ExportFit = { filters: Band[]; preamp_db: number };
  *  `Band[]` the §5.2 chart already draws for the active slot. Reuses the existing `.modal-card`
  *  overlay convention (see the `presetSave` dialog in App.tsx) rather than inventing new modal
  *  chrome. */
-export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]; sampleRate?: number; onClose: () => void }) {
+/** `model`: how the slot's own `filters` are realised on the desktop (the effective model) — the
+ *  curve the export approximates. The *exported* bands are always drawn as RBJ, because RBJ is
+ *  what every phone EQ app receiving them runs. */
+export function ExportDialog({ filters, model, sampleRate, onClose }: { filters: Band[]; model: ResponseModel; sampleRate?: number; onClose: () => void }) {
   const { t } = useTranslation();
   const [format, setFormat] = useState<ExportFormat>("parametric");
   const [bandCount, setBandCount] = useState(BAND_COUNT_DEFAULT);
@@ -96,7 +99,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
   );
   const refs: RefCurve[] = useMemo(() => {
     if (!filters.length) return [];
-    const curve = composedCurveDb(filters, previewFreqs, sampleRate);
+    const curve = composedCurveDb(filters, previewFreqs, model, sampleRate);
     return [
       {
         id: "export-full",
@@ -105,7 +108,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
         label: t("export.fullCurve"),
       },
     ];
-  }, [filters, previewFreqs, sampleRate, t]);
+  }, [filters, previewFreqs, sampleRate, model, t]);
 
   // How well the exported (reduced-band) fit actually matches the full cascade it's approximating
   // — the same two curves the chart above already draws (`series`/`refs`), just reduced to two
@@ -116,8 +119,8 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
   // don't hand back a curve at all) — no second error computation to keep in sync with the backend.
   const fitError = useMemo(() => {
     if (!fit || !filters.length) return null;
-    const achieved = composedCurveDb(fit.filters, previewFreqs, sampleRate);
-    const reference = composedCurveDb(filters, previewFreqs, sampleRate);
+    const achieved = composedCurveDb(fit.filters, previewFreqs, "Rbj", sampleRate); // exported bands: RBJ, as the phone app will run them
+    const reference = composedCurveDb(filters, previewFreqs, model, sampleRate);
     let sumSq = 0;
     let max = 0;
     for (let i = 0; i < previewFreqs.length; i++) {
@@ -126,7 +129,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
       max = Math.max(max, err);
     }
     return { rms: Math.sqrt(sumSq / previewFreqs.length), max };
-  }, [fit, filters, previewFreqs, sampleRate]);
+  }, [fit, filters, previewFreqs, sampleRate, model]);
 
   const copy = async () => {
     try {
@@ -206,7 +209,9 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
         )}
 
         <div style={{ height: 160, position: "relative", margin: "0.6em 0" }}>
-          <EqChart series={series} refs={refs} height={160} screen legendHost={legendHost} />
+          {/* model="Rbj": the only band series here is the exported fit, which phone EQ apps run as RBJ;
+              the slot's own curve arrives as `refs`, already computed in its effective model. */}
+          <EqChart model="Rbj" series={series} refs={refs} height={160} screen legendHost={legendHost} />
           {/* Absolutely positioned inside the chart's own fixed-height box, not a line of its
               own — same "nothing here may grow the dialog" discipline as everything else in it
               (see the modal-card's own doc). `pointerEvents: none` so it never steals the

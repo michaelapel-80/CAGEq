@@ -6,7 +6,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
-import { Band, composedCurveDb, logGrid } from "./biquad";
+import { Band, composedCurveDb, logGrid, type ResponseModel } from "./biquad";
 import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_MIN, snapFftSize } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
@@ -34,7 +34,13 @@ type ApplyResult = {
   reference_curve: { f: number; db: number }[]; // §5.2 ideal-correction overlay (empty for Dry)
   g_target_db: number; // §4.1 loudness target the curve wants
   g_max_peak_db: number; // §4.2 composed-curve peak
+  model: ResponseModel; // the *effective* model `filters` are realised in — what every curve must be drawn in
 };
+// The filter-model toggle's state (`get_response_model` / `set_response_model`): the user's
+// preference, what is actually applied, and whether the current backend can realise the matched
+// model at all (Equalizer APO cannot — it designs its own RBJ filters).
+type ResponseModelState = { preference: ResponseModel; effective: ResponseModel; available: boolean };
+type ResponseModelUpdate = { state: ResponseModelState; applied: ApplyResult | null };
 type Status = {
   startup: string;
   config_dir: string;
@@ -78,7 +84,8 @@ type Selection = { headphone: string | null; target: string | null };
 // core needs to seed a slot and compose the preamp: the composed bands + the two curve
 // quantities (+ the chart reference). The fit is deterministic in its inputs, so the
 // cached bands equal a fresh fit's; a background re-fit reconciles/​warms the sidecar.
-type PersistedFit = { device: string; filters: Band[]; g_target_db: number; g_max_peak_db: number; reference_curve: { f: number; db: number }[] };
+// `model`: what the fit was computed in — absent in blobs saved before the model existed (RBJ).
+type PersistedFit = { device: string; filters: Band[]; g_target_db: number; g_max_peak_db: number; reference_curve: { f: number; db: number }[]; model?: ResponseModel };
 // §3.5 resume blob (UI-owned shape; the backend stores/returns it verbatim).
 type Resume = {
   activeSlot: SlotName;
@@ -419,7 +426,7 @@ function avgSpectrum(frames: SpectrumData[], n: number): Float64Array {
   return a;
 }
 
-function selfTestVerdict(corrected: SpectrumData[], dry: SpectrumData[], bands: Band[], fs?: number): SelfTestVerdict {
+function selfTestVerdict(corrected: SpectrumData[], dry: SpectrumData[], bands: Band[], model: ResponseModel, fs?: number): SelfTestVerdict {
   // No (or barely any) captured frames ⇒ the loopback produced nothing — e.g. the device was
   // disabled/removed mid-test and the capture is stuck reopening. That's no-signal, not "too flat".
   if (corrected.length < 3 || dry.length < 3) return { kind: "nosignal" };
@@ -429,7 +436,7 @@ function selfTestVerdict(corrected: SpectrumData[], dry: SpectrumData[], bands: 
   const { f_min, f_max } = corrected[0];
   const freqs = new Float64Array(N);
   for (let i = 0; i < N; i++) freqs[i] = f_min * (f_max / f_min) ** (i / (N - 1));
-  const C = composedCurveDb(bands, freqs, fs); // expected EQ magnitude at each bin (at the device rate)
+  const C = composedCurveDb(bands, freqs, model, fs); // expected EQ magnitude at each bin (at the device rate)
   // Trust only bins with real energy in *both* captures (pink well above the display floor).
   const idx: number[] = [];
   for (let i = 0; i < N; i++) if (Lc[i] > -90 && Ld[i] > -90) idx.push(i);
@@ -666,6 +673,11 @@ function App() {
   const [rawCurve, setRawCurve] = useState<{ f: number; db: number }[] | null>(null); // raw measured FR (nerd overlay)
   const [targetCurve, setTargetCurve] = useState<{ f: number; db: number }[] | null>(null); // the target curve (nerd overlay)
   const [result, setResult] = useState<ApplyResult | null>(null);
+  const [modelState, setModelState] = useState<ResponseModelState | null>(null);
+  const [modelBusy, setModelBusy] = useState(false);
+  // The model every curve is drawn in: the one the last apply was *realised* in, falling back to
+  // the core's effective model before anything has been applied. Never the bare preference.
+  const drawModel: ResponseModel = result?.model ?? modelState?.effective ?? "Rbj";
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
   const [confirmFinalVolume, setConfirmFinalVolume] = useState(true); // §7.5 point 1
   const [pendingFinal, setPendingFinal] = useState<{ next: LoudnessSettings; jump: number } | null>(null);
@@ -778,6 +790,7 @@ function App() {
           g_target_db: applied.g_target_db,
           g_max_peak_db: applied.g_max_peak_db,
           reference_curve: applied.reference_curve,
+          model: applied.model,
         },
       }));
     return applied;
@@ -808,6 +821,7 @@ function App() {
       try {
         setStatus(await invoke<Status>("status"));
         setLoudness(await invoke<LoudnessSettings>("get_loudness"));
+        setModelState(await invoke<ResponseModelState>("get_response_model"));
         setConfirmFinalVolume(await invoke<boolean>("get_confirm_final_volume"));
         setApoNudgeDismissed(await invoke<boolean>("get_apo_nudge_dismissed"));
         const lib = await invoke<Parameters<typeof normalizeLibrary>[0]>("get_library");
@@ -858,6 +872,7 @@ function App() {
               gTargetDb: f.g_target_db,
               gMaxPeakDb: f.g_max_peak_db,
               referenceCurve: f.reference_curve,
+              model: f.model ?? "Rbj",
             });
             setHydrated((prev) => ({ ...prev, [s]: true }));
           }
@@ -972,6 +987,16 @@ function App() {
       invoke<Status>("status")
         .then((next) => setStatus((prev) => (prev && statusEqual(prev, next) ? prev : next)))
         .catch(() => {});
+      // The effective filter model can change without any action here: the status poll above is
+      // what lets the app swap backends mid-session (CAGEq's APO <-> Equalizer APO), and a swap can
+      // take the matched model away (or give it back). Only replaced when it actually differs.
+      invoke<ResponseModelState>("get_response_model")
+        .then((next) =>
+          setModelState((prev) =>
+            prev && prev.preference === next.preference && prev.effective === next.effective && prev.available === next.available ? prev : next,
+          ),
+        )
+        .catch(() => {});
     }, 3000);
     return () => clearInterval(id);
   }, []);
@@ -1077,6 +1102,38 @@ function App() {
       await invoke("set_confirm_final_volume", { enabled: false });
     }
     await updateLoudness(p.next);
+  }
+
+  // Warping-corrected filters on/off. The core re-fits both slots for the new effective model
+  // (instant when that model's fit is cached, a few seconds cold) and rewrites the active one;
+  // the result carries the model it was realised in, which is what the chart then draws.
+  async function toggleResponseModel(matched: boolean) {
+    setModelBusy(true);
+    try {
+      const update = await invoke<ResponseModelUpdate>("set_response_model", { model: matched ? "AnalogMatched" : "Rbj" });
+      setModelState(update.state);
+      if (update.applied) {
+        const applied = update.applied;
+        setResult(applied);
+        if (activeSlot === "A" || activeSlot === "B") {
+          setSlotFits((prev) => ({
+            ...prev,
+            [activeSlot]: {
+              device: applied.device,
+              filters: applied.filters,
+              g_target_db: applied.g_target_db,
+              g_max_peak_db: applied.g_max_peak_db,
+              reference_curve: applied.reference_curve,
+              model: applied.model,
+            },
+          }));
+        }
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setModelBusy(false);
+    }
   }
 
   async function toggleConfirmFinalVolume(enabled: boolean) {
@@ -1583,7 +1640,7 @@ function App() {
     // Pre-check: if the correction is too flat there's no shape to measure — don't bother playing.
     const grid = new Float64Array(120);
     for (let i = 0; i < 120; i++) grid[i] = 20 * 1000 ** (i / 119); // 20 Hz … 20 kHz
-    const gc = composedCurveDb(bands, grid, sampleRate ?? undefined);
+    const gc = composedCurveDb(bands, grid, drawModel, sampleRate ?? undefined);
     let mean = 0;
     for (const v of gc) mean += v;
     mean /= gc.length;
@@ -1622,7 +1679,7 @@ function App() {
       const dry = await capture(600, 1500); // EqAPO reload/crossfade + spectrum smoothing settle
       await invoke("activate_slot", { slot: originalSlot });
       switched = false;
-      setSelfTest({ phase: "done", verdict: selfTestVerdict(corrected, dry, bands, sampleRate ?? undefined) });
+      setSelfTest({ phase: "done", verdict: selfTestVerdict(corrected, dry, bands, drawModel, sampleRate ?? undefined) });
     } catch (e) {
       setError(String(e));
       setSelfTest(null);
@@ -2072,7 +2129,17 @@ function App() {
   // (Vectorscope, TimeScope, SpectrumScope) all read this same broadcast, so gating it once here
   // covers all of them; EqChart's backdrop takes eqBands as a direct prop and is gated the same
   // way where it's passed, below.
-  const scopeEq = { filters: dryActive || isolateAudition ? [] : result?.filters ?? [], preampDb: result?.preamp_db ?? 0 };
+  const scopeEq = { filters: dryActive || isolateAudition ? [] : result?.filters ?? [], preampDb: result?.preamp_db ?? 0, model: drawModel };
+  useEffect(() => {
+    if (!result || !modelState || modelBusy || isolateAudition || result.model === modelState.effective) return;
+    // `activate_slot` on the slot already active is a pure rewrite that returns the current state.
+    invoke<ApplyResult>("activate_slot", { slot: activeSlot })
+      .then(setResult)
+      .catch((e) => setError(String(e)));
+    // Only a change of the effective model is a reason to refetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelState?.effective]);
+
   const scopeEqRef = useRef(scopeEq);
   scopeEqRef.current = scopeEq;
   useEffect(() => {
@@ -2249,7 +2316,7 @@ function App() {
     for (const s of ["A", "B"] as const) {
       const fit = slotFits[s];
       if (!fit) continue;
-      for (const v of composedCurveDb(fit.filters, freqs, sampleRate ?? undefined)) m = Math.max(m, Math.abs(v));
+      for (const v of composedCurveDb(fit.filters, freqs, fit.model ?? "Rbj", sampleRate ?? undefined)) m = Math.max(m, Math.abs(v));
     }
     return m > 0 ? Math.max(6, Math.ceil(m + 1)) : undefined;
   }, [loudness?.mode, slotFits, sampleRate]);
@@ -2440,7 +2507,7 @@ function App() {
       )}
 
       {exportOpen && result && (
-        <ExportDialog filters={result.filters} sampleRate={sampleRate ?? undefined} onClose={() => setExportOpen(false)} />
+        <ExportDialog filters={result.filters} model={drawModel} sampleRate={sampleRate ?? undefined} onClose={() => setExportOpen(false)} />
       )}
 
       {selfTest && (
@@ -2919,6 +2986,7 @@ function App() {
                       // already draw exactly that from an empty band list (impulseResponse seeds
                       // sig[0]=1 and only the loop over `bands`, skipped here, would shape it further).
                       <ImpulseChart
+                        model={drawModel}
                         bands={dryActive ? [] : result.filters}
                         color={SLOT_COLOR[activeSlot]}
                         height={215}
@@ -2938,6 +3006,7 @@ function App() {
                       />
                     ) : (
                       <EqChart
+                        model={drawModel}
                         series={chartSeries}
                         markers={chartMarkers}
                         refs={chartRefs}
@@ -3284,6 +3353,32 @@ function App() {
                 />
                 {tr("loudness.confirmToggle")}
               </label>
+              {modelState && (
+                <div style={{ marginTop: "0.7em" }}>
+                  <label
+                    style={{ fontSize: "0.75em", opacity: modelState.available ? 0.8 : 0.5, display: "flex", alignItems: "center", gap: "0.4em" }}
+                    title={modelState.available ? undefined : tr("model.unavailable")}
+                  >
+                    <input
+                      name="analog-matched"
+                      type="checkbox"
+                      checked={modelState.preference === "AnalogMatched"}
+                      disabled={!modelState.available || modelBusy}
+                      onChange={(e) => void toggleResponseModel(e.currentTarget.checked)}
+                      style={{ flex: "none", margin: 0 }}
+                    />
+                    {tr("model.toggle")}
+                    {modelBusy && <span style={{ opacity: 0.7 }}>{tr("model.refitting")}</span>}
+                  </label>
+                  <p style={{ fontSize: "0.7em", opacity: 0.65, margin: "0.3em 0 0" }}>
+                    {modelState.available
+                      ? tr("model.desc")
+                      : modelState.preference === "AnalogMatched"
+                        ? tr("model.inactive")
+                        : tr("model.unavailable")}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 

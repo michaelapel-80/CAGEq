@@ -77,6 +77,13 @@ name = "cageq-biquad"
 version = "0.14.5"
 
 [[package]]
+name = "cageq-biquad-wasm"
+version = "0.14.5"
+dependencies = [
+ "cageq-biquad",
+]
+
+[[package]]
 name = "cageq-catalog"
 version = "0.14.5"
 dependencies = [

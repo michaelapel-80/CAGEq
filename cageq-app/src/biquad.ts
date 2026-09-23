@@ -1,18 +1,44 @@
 /**
- * Biquad response maths for the §5.2 chart.
+ * Biquad response maths for the §5.2 chart, the undistort inverse filters and every other
+ * client-side curve.
  *
- * This is a deliberate, exact mirror of AutoEq's `autoeq/peq.py` — both
- * `biquad_coefficients()` and `PEQFilter.fr` (its numerically-stable `phi` form).
- * Keeping the same model matters: the DSP fits with it and the config-writer exports
- * the same Fc/Gain/Q to EqAPO, so a curve drawn with different conventions (shelf Q in
- * particular) would quietly lie about what you're hearing.
+ * **Coefficients come from `cageq-biquad`, compiled to WebAssembly** (`cageq-biquad-wasm`,
+ * built into `src/wasm/` by `npm run wasm`) — the very code the APO and the fit run, in either
+ * {@link ResponseModel}. There used to be a TypeScript transcription of the RBJ formulas here;
+ * one source of truth means the chart cannot quietly disagree with what is being heard. Only
+ * the *evaluation* (AutoEq's numerically-stable `phi` form of `PEQFilter.fr`) stays in TS.
+ *
+ * Every function takes the model explicitly and it is required: it must be the *effective*
+ * model the core reports (`ApplyResult.model`), and a forgotten argument would otherwise draw
+ * RBJ over a warping-corrected correction without anyone noticing.
  *
  * Computing this client-side is what makes dragging instant — no IPC round-trip per
  * frame (filter.md §5.2 performance rule: a drag recomputes only the additive curve).
+ * {@link initBiquad} must have resolved before any of it runs (`main.tsx` awaits it before
+ * rendering).
  */
+
+import initWasm from "./wasm/cageq_biquad.wasm?init";
 
 export type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass" | "Tilt";
 export type Band = { kind: FilterKind; freq_hz: number; gain_db: number; q: number };
+/** How bands are realised — mirrors `cageq_backend::ResponseModel` (serde's unit-variant names). */
+export type ResponseModel = "Rbj" | "AnalogMatched";
+
+type WasmExports = {
+  memory: WebAssembly.Memory;
+  biquad_design: (kind: number, freqHz: number, gainDb: number, q: number, fs: number, model: number) => number;
+};
+let wasm: WasmExports | null = null;
+
+/** Instantiate the design module. Resolve before rendering anything that draws a curve. */
+export async function initBiquad(): Promise<void> {
+  const instance = await initWasm({});
+  wasm = instance.exports as unknown as WasmExports;
+}
+
+const KIND_CODE: Record<Exclude<FilterKind, "Tilt">, number> = { Peaking: 0, LowShelf: 1, HighShelf: 2, Bandpass: 3 };
+const MODEL_CODE: Record<ResponseModel, number> = { Rbj: 0, AnalogMatched: 1 };
 
 /**
  * Expand every `Tilt` band into the complementary shelf pair that actually realises it
@@ -36,63 +62,33 @@ export function expandTilts(bands: Band[]): Band[] {
   return out;
 }
 
-/** Sample rate the filters are defined against (matches the sidecar's `fs` default). */
+/** Sample rate the filters are defined against (matches the fit's `fs` default). */
 export const FS = 48000;
 
 /**
- * AutoEq's `biquad_coefficients()`: `[a0, a1, a2, b0, b1, b2]`, with `a1`/`a2` already
- * negated (its `fr` re-negates them — mirrored in {@link filterResponseDb}).
+ * One band's coefficients from `cageq-biquad` in AutoEq's `biquad_coefficients()` layout —
+ * `[a0, a1, a2, b0, b1, b2]` with `a1`/`a2` negated (its `fr` re-negates them, mirrored in
+ * {@link filterResponseDb}) — so everything below evaluates them exactly as before.
  */
-function coefficients(kind: FilterKind, fc: number, gainDb: number, q: number, fs: number) {
-  const a = Math.pow(10, gainDb / 40);
-  const w0 = (2 * Math.PI * fc) / fs;
-  const alpha = Math.sin(w0) / (2 * q);
-  const cosw = Math.cos(w0);
-  const sqrtA = Math.sqrt(a);
-
-  let a0: number, a1: number, a2: number, b0: number, b1: number, b2: number;
+function coefficients(kind: FilterKind, fc: number, gainDb: number, q: number, model: ResponseModel, fs: number) {
   if (kind === "Tilt") {
-    // No native tilt formula, by construction — see expandTilts's doc. Every real call
+    // No model has a native tilt, by construction — see expandTilts's doc. Every real call
     // site expands first; landing here means one didn't.
     throw new Error("coefficients() called with Tilt — expandTilts must run first");
-  } else if (kind === "Bandpass") {
-    // RBJ band-pass, 0 dB peak (gain ignored — the §5.2 isolate audition uses unity peak).
-    a0 = 1 + alpha;
-    a1 = -(-2 * cosw) / a0;
-    a2 = -(1 - alpha) / a0;
-    b0 = alpha / a0;
-    b1 = 0;
-    b2 = -alpha / a0;
-  } else if (kind === "Peaking") {
-    a0 = 1 + alpha / a;
-    a1 = -(-2 * cosw) / a0;
-    a2 = -(1 - alpha / a) / a0;
-    b0 = (1 + alpha * a) / a0;
-    b1 = (-2 * cosw) / a0;
-    b2 = (1 - alpha * a) / a0;
-  } else if (kind === "LowShelf") {
-    a0 = a + 1 + (a - 1) * cosw + 2 * sqrtA * alpha;
-    a1 = -(-2 * (a - 1 + (a + 1) * cosw)) / a0;
-    a2 = -(a + 1 + (a - 1) * cosw - 2 * sqrtA * alpha) / a0;
-    b0 = (a * (a + 1 - (a - 1) * cosw + 2 * sqrtA * alpha)) / a0;
-    b1 = (2 * a * (a - 1 - (a + 1) * cosw)) / a0;
-    b2 = (a * (a + 1 - (a - 1) * cosw - 2 * sqrtA * alpha)) / a0;
-  } else {
-    a0 = a + 1 - (a - 1) * cosw + 2 * sqrtA * alpha;
-    a1 = -(2 * (a - 1 - (a + 1) * cosw)) / a0;
-    a2 = -(a + 1 - (a - 1) * cosw - 2 * sqrtA * alpha) / a0;
-    b0 = (a * (a + 1 + (a - 1) * cosw + 2 * sqrtA * alpha)) / a0;
-    b1 = (-2 * a * (a - 1 + (a + 1) * cosw)) / a0;
-    b2 = (a * (a + 1 + (a - 1) * cosw - 2 * sqrtA * alpha)) / a0;
   }
-  return [1.0, a1, a2, b0, b1, b2] as const;
+  if (!wasm) throw new Error("biquad design module not initialised — initBiquad() must resolve first");
+  const ptr = wasm.biquad_design(KIND_CODE[kind], fc, gainDb, q, fs, MODEL_CODE[model]);
+  if (ptr === 0) throw new Error(`biquad design refused kind ${kind} / model ${model}`);
+  // A fresh view per call: cheap, and immune to the memory buffer ever being replaced.
+  const [b0, b1, b2, a1, a2] = new Float64Array(wasm.memory.buffer, ptr, 5);
+  return [1.0, -a1, -a2, b0, b1, b2] as const;
 }
 
 /** Difference-equation coefficients (a0 = 1) for one band's biquad in the direct-form convention
  *  `y = b0·x + b1·x₁ + b2·x₂ − a1·y₁ − a2·y₂` — the a's un-negated from {@link coefficients}. */
 export type BiquadCoeffs = { b0: number; b1: number; b2: number; a1: number; a2: number };
-export function biquadCoeffs(band: Band, fs = FS): BiquadCoeffs {
-  const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);
+export function biquadCoeffs(band: Band, model: ResponseModel, fs = FS): BiquadCoeffs {
+  const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, model, fs);
   return { b0, b1, b2, a1: -a1, a2: -a2 };
 }
 
@@ -100,8 +96,8 @@ export function biquadCoeffs(band: Band, fs = FS): BiquadCoeffs {
  *  1/H(z), i.e. numerator and denominator swapped (then renormalised to a0 = 1). Cascade the
  *  inverses of every band (reverse order) to undo an EQ chain in the time domain. Exact for the
  *  minimum-phase EQ this app builds; deep cuts become peaks in the inverse (noise-amplifying). */
-export function inverseBiquadCoeffs(band: Band, fs = FS): BiquadCoeffs {
-  const { b0, b1, b2, a1, a2 } = biquadCoeffs(band, fs);
+export function inverseBiquadCoeffs(band: Band, model: ResponseModel, fs = FS): BiquadCoeffs {
+  const { b0, b1, b2, a1, a2 } = biquadCoeffs(band, model, fs);
   return { b0: 1 / b0, b1: a1 / b0, b2: a2 / b0, a1: b1 / b0, a2: b2 / b0 };
 }
 
@@ -123,8 +119,8 @@ export function stepBiquad(c: BiquadCoeffs, s: BiquadState, x: number): number {
  *  particular EQ, ready to run sample-by-sample. */
 export type InverseCascade = { coeffs: BiquadCoeffs[]; stateL: BiquadState[]; stateR: BiquadState[]; gain: number };
 
-export function buildInverseCascade(filters: Band[], preampDb: number, fs: number): InverseCascade {
-  const coeffs = expandTilts(filters).map((b) => inverseBiquadCoeffs(b, fs)).reverse(); // undo in reverse order
+export function buildInverseCascade(filters: Band[], preampDb: number, model: ResponseModel, fs: number): InverseCascade {
+  const coeffs = expandTilts(filters).map((b) => inverseBiquadCoeffs(b, model, fs)).reverse(); // undo in reverse order
   return { coeffs, stateL: coeffs.map(zeroState), stateR: coeffs.map(zeroState), gain: Math.pow(10, preampDb / 20) };
 }
 
@@ -160,17 +156,26 @@ export const UNDISTORT_FADE_MS = 10;
  * drag) just keeps chaining short fades rather than tracking one true origin. That is a visual
  * approximation, not the audio path, so smooth-and-simple wins over exact.
  */
-export type FadingInverse = { from: InverseCascade | null; to: InverseCascade; filtersRef: Band[] | null; rate: number; fadeLeft: number; fadeFrames: number };
+export type FadingInverse = {
+  from: InverseCascade | null;
+  to: InverseCascade;
+  filtersRef: Band[] | null;
+  /** The model `to` was built in — callers retarget when it changes, even with the same bands. */
+  model: ResponseModel;
+  rate: number;
+  fadeLeft: number;
+  fadeFrames: number;
+};
 
-export function retargetFadingInverse(prev: FadingInverse | null, filters: Band[], preampDb: number, rate: number): FadingInverse {
-  const to = buildInverseCascade(filters, preampDb, rate);
+export function retargetFadingInverse(prev: FadingInverse | null, filters: Band[], preampDb: number, model: ResponseModel, rate: number): FadingInverse {
+  const to = buildInverseCascade(filters, preampDb, model, rate);
   // No prior cascade, or the sample rate itself changed (a device change, not a filter switch —
   // the old state doesn't even apply at the new rate): nothing to fade from.
   if (!prev || prev.rate !== rate) {
-    return { from: null, to, filtersRef: filters, rate, fadeLeft: 0, fadeFrames: 1 };
+    return { from: null, to, filtersRef: filters, model, rate, fadeLeft: 0, fadeFrames: 1 };
   }
   const fadeFrames = Math.max(1, Math.round(rate * (UNDISTORT_FADE_MS / 1000)));
-  return { from: prev.to, to, filtersRef: filters, rate, fadeLeft: fadeFrames, fadeFrames };
+  return { from: prev.to, to, filtersRef: filters, model, rate, fadeLeft: fadeFrames, fadeFrames };
 }
 
 /** Advance one sample through a `FadingInverse`, returning the (possibly blended) undistorted
@@ -216,8 +221,8 @@ export function stepFadingCurve(f: FadingCurve, dtMs: number): Float64Array {
 }
 
 /** One band's magnitude response in dB over `freqs` (mirrors `PEQFilter.fr`). */
-export function filterResponseDb(band: Band, freqs: Float64Array, fs = FS): Float64Array {
-  let [a0, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);
+export function filterResponseDb(band: Band, freqs: Float64Array, model: ResponseModel, fs = FS): Float64Array {
+  let [a0, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, model, fs);
   a1 = -a1; // AutoEq flips these back before evaluating
   a2 = -a2;
 
@@ -235,10 +240,10 @@ export function filterResponseDb(band: Band, freqs: Float64Array, fs = FS): Floa
 }
 
 /** The composed EQ curve: every band summed (a biquad cascade adds in dB). */
-export function composedCurveDb(bands: Band[], freqs: Float64Array, fs = FS): Float64Array {
+export function composedCurveDb(bands: Band[], freqs: Float64Array, model: ResponseModel, fs = FS): Float64Array {
   const total = new Float64Array(freqs.length);
   for (const band of expandTilts(bands)) {
-    const r = filterResponseDb(band, freqs, fs);
+    const r = filterResponseDb(band, freqs, model, fs);
     for (let i = 0; i < total.length; i++) total[i] += r[i];
   }
   return total;
@@ -250,10 +255,10 @@ export function composedCurveDb(bands: Band[], freqs: Float64Array, fs = FS): Fl
  *  wrapped — a minimum-phase EQ stays bounded and wrapping would add fake ±180° jumps.
  *  Uses the same coefficients as {@link filterResponseDb}; the denominator's true a1/a2 are
  *  the negation of what `coefficients()` returns (that helper pre-negates them, a0 = 1). */
-export function phaseDeg(bands: Band[], freqs: Float64Array, fs = FS): Float64Array {
+export function phaseDeg(bands: Band[], freqs: Float64Array, model: ResponseModel, fs = FS): Float64Array {
   const out = new Float64Array(freqs.length);
   for (const band of expandTilts(bands)) {
-    const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);
+    const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, model, fs);
     const a1t = -a1;
     const a2t = -a2;
     for (let i = 0; i < freqs.length; i++) {
@@ -277,11 +282,11 @@ export function phaseDeg(bands: Band[], freqs: Float64Array, fs = FS): Float64Ar
 /** The filter chain's **impulse response** h[n] — a unit impulse cascaded through each
  *  biquad's difference equation (Direct Form I): the time-domain "ring" of the EQ. Exact
  *  (no FFT). `n` samples at `fs`. Same coefficient convention as above. */
-export function impulseResponse(bands: Band[], n = 480, fs = FS): Float64Array {
+export function impulseResponse(bands: Band[], model: ResponseModel, n = 480, fs = FS): Float64Array {
   let sig = new Float64Array(n);
   sig[0] = 1;
   for (const band of expandTilts(bands)) {
-    const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, fs);
+    const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, model, fs);
     const a1t = -a1;
     const a2t = -a2;
     const out = new Float64Array(n);

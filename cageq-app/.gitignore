@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Built from cageq-biquad-wasm by `npm run wasm` (runs before dev/build) — never edited by hand.
+src/wasm/*.wasm
