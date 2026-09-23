@@ -70,6 +70,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cageq-biquad"
+version = "0.14.5"
+
+[[package]]
 name = "cageq-catalog"
 version = "0.14.5"
 dependencies = [

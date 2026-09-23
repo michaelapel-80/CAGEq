@@ -1,0 +1,17 @@
+[package]
+name = "cageq-biquad"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+
+# A leaf crate on purpose: no dependencies at all, so every other crate can depend on it —
+# `cageq-apo` (loaded inside audiodg), `cageq-peq-solver` (which must not depend on
+# `cageq-core`), `cageq-core`, and later the frontend via WASM. That is what lets it become
+# the single source of truth for the biquad math instead of a sixth transcription of it.
+#
+# Stage 0 (the frequency-warping spike, filter.md / `warping-corrected-filters-plan`):
+# for now this crate holds the analog ground truth, today's RBJ filters, and the candidate
+# warping-corrected designs, plus `examples/warp_spike.rs`, which measures them against the
+# analog prototype. Nothing else in the workspace depends on it yet.
+
+[dependencies]
