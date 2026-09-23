@@ -30,13 +30,16 @@ type ExportFit = { filters: Band[]; preamp_db: number };
  *  overlay convention (see the `presetSave` dialog in App.tsx) rather than inventing new modal
  *  chrome. */
 /** `model`: how the slot's own `filters` are realised on the desktop (the effective model) — the
- *  curve the export approximates. The *exported* bands are always drawn as RBJ, because RBJ is
- *  what every phone EQ app receiving them runs. */
+ *  curve the export approximates, i.e. what is heard. The *exported* bands are designed (and
+ *  previewed) for the receiving app's filter design instead — its own toggle, RBJ by default,
+ *  since nearly every EQ app uses RBJ, independent of CAGEq's playback model. */
 export function ExportDialog({ filters, model, sampleRate, onClose }: { filters: Band[]; model: ResponseModel; sampleRate?: number; onClose: () => void }) {
   const { t } = useTranslation();
   const [format, setFormat] = useState<ExportFormat>("parametric");
   const [bandCount, setBandCount] = useState(BAND_COUNT_DEFAULT);
   const [fixedBandPreset, setFixedBandPreset] = useState<FixedBandPreset>("31");
+  // The receiving app's filter design. RBJ unless the user says their app is warping-corrected.
+  const [bandModel, setBandModel] = useState<ResponseModel>("Rbj");
   const [fit, setFit] = useState<ExportFit | null>(null);
   const [fitting, setFitting] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -51,7 +54,7 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
     if (filters.length === 0) return;
     setFitting(true);
     const method = format === "parametric" ? "export_eq_fit" : "fixed_band_eq_fit";
-    const params = format === "parametric" ? { filters, bandCount } : { filters, preset: fixedBandPreset };
+    const params = format === "parametric" ? { filters, bandCount, bandModel } : { filters, preset: fixedBandPreset, bandModel };
     // Set by this effect's cleanup once a newer fit (or unmount) supersedes this one. The backend
     // call itself can't be cancelled, so an older, slower solve can still resolve after a newer one
     // started — without this it would flip `fitting` off (hiding the spinner) while the newer solve
@@ -80,7 +83,7 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
       clearTimeout(h);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [format, filters, bandCount, fixedBandPreset]);
+  }, [format, filters, bandCount, fixedBandPreset, bandModel]);
 
   // Q omitted for the fixed-band presets — it's constant per preset, so AutoEq's own site
   // doesn't state it either (see parametricEqText's own doc); the free-band-count fit still
@@ -119,7 +122,7 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
   // don't hand back a curve at all) — no second error computation to keep in sync with the backend.
   const fitError = useMemo(() => {
     if (!fit || !filters.length) return null;
-    const achieved = composedCurveDb(fit.filters, previewFreqs, "Rbj", sampleRate); // exported bands: RBJ, as the phone app will run them
+    const achieved = composedCurveDb(fit.filters, previewFreqs, bandModel, sampleRate); // exported bands, as the receiving app will run them
     const reference = composedCurveDb(filters, previewFreqs, model, sampleRate);
     let sumSq = 0;
     let max = 0;
@@ -129,7 +132,7 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
       max = Math.max(max, err);
     }
     return { rms: Math.sqrt(sumSq / previewFreqs.length), max };
-  }, [fit, filters, previewFreqs, sampleRate, model]);
+  }, [fit, filters, previewFreqs, sampleRate, model, bandModel]);
 
   const copy = async () => {
     try {
@@ -208,10 +211,24 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
           </div>
         )}
 
+        <label
+          style={{ fontSize: "0.75em", opacity: 0.8, display: "flex", alignItems: "center", gap: "0.4em", marginTop: "0.5em" }}
+          title={t("export.bandModelHint")}
+        >
+          <input
+            name="export-band-model"
+            type="checkbox"
+            checked={bandModel === "AnalogMatched"}
+            onChange={(e) => setBandModel(e.currentTarget.checked ? "AnalogMatched" : "Rbj")}
+            style={{ flex: "none", margin: 0 }}
+          />
+          {t("export.bandModel")}
+        </label>
+
         <div style={{ height: 160, position: "relative", margin: "0.6em 0" }}>
-          {/* model="Rbj": the only band series here is the exported fit, which phone EQ apps run as RBJ;
-              the slot's own curve arrives as `refs`, already computed in its effective model. */}
-          <EqChart model="Rbj" series={series} refs={refs} height={160} screen legendHost={legendHost} />
+          {/* The only band series here is the exported fit, drawn in the receiving app's design; the
+              slot's own curve arrives as `refs`, already computed in its effective model. */}
+          <EqChart model={bandModel} series={series} refs={refs} height={160} screen legendHost={legendHost} />
           {/* Absolutely positioned inside the chart's own fixed-height box, not a line of its
               own — same "nothing here may grow the dialog" discipline as everything else in it
               (see the modal-card's own doc). `pointerEvents: none` so it never steals the

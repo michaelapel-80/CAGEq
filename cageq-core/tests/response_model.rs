@@ -178,16 +178,35 @@ fn a_seeded_slot_gets_its_quantities_recomputed_for_the_effective_model() {
     assert!(applied.g_max_peak_db > 7.0, "quantities recomputed (not the seeded 0.0): {}", applied.g_max_peak_db);
 }
 
+fn differ(a: &[Filter], b: &[Filter]) -> bool {
+    a.iter().zip(b).any(|(x, y)| (x.gain_db - y.gain_db).abs() > 1e-3 || (x.freq_hz - y.freq_hz).abs() > 1e-3)
+}
+
 /// The export fit aims at the curve the slot's bands actually produce in the effective model.
 #[test]
 fn export_fits_the_effective_models_curve() {
     let (core, _backend) = start(true);
     let bands = [Filter { kind: FilterType::Peaking, freq_hz: 14_000.0, gain_db: 6.0, q: 1.0 }];
-    let (rbj_export, _) = core.fit_export_eq(&bands, 5).unwrap();
+    let (rbj_export, _) = core.fit_export_eq(&bands, 5, ResponseModel::Rbj).unwrap();
     core.set_response_model(ResponseModel::AnalogMatched);
-    let (matched_export, _) = core.fit_export_eq(&bands, 5).unwrap();
-    assert!(
-        rbj_export.iter().zip(&matched_export).any(|(a, b)| (a.gain_db - b.gain_db).abs() > 1e-3 || (a.freq_hz - b.freq_hz).abs() > 1e-3),
-        "a different target curve must give a different export fit (and not a cache hit)"
-    );
+    let (matched_export, _) = core.fit_export_eq(&bands, 5, ResponseModel::Rbj).unwrap();
+    assert!(differ(&rbj_export, &matched_export), "a different target curve must give a different export fit (and not a cache hit)");
+}
+
+/// The receiving app's filter design is a separate choice from CAGEq's own playback model: the
+/// same curve, exported for an app that realises its bands warping-corrected, needs different
+/// bands than for an RBJ app — and the export cache must not hand one the other's.
+#[test]
+fn the_export_band_model_is_independent_of_the_playback_model() {
+    let (core, _backend) = start(true);
+    // A treble bell: where the two designs differ most, and a curve the fixed-band (graphic) fit
+    // handles (it currently returns all-zero gains for a lone shelf, in either design — a
+    // separate, pre-existing issue).
+    let bands = [Filter { kind: FilterType::Peaking, freq_hz: 12_000.0, gain_db: 6.0, q: 1.0 }];
+    let (for_rbj_app, _) = core.fit_export_eq(&bands, 5, ResponseModel::Rbj).unwrap();
+    let (for_matched_app, _) = core.fit_export_eq(&bands, 5, ResponseModel::AnalogMatched).unwrap();
+    assert!(differ(&for_rbj_app, &for_matched_app), "different app designs must give different export bands");
+    let (graphic_rbj, _) = core.fit_fixed_band_eq(&bands, "10", ResponseModel::Rbj).unwrap();
+    let (graphic_matched, _) = core.fit_fixed_band_eq(&bands, "10", ResponseModel::AnalogMatched).unwrap();
+    assert!(differ(&graphic_rbj, &graphic_matched), "the graphic-EQ export honours the app design too");
 }

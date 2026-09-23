@@ -82,11 +82,10 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> BoundedCache<K, V> {
     }
 }
 
-// The model is part of both keys: the export fits the curve the slot's bands actually
-// produce, which depends on it. (The exported bands themselves are always RBJ — that is what
-// every phone EQ app runs.)
-type ExportKey = (Vec<(u8, i64, i64, i64)>, u32, ResponseModel);
-type FixedBandKey = (Vec<(u8, i64, i64, i64)>, &'static str, ResponseModel);
+// Two models in both keys: how the slot's bands are realised (the curve being approximated),
+// and how the receiving app realises the *exported* bands (what the fit optimises).
+type ExportKey = (Vec<(u8, i64, i64, i64)>, u32, ResponseModel, ResponseModel);
+type FixedBandKey = (Vec<(u8, i64, i64, i64)>, &'static str, ResponseModel, ResponseModel);
 type FitResult = (Vec<Filter>, f64);
 
 pub(crate) type ExportCache = BoundedCache<ExportKey, FitResult>;
@@ -104,25 +103,28 @@ fn preamp_db(achieved_curve: &[f64]) -> f64 {
 /// shelf + one high shelf + the rest free peaking, same shape as the main fit's own
 /// config) directly to `filters`' own composed curve.
 ///
-/// `model` is how `filters` are realised on the desktop — the curve being approximated. The
-/// exported bands are RBJ regardless (phone EQ apps are), so a warping-corrected desktop curve
-/// is simply what the RBJ fit aims at.
+/// `model` is how `filters` are realised on the desktop — the curve being approximated, i.e.
+/// what is actually heard. `band_model` is how the *receiving app* will realise the exported
+/// bands, and so what the fit optimises: RBJ for nearly every phone/desktop EQ app, the
+/// warping-corrected model for one that designs its filters that way. Independent on purpose —
+/// a warping-corrected desktop curve exported to an RBJ app is the common case.
 pub(crate) fn fit_export_eq(
     cache: &Mutex<ExportCache>,
     filters: &[Filter],
     band_count: u32,
     model: ResponseModel,
+    band_model: ResponseModel,
 ) -> Result<FitResult, CoreError> {
     validate_filters(filters)?;
     let band_count = band_count.max(3);
-    let key = (filters_key(filters), band_count, model);
+    let key = (filters_key(filters), band_count, model, band_model);
     if let Some(cached) = cache.lock().unwrap().get(&key) {
         return Ok(cached);
     }
 
     let f = standard_grid();
     let target = filter_curve_db_in(filters, &f, model);
-    let bands = cageq_peq_solver::cageq_default_bands((band_count - 2) as usize);
+    let bands = cageq_peq_solver::cageq_default_bands_in((band_count - 2) as usize, crate::biquad_model(band_model));
 
     let mut solver = Solver::new(f, FS, bands, target);
     solver.optimize()?;
@@ -158,15 +160,17 @@ fn preset_key(preset: &str) -> &'static str {
 /// that band's exact `fc` (`optimize_fixed_band_eq`'s `gain_range`, `frequency_response.
 /// py:182-190`) — left unconstrained, a dense preset's neighbouring bands measurably
 /// overshoot/ripple against each other (see `sidecar_dsp.py`'s own doc on that constant).
+/// `model`/`band_model`: as for [`fit_export_eq`].
 pub(crate) fn fit_fixed_band_eq(
     cache: &Mutex<FixedBandCache>,
     filters: &[Filter],
     preset: &str,
     model: ResponseModel,
+    band_model: ResponseModel,
 ) -> Result<FitResult, CoreError> {
     validate_filters(filters)?;
     let preset = preset_key(preset);
-    let key = (filters_key(filters), preset, model);
+    let key = (filters_key(filters), preset, model, band_model);
     if let Some(cached) = cache.lock().unwrap().get(&key) {
         return Ok(cached);
     }
@@ -175,6 +179,7 @@ pub(crate) fn fit_fixed_band_eq(
     let target = filter_curve_db_in(filters, &f, model);
     let mut bands = preset_bands(preset);
     for band in &mut bands {
+        band.model = crate::biquad_model(band_model);
         let target_at_fc = linear_interp_log(&f, &target, &[band.fc])[0];
         band.min_gain = target_at_fc - FIXED_BAND_GAIN_RANGE_DB;
         band.max_gain = target_at_fc + FIXED_BAND_GAIN_RANGE_DB;

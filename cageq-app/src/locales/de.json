@@ -382,6 +382,8 @@
     "band10": "10-Band",
     "band31": "31-Band",
     "fixedBandHint": "AutoEqs eigenes Standard-Preset: feste Frequenzen und Bandbreite. Eine Korrektur mit feineren Details als das kann hier Welligkeit zeigen – für einen präziseren, welligkeitsarmen Export stattdessen Parametrisch verwenden.",
+    "bandModel": "App nutzt analog-angepasste Filter",
+    "bandModelHint": "Für fast jede EQ-App aus lassen: Sie berechnen Standardfilter (RBJ), und der Export wird so angepasst, dass diese wiedergeben, was du hier hörst. Nur einschalten, wenn deine App verzerrungskorrigierte (analog-angepasste) Filter nutzt.",
     "fitCurve": "Exportierte Anpassung",
     "fullCurve": "Volle Korrektur",
     "fitError": "Anpassungsfehler — RMS {{rms}} dB · Max {{max}} dB",

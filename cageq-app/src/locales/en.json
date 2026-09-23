@@ -382,6 +382,8 @@
     "band10": "10-band",
     "band31": "31-band",
     "fixedBandHint": "AutoEq's own standard preset: fixed frequencies and bandwidth. A correction with detail narrower than that can show ripple here — for a tighter, low-ripple export, use Parametric instead.",
+    "bandModel": "App uses analog-matched filters",
+    "bandModelHint": "Leave off for nearly every EQ app: they design standard (RBJ) filters, and the export is fitted so those reproduce what you hear here. Turn on only if your app uses warping-corrected (analog-matched) filters.",
     "fitCurve": "Exported fit",
     "fullCurve": "Full correction",
     "fitError": "Fit error — RMS {{rms}} dB · Max {{max}} dB",

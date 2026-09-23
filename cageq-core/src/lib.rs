@@ -579,16 +579,21 @@ impl Core {
     /// filters (>= 3) directly to `filters`' own composed curve — see `export.rs`'s
     /// module doc. Returns `(filters, preamp_db)`, the same shape the sidecar's
     /// `fit_export_eq` did.
-    pub fn fit_export_eq(&self, filters: &[Filter], band_count: u32) -> Result<(Vec<Filter>, f64), CoreError> {
-        export::fit_export_eq(&self.inner.export_cache, filters, band_count, effective_model(&self.inner))
+    ///
+    /// `band_model` is how the app receiving the export realises its filters — RBJ for nearly
+    /// all of them. The curve being approximated is always the slot's as heard (the effective
+    /// model), whatever the export targets.
+    pub fn fit_export_eq(&self, filters: &[Filter], band_count: u32, band_model: ResponseModel) -> Result<(Vec<Filter>, f64), CoreError> {
+        export::fit_export_eq(&self.inner.export_cache, filters, band_count, effective_model(&self.inner), band_model)
     }
 
     /// §8 mobile export: AutoEq's own standard 10-/31-band graphic EQ (`preset`, any
     /// value other than `"10"` is treated as `"31"`, matching `sidecar_dsp.py`'s own
     /// fallback), fit the same way [`Core::fit_export_eq`] is but with fixed ISO center
     /// frequencies/Q. Returns `(filters, preamp_db)`.
-    pub fn fit_fixed_band_eq(&self, filters: &[Filter], preset: &str) -> Result<(Vec<Filter>, f64), CoreError> {
-        export::fit_fixed_band_eq(&self.inner.fixed_band_cache, filters, preset, effective_model(&self.inner))
+    /// `band_model`: as for [`Core::fit_export_eq`].
+    pub fn fit_fixed_band_eq(&self, filters: &[Filter], preset: &str, band_model: ResponseModel) -> Result<(Vec<Filter>, f64), CoreError> {
+        export::fit_fixed_band_eq(&self.inner.fixed_band_cache, filters, preset, effective_model(&self.inner), band_model)
     }
 
     /// The AutoEq headphone measurement catalogue: `[{source, form_factor, name, path,

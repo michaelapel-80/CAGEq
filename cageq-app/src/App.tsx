@@ -3354,30 +3354,29 @@ function App() {
                 {tr("loudness.confirmToggle")}
               </label>
               {modelState && (
-                <div style={{ marginTop: "0.7em" }}>
-                  <label
-                    style={{ fontSize: "0.75em", opacity: modelState.available ? 0.8 : 0.5, display: "flex", alignItems: "center", gap: "0.4em" }}
-                    title={modelState.available ? undefined : tr("model.unavailable")}
-                  >
-                    <input
-                      name="analog-matched"
-                      type="checkbox"
-                      checked={modelState.preference === "AnalogMatched"}
-                      disabled={!modelState.available || modelBusy}
-                      onChange={(e) => void toggleResponseModel(e.currentTarget.checked)}
-                      style={{ flex: "none", margin: 0 }}
-                    />
-                    {tr("model.toggle")}
-                    {modelBusy && <span style={{ opacity: 0.7 }}>{tr("model.refitting")}</span>}
-                  </label>
-                  <p style={{ fontSize: "0.7em", opacity: 0.65, margin: "0.3em 0 0" }}>
-                    {modelState.available
+                // Same compact row as the confirm toggle above; the explanation (and, on Equalizer
+                // APO, why it is disabled or inactive) lives in the tooltip rather than on screen.
+                <label
+                  style={{ fontSize: "0.75em", opacity: modelState.available ? 0.8 : 0.5, display: "flex", alignItems: "center", gap: "0.4em", marginTop: "0.3em" }}
+                  title={
+                    modelState.available
                       ? tr("model.desc")
                       : modelState.preference === "AnalogMatched"
                         ? tr("model.inactive")
-                        : tr("model.unavailable")}
-                  </p>
-                </div>
+                        : tr("model.unavailable")
+                  }
+                >
+                  <input
+                    name="analog-matched"
+                    type="checkbox"
+                    checked={modelState.preference === "AnalogMatched"}
+                    disabled={!modelState.available || modelBusy}
+                    onChange={(e) => void toggleResponseModel(e.currentTarget.checked)}
+                    style={{ flex: "none", margin: 0 }}
+                  />
+                  {tr("model.toggle")}
+                  {modelBusy && <span style={{ opacity: 0.7 }}>{tr("model.refitting")}</span>}
+                </label>
               )}
             </div>
           )}

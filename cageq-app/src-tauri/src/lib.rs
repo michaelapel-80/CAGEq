@@ -1066,12 +1066,16 @@ fn measurement_curves(headphone: String, target: Option<String>, state: State<Ba
 ///
 /// `async`: another independent SLSQP pass — see `apply`'s doc for why this needs Tauri's
 /// blocking-thread-pool dispatch rather than running inline on the IPC thread.
+///
+/// `band_model`: the filter design of the app receiving the export (RBJ when absent — nearly
+/// every app), independent of CAGEq's own playback model.
 #[tauri::command(async)]
-fn export_eq_fit(filters: Vec<Filter>, band_count: u32, state: State<Backend>) -> Result<Value, String> {
+fn export_eq_fit(filters: Vec<Filter>, band_count: u32, band_model: Option<ResponseModel>, state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, .. } => {
-            let (out_filters, preamp_db) = core.fit_export_eq(&filters, band_count).map_err(|e| e.to_string())?;
+            let (out_filters, preamp_db) =
+                core.fit_export_eq(&filters, band_count, band_model.unwrap_or_default()).map_err(|e| e.to_string())?;
             Ok(json!({ "filters": out_filters, "preamp_db": preamp_db }))
         }
     }
@@ -1084,11 +1088,12 @@ fn export_eq_fit(filters: Vec<Filter>, band_count: u32, state: State<Backend>) -
 ///
 /// `async`: same reason as `export_eq_fit`.
 #[tauri::command(async)]
-fn fixed_band_eq_fit(filters: Vec<Filter>, preset: String, state: State<Backend>) -> Result<Value, String> {
+fn fixed_band_eq_fit(filters: Vec<Filter>, preset: String, band_model: Option<ResponseModel>, state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, .. } => {
-            let (out_filters, preamp_db) = core.fit_fixed_band_eq(&filters, &preset).map_err(|e| e.to_string())?;
+            let (out_filters, preamp_db) =
+                core.fit_fixed_band_eq(&filters, &preset, band_model.unwrap_or_default()).map_err(|e| e.to_string())?;
             Ok(json!({ "filters": out_filters, "preamp_db": preamp_db }))
         }
     }
