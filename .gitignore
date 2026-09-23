@@ -28,3 +28,4 @@ cageq-app/src-tauri/apo/
 /rust_licenses_tauri.json
 /npm_licenses.json
 /python_licenses.json
+/.claude
