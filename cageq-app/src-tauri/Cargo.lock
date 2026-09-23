@@ -355,6 +355,9 @@ dependencies = [
 [[package]]
 name = "cageq-apo"
 version = "0.14.5"
+dependencies = [
+ "cageq-biquad",
+]
 
 [[package]]
 name = "cageq-apo-backend"
@@ -390,6 +393,10 @@ dependencies = [
  "thiserror 2.0.19",
  "winreg",
 ]
+
+[[package]]
+name = "cageq-biquad"
+version = "0.14.5"
 
 [[package]]
 name = "cageq-catalog"
