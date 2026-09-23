@@ -213,8 +213,9 @@ fn the_export_band_model_is_independent_of_the_playback_model() {
 
 /// No self-cancelling band sets in either model: every fit's largest gain stays sane on seeded
 /// synthetic headphones (offline), and no two bands oppose each other at double-digit gains
-/// within an octave. The cold warping-corrected refit, and the fully converged RBJ fit of the
-/// Sennheiser HD 800 S (`tests/fit_real_headphones.rs`), used to produce exactly that.
+/// within an octave. Without the solver's cancellation penalty, warping-corrected fits and the
+/// fully converged RBJ fit of the Sennheiser HD 800 S (`tests/fit_real_headphones.rs`) produced
+/// exactly that.
 #[test]
 fn fits_have_no_self_cancelling_band_pairs() {
     let mut seed: u64 = 0x5eed_cafe;

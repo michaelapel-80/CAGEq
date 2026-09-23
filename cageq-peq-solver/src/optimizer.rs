@@ -362,47 +362,12 @@ impl Solver {
 
     /// `PEQ.optimize` (peq.py:706-725). No-op if every band is fully pinned (no free fc/q/gain).
     pub fn optimize(&mut self) -> Result<OptimizeReport, SolverError> {
-        if !self.has_free() {
+        let has_free = self.bands.iter().any(|b| b.optimize_fc || b.optimize_q || b.optimize_gain);
+        if !has_free {
             return Ok(self.report());
         }
-        let params = self.init_params();
-        self.run(params)
-    }
 
-    /// [`Solver::optimize`], but starting from the bands' *current* fc/q/gain instead of
-    /// AutoEq's init heuristic — a local refinement of a known-good solution. (Each value is
-    /// clamped into its band's bounds first, so any starting point is a feasible one.)
-    ///
-    /// What it is for: refining a known solution for a different realisation — the
-    /// warping-corrected refit of an RBJ fit (`cageq-core`'s `fit.rs`), so a model toggle moves
-    /// the bands a little rather than reshuffling them. It does not constrain anything; what keeps
-    /// the refit sane is [`Solver::cancellation_penalty`], without which that refit reached
-    /// degenerate sets (opposing ±15–20 dB bands and shelves that cancel) even from here.
-    pub fn optimize_warm(&mut self) -> Result<OptimizeReport, SolverError> {
-        if !self.has_free() {
-            return Ok(self.report());
-        }
-        let mut params = Vec::new();
-        for b in &self.bands {
-            if b.optimize_fc {
-                params.push(b.fc.clamp(b.min_fc, b.max_fc).log10());
-            }
-            if b.optimize_q {
-                params.push(b.q.clamp(b.min_q, b.max_q));
-            }
-            if b.optimize_gain {
-                params.push(b.gain.clamp(b.min_gain, b.max_gain));
-            }
-        }
-        self.run(params)
-    }
-
-    fn has_free(&self) -> bool {
-        self.bands.iter().any(|b| b.optimize_fc || b.optimize_q || b.optimize_gain)
-    }
-
-    /// The SLSQP run shared by [`Solver::optimize`] and [`Solver::optimize_warm`], from `params`.
-    fn run(&mut self, mut params: Vec<f64>) -> Result<OptimizeReport, SolverError> {
+        let mut params = self.init_params();
         let bounds = self.init_bounds();
         let lower: Vec<f64> = bounds.iter().map(|b| b.0).collect();
         let upper: Vec<f64> = bounds.iter().map(|b| b.1).collect();

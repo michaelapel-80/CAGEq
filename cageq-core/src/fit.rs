@@ -242,28 +242,9 @@ fn run_autoeq_fit(
 
     // `sidecar_dsp.py`'s config: a low shelf at 105 Hz and a high shelf at 10 kHz
     // (both `q = 0.7`, gain free), plus `peaking_filters` fully-free peaking bands.
-    let mut bands = cageq_peq_solver::cageq_default_bands_in(params.peaking_filters, crate::biquad_model(model));
-    let warm = if model == ResponseModel::Rbj {
-        false
-    } else {
-        // Warping-corrected: start from the RBJ fit (from this cache when it was already made)
-        // rather than AutoEq's init heuristic. Not a constraint — what keeps either fit sane is
-        // the solver's cancellation penalty (`Solver::cancellation_penalty`) — but the two
-        // realisations only differ near the top, so the RBJ answer is the natural start, and a
-        // model toggle then moves the bands a little instead of reshuffling them.
-        // `bands_to_filters` keeps band order, so the two line up one to one.
-        let (rbj_filters, ..) = run_autoeq_fit(cache, params, ResponseModel::Rbj)?;
-        for (band, f) in bands.iter_mut().zip(&rbj_filters) {
-            (band.fc, band.q, band.gain) = (f.freq_hz, f.q, f.gain_db);
-        }
-        true
-    };
+    let bands = cageq_peq_solver::cageq_default_bands_in(params.peaking_filters, crate::biquad_model(model));
     let mut solver = Solver::new(opt_f.clone(), params.fs, bands, opt_equalization);
-    if warm {
-        solver.optimize_warm()?;
-    } else {
-        solver.optimize()?;
-    }
+    solver.optimize()?;
 
     let filters = cageq_peq_solver::bands_to_filters(&solver.bands);
     let curve = solver.fr();
