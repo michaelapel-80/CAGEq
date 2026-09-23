@@ -173,13 +173,31 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
         <p style={{ marginTop: 0, fontWeight: 600 }}>{t("export.title")}</p>
         <p style={{ fontSize: "0.85em", opacity: 0.75 }}>{t("export.hint")}</p>
 
-        <div className="pl-toggle">
-          <button type="button" className={format === "parametric" ? "on" : ""} onClick={() => setFormat("parametric")}>
-            {t("export.parametric")}
-          </button>
-          <button type="button" className={format === "graphic" ? "on" : ""} onClick={() => setFormat("graphic")}>
-            {t("export.graphic")}
-          </button>
+        {/* The app-design checkbox shares the format row rather than taking a line of its own —
+            this card has a fixed height budget (see its own doc), and a separate row pushed it past
+            it again (reported live). Short label; the explanation is in the tooltip. */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.8em" }}>
+          <div className="pl-toggle" style={{ flex: 1 }}>
+            <button type="button" className={format === "parametric" ? "on" : ""} onClick={() => setFormat("parametric")}>
+              {t("export.parametric")}
+            </button>
+            <button type="button" className={format === "graphic" ? "on" : ""} onClick={() => setFormat("graphic")}>
+              {t("export.graphic")}
+            </button>
+          </div>
+          <label
+            style={{ fontSize: "0.75em", opacity: 0.8, display: "flex", alignItems: "center", gap: "0.35em", flex: "none", whiteSpace: "nowrap" }}
+            title={t("export.bandModelHint")}
+          >
+            <input
+              name="export-band-model"
+              type="checkbox"
+              checked={bandModel === "AnalogMatched"}
+              onChange={(e) => setBandModel(e.currentTarget.checked ? "AnalogMatched" : "Rbj")}
+              style={{ flex: "none", margin: 0 }}
+            />
+            {t("export.bandModel")}
+          </label>
         </div>
 
         {format === "parametric" ? (
@@ -210,20 +228,6 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
             </button>
           </div>
         )}
-
-        <label
-          style={{ fontSize: "0.75em", opacity: 0.8, display: "flex", alignItems: "center", gap: "0.4em", marginTop: "0.5em" }}
-          title={t("export.bandModelHint")}
-        >
-          <input
-            name="export-band-model"
-            type="checkbox"
-            checked={bandModel === "AnalogMatched"}
-            onChange={(e) => setBandModel(e.currentTarget.checked ? "AnalogMatched" : "Rbj")}
-            style={{ flex: "none", margin: 0 }}
-          />
-          {t("export.bandModel")}
-        </label>
 
         <div style={{ height: 160, position: "relative", margin: "0.6em 0" }}>
           {/* The only band series here is the exported fit, drawn in the receiving app's design; the
