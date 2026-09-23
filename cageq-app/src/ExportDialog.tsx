@@ -186,7 +186,10 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
             </button>
           </div>
           <label
-            style={{ fontSize: "0.75em", opacity: 0.8, display: "flex", alignItems: "center", gap: "0.35em", flex: "none", whiteSpace: "nowrap" }}
+            // lineHeight 1: the root's fixed `line-height: 24px` otherwise gives this small label a full
+            // 24px line box — the same height as the switch buttons, so at some display scalings it
+            // rounded up past them and grew the row (and the card) by a pixel or two.
+            style={{ fontSize: "0.75em", lineHeight: 1, opacity: 0.8, display: "flex", alignItems: "center", gap: "0.35em", flex: "none", whiteSpace: "nowrap" }}
             title={t("export.bandModelHint")}
           >
             <input
