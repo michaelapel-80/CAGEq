@@ -108,10 +108,10 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──biquad
                                           algorithm, ported to                   │
                                              Rust (SLSQP)                        │
                                                     │                            │
-                              ┌─────────────────────┴──────┐                    │
-                              ▼                             ▼                   │
-             Equalizer APO (external, optional)       CAGEq's own APO ◀─────────┘
-            — click-free config-reload crossfade    — live coefficient ramping over a
+                              ┌─────────────────────┴──────┐                     │
+                              ▼                            ▼                     │
+             Equalizer APO (external, optional)        CAGEq's own APO ◀─────────┘
+            — click-free config-reload crossfade     — live coefficient ramping over a
                                                        shared-memory control channel
 ```
 
@@ -126,11 +126,27 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──biquad
 * **Why Rust/Tauri:** a lean native WebView2 shell instead of a bundled Chromium (Electron). The
   orchestrator itself doesn't need Rust's performance to do its job — but two other components in
   this same Rust codebase have their own reasons: the spectrum analyzer's FFT runs on
-  [`rustfft`](https://github.com/ejmahler/RustFFT),
-  which benchmarks itself against FFTW and claims to match or beat it; and CAGEq's own APO runs
-  inside `audiodg.exe`'s real-time audio callback, where missing a deadline means an audible
-  glitch rather than a slow UI — though it leans on a fair amount of `unsafe` to interop with its
-  C++ COM shim, so it isn't a clean memory-safety win either.
+  [`rustfft`](https://github.com/ejmahler/RustFFT), which benchmarks itself against FFTW and
+  claims to match or beat it. A GPU-accelerated path was evaluated and measured *worse*, not
+  neutral — at this workload's batch size of one FFT per ~43 ms hop, the fixed per-dispatch
+  upload/sync/readback cost outweighs the entire CPU transform, costing 2-3x more CPU than just
+  doing it on the CPU outright, and even async pipelining only reaches break-even at 96 kHz. On an
+  AMD Ryzen 9 7900X, a release build's single-core load for the FFT alone is ~0.3% at 96 kHz (the
+  spectrum analyzer's own capped ceiling — the actual correction filters always run at the
+  device's real sample rate, capped or not). CAGEq's own APO runs inside `audiodg.exe`'s real-time
+  audio callback, where missing a deadline means an audible glitch rather than a slow UI — though
+  it leans on a fair amount of `unsafe` to interop with its C++ COM shim, so it isn't a clean
+  memory-safety win either.
+* **Why the plain RBJ cookbook filter formulas, not a warping-corrected design** (Massberg/
+  Vicanek/Muranov): AutoEq's own reference implementation and Equalizer APO both compute — and
+  expect — coefficients from exactly these formulas, so matching them bit-for-bit keeps a
+  CAGEq-fitted curve numerically identical to what either tool would produce from the same
+  parameters; a "more correct" warping-corrected design would quietly diverge from the very target
+  it's meant to match. Warping itself isn't a real issue for what headphone correction actually
+  asks of it, either: what drives its error is the centre-frequency-to-sample-rate ratio, not Q on
+  its own — a correction band can run fairly narrow (AutoEq's own peaking-filter search allows Q up
+  to 6) and still warp negligibly, as long as it sits well below Nyquist, which real correction
+  bands do.
 * **Why a second, custom audio engine alongside Equalizer APO:** the whole point of this app is a
   meaningful A/B. Equalizer APO's config-reload crossfade puts a bloom on every switch, not just
   every edit — not a hard click, but measurable, and audible with real program material. Read
