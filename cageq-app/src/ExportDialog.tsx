@@ -308,7 +308,10 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
           {copied ? t("export.copied") : t("export.copy")}
         </button>
 
-        <p style={{ fontSize: "0.75em", opacity: 0.7, marginTop: "0.8em" }}>{t("export.impedanceCaveat")}</p>
+        {/* lineHeight 1.35 + a small bottom margin: this 0.75em note otherwise inherits the root's fixed
+            24px line-height (3–4 lines of 12px text taking 24px each) — the space the app-design
+            checkbox's row needed back to keep the card inside its height budget. */}
+        <p style={{ fontSize: "0.75em", lineHeight: 1.35, opacity: 0.7, marginTop: "0.8em", marginBottom: "0.3em" }}>{t("export.impedanceCaveat")}</p>
 
         <button type="button" onClick={onClose} style={{ marginTop: "0.5em" }}>
           {t("dialog.cancel")}
