@@ -210,3 +210,42 @@ fn the_export_band_model_is_independent_of_the_playback_model() {
     let (graphic_matched, _) = core.fit_fixed_band_eq(&bands, "10", ResponseModel::AnalogMatched).unwrap();
     assert!(differ(&graphic_rbj, &graphic_matched), "the graphic-EQ export honours the app design too");
 }
+
+/// Regression for degenerate warping-corrected fits. Refitting in the matched model once
+/// produced opposing, very wide ±15–20 dB bands and shelves that cancelled to nearly the same
+/// curve (AKG K812 vs Harman 2018: a −15.9 dB 10 kHz shelf against a +20 dB, Q 0.24 bell). The
+/// matched fit is now the RBJ fit refined within a trust region, so every matched band must stay
+/// close to its RBJ counterpart — checked over seeded synthetic headphones (offline).
+#[test]
+fn the_matched_refit_stays_the_rbj_correction() {
+    let mut seed: u64 = 0x5eed_cafe;
+    let mut rnd = move || {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 11) as f64 / (1u64 << 53) as f64
+    };
+    for case in 0..4 {
+        let bumps: Vec<(f64, f64, f64)> =
+            (0..5).map(|_| ((30f64.ln() + rnd() * (18_000f64 / 30.0).ln()).exp(), 0.08 + rnd() * 0.9, (rnd() - 0.5) * 10.0)).collect();
+        let tilt = (rnd() - 0.5) * 6.0;
+        let mut points = Vec::new();
+        let mut f: f64 = 20.0;
+        while f <= 20_000.0 {
+            let lf = f.log2();
+            let raw: f64 = bumps.iter().map(|(c, w, g)| g * (-((lf - c.log2()).powi(2)) / (2.0 * w * w)).exp()).sum::<f64>() + tilt * (f / 1000.0).log10();
+            points.push(json!({"frequency": f, "raw_db": raw}));
+            f *= 1.03;
+        }
+        let mut req = CalcRequest::for_device("DAC");
+        req.inputs.insert("measurement".into(), serde_json::Value::Array(points));
+
+        let (core, _backend) = start(true);
+        let rbj = core.apply(req).unwrap();
+        let matched = core.update_response_model(ResponseModel::AnalogMatched).unwrap().unwrap();
+        assert_eq!(rbj.filters.len(), matched.filters.len());
+        for (r, m) in rbj.filters.iter().zip(&matched.filters) {
+            assert!((m.gain_db - r.gain_db).abs() <= 3.0 + 1e-9, "case {case}: {r:?} -> {m:?} (gain)");
+            assert!((m.freq_hz / r.freq_hz).log2().abs() <= 1.0 / 3.0 + 1e-9, "case {case}: {r:?} -> {m:?} (Fc)");
+            assert!((m.q / r.q).ln().abs() <= 1.5f64.ln() + 1e-9, "case {case}: {r:?} -> {m:?} (Q)");
+        }
+    }
+}
