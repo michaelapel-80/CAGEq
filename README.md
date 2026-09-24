@@ -43,6 +43,9 @@ risks digital clipping or jarring level jumps.
   you don't.
 * **Auto-fit and hand-tuned filters stay separate but merge cleanly at runtime** — adjusting your
   own bands never loses or fights the underlying AutoEq correction.
+* **Optional warping-corrected filters** (with CAGEq's own audio engine): bands keep their analog
+  shape up to 20 kHz instead of being squeezed toward Nyquist, and sound the same at 44.1, 48 or
+  96 kHz. The standard (RBJ) design stays the default. See [How it works](#how-it-works) for why.
 
 ## Built-in instrumentation
 
@@ -145,19 +148,31 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──biquad
   audio callback, where missing a deadline means an audible glitch rather than a slow UI — though
   it leans on a fair amount of `unsafe` to interop with its C++ COM shim, so it isn't a clean
   memory-safety win either.
-* **Why the plain RBJ cookbook filter formulas, not a warping-corrected design** (Massberg/
-  Vicanek/Muranov): AutoEq fits its filter parameters (Fc, gain, Q) against the RBJ cookbook's
-  response, and Equalizer APO turns those same parameters back into coefficients with the same
-  formulas — so an engine that realizes them any other way no longer reproduces the curve the fit
-  actually optimized; a "more correct" warping-corrected design would quietly diverge from its own
-  target. Those designs pay off as the centre frequency approaches Nyquist — the regime the
-  papers' full-spectrum comparisons demonstrate them in — and the fit stays well short of it:
-  AutoEq caps every filter's centre frequency at 10 kHz (peaking and shelf alike, mirrored in
-  `cageq-peq-solver`), under half of Nyquist even at 44.1 kHz, and above ~6-8 kHz deliberately
-  fits only a smoothed average (a 2-octave smoothing window there, versus 1/12-octave below) — its
-  own changelog says it "treats +10kHz range as average value instead of trying to fix it
-  precisely." Hand-placed bands can go higher, but the chart draws each band's actual digital
-  response at the device's sample rate, warping included, so what you tune is what runs.
+* **Why RBJ cookbook filters by default, and warping-corrected ones as an option:** the RBJ
+  cookbook formulas are what the rest of the chain speaks. AutoEq fits its filter parameters (Fc,
+  gain, Q) against their response, Equalizer APO turns those parameters back into coefficients
+  with the same formulas, and so does nearly every phone or desktop EQ app an export lands in. So
+  RBJ stays the default (and the only design Equalizer APO can run). The cost is the bilinear
+  transform's frequency warping: every shape gets squeezed toward Nyquist, so a 12 kHz, Q 1 bell
+  at 48 kHz is ~2.3 dB off its analog shape at 19 kHz, and the same band sounds slightly different
+  at 44.1, 48 and 96 kHz. With CAGEq's own engine, an opt-in warping-corrected model follows the
+  analog prototype up to Nyquist instead. Peaking bands use the prescribed-Nyquist-gain design
+  (Orfanidis; Muranov's 2025 thesis). Shelves use a generalised version of Vicanek's matched
+  design, blended with Ivantsov's where it breaks down. Resonant shelves (Q above ~1) fade back to
+  RBJ, which places their bump more exactly. Tests pin, band by band across the UI's whole
+  parameter range and at 44.1-192 kHz, that no band strays further from its analog shape than RBJ
+  does. Switching models re-runs the AutoEq fit in the new model, so the engine never realizes
+  parameters optimized for a different response. The fit itself gains little. AutoEq caps every
+  filter's centre frequency at 10 kHz (peaking and shelf alike, mirrored in `cageq-peq-solver`),
+  under half of Nyquist even at 44.1 kHz. Above ~6-8 kHz it deliberately fits only a smoothed
+  average (a 2-octave smoothing window there, versus 1/12-octave below); its own changelog says it
+  "treats +10kHz range as average value instead of trying to fix it precisely." The real wins are
+  hand-placed treble bands, which mean what their Fc and Q say, and sample-rate independence: the
+  fit always runs at 48 kHz, and the corrected model carries its curve over to 44.1 or 96 kHz
+  nearly unchanged. An export stays RBJ unless you say the receiving app uses matched filters.
+  Every client-side curve (chart, scopes, export preview) comes from the same Rust crate the
+  engine runs (`cageq-biquad`, compiled to WebAssembly), drawn in whichever model is actually
+  active, warping included. What you tune is what runs.
 * **Why a second, custom audio engine alongside Equalizer APO:** the whole point of this app is a
   meaningful A/B. Equalizer APO's config-reload crossfade puts a bloom on every switch, not just
   every edit — not a hard click, but measurable, and audible with real program material. Read
