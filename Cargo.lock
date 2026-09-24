@@ -46,14 +46,14 @@ dependencies = [
 
 [[package]]
 name = "cageq-apo"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "cageq-biquad",
 ]
 
 [[package]]
 name = "cageq-apo-backend"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "cageq-apo",
  "cageq-backend",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-backend"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -74,18 +74,18 @@ dependencies = [
 
 [[package]]
 name = "cageq-biquad"
-version = "0.14.5"
+version = "0.15.0"
 
 [[package]]
 name = "cageq-biquad-wasm"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "cageq-biquad",
 ]
 
 [[package]]
 name = "cageq-catalog"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "encoding_rs",
  "regex",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-config-writer"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "cageq-backend",
  "cageq-monitor",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-core"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "cageq-backend",
  "cageq-biquad",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-monitor"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "ebur128",
  "realfft",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-peq-solver"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "cageq-backend",
  "cageq-biquad",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-sidecar"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "cageq-watchdog"
-version = "0.14.5"
+version = "0.15.0"
 dependencies = [
  "cageq-sidecar",
  "serde_json",

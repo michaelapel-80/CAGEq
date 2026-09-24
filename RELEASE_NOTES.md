@@ -1,12 +1,15 @@
-A round of small robustness and accessibility fixes.
+Warping-corrected (analog-matched) filters.
 
-- **Fixed:** cageq-apo now sanitizes non-finite (NaN/Inf) input samples before the biquad cascade —
-  a bad sample from anywhere upstream (another app, a mixer, an SRC) could otherwise poison the
-  filter's carried-forward state permanently, with no recovery until restart.
-- **Fixed:** a stalled meter/spectrum/scope stream (a dropped subscriber, a failed fetch) could
-  freeze silently until the app was restarted. Streams now self-heal a few seconds after going
-  quiet, and stopping/restarting monitoring can no longer race itself.
-- **Fixed:** the tone generator window could default to the wrong output device instead of
-  whatever the main window actually has selected.
-- Cleared several accessibility warnings (unlabeled form fields, missing field names).
-- Trimmed some unnecessary vertical padding the app window no longer needs.
+- **New:** an optional warping-corrected filter design, next to the loudness controls. Filters
+  keep their analog shape up to 20 kHz instead of being squeezed toward Nyquist by the standard
+  (RBJ) design, and sound the same at 44.1, 48 or 96 kHz. It is mostly audible on treble bands,
+  and turning it on redoes the AutoEq fit for the new design. It needs CAGEq's own audio engine,
+  because Equalizer APO always designs standard filters.
+- **New:** the chart, the scopes and the export preview now use the same filter code as the
+  audio engine (compiled to WebAssembly), so what you see can't drift from what you hear.
+- **New:** export has an "App uses analog-matched filters" option. Leave it off for nearly every
+  EQ app. The export is fitted so standard filters reproduce what you hear in CAGEq.
+- **Engine update:** CAGEq's own audio engine has a new version that reads the new configuration
+  format. The app flags it after updating: Continue refreshes it, with a brief machine-wide
+  audio interruption.
+- **Fixed:** the third-party license file was out of date and now credits NLopt (LGPL-2.1).
