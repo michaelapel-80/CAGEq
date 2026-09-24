@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cageq_config_writer::{self as cw, BlockState, StartupDecision};
-use cageq_core::{
+use cageq_core::{ResponseModel, 
     CalcRequest, Core, CoreError, CurvePoint, DEFAULT_BASE_PREGAIN_DB, EqApoBackend, EqBackend,
     Filter, FilterType, LoudnessMode, LoudnessSettings, Slot,
 };
@@ -108,7 +108,7 @@ fn seeded_slot_writes_without_a_fit() {
 
     // Seeding only fills the cache — nothing is written yet.
     let before = core.applied_count();
-    core.seed_slot(Slot::A, "Seeded DAC".into(), filters.clone(), -3.5, 4.0, reference)
+    core.seed_slot(Slot::A, "Seeded DAC".into(), filters.clone(), -3.5, 4.0, reference, ResponseModel::Rbj)
         .expect("seed A");
     assert_eq!(core.applied_count(), before, "seeding must not write to disk");
     assert!(tmp.cageq().is_empty(), "no cageq.txt until the slot is activated");
@@ -130,11 +130,11 @@ fn seeded_slot_writes_without_a_fit() {
 
     // A seeded slot behaves like any other: it's a real cache, so switching away and back
     // is a pure re-write, and Dry cannot be seeded.
-    core.seed_slot(Slot::B, "Seeded DAC".into(), filters, 0.0, 0.0, Vec::new()).expect("seed B");
+    core.seed_slot(Slot::B, "Seeded DAC".into(), filters, 0.0, 0.0, Vec::new(), ResponseModel::Rbj).expect("seed B");
     assert!(core.activate_slot(Slot::B).is_ok());
     assert!(core.activate_slot(Slot::A).is_ok(), "switch back to seeded A is a pure re-write");
     assert!(matches!(
-        core.seed_slot(Slot::Dry, "x".into(), Vec::new(), 0.0, 0.0, Vec::new()),
+        core.seed_slot(Slot::Dry, "x".into(), Vec::new(), 0.0, 0.0, Vec::new(), ResponseModel::Rbj),
         Err(CoreError::DryNotEditable)
     ));
 }

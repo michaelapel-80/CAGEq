@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use cageq_core::{
-    Applied, AudioDevice, BackendError, CalcRequest, Capabilities, Core, CurvePoint,
+    Applied, AudioDevice, BackendError, CalcRequest, Capabilities, Core, CurvePoint, ResponseModel, SlotFit,
     DEFAULT_BASE_PREGAIN_DB, DEFAULT_ISP_HEADROOM_DB, DeviceConfig, EqApoBackend, EqBackend,
     Filter, LoudnessSettings, Slot, StartupDecision,
     detect_eqapo_config_dir, list_render_devices,
@@ -236,6 +236,9 @@ struct ApplyResult {
     /// that gives the loudness match headroom when the clipping ceiling binds.
     g_target_db: f64,
     g_max_peak_db: f64,
+    /// The model the bands are realised with — the *effective* one, which the chart must draw
+    /// (never the preference: on Equalizer APO a matched preference still plays RBJ).
+    model: ResponseModel,
 }
 
 #[derive(serde::Serialize)]
@@ -354,12 +357,15 @@ fn seed_slot(
     g_target_db: f64,
     g_max_peak_db: f64,
     reference_curve: Vec<CurvePoint>,
+    model: Option<ResponseModel>,
     state: State<Backend>,
 ) -> Result<(), String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
+        // `model`: what the persisted fit was computed in — absent for anything saved before
+        // the model existed, which was RBJ.
         Backend::Ready { core, .. } => core
-            .seed_slot(slot, device, filters, g_target_db, g_max_peak_db, reference_curve)
+            .seed_slot(slot, device, filters, g_target_db, g_max_peak_db, reference_curve, model.unwrap_or_default())
             .map_err(|e| e.to_string()),
     }
 }
@@ -392,6 +398,25 @@ fn activate_slot(slot: Slot, state: State<Backend>) -> Result<ApplyResult, Strin
             let applied = core.activate_slot(slot).map_err(|e| e.to_string())?;
             Ok(apply_result(applied, eq))
         }
+    }
+}
+
+/// What slots A and B hold right now (`null` for an empty one), without writing anything — so
+/// the frontend can refresh its launch cache (§3.5) after the core re-fitted *every* slot on
+/// its own (a model change or backend swap), when a write only reported the active one.
+#[derive(serde::Serialize)]
+struct SlotFits {
+    #[serde(rename = "A")]
+    a: Option<SlotFit>,
+    #[serde(rename = "B")]
+    b: Option<SlotFit>,
+}
+
+#[tauri::command]
+fn slot_fits(state: State<Backend>) -> Result<SlotFits, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => Ok(SlotFits { a: core.slot_fit(Slot::A), b: core.slot_fit(Slot::B) }),
     }
 }
 
@@ -453,6 +478,7 @@ fn apply_result(applied: Applied, eq: &Arc<dyn EqBackend>) -> ApplyResult {
         reference_curve: applied.reference_curve,
         g_target_db: applied.g_target_db,
         g_max_peak_db: applied.g_max_peak_db,
+        model: applied.model,
     }
 }
 
@@ -1059,12 +1085,16 @@ fn measurement_curves(headphone: String, target: Option<String>, state: State<Ba
 ///
 /// `async`: another independent SLSQP pass — see `apply`'s doc for why this needs Tauri's
 /// blocking-thread-pool dispatch rather than running inline on the IPC thread.
+///
+/// `band_model`: the filter design of the app receiving the export (RBJ when absent — nearly
+/// every app), independent of CAGEq's own playback model.
 #[tauri::command(async)]
-fn export_eq_fit(filters: Vec<Filter>, band_count: u32, state: State<Backend>) -> Result<Value, String> {
+fn export_eq_fit(filters: Vec<Filter>, band_count: u32, band_model: Option<ResponseModel>, state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, .. } => {
-            let (out_filters, preamp_db) = core.fit_export_eq(&filters, band_count).map_err(|e| e.to_string())?;
+            let (out_filters, preamp_db) =
+                core.fit_export_eq(&filters, band_count, band_model.unwrap_or_default()).map_err(|e| e.to_string())?;
             Ok(json!({ "filters": out_filters, "preamp_db": preamp_db }))
         }
     }
@@ -1077,11 +1107,12 @@ fn export_eq_fit(filters: Vec<Filter>, band_count: u32, state: State<Backend>) -
 ///
 /// `async`: same reason as `export_eq_fit`.
 #[tauri::command(async)]
-fn fixed_band_eq_fit(filters: Vec<Filter>, preset: String, state: State<Backend>) -> Result<Value, String> {
+fn fixed_band_eq_fit(filters: Vec<Filter>, preset: String, band_model: Option<ResponseModel>, state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
         Backend::Ready { core, .. } => {
-            let (out_filters, preamp_db) = core.fit_fixed_band_eq(&filters, &preset).map_err(|e| e.to_string())?;
+            let (out_filters, preamp_db) =
+                core.fit_fixed_band_eq(&filters, &preset, band_model.unwrap_or_default()).map_err(|e| e.to_string())?;
             Ok(json!({ "filters": out_filters, "preamp_db": preamp_db }))
         }
     }
@@ -1095,6 +1126,58 @@ fn list_targets(state: State<Backend>) -> Result<Value, String> {
         Backend::Ready { core, .. } => {
             let targets = core.list_targets(false).map_err(|e| e.to_string())?;
             Ok(json!({ "targets": targets }))
+        }
+    }
+}
+
+/// The filter-model state the UI needs for its toggle: what the user asked for, what is
+/// actually applied, and whether the current backend can realise the matched model at all
+/// (the toggle is disabled with an explanation when it cannot).
+#[derive(serde::Serialize)]
+struct ResponseModelState {
+    preference: ResponseModel,
+    effective: ResponseModel,
+    available: bool,
+}
+
+fn response_model_state(core: &Core) -> ResponseModelState {
+    ResponseModelState {
+        preference: core.response_model(),
+        effective: core.effective_response_model(),
+        available: core.analog_matched_available(),
+    }
+}
+
+#[tauri::command]
+fn get_response_model(state: State<Backend>) -> Result<ResponseModelState, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => Ok(response_model_state(core)),
+    }
+}
+
+/// What `set_response_model` returns: the new state, plus the config re-applied (re-fitted)
+/// for it — `None` when nothing was applied yet.
+#[derive(serde::Serialize)]
+struct ResponseModelUpdate {
+    state: ResponseModelState,
+    applied: Option<ApplyResult>,
+}
+
+/// Set and persist the filter-model preference, and re-apply: slots are re-fitted for the
+/// effective model (instant when that fit is cached). Persisted even when the backend cannot
+/// honour it, so it takes effect the moment one that can is active.
+#[tauri::command(async)]
+fn set_response_model(model: ResponseModel, state: State<Backend>) -> Result<ResponseModelUpdate, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, eq, .. } => {
+            update_settings(|s| s.response_model = model);
+            let applied = match core.update_response_model(model) {
+                None => None,
+                Some(r) => Some(apply_result(r.map_err(|e| e.to_string())?, eq)),
+            };
+            Ok(ResponseModelUpdate { state: response_model_state(core), applied })
         }
     }
 }
@@ -1237,6 +1320,10 @@ struct AppSettings {
     /// EqAPO.
     #[serde(default)]
     apo_nudge_dismissed: bool,
+    /// The user's filter-model preference (warping-corrected vs RBJ). A preference, not a
+    /// guarantee: it only takes effect on a backend with `Capabilities::analog_matched`.
+    #[serde(default)]
+    response_model: ResponseModel,
 }
 
 fn default_true() -> bool {
@@ -1253,6 +1340,7 @@ impl Default for AppSettings {
             resume: None,
             library: None,
             apo_nudge_dismissed: false,
+            response_model: ResponseModel::default(),
         }
     }
 }
@@ -1443,6 +1531,7 @@ fn build_backend() -> Backend {
     match Core::start(Arc::clone(&eq), settings.last_hash.as_deref()) {
         Ok(core) => {
             core.set_loudness(settings.loudness); // restore §4.0 settings
+            core.set_response_model(settings.response_model); // and the filter-model preference
             Backend::Ready {
                 core,
                 eq,
@@ -1587,6 +1676,9 @@ pub fn run() {
             fixed_band_eq_fit,
             get_loudness,
             set_loudness,
+            get_response_model,
+            set_response_model,
+            slot_fits,
             preview_loudness,
             get_confirm_final_volume,
             set_confirm_final_volume,
@@ -1730,6 +1822,7 @@ mod tests {
                 apo_nudge_dismissed: false,
                 resume: Some(serde_json::json!({ "activeSlot": "B", "deviceId": "dev-1" })),
                 library: Some(serde_json::json!({ "presets": [{ "id": "p1", "name": "Warm & Relaxed" }], "templates": [] })),
+                response_model: ResponseModel::AnalogMatched,
             },
         )
         .expect("save");
@@ -1739,6 +1832,7 @@ mod tests {
         assert_eq!(reloaded.selection.target, selection.target, "reloaded target should match");
         assert_eq!(reloaded.last_hash.as_deref(), Some("abc123"), "reloaded hash should match");
         assert!(!reloaded.confirm_final_volume, "reloaded confirm flag should match saved (false)");
+        assert_eq!(reloaded.response_model, ResponseModel::AnalogMatched, "the filter-model preference should round-trip");
         // The resume blob round-trips verbatim (UI-owned shape).
         assert_eq!(reloaded.resume.as_ref().and_then(|r| r["activeSlot"].as_str()), Some("B"), "resume blob should round-trip");
         // The preset library round-trips verbatim too.
@@ -1752,6 +1846,7 @@ mod tests {
         std::fs::write(&path, r#"{"loudness":{"base_pregain_db":-9.0,"mode":"Comparison"}}"#).unwrap();
         let reloaded = load_settings_from(&path);
         assert!(reloaded.confirm_final_volume, "missing confirm flag defaults to true");
+        assert_eq!(reloaded.response_model, ResponseModel::Rbj, "a settings.json from before the model existed loads as RBJ");
         assert_eq!(
             reloaded.loudness.isp_headroom_db, DEFAULT_ISP_HEADROOM_DB,
             "missing isp_headroom_db (pre-existing settings.json) should default, not fail to load"

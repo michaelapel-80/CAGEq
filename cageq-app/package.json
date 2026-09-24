@@ -5,8 +5,9 @@
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "wasm": "cargo build --release --target wasm32-unknown-unknown -p cageq-biquad-wasm --manifest-path ../Cargo.toml && node -e \"require('fs').mkdirSync('src/wasm',{recursive:true});require('fs').copyFileSync('../target/wasm32-unknown-unknown/release/cageq_biquad_wasm.wasm','src/wasm/cageq_biquad.wasm')\"",
+    "dev": "npm run wasm && vite",
+    "build": "npm run wasm && tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
   },

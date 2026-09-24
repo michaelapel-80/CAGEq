@@ -1,0 +1,18 @@
+[package]
+name = "cageq-biquad"
+version.workspace = true
+license.workspace = true
+edition = "2024"
+
+# A leaf crate on purpose: no dependencies at all, so every other crate can depend on it —
+# `cageq-apo` (loaded inside audiodg), `cageq-peq-solver` (which must not depend on
+# `cageq-core`), `cageq-core`, and later the frontend via WASM. That is what lets it become
+# the single source of truth for the biquad math instead of a sixth transcription of it.
+#
+# Stage 1: the production entry point is `design(band, fs, ResponseModel)` — RBJ (bit-identical
+# to what CAGEq has always run; pinned by cageq-apo/tests/biquad_parity.rs) or the
+# warping-corrected `AnalogMatched` designs chosen by the Stage 0/0b spike. The spike's tools
+# stay as examples (`warp_spike`, `shelf_tune`, `per_band_scan`) and its rejected candidates in
+# `src/spike.rs`, so every decision can be re-run. No consumer is wired to it yet (Stage 2).
+
+[dependencies]

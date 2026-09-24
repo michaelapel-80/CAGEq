@@ -42,6 +42,7 @@ impl Drop for TempDir {
 
 fn sample() -> Vec<DeviceConfig> {
     vec![DeviceConfig {
+        model: Default::default(),
         device: "USB DAC".to_string(),
         preamp_db: -9.0,
         filters: vec![
@@ -136,6 +137,7 @@ fn safe_state_is_written_and_recognised_at_startup() {
 fn a_tilt_band_is_written_as_a_complementary_lsc_hsc_pair() {
     let tmp = TempDir::new("tilt");
     let configs = vec![DeviceConfig {
+        model: Default::default(),
         device: "USB DAC".to_string(),
         preamp_db: 0.0,
         filters: vec![Filter { kind: FilterType::Tilt, freq_hz: 500.0, gain_db: 6.0, q: 0.9 }],
@@ -145,4 +147,26 @@ fn a_tilt_band_is_written_as_a_complementary_lsc_hsc_pair() {
     let cageq = tmp.read(CAGEQ_FILENAME);
     assert!(cageq.contains("Filter 1: ON LSC Fc 500 Hz Gain -3.0 dB Q 0.90"), "{cageq}");
     assert!(cageq.contains("Filter 2: ON HSC Fc 500 Hz Gain 3.0 dB Q 0.90"), "{cageq}");
+}
+
+/// Equalizer APO designs its own RBJ filters from `PK`/`LSC`/`HSC` lines, so it cannot realise
+/// the warping-corrected model. The backend must refuse such a config *loudly and without
+/// writing anything* — quietly writing RBJ lines would apply a curve other than the one the
+/// chart draws — and advertise that through its capabilities so the core never asks.
+#[test]
+fn the_eqapo_backend_refuses_the_analog_matched_model() {
+    use cageq_backend::{EqBackend, ResponseModel};
+    let tmp = TempDir::new("model");
+    let backend = cageq_config_writer::EqApoBackend::new(tmp.dir());
+    assert!(!backend.capabilities().analog_matched);
+
+    let mut configs = sample();
+    configs[0].model = ResponseModel::AnalogMatched;
+    assert!(backend.apply(&configs).is_err());
+    assert!(!tmp.dir().join("cageq.txt").exists(), "a refused apply must not write anything");
+    assert!(!tmp.dir().join("config.txt").exists(), "a refused apply must not write anything");
+
+    // The same correction in RBJ goes through as it always did.
+    configs[0].model = ResponseModel::Rbj;
+    backend.apply(&configs).unwrap();
 }

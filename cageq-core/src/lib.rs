@@ -52,7 +52,7 @@ use serde_json::{Map, Value};
 // (the `pub use` both re-exports and brings them into scope here).
 pub use cageq_backend::{
     AudioDevice, BackendError, Capabilities, DeviceConfig, EqBackend, Filter, FilterType,
-    StartupDecision, list_render_devices,
+    ResponseModel, StartupDecision, list_render_devices,
 };
 // The Equalizer APO backend specifically — the app still needs its constructor and its
 // config-directory detection to build one. Everything else about it reaches the core
@@ -105,6 +105,23 @@ pub struct Applied {
     /// "add headroom" action) without re-deriving them.
     pub g_target_db: f64,
     pub g_max_peak_db: f64,
+    /// The [`ResponseModel`] `filters` were realised with — the *effective* one (the user's
+    /// preference, if the backend can honour it; RBJ otherwise), never just the preference.
+    /// The chart must draw this, or it would draw a curve that is not playing.
+    pub model: ResponseModel,
+}
+
+/// A slot's cached fit as [`Core::slot_fit`] reports it — exactly what [`Core::seed_slot`] takes
+/// back at the next launch.
+#[derive(Debug, Clone, Serialize)]
+pub struct SlotFit {
+    pub device: String,
+    pub filters: Vec<Filter>,
+    pub g_target_db: f64,
+    pub g_max_peak_db: f64,
+    pub reference_curve: Vec<CurvePoint>,
+    /// The model `filters` were fitted for — the effective one, once [`refresh_slots`] has run.
+    pub model: ResponseModel,
 }
 
 /// filter.md §4.0 default base pre-gain (user headroom), in dB. A conservative,
@@ -186,7 +203,33 @@ pub enum Slot {
 /// is the same math the tonal-morph metric (§5.3a) runs on; exposed so a cross-language
 /// test can pin it against the reference AutoEq implementation in the Python sidecar.
 pub fn filter_curve_db(bands: &[Filter], freqs: &[f64]) -> Vec<f64> {
-    morph::curve_db_on(bands, freqs)
+    morph::curve_db_on(bands, freqs, ResponseModel::Rbj)
+}
+
+/// [`filter_curve_db`] realised in `model`.
+pub fn filter_curve_db_in(bands: &[Filter], freqs: &[f64], model: ResponseModel) -> Vec<f64> {
+    morph::curve_db_on(bands, freqs, model)
+}
+
+/// The backend's serialisable model onto `cageq-biquad`'s (that crate stays dependency-free,
+/// so it cannot carry serde itself).
+pub(crate) fn biquad_model(model: ResponseModel) -> cageq_biquad::ResponseModel {
+    match model {
+        ResponseModel::Rbj => cageq_biquad::ResponseModel::Rbj,
+        ResponseModel::AnalogMatched => cageq_biquad::ResponseModel::AnalogMatched,
+    }
+}
+
+/// A (Tilt-expanded) [`Filter`] as `cageq-biquad` describes a band.
+pub(crate) fn biquad_band(f: &Filter) -> cageq_biquad::Band {
+    let kind = match f.kind {
+        FilterType::Peaking => cageq_biquad::Kind::Peaking,
+        FilterType::LowShelf => cageq_biquad::Kind::LowShelf,
+        FilterType::HighShelf => cageq_biquad::Kind::HighShelf,
+        FilterType::Bandpass => cageq_biquad::Kind::Bandpass,
+        FilterType::Tilt => unreachable!("tilts are expanded into shelf pairs before any band is designed"),
+    };
+    cageq_biquad::Band { kind, freq_hz: f.freq_hz, gain_db: f.gain_db, q: f.q }
 }
 
 /// A point on a UI reference curve (filter.md §5.2): frequency in Hz, level in dB.
@@ -216,6 +259,15 @@ struct CalcResult {
     /// measured, gain-limited), independent of custom filters. Empty from the stub.
     #[serde(default)]
     reference_curve: Vec<CurvePoint>,
+    /// The model `filters` were fitted for and `g_target_db`/`g_max_peak_db` computed in.
+    /// A slot whose model differs from the effective one is stale — see [`refresh_slots`].
+    #[serde(default)]
+    model: ResponseModel,
+    /// The request this was fitted from, so the core can re-fit it on its own when the
+    /// effective model changes (the user toggles it, or the backend swaps mid-session).
+    /// `None` for fits restored from the launch cache (§3.5), synthesised Dry, and isolate.
+    #[serde(skip)]
+    request: Option<CalcRequest>,
 }
 
 /// The composed preamp for one curve (filter.md §4.0 + §4.2).
@@ -363,6 +415,9 @@ struct SlotStore {
     /// Output device every slot is scoped to (set on apply / [`Core::set_device`]).
     device: Option<String>,
     active: Slot,
+    /// The effective model the slots were last brought into line with ([`refresh_slots`]);
+    /// what a synthesised Dry reports.
+    model: ResponseModel,
 }
 
 impl SlotStore {
@@ -407,6 +462,8 @@ impl SlotStore {
                 g_target_db: 0.0,
                 g_max_peak_db: 0.0,
                 reference_curve: Vec::new(),
+                model: self.model,
+                request: None,
             }),
         }
     }
@@ -431,6 +488,9 @@ struct Inner {
     startup: StartupDecision,
     /// §4.0 loudness settings (base pre-gain + mode) applied to every composed preamp.
     loudness: Mutex<LoudnessSettings>,
+    /// The user's [`ResponseModel`] *preference*. What is applied is [`effective_model`]:
+    /// this, gated by the backend's `Capabilities::analog_matched`.
+    model_pref: Mutex<ResponseModel>,
     /// What was last written to cageq.txt — the true *starting* curve for a §5.3a
     /// morph. Taken from here rather than from the previously-active slot so that a
     /// morph interrupted half-way resumes from the curve actually on disk, not from
@@ -474,12 +534,13 @@ impl Core {
         let inner = Arc::new(Inner {
             backend,
             apply_lock: Mutex::new(()),
-            slots: Mutex::new(SlotStore { a: None, b: None, device: None, active: Slot::A }),
+            slots: Mutex::new(SlotStore { a: None, b: None, device: None, active: Slot::A, model: ResponseModel::Rbj }),
             applied_count: AtomicU32::new(0),
             // Back-date so the first write is never delayed by the spacing rule.
             last_write: Mutex::new(Instant::now() - min_write_spacing),
             startup,
             loudness: Mutex::new(LoudnessSettings::default()),
+            model_pref: Mutex::new(ResponseModel::Rbj),
             last_written: Mutex::new(None),
             last_applied: Mutex::new(None),
             morph_gen: AtomicU32::new(0),
@@ -524,23 +585,28 @@ impl Core {
             inputs.insert("target".into(), Value::String(t));
         }
         let request = CalcRequest { device: String::new(), inputs };
-        let _ = fit::compute(&self.inner.fit_cache, &request);
+        let _ = fit::compute(&self.inner.fit_cache, &request, effective_model(&self.inner));
     }
 
     /// §8 mobile export: a second, independent AutoEq PEQ pass fitting `band_count`
     /// filters (>= 3) directly to `filters`' own composed curve — see `export.rs`'s
     /// module doc. Returns `(filters, preamp_db)`, the same shape the sidecar's
     /// `fit_export_eq` did.
-    pub fn fit_export_eq(&self, filters: &[Filter], band_count: u32) -> Result<(Vec<Filter>, f64), CoreError> {
-        export::fit_export_eq(&self.inner.export_cache, filters, band_count)
+    ///
+    /// `band_model` is how the app receiving the export realises its filters — RBJ for nearly
+    /// all of them. The curve being approximated is always the slot's as heard (the effective
+    /// model), whatever the export targets.
+    pub fn fit_export_eq(&self, filters: &[Filter], band_count: u32, band_model: ResponseModel) -> Result<(Vec<Filter>, f64), CoreError> {
+        export::fit_export_eq(&self.inner.export_cache, filters, band_count, effective_model(&self.inner), band_model)
     }
 
     /// §8 mobile export: AutoEq's own standard 10-/31-band graphic EQ (`preset`, any
     /// value other than `"10"` is treated as `"31"`, matching `sidecar_dsp.py`'s own
     /// fallback), fit the same way [`Core::fit_export_eq`] is but with fixed ISO center
     /// frequencies/Q. Returns `(filters, preamp_db)`.
-    pub fn fit_fixed_band_eq(&self, filters: &[Filter], preset: &str) -> Result<(Vec<Filter>, f64), CoreError> {
-        export::fit_fixed_band_eq(&self.inner.fixed_band_cache, filters, preset)
+    /// `band_model`: as for [`Core::fit_export_eq`].
+    pub fn fit_fixed_band_eq(&self, filters: &[Filter], preset: &str, band_model: ResponseModel) -> Result<(Vec<Filter>, f64), CoreError> {
+        export::fit_fixed_band_eq(&self.inner.fixed_band_cache, filters, preset, effective_model(&self.inner), band_model)
     }
 
     /// The AutoEq headphone measurement catalogue: `[{source, form_factor, name, path,
@@ -576,6 +642,12 @@ impl Core {
     /// would produce, so the immediate write matches, and a later re-fit (on the first
     /// edit) is a byte-identical no-op EqAPO silently dedups — unless an input genuinely
     /// changed, in which case that edit's fit corrects it.
+    ///
+    /// `model` is the [`ResponseModel`] the persisted fit was computed in (RBJ for anything
+    /// saved before the model existed). If it is not the effective one when the slot is
+    /// written, the slot's curve quantities are recomputed for the effective model — see
+    /// [`refresh_slots`] — until the first edit re-fits it properly.
+    #[allow(clippy::too_many_arguments)]
     pub fn seed_slot(
         &self,
         slot: Slot,
@@ -584,11 +656,13 @@ impl Core {
         g_target_db: f64,
         g_max_peak_db: f64,
         reference_curve: Vec<CurvePoint>,
+        model: ResponseModel,
     ) -> Result<(), CoreError> {
         if slot == Slot::Dry {
             return Err(CoreError::DryNotEditable);
         }
-        let result = CalcResult { device: device.clone(), filters, g_target_db, g_max_peak_db, reference_curve };
+        let result =
+            CalcResult { device: device.clone(), filters, g_target_db, g_max_peak_db, reference_curve, model, request: None };
         let mut store = self.inner.slots.lock().unwrap();
         store.device = Some(device);
         *store.slot_mut(slot) = Some(result);
@@ -602,6 +676,7 @@ impl Core {
         let ticket = claim_write(&self.inner);
         {
             let _guard = self.inner.apply_lock.lock().unwrap();
+            refresh_slots(&self.inner)?;
             let mut store = self.inner.slots.lock().unwrap();
             if !store.has(slot) {
                 return Err(CoreError::EmptySlot(slot));
@@ -622,6 +697,7 @@ impl Core {
         let ticket = claim_write(&self.inner);
         {
             let _guard = self.inner.apply_lock.lock().unwrap();
+            refresh_slots(&self.inner)?;
             let mut store = self.inner.slots.lock().unwrap();
             let src = store.slot_mut(from).clone().ok_or(CoreError::EmptySlot(from))?;
             *store.slot_mut(to) = Some(src);
@@ -651,9 +727,31 @@ impl Core {
             g_target_db: 0.0,
             g_max_peak_db: 0.0,
             reference_curve: Vec::new(),
+            model: effective_model(&self.inner),
+            request: None,
         };
         let base = self.inner.loudness.lock().unwrap().base_pregain_db;
         write_effective(&self.inner, effective, base, false)
+    }
+
+    /// What slot A or B holds right now, without writing anything (`None` for an empty slot and
+    /// for Dry). For the app's launch cache (§3.5): the core re-fits *every* slot on its own when
+    /// the effective model changes ([`Core::update_response_model`], or a backend swap followed
+    /// by any write), and a write only reports the active one — so the app reads the others back
+    /// here rather than persisting fits made for a model no longer in effect.
+    pub fn slot_fit(&self, slot: Slot) -> Option<SlotFit> {
+        if slot == Slot::Dry {
+            return None;
+        }
+        let mut store = self.inner.slots.lock().unwrap();
+        store.slot_mut(slot).as_ref().map(|r| SlotFit {
+            device: r.device.clone(),
+            filters: r.filters.clone(),
+            g_target_db: r.g_target_db,
+            g_max_peak_db: r.g_max_peak_db,
+            reference_curve: r.reference_curve.clone(),
+            model: r.model,
+        })
     }
 
     /// The currently active slot.
@@ -707,11 +805,54 @@ impl Core {
     /// settings change, to update the written preamp live. A pure re-write of the
     /// cached fit (no sidecar). `None` if the active slot has nothing to write yet;
     /// otherwise the fresh [`Applied`] (or a write error).
+    ///
+    /// Also where a change of *effective* model lands when nothing else asked for it — the app
+    /// calls this after swapping backends mid-session (CAGEq's APO ↔ Equalizer APO), and the
+    /// swap may take the warping-corrected model away: stale slots are re-fitted first
+    /// ([`refresh_slots`]), so the rewrite is of a fit made for the model now in effect.
     pub fn reapply(&self) -> Option<Result<Applied, CoreError>> {
         claim_write(&self.inner);
         let _guard = self.inner.apply_lock.lock().unwrap();
         self.inner.slots.lock().unwrap().effective()?; // nothing active to rewrite yet
+        if let Err(e) = refresh_slots(&self.inner) {
+            return Some(Err(e));
+        }
         Some(write_active_locked(&self.inner))
+    }
+
+    /// The user's [`ResponseModel`] preference (not necessarily what is applied — see
+    /// [`Core::effective_response_model`]).
+    pub fn response_model(&self) -> ResponseModel {
+        *self.inner.model_pref.lock().unwrap()
+    }
+
+    /// What is actually applied: the preference if the backend can realise it
+    /// (`Capabilities::analog_matched`), RBJ otherwise. Re-evaluated on every write, so a
+    /// mid-session backend swap is honoured on the next one.
+    pub fn effective_response_model(&self) -> ResponseModel {
+        effective_model(&self.inner)
+    }
+
+    /// Can the current backend realise [`ResponseModel::AnalogMatched`]? What the UI gates
+    /// its toggle on.
+    pub fn analog_matched_available(&self) -> bool {
+        self.inner.backend.capabilities().analog_matched
+    }
+
+    /// Set the model preference without writing anything — for restoring settings at startup,
+    /// before any slot exists. Use [`Core::update_response_model`] to change it live.
+    pub fn set_response_model(&self, model: ResponseModel) {
+        *self.inner.model_pref.lock().unwrap() = model;
+    }
+
+    /// Change the model preference and push it onto the active config: slots are re-fitted
+    /// for the new effective model (from the fit cache when this model was seen before) and
+    /// the active one rewritten. `None` if nothing is active yet. A no-op rewrite when the
+    /// effective model does not actually change (e.g. the preference moves while Equalizer
+    /// APO is the backend).
+    pub fn update_response_model(&self, model: ResponseModel) -> Option<Result<Applied, CoreError>> {
+        self.set_response_model(model);
+        self.reapply()
     }
 
     /// Change the §4.0 loudness settings and push them onto the active config. Only the
@@ -727,6 +868,12 @@ impl Core {
             *l = settings;
             prev
         };
+        {
+            let _guard = self.inner.apply_lock.lock().unwrap();
+            if let Err(e) = refresh_slots(&self.inner) {
+                return Some(Err(e));
+            }
+        }
         let effective = self.inner.slots.lock().unwrap().effective()?;
         let start = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &prev).db;
         let target = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &settings).db;
@@ -773,15 +920,21 @@ fn do_apply_to_slot(inner: &Inner, slot: Slot, request: CalcRequest) -> Result<A
     {
         let _guard = inner.apply_lock.lock().unwrap();
 
-        let outcome = fit::compute(&inner.fit_cache, &request)?;
+        let model = effective_model(inner);
+        let outcome = fit::compute(&inner.fit_cache, &request, model)?;
         let result = CalcResult {
             device: outcome.device,
             filters: outcome.filters,
             g_target_db: outcome.g_target_db,
             g_max_peak_db: outcome.g_max_peak_db,
             reference_curve: outcome.reference_curve,
+            model,
+            request: Some(request),
         };
         validate_filters(&result.filters)?;
+        // The *other* slot may still be fitted for a previous model; bring it into line now,
+        // while the lock is held anyway, so a later A/B switch is instant.
+        refresh_slots(inner)?;
 
         let mut store = inner.slots.lock().unwrap();
         store.device = Some(result.device.clone());
@@ -789,6 +942,63 @@ fn do_apply_to_slot(inner: &Inner, slot: Slot, request: CalcRequest) -> Result<A
         store.active = slot;
     }
     morph_to_active(inner, ticket)
+}
+
+/// The model actually applied: the user's preference, if the backend can realise it.
+fn effective_model(inner: &Inner) -> ResponseModel {
+    let pref = *inner.model_pref.lock().unwrap();
+    if pref == ResponseModel::AnalogMatched && !inner.backend.capabilities().analog_matched {
+        ResponseModel::Rbj
+    } else {
+        pref
+    }
+}
+
+/// Bring every cached slot into line with the effective model. Assumes `apply_lock` held.
+///
+/// A slot fitted for another model is stale in two ways: its bands were optimised for a
+/// different realisation, and its loudness/peak quantities describe a different curve. With
+/// the request on hand it is simply re-fitted (instant if this model's fit is still cached).
+/// A fit restored from the launch cache has no request; its bands are kept and only its curve
+/// quantities are recomputed for the new model, so at least the preamp is composed for what
+/// actually plays — the next edit re-fits it properly.
+///
+/// Fits run outside the slots lock (they can take seconds cold); `apply_lock` already keeps
+/// any other writer out.
+fn refresh_slots(inner: &Inner) -> Result<(), CoreError> {
+    let model = effective_model(inner);
+    let stale: Vec<(Slot, CalcResult)> = {
+        let mut store = inner.slots.lock().unwrap();
+        store.model = model;
+        [Slot::A, Slot::B]
+            .into_iter()
+            .filter_map(|slot| store.slot_mut(slot).clone().filter(|r| r.model != model).map(|r| (slot, r)))
+            .collect()
+    };
+    for (slot, old) in stale {
+        let fresh = match &old.request {
+            Some(request) => {
+                let outcome = fit::compute(&inner.fit_cache, request, model)?;
+                CalcResult {
+                    // Keep the slot's own device: `set_device` may have restamped it since.
+                    device: old.device.clone(),
+                    filters: outcome.filters,
+                    g_target_db: outcome.g_target_db,
+                    g_max_peak_db: outcome.g_max_peak_db,
+                    reference_curve: outcome.reference_curve,
+                    model,
+                    request: old.request.clone(),
+                }
+            }
+            None => {
+                let (g_target_db, g_max_peak_db) = fit::curve_quantities(&old.filters, model);
+                CalcResult { g_target_db, g_max_peak_db, model, ..old.clone() }
+            }
+        };
+        validate_filters(&fresh.filters)?;
+        *inner.slots.lock().unwrap().slot_mut(slot) = Some(fresh);
+    }
+    Ok(())
 }
 
 /// Take a ticket for a new write intention (§5.3a). Any morph still running against an
@@ -826,7 +1036,15 @@ fn write_effective(
     clipping_warning: bool,
 ) -> Result<Applied, CoreError> {
     let device_config =
-        DeviceConfig { device: effective.device.clone(), preamp_db, filters: effective.filters.clone() };
+        DeviceConfig {
+            device: effective.device.clone(),
+            preamp_db,
+            filters: effective.filters.clone(),
+            // The model this result was fitted/computed for — kept in line with the effective
+            // model by `refresh_slots`, so the backend realises exactly the curve the slot's
+            // loudness/peak quantities (and the chart) describe.
+            model: effective.model,
+        };
     space_out_write(inner); // §5.3: honour whatever cadence this backend can take
     let hash = match inner.backend.apply(std::slice::from_ref(&device_config)) {
         Ok(hash) => hash,
@@ -850,6 +1068,7 @@ fn write_effective(
         reference_curve: effective.reference_curve.clone(),
         g_target_db: effective.g_target_db,
         g_max_peak_db: effective.g_max_peak_db,
+        model: effective.model,
     };
     // Remember what landed: the curve is the next morph's start point (§5.3a), the
     // Applied is what a superseded morph reports.
@@ -900,6 +1119,8 @@ fn morph_to_active(inner: &Inner, ticket: u32) -> Result<Applied, CoreError> {
         g_target_db: 0.0,
         g_max_peak_db: 0.0,
         reference_curve: Vec::new(),
+        model: to.model,
+        request: None,
     });
 
     // A backend that owns its transitions (an in-process APO ramps coefficients with the
@@ -909,7 +1130,7 @@ fn morph_to_active(inner: &Inner, ticket: u32) -> Result<Applied, CoreError> {
     // workaround for EqAPO's fixed, cold ~10 ms crossfade (§5.3a).
     let emulate_morph = can_morph && !inner.backend.capabilities().owns_transitions;
     let frames =
-        if emulate_morph { morph_frames(morph::tonal_distance_db(&from.filters, &to.filters)) } else { 0 };
+        if emulate_morph { morph_frames(morph::tonal_distance_db(&from.filters, &to.filters, to.model)) } else { 0 };
 
     if frames > 0 {
         // morph.rs's own loudness model (a 192-point grid, built for cheap per-frame
@@ -917,7 +1138,7 @@ fn morph_to_active(inner: &Inner, ticket: u32) -> Result<Applied, CoreError> {
         // fits on) agree in form but not to the last decimal. Carrying the endpoint
         // residuals across the morph keeps intermediate frames level-matched *and*
         // lands exactly on the fit's own number, so there's no small step at the finish.
-        let residual = |c: &CalcResult| c.g_target_db - morph::loudness_target_db(&morph::curve_db(&c.filters));
+        let residual = |c: &CalcResult| c.g_target_db - morph::loudness_target_db(&morph::curve_db(&c.filters, c.model));
         let (res_from, res_to) = (residual(&from), residual(&to));
         let loudness = *inner.loudness.lock().unwrap();
 
@@ -929,7 +1150,7 @@ fn morph_to_active(inner: &Inner, ticket: u32) -> Result<Applied, CoreError> {
                 return last_applied(inner);
             }
             let bands = morph::lerp_bands(&from.filters, &to.filters, t);
-            let curve = morph::curve_db(&bands);
+            let curve = morph::curve_db(&bands, to.model);
             let frame = CalcResult {
                 device: to.device.clone(),
                 filters: bands,
@@ -938,6 +1159,8 @@ fn morph_to_active(inner: &Inner, ticket: u32) -> Result<Applied, CoreError> {
                 // The reference is the *destination* fit's; intermediate frames aren't
                 // returned to the UI, so carrying `to`'s keeps last_written coherent.
                 reference_curve: to.reference_curve.clone(),
+                model: to.model,
+                request: None,
             };
             let preamp = compose_preamp(frame.g_target_db, frame.g_max_peak_db, &loudness);
             write_effective(inner, frame, preamp.db, preamp.clipping_warning)?;
@@ -1076,7 +1299,7 @@ mod tests {
     }
 
     fn fit(device: &str) -> CalcResult {
-        CalcResult { device: device.to_string(), filters: Vec::new(), g_target_db: 0.0, g_max_peak_db: 0.0, reference_curve: Vec::new() }
+        CalcResult { device: device.to_string(), filters: Vec::new(), g_target_db: 0.0, g_max_peak_db: 0.0, reference_curve: Vec::new(), model: ResponseModel::Rbj, request: None }
     }
 
     /// **The bug this fixes.** A already-hydrated slot's cached fit carries its own `device`
@@ -1085,7 +1308,7 @@ mod tests {
     /// re-fitting it) must not keep targeting the old device.
     #[test]
     fn set_device_restamps_already_cached_slots() {
-        let mut store = SlotStore { a: Some(fit("old-guid")), b: Some(fit("old-guid")), device: Some("old-guid".into()), active: Slot::A };
+        let mut store = SlotStore { a: Some(fit("old-guid")), b: Some(fit("old-guid")), device: Some("old-guid".into()), active: Slot::A, model: ResponseModel::Rbj };
         store.set_device("new-guid".into());
         assert_eq!(store.a.as_ref().unwrap().device, "new-guid", "A's cached fit must follow the device switch");
         assert_eq!(store.b.as_ref().unwrap().device, "new-guid", "B's cached fit must follow it too");
@@ -1095,7 +1318,7 @@ mod tests {
     /// An empty slot has nothing to restamp — must not panic reaching into a `None`.
     #[test]
     fn set_device_tolerates_empty_slots() {
-        let mut store = SlotStore { a: None, b: None, device: None, active: Slot::Dry };
+        let mut store = SlotStore { a: None, b: None, device: None, active: Slot::Dry, model: ResponseModel::Rbj };
         store.set_device("guid".into());
         assert_eq!(store.device.as_deref(), Some("guid"));
         assert_eq!(store.effective().unwrap().device, "guid", "Dry synthesises from the shared field, as before");

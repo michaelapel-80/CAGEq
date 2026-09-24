@@ -27,7 +27,9 @@
 //! peaking_filters/fs, deliberately *not* including custom filters — so editing a
 //! custom filter (the common interactive case, e.g. dragging a slider) reuses the
 //! cached SLSQP result and only recombines curves, rather than re-running the ~1-4 s
-//! fit on every edit.
+//! fit on every edit. Plus the [`ResponseModel`]: the fit optimises the curve the backend
+//! will actually run, so an RBJ fit and a warping-corrected fit of the same measurement are
+//! different answers, and toggling back and forth reuses both.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -35,7 +37,7 @@ use cageq_peq_solver::Solver;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{filter_curve_db, validate_filters, CalcRequest, CoreError, CurvePoint, Filter};
+use crate::{filter_curve_db_in, validate_filters, CalcRequest, CoreError, CurvePoint, Filter, ResponseModel};
 
 /// A request's inputs, parsed out of [`CalcRequest::inputs`]'s opaque JSON blob. Custom
 /// defaults (not the field types' own zero values) via the struct-level `#[serde(default)]`
@@ -111,6 +113,7 @@ struct FitCacheKey {
     max_gain_bits: u64,
     peaking_filters: usize,
     fs_bits: u64,
+    model: ResponseModel,
 }
 
 #[derive(Clone)]
@@ -143,7 +146,7 @@ impl FitCache {
     }
 }
 
-fn fit_key(params: &FitParams) -> FitCacheKey {
+fn fit_key(params: &FitParams, model: ResponseModel) -> FitCacheKey {
     FitCacheKey {
         headphone: params.headphone.clone(),
         measurement_bits: if params.headphone.is_some() {
@@ -155,6 +158,7 @@ fn fit_key(params: &FitParams) -> FitCacheKey {
         max_gain_bits: params.max_gain.to_bits(),
         peaking_filters: params.peaking_filters,
         fs_bits: params.fs.to_bits(),
+        model,
     }
 }
 
@@ -214,8 +218,12 @@ pub(crate) fn subsample_curve(f: &[f64], db: &[f64], n: usize) -> Vec<CurvePoint
 /// Runs (or reuses from [`FitCache`]) the AutoEq-only fit: fetch, FR-prep, `equalize`,
 /// SLSQP. Returns `(filters, f, curve, reference_curve)` — the same four values
 /// `sidecar_dsp.py`'s `_autoeq_fit` returns, computed the same way.
-fn run_autoeq_fit(cache: &std::sync::Mutex<FitCache>, params: &FitParams) -> Result<(Vec<Filter>, Vec<f64>, Vec<f64>, Vec<CurvePoint>), CoreError> {
-    let key = fit_key(params);
+fn run_autoeq_fit(
+    cache: &std::sync::Mutex<FitCache>,
+    params: &FitParams,
+    model: ResponseModel,
+) -> Result<(Vec<Filter>, Vec<f64>, Vec<f64>, Vec<CurvePoint>), CoreError> {
+    let key = fit_key(params, model);
     if let Some(entry) = cache.lock().unwrap().get(&key) {
         return Ok((entry.filters, entry.f, entry.curve, entry.reference_curve));
     }
@@ -234,7 +242,7 @@ fn run_autoeq_fit(cache: &std::sync::Mutex<FitCache>, params: &FitParams) -> Res
 
     // `sidecar_dsp.py`'s config: a low shelf at 105 Hz and a high shelf at 10 kHz
     // (both `q = 0.7`, gain free), plus `peaking_filters` fully-free peaking bands.
-    let bands = cageq_peq_solver::cageq_default_bands(params.peaking_filters);
+    let bands = cageq_peq_solver::cageq_default_bands_in(params.peaking_filters, crate::biquad_model(model));
     let mut solver = Solver::new(opt_f.clone(), params.fs, bands, opt_equalization);
     solver.optimize()?;
 
@@ -251,7 +259,10 @@ fn run_autoeq_fit(cache: &std::sync::Mutex<FitCache>, params: &FitParams) -> Res
 /// `sidecar_dsp.py`'s `_custom_filters` raises on), and derive the §4.1/§4.2
 /// loudness/peak quantities from the combined curve — matching
 /// `sidecar_dsp.py::calculate_filters` field for field.
-pub(crate) fn compute(cache: &std::sync::Mutex<FitCache>, request: &CalcRequest) -> Result<FitOutcome, CoreError> {
+///
+/// Everything is realised in `model` — the fitted bands, the custom bands' curve, and so the
+/// loudness/peak quantities — so the preamp is composed for the curve that will actually play.
+pub(crate) fn compute(cache: &std::sync::Mutex<FitCache>, request: &CalcRequest, model: ResponseModel) -> Result<FitOutcome, CoreError> {
     let params: FitParams = serde_json::from_value(Value::Object(request.inputs.clone()))?;
     validate_filters(&params.custom_filters)?;
 
@@ -261,10 +272,10 @@ pub(crate) fn compute(cache: &std::sync::Mutex<FitCache>, request: &CalcRequest)
         let zeros = vec![0.0; f.len()];
         (Vec::new(), f, zeros, Vec::new())
     } else {
-        run_autoeq_fit(cache, &params)?
+        run_autoeq_fit(cache, &params, model)?
     };
 
-    let custom_curve = filter_curve_db(&params.custom_filters, &f);
+    let custom_curve = filter_curve_db_in(&params.custom_filters, &f, model);
     let combined: Vec<f64> = autoeq_curve.iter().zip(&custom_curve).map(|(a, c)| a + c).collect();
 
     let g_target_db = cageq_peq_solver::loudness_target_db(&f, &combined, params.fs);
@@ -280,4 +291,17 @@ pub(crate) fn compute(cache: &std::sync::Mutex<FitCache>, request: &CalcRequest)
         g_max_peak_db: (g_max_peak_db * 100.0).round() / 100.0,
         reference_curve,
     })
+}
+
+/// The §4.1/§4.2 curve quantities of an already-known band set in `model`, on the standard
+/// grid and rounded exactly as [`compute`] rounds them. For a slot whose model changed but
+/// that cannot be re-fitted because the core never saw its request (a fit restored from the
+/// launch cache, §3.5): its bands stay as they were until the next edit re-fits them, but the
+/// preamp is at least composed for the curve those bands now actually produce.
+pub(crate) fn curve_quantities(filters: &[Filter], model: ResponseModel) -> (f64, f64) {
+    let f = cageq_peq_solver::grid::standard_grid();
+    let curve = filter_curve_db_in(filters, &f, model);
+    let g_target_db = cageq_peq_solver::loudness_target_db(&f, &curve, FitParams::default().fs);
+    let g_max_peak_db = cageq_peq_solver::curve_peak_db(&curve);
+    ((g_target_db * 100.0).round() / 100.0, (g_max_peak_db * 100.0).round() / 100.0)
 }

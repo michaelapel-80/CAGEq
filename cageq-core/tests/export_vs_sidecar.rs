@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cageq_core::{filter_curve_db, Core, EqApoBackend, EqBackend, Filter, FilterType};
+use cageq_core::{filter_curve_db, Core, EqApoBackend, EqBackend, Filter, FilterType, ResponseModel};
 use cageq_sidecar::Sidecar;
 use serde_json::json;
 
@@ -68,7 +68,7 @@ fn rust_export_eq_matches_the_reference_sidecar() {
     let old_filters: Vec<Filter> = serde_json::from_value(old_reply["filters"].clone()).expect("old filters");
     let old_preamp = old_reply["preamp_db"].as_f64().expect("old preamp_db");
 
-    let (new_filters, new_preamp) = core.fit_export_eq(&filters, band_count).expect("rust fit_export_eq");
+    let (new_filters, new_preamp) = core.fit_export_eq(&filters, band_count, ResponseModel::Rbj).expect("rust fit_export_eq");
 
     let grid = cageq_peq_solver::grid::standard_grid();
     let old_curve = filter_curve_db(&old_filters, &grid);
@@ -97,7 +97,7 @@ fn rust_fixed_band_eq_matches_the_reference_sidecar_for_both_presets() {
         let old_filters: Vec<Filter> = serde_json::from_value(old_reply["filters"].clone()).expect("old filters");
         let old_preamp = old_reply["preamp_db"].as_f64().expect("old preamp_db");
 
-        let (new_filters, new_preamp) = core.fit_fixed_band_eq(&filters, preset).unwrap_or_else(|e| panic!("rust fit_fixed_band_eq preset {preset}: {e}"));
+        let (new_filters, new_preamp) = core.fit_fixed_band_eq(&filters, preset, ResponseModel::Rbj).unwrap_or_else(|e| panic!("rust fit_fixed_band_eq preset {preset}: {e}"));
         assert_eq!(new_filters.len(), old_filters.len(), "preset {preset}: band count mismatch");
 
         let grid = cageq_peq_solver::grid::standard_grid();

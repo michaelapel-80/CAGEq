@@ -152,7 +152,7 @@ impl Drop for DenormalGuard {
 /// Compared against `install_dir()`'s own `CAGEqApo.version` marker file (written by
 /// `register`, read by `status` — see both their own docs) instead of the DLL's bytes, so
 /// staleness now means "an intentional version bump", not "recompiled".
-pub const APO_VERSION: u32 = 7;
+pub const APO_VERSION: u32 = 8;
 
 /// Per-instance state. One of these exists per APO instance (per endpoint, per mode),
 /// created at `LockForProcess` and destroyed at `UnlockForProcess`.
@@ -403,7 +403,7 @@ pub unsafe extern "C" fn cageq_apo_load_config(
             // *combination*, so applying an attenuating preamp before the boosts it was
             // calculated to offset is what lets a legitimate correction through. Applying
             // them the other way round can trip the guard on a chain that is fine as a whole.
-            if !apo.cascade.set_preamp_db(cfg.preamp_db) || !apo.cascade.set_bands(&cfg.bands) {
+            if !apo.cascade.set_preamp_db(cfg.preamp_db) || !apo.cascade.set_bands_in(&cfg.bands, cfg.model) {
                 return CAGEQ_CONFIG_UNSUITABLE;
             }
             // Applied instantly, not ramped. This runs at lock, before a single frame has been

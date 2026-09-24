@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
-import { Band, composedCurveDb, logGrid } from "./biquad";
+import { Band, composedCurveDb, logGrid, type ResponseModel } from "./biquad";
 import { EqChart, RefCurve, Series } from "./EqChart";
 import { parametricEqText } from "./exportFormats";
 
@@ -29,11 +29,17 @@ type ExportFit = { filters: Band[]; preamp_db: number };
  *  `Band[]` the §5.2 chart already draws for the active slot. Reuses the existing `.modal-card`
  *  overlay convention (see the `presetSave` dialog in App.tsx) rather than inventing new modal
  *  chrome. */
-export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]; sampleRate?: number; onClose: () => void }) {
+/** `model`: how the slot's own `filters` are realised on the desktop (the effective model) — the
+ *  curve the export approximates, i.e. what is heard. The *exported* bands are designed (and
+ *  previewed) for the receiving app's filter design instead — its own toggle, RBJ by default,
+ *  since nearly every EQ app uses RBJ, independent of CAGEq's playback model. */
+export function ExportDialog({ filters, model, sampleRate, onClose }: { filters: Band[]; model: ResponseModel; sampleRate?: number; onClose: () => void }) {
   const { t } = useTranslation();
   const [format, setFormat] = useState<ExportFormat>("parametric");
   const [bandCount, setBandCount] = useState(BAND_COUNT_DEFAULT);
   const [fixedBandPreset, setFixedBandPreset] = useState<FixedBandPreset>("31");
+  // The receiving app's filter design. RBJ unless the user says their app is warping-corrected.
+  const [bandModel, setBandModel] = useState<ResponseModel>("Rbj");
   const [fit, setFit] = useState<ExportFit | null>(null);
   const [fitting, setFitting] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -48,7 +54,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
     if (filters.length === 0) return;
     setFitting(true);
     const method = format === "parametric" ? "export_eq_fit" : "fixed_band_eq_fit";
-    const params = format === "parametric" ? { filters, bandCount } : { filters, preset: fixedBandPreset };
+    const params = format === "parametric" ? { filters, bandCount, bandModel } : { filters, preset: fixedBandPreset, bandModel };
     // Set by this effect's cleanup once a newer fit (or unmount) supersedes this one. The backend
     // call itself can't be cancelled, so an older, slower solve can still resolve after a newer one
     // started — without this it would flip `fitting` off (hiding the spinner) while the newer solve
@@ -77,7 +83,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
       clearTimeout(h);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [format, filters, bandCount, fixedBandPreset]);
+  }, [format, filters, bandCount, fixedBandPreset, bandModel]);
 
   // Q omitted for the fixed-band presets — it's constant per preset, so AutoEq's own site
   // doesn't state it either (see parametricEqText's own doc); the free-band-count fit still
@@ -96,7 +102,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
   );
   const refs: RefCurve[] = useMemo(() => {
     if (!filters.length) return [];
-    const curve = composedCurveDb(filters, previewFreqs, sampleRate);
+    const curve = composedCurveDb(filters, previewFreqs, model, sampleRate);
     return [
       {
         id: "export-full",
@@ -105,7 +111,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
         label: t("export.fullCurve"),
       },
     ];
-  }, [filters, previewFreqs, sampleRate, t]);
+  }, [filters, previewFreqs, sampleRate, model, t]);
 
   // How well the exported (reduced-band) fit actually matches the full cascade it's approximating
   // — the same two curves the chart above already draws (`series`/`refs`), just reduced to two
@@ -116,8 +122,8 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
   // don't hand back a curve at all) — no second error computation to keep in sync with the backend.
   const fitError = useMemo(() => {
     if (!fit || !filters.length) return null;
-    const achieved = composedCurveDb(fit.filters, previewFreqs, sampleRate);
-    const reference = composedCurveDb(filters, previewFreqs, sampleRate);
+    const achieved = composedCurveDb(fit.filters, previewFreqs, bandModel, sampleRate); // exported bands, as the receiving app will run them
+    const reference = composedCurveDb(filters, previewFreqs, model, sampleRate);
     let sumSq = 0;
     let max = 0;
     for (let i = 0; i < previewFreqs.length; i++) {
@@ -126,7 +132,7 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
       max = Math.max(max, err);
     }
     return { rms: Math.sqrt(sumSq / previewFreqs.length), max };
-  }, [fit, filters, previewFreqs, sampleRate]);
+  }, [fit, filters, previewFreqs, sampleRate, model, bandModel]);
 
   const copy = async () => {
     try {
@@ -167,13 +173,34 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
         <p style={{ marginTop: 0, fontWeight: 600 }}>{t("export.title")}</p>
         <p style={{ fontSize: "0.85em", opacity: 0.75 }}>{t("export.hint")}</p>
 
-        <div className="pl-toggle">
-          <button type="button" className={format === "parametric" ? "on" : ""} onClick={() => setFormat("parametric")}>
-            {t("export.parametric")}
-          </button>
-          <button type="button" className={format === "graphic" ? "on" : ""} onClick={() => setFormat("graphic")}>
-            {t("export.graphic")}
-          </button>
+        {/* The app-design checkbox shares the format row rather than taking a line of its own —
+            this card has a fixed height budget (see its own doc), and a separate row pushed it past
+            it again (reported live). Short label; the explanation is in the tooltip. */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.8em" }}>
+          <div className="pl-toggle" style={{ flex: 1 }}>
+            <button type="button" className={format === "parametric" ? "on" : ""} onClick={() => setFormat("parametric")}>
+              {t("export.parametric")}
+            </button>
+            <button type="button" className={format === "graphic" ? "on" : ""} onClick={() => setFormat("graphic")}>
+              {t("export.graphic")}
+            </button>
+          </div>
+          <label
+            // lineHeight 1: the root's fixed `line-height: 24px` otherwise gives this small label a full
+            // 24px line box — the same height as the switch buttons, so at some display scalings it
+            // rounded up past them and grew the row (and the card) by a pixel or two.
+            style={{ fontSize: "0.75em", lineHeight: 1, opacity: 0.8, display: "flex", alignItems: "center", gap: "0.35em", flex: "none", whiteSpace: "nowrap" }}
+            title={t("export.bandModelHint")}
+          >
+            <input
+              name="export-band-model"
+              type="checkbox"
+              checked={bandModel === "AnalogMatched"}
+              onChange={(e) => setBandModel(e.currentTarget.checked ? "AnalogMatched" : "Rbj")}
+              style={{ flex: "none", margin: 0 }}
+            />
+            {t("export.bandModel")}
+          </label>
         </div>
 
         {format === "parametric" ? (
@@ -206,7 +233,9 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
         )}
 
         <div style={{ height: 160, position: "relative", margin: "0.6em 0" }}>
-          <EqChart series={series} refs={refs} height={160} screen legendHost={legendHost} />
+          {/* The only band series here is the exported fit, drawn in the receiving app's design; the
+              slot's own curve arrives as `refs`, already computed in its effective model. */}
+          <EqChart model={bandModel} series={series} refs={refs} height={160} screen legendHost={legendHost} />
           {/* Absolutely positioned inside the chart's own fixed-height box, not a line of its
               own — same "nothing here may grow the dialog" discipline as everything else in it
               (see the modal-card's own doc). `pointerEvents: none` so it never steals the
@@ -279,7 +308,10 @@ export function ExportDialog({ filters, sampleRate, onClose }: { filters: Band[]
           {copied ? t("export.copied") : t("export.copy")}
         </button>
 
-        <p style={{ fontSize: "0.75em", opacity: 0.7, marginTop: "0.8em" }}>{t("export.impedanceCaveat")}</p>
+        {/* lineHeight 1.35 + a small bottom margin: this 0.75em note otherwise inherits the root's fixed
+            24px line-height (3–4 lines of 12px text taking 24px each) — the space the app-design
+            checkbox's row needed back to keep the card inside its height budget. */}
+        <p style={{ fontSize: "0.75em", lineHeight: 1.35, opacity: 0.7, marginTop: "0.8em", marginBottom: "0.3em" }}>{t("export.impedanceCaveat")}</p>
 
         <button type="button" onClick={onClose} style={{ marginTop: "0.5em" }}>
           {t("dialog.cancel")}

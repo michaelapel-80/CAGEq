@@ -92,7 +92,7 @@ function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number, sampleR
       const lnF1 = Math.log(s.f_max);
       for (let i = 0; i < n; i++) bf[i] = Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
     }
-    const curve = composedCurveDb(eq.filters, bf, sampleRate);
+    const curve = composedCurveDb(eq.filters, bf, eq.model, sampleRate);
     for (let i = 0; i < n; i++) arr[i] = curve[i] + eq.preampDb;
   } else {
     arr.fill(eq.preampDb); // Dry: no filters, still undo the §4.1 loudness-match preamp
@@ -110,18 +110,19 @@ function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number, sampleR
  *  `linear` needs its own explicit tracking, not just `curve.to.length`: `N_LIN_BINS`/`N_LOG_BINS`
  *  happen to match today, so a bin-count check alone wouldn't notice the axis mode changing under
  *  an unchanged length — the two curves have different *values* at the same length. */
-type CorrCache = { filters: ScopeEq["filters"] | null; preampDb: number; sampleRate: number | undefined; linear: boolean; curve: FadingCurve };
+type CorrCache = { filters: ScopeEq["filters"] | null; preampDb: number; model: ScopeEq["model"]; sampleRate: number | undefined; linear: boolean; curve: FadingCurve };
 function getCorrection(cache: { current: CorrCache | null }, eq: ScopeEq, s: SpectrumData, sampleRate: number | undefined, dtMs: number, linear: boolean): Float64Array {
   const c = cache.current;
   const n = linear ? s.db_lin.length : s.db.length;
   if (!c || c.curve.to.length !== n || c.linear !== linear) {
     const to = computeCorrectionCurve(eq, s, n, sampleRate, linear);
-    cache.current = { filters: eq.filters, preampDb: eq.preampDb, sampleRate, linear, curve: retargetFadingCurve(null, to) };
+    cache.current = { filters: eq.filters, preampDb: eq.preampDb, model: eq.model, sampleRate, linear, curve: retargetFadingCurve(null, to) };
     return to;
   }
-  if (c.filters !== eq.filters || c.preampDb !== eq.preampDb || c.sampleRate !== sampleRate) {
+  if (c.filters !== eq.filters || c.preampDb !== eq.preampDb || c.model !== eq.model || c.sampleRate !== sampleRate) {
     c.filters = eq.filters;
     c.preampDb = eq.preampDb;
+    c.model = eq.model;
     c.sampleRate = sampleRate;
     c.curve = retargetFadingCurve(c.curve, computeCorrectionCurve(eq, s, n, sampleRate, linear));
   }
@@ -417,7 +418,7 @@ export function SpectrumScope({
   // draws one event at a time with no blending — the tell that pointed at the interpolation itself
   // rather than the data feeding it.
   const curRef = useRef<SpectrumData | null>(null);
-  const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0 });
+  const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0, model: "Rbj" }); // placeholder until the first `scope-eq` arrives
   const corrCacheRef = useRef<CorrCache | null>(null);
   // Hover cursor: the fraction (0..1) of the tube's own width the mouse is over, or `null` when not
   // hovering. Set directly by the pointer handlers below (no DOM write there — see the render

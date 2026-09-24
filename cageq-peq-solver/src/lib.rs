@@ -105,10 +105,19 @@ pub fn bands_to_filters(bands: &[Band]) -> Vec<cageq_backend::Filter> {
 /// a low shelf at 105 Hz and a high shelf at 10 kHz (both `q = 0.7`, gain free), plus
 /// `peaking` fully-free peaking bands.
 pub fn cageq_default_bands(peaking: usize) -> Vec<Band> {
+    cageq_default_bands_in(peaking, cageq_biquad::ResponseModel::Rbj)
+}
+
+/// [`cageq_default_bands`], every band realised in `model` — so the fit optimises the curve
+/// the backend will actually apply.
+pub fn cageq_default_bands_in(peaking: usize, model: cageq_biquad::ResponseModel) -> Vec<Band> {
     let mut bands = vec![
         Band::fixed_fc_q(BandKind::LowShelf, 105.0, 0.7),
         Band::fixed_fc_q(BandKind::HighShelf, 10_000.0, 0.7),
     ];
     bands.extend((0..peaking).map(|_| Band::free(BandKind::Peaking)));
+    for b in &mut bands {
+        b.model = model;
+    }
     bands
 }

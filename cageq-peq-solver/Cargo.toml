@@ -9,6 +9,9 @@ license = "MIT"
 edition = "2024"
 
 [dependencies]
+# The warping-corrected model's coefficient design (`Band::model`). Dependency-free, so it
+# does not reintroduce the `cageq-core` dependency this crate exists to avoid.
+cageq-biquad = { path = "../cageq-biquad" }
 # The output type: fitted bands hand back as the same `Filter`/`FilterType` every
 # backend already speaks, so callers need no adapter at the boundary.
 cageq-backend = { path = "../cageq-backend" }

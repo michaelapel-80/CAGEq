@@ -9,6 +9,9 @@
 #   * cageq-watchdog      — fail-safe sidecar supervisor: silent-safe-state + recovery (§7.1/§7.2)
 #   * cageq-core          — orchestrator tying the sidecar/watchdog/EqBackend into one flow (§2)
 #   * cageq-monitor       — post-EQ loudness/spectrum monitoring via WASAPI loopback (§5.3c)
+#   * cageq-biquad        — biquad design math: analog ground truth, RBJ, warping-corrected
+#                           candidates (dependency-free leaf)
+#   * cageq-biquad-wasm   — cageq-biquad compiled to WebAssembly for the frontend
 # A workspace gives one shared target/ dir and a single Cargo.lock, and lets the
 # crates depend on each other (the sidecar's result maps onto the backend's
 # DeviceConfig).
@@ -22,6 +25,8 @@ members = [
     "cageq-apo",
     "cageq-apo-backend",
     "cageq-backend",
+    "cageq-biquad",
+    "cageq-biquad-wasm",
     "cageq-catalog",
     "cageq-config-writer",
     "cageq-peq-solver",

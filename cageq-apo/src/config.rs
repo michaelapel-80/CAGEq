@@ -18,6 +18,13 @@
 //! band LSC 1000 -2.4 1.40
 //! ```
 //!
+//! Version 2 adds exactly one directive, `model analog-matched`, for a correction realised
+//! with the warping-corrected filters (`cageq_biquad::ResponseModel`). It is required in a v2
+//! file and refused in a v1 file, and an RBJ correction is always written as v1 — so every
+//! file CAGEq wrote before v2 existed, and every RBJ file it writes now, is byte-identical to
+//! before (its startup-integrity hash included), and an older DLL that meets a v2 file
+//! rejects it whole and keeps what it was running rather than applying the wrong model.
+//!
 //! Filter tokens are the ones CAGEq already writes (`PK`/`LSC`/`HSC`/`BP`, AutoEq's), so
 //! the same vocabulary reads the same everywhere in the project.
 //!
@@ -31,10 +38,12 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::dsp::{Band, FilterKind, MAX_BANDS};
+use crate::dsp::{Band, FilterKind, ResponseModel, MAX_BANDS};
 
-/// Format version this parser accepts.
+/// Format version of an RBJ correction — the original format, unchanged.
 const FORMAT_VERSION: u32 = 1;
+/// Format version that carries a `model` directive (see the module doc).
+const FORMAT_VERSION_MODEL: u32 = 2;
 /// First token of the header line.
 const MAGIC: &str = "cageq-apo";
 
@@ -71,12 +80,14 @@ const MAX_FREQ_HZ: f64 = 1_000_000.0;
 pub struct ApoConfig {
     pub preamp_db: f64,
     pub bands: Vec<Band>,
+    /// Which model `bands` are realised with. RBJ for every v1 file.
+    pub model: ResponseModel,
 }
 
 impl Default for ApoConfig {
     /// No correction — the neutral state, and what an absent config file means.
     fn default() -> Self {
-        ApoConfig { preamp_db: 0.0, bands: Vec::new() }
+        ApoConfig { preamp_db: 0.0, bands: Vec::new(), model: ResponseModel::Rbj }
     }
 }
 
@@ -238,6 +249,8 @@ pub fn parse(text: &str) -> Result<ApoConfig, ParseError> {
     let mut config = ApoConfig::default();
     let mut seen_header = false;
     let mut seen_preamp = false;
+    let mut version = 0;
+    let mut seen_model = false;
 
     for (i, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -256,7 +269,7 @@ pub fn parse(text: &str) -> Result<ApoConfig, ParseError> {
                 return Err(ParseError { line: no, reason: "expected a 'cageq-apo <version>' header" });
             }
             match tok.next().and_then(|v| v.parse::<u32>().ok()) {
-                Some(FORMAT_VERSION) => {}
+                Some(v @ (FORMAT_VERSION | FORMAT_VERSION_MODEL)) => version = v,
                 Some(_) => return Err(ParseError { line: no, reason: "unsupported format version" }),
                 None => return Err(ParseError { line: no, reason: "malformed version" }),
             }
@@ -268,6 +281,20 @@ pub fn parse(text: &str) -> Result<ApoConfig, ParseError> {
         }
 
         match directive {
+            // v2 only, exactly once. A v1 file never names a model (it predates them), so
+            // meeting one there is as wrong as any other unknown directive.
+            "model" if version == FORMAT_VERSION_MODEL => {
+                if seen_model {
+                    return Err(ParseError { line: no, reason: "duplicate model" });
+                }
+                config.model = match tok.next() {
+                    Some("analog-matched") => ResponseModel::AnalogMatched,
+                    // RBJ is written as v1, never as a v2 `model` line — accepting one would
+                    // give the same correction two spellings and two integrity hashes.
+                    _ => return Err(ParseError { line: no, reason: "unknown model" }),
+                };
+                seen_model = true;
+            }
             "preamp" => {
                 if seen_preamp {
                     return Err(ParseError { line: no, reason: "duplicate preamp" });
@@ -325,6 +352,9 @@ pub fn parse(text: &str) -> Result<ApoConfig, ParseError> {
     if !seen_header {
         return Err(ParseError { line: 0, reason: "empty or headerless file" });
     }
+    if version == FORMAT_VERSION_MODEL && !seen_model {
+        return Err(ParseError { line: 0, reason: "a version 2 file must name its model" });
+    }
     Ok(config)
 }
 
@@ -339,8 +369,16 @@ fn parse_finite(tok: Option<&str>, line: usize, what: &'static str) -> Result<f6
 
 /// Render a configuration back to the format — the writer CAGEq's own backend will use, and
 /// what makes the round trip testable.
+///
+/// An RBJ correction renders as v1, byte for byte what it always was; only a correction that
+/// needs the `model` directive becomes v2 (see the module doc for why).
 pub fn render(config: &ApoConfig) -> String {
-    let mut s = format!("{MAGIC} {FORMAT_VERSION}\npreamp {:.4}\n", config.preamp_db);
+    let mut s = match config.model {
+        ResponseModel::Rbj => format!("{MAGIC} {FORMAT_VERSION}\npreamp {:.4}\n", config.preamp_db),
+        ResponseModel::AnalogMatched => {
+            format!("{MAGIC} {FORMAT_VERSION_MODEL}\nmodel analog-matched\npreamp {:.4}\n", config.preamp_db)
+        }
+    };
     for b in &config.bands {
         let token = match b.kind {
             FilterKind::Peaking => "PK",
@@ -402,6 +440,34 @@ mod tests {
             .expect("a BOM-prefixed config must parse");
         assert_eq!(c.preamp_db, -12.0);
         assert_eq!(c.bands.len(), 1);
+    }
+
+    /// Version 2 carries the warping-corrected model and round-trips through render/parse.
+    #[test]
+    fn v2_carries_the_analog_matched_model() {
+        let c = parse("cageq-apo 2
+model analog-matched
+preamp -3
+band HSC 10000 6 0.7
+").expect("v2 should parse");
+        assert_eq!(c.model, ResponseModel::AnalogMatched);
+        assert_eq!(c.bands.len(), 1);
+        assert_eq!(parse(&render(&c)).unwrap(), c);
+        assert!(render(&c).starts_with("cageq-apo 2
+model analog-matched
+"));
+    }
+
+    /// An RBJ correction is written exactly as it always was: v1, no model line — so existing
+    /// files, their startup-integrity hashes, and older DLLs all see no difference.
+    #[test]
+    fn an_rbj_config_still_renders_as_v1() {
+        let c = parse(GOOD).unwrap();
+        assert_eq!(c.model, ResponseModel::Rbj);
+        let text = render(&c);
+        assert!(text.starts_with("cageq-apo 1
+preamp "), "{text}");
+        assert!(!text.contains("model"), "{text}");
     }
 
     #[test]

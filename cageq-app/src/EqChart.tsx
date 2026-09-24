@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { Band, composedCurveDb, logGrid, phaseDeg, type FadingCurve, retargetFadingCurve, stepFadingCurve } from "./biquad";
+import { Band, composedCurveDb, logGrid, phaseDeg, type FadingCurve, type ResponseModel, retargetFadingCurve, stepFadingCurve } from "./biquad";
 import { fftWindowMs } from "./fftWindow";
 import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
 import { TiltGlyph } from "./TiltGlyph";
@@ -321,6 +321,7 @@ export function FftSizeRow({ fftSize, sampleRate, onChange }: { fftSize?: number
 }
 
 export function EqChart({
+  model,
   series,
   markers = [],
   refs = [],
@@ -385,6 +386,10 @@ export function EqChart({
    *  96, or anything higher). Falls back to that same default only when genuinely unknown
    *  (e.g. before the meter/monitor has reported one). */
   sampleRate?: number;
+  /** The model every curve here is realised in — the *effective* one the core reports
+   *  (`ApplyResult.model`), never the user's preference: on a backend that cannot honour it,
+   *  a matched preference still plays RBJ, and drawing anything else would lie. */
+  model: ResponseModel;
   /** If given, the legend renders (via portal) into this element instead of inline — used to
    *  place it full-width below the chart+meters row so long labels have room. */
   legendHost?: HTMLElement | null;
@@ -470,7 +475,7 @@ export function EqChart({
 
   const { freqs, curves, yMin, yMax, step } = useMemo(() => {
     const freqs = logGrid(480, F_MIN, F_MAX);
-    const curves = series.map((s) => composedCurveDb(s.bands, freqs, sampleRate));
+    const curves = series.map((s) => composedCurveDb(s.bands, freqs, model, sampleRate));
     let lo = 0;
     let hi = 0;
     // Auto-range over visible curves and visible marker gains only (hiding a spiky layer
@@ -508,17 +513,17 @@ export function EqChart({
     const step = span <= 9 ? 3 : span <= 18 ? 6 : 12;
     return { freqs, curves, yMin: -span, yMax: span, step };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [series, markers, refs, overrides, defaultHidden, minSpan, sampleRate]);
+  }, [series, markers, refs, overrides, defaultHidden, minSpan, sampleRate, model]);
 
   // Phase curve on the secondary axis (computed on the same freq grid). Its degrees range
   // is symmetric and snapped to 45°, independent of the dB axis.
   const { phaseCurve, phaseRange } = useMemo(() => {
     if (!phase) return { phaseCurve: null as Float64Array | null, phaseRange: 90 };
-    const p = phaseDeg(phase.bands, freqs, sampleRate);
+    const p = phaseDeg(phase.bands, freqs, model, sampleRate);
     let m = 45;
     for (const v of p) m = Math.max(m, Math.abs(v));
     return { phaseCurve: p, phaseRange: Math.ceil(m / 45) * 45 };
-  }, [phase, freqs, sampleRate]);
+  }, [phase, freqs, sampleRate, model]);
 
   const lnMin = Math.log(F_MIN);
   const lnSpan = Math.log(F_MAX) - lnMin;
@@ -638,8 +643,8 @@ export function EqChart({
   // Render-time values the rAF loop below needs but can't close over directly — the loop is set up
   // once at mount (like Vectorscope's), so anything from props/render has to come through a ref
   // that's refreshed every render, read fresh each frame.
-  const specDrawCtx = useRef({ eqBands, preampDb, sampleRate, PAD, H, W, specParams });
-  specDrawCtx.current = { eqBands, preampDb, sampleRate, PAD, H, W, specParams };
+  const specDrawCtx = useRef({ eqBands, preampDb, sampleRate, model, PAD, H, W, specParams });
+  specDrawCtx.current = { eqBands, preampDb, sampleRate, model, PAD, H, W, specParams };
   // The spectrum backdrop. Each received payload is drawn as a smooth curve (traceSmooth, spline.ts)
   // through the bins' own values — filled down to the baseline for a dim ambient wash, then stroked
   // again on top at full `glowBase` (see the render loop's own comments for why two layers, and why
@@ -696,12 +701,13 @@ export function EqChart({
     let lastEqBands: Band[] | undefined;
     let lastPreampDb: number | undefined;
     let lastSampleRate: number | undefined;
+    let lastModel: ResponseModel | undefined;
 
     const render = () => {
       const now = performance.now();
       const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
       last = now;
-      const { eqBands, preampDb, sampleRate, PAD, H, W, specParams } = specDrawCtx.current;
+      const { eqBands, preampDb, sampleRate, model, PAD, H, W, specParams } = specDrawCtx.current;
       const spectrum = spectrumRef?.current ?? null;
       const ctx = phos.begin();
       // Own layer, cleared and fully redrawn every frame — see the stroke's own comment below for
@@ -744,13 +750,15 @@ export function EqChart({
             corrCache.to.length !== n ||
             lastEqBands !== eqBands ||
             lastPreampDb !== preampDb ||
-            lastSampleRate !== sampleRate
+            lastSampleRate !== sampleRate ||
+            // The same bands in another model are a different correction to undo.
+            lastModel !== model
           ) {
             const bf = new Float64Array(n);
             for (let i = 0; i < n; i++) bf[i] = binF(i);
             const to = new Float64Array(n);
             if (eqBands.length) {
-              const curve = composedCurveDb(eqBands, bf, sampleRate);
+              const curve = composedCurveDb(eqBands, bf, model, sampleRate);
               for (let i = 0; i < n; i++) to[i] = curve[i] + preampDb;
             } else {
               to.fill(preampDb);
@@ -759,6 +767,7 @@ export function EqChart({
             lastEqBands = eqBands;
             lastPreampDb = preampDb;
             lastSampleRate = sampleRate;
+            lastModel = model;
           }
           corr = stepFadingCurve(corrCache, dt * 1000);
         }
@@ -888,7 +897,7 @@ export function EqChart({
           const raw = srcDb[i0] * (1 - ft) + srcDb[i1] * ft;
           const corrDb =
             specParams.undistort && eqBands !== undefined
-              ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]), sampleRate)[0] : 0) + preampDb
+              ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]), model, sampleRate)[0] : 0) + preampDb
               : 0;
           dbText = `${(raw - corrDb).toFixed(1)} dB`;
         }

@@ -41,10 +41,24 @@ const MAXEVAL: u32 = 10_000;
 /// (SciPy falls back to its own forward-difference approximation); central costs one
 /// extra evaluation per dimension in exchange for a visibly less noisy gradient.
 const GRAD_EPS: f64 = 1e-6;
+/// Default [`Solver::cancellation_weight`]. Tuned with `cageq-core/examples/fit_sweep.rs` on 13
+/// real headphones (oratory1990, over- and in-ear) against Python AutoEq 4.1.2's own fits:
+/// 1e-4 still leaves the HD 800 S's +20/−18 dB pair; 3e-4 removes every degenerate set with
+/// each fit's error at or below Python's; 1e-3 (chosen — 10× the weight that still fails,
+/// for headphones not in that set) keeps every fit's largest gain ≤ 8.5 dB with the error at or
+/// below Python's on 12 of 13 (ER2XR +0.008 dB); 1e-2 starts to cost real accuracy. On 40
+/// seeded synthetic headphones it gives fewer >12 dB fits than Python (20 vs 26) at a
+/// comparable error (0.121 vs 0.125 dB RMS below 10 kHz).
+pub const CANCELLATION_WEIGHT: f64 = 1e-3;
 
 #[derive(Debug, Clone)]
 pub struct OptimizeReport {
+    /// The objective the solve minimised: AutoEq's loss plus [`Solver::cancellation_penalty`].
     pub loss: f64,
+    /// AutoEq's own loss (`peq.py`'s `_optimizer_loss`: fit error + sharpness penalty) at the
+    /// same point, *without* the cancellation penalty — the quantity to compare against a
+    /// Python AutoEq result, which has no such term.
+    pub autoeq_loss: f64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +81,8 @@ pub struct Solver {
     /// `PEQ.__init__`'s `self._10k_ix` (peq.py:449) — a literal 10 kHz index, distinct
     /// from `Band::ix10k`'s same-named-but-different quantity (see that method's doc).
     ix_10k: usize,
+    /// Weight of the cancellation penalty — see [`Solver::cancellation_penalty`].
+    pub cancellation_weight: f64,
 }
 
 impl Solver {
@@ -76,7 +92,8 @@ impl Solver {
         let min_f_ix = argmin_abs(&f, 20.0);
         let max_f_ix = argmin_abs(&f, 20_000.0);
         let ix_10k = argmin_abs(&f, 10_000.0);
-        Solver { f, fs, bands, target, min_f_ix, max_f_ix, ix_10k }
+        Solver {
+            cancellation_weight: CANCELLATION_WEIGHT, f, fs, bands, target, min_f_ix, max_f_ix, ix_10k }
     }
 
     /// `PEQ.fr` (peq.py:537-540): the cascade response, bands summed in dB.
@@ -225,12 +242,39 @@ impl Solver {
     /// band's own response and penalties recomputed from scratch. Used where it's only
     /// called once (outside the optimizer's hot loop) — see [`Solver::evaluate`] for the
     /// version the gradient sweep actually uses.
-    fn loss(&self) -> f64 {
+    /// Both losses at the current band values — see [`OptimizeReport`].
+    fn report(&self) -> OptimizeReport {
         let band_frs: Vec<Vec<f64>> = self.bands.iter().map(|b| b.fr(&self.f, self.fs)).collect();
         let cascade = sum_vectors(&band_frs, self.f.len());
+        let magnitude = sum_magnitudes(&band_frs, self.f.len());
         let penalty_sum: f64 = self.bands.iter().zip(&band_frs).map(|(b, fr)| self.band_penalty_sum(b, fr)).sum();
+        let autoeq = self.mse_component(&cascade) + penalty_sum;
         // `_optimizer_loss` (peq.py:600) returns `np.sqrt(loss_val)`, not the raw MSE+penalty sum.
-        (self.mse_component(&cascade) + penalty_sum).sqrt()
+        OptimizeReport { loss: (autoeq + self.cancellation_penalty(&cascade, &magnitude)).sqrt(), autoeq_loss: autoeq.sqrt() }
+    }
+
+    /// Penalises bands that fight each other. At each frequency, `Σ|fr_b| − |Σ fr_b|` is
+    /// exactly how much of the bands' individual responses cancels out — zero wherever they
+    /// all push the same way — and its mean square (over the same range the fit error is
+    /// taken on) times [`Solver::cancellation_weight`] is added to the loss.
+    ///
+    /// AutoEq's own loss has nothing against cancellation: it matches only the *mean* above
+    /// 10 kHz and `sharpness_penalty` restrains only boosts, so opposing wide bands cost
+    /// nothing, and fully converged it genuinely prefers such sets — e.g. a +20 dB and a
+    /// −18 dB bell at Q 0.39, 150 Hz apart, on the Sennheiser HD 800 S, which scores *better*
+    /// than Python AutoEq's sane fit by AutoEq's own measure. Python only avoids it by stopping
+    /// early; this makes the solve itself prefer a set whose bands mean what they say. Squared,
+    /// so a large cancellation (tens of dB across octaves) weighs heavily while a legitimate
+    /// small one (a narrow notch inside a broad boost) barely registers. Smooth |x| (see
+    /// [`smooth_abs`]) keeps the central-difference gradient well behaved.
+    fn cancellation_penalty(&self, cascade: &[f64], magnitude: &[f64]) -> f64 {
+        if self.cancellation_weight == 0.0 {
+            return 0.0;
+        }
+        let range = self.min_f_ix..self.max_f_ix;
+        let n = range.len() as f64;
+        let ms: f64 = range.map(|i| (magnitude[i] - smooth_abs(cascade[i])).powi(2)).sum::<f64>() / n;
+        self.cancellation_weight * ms
     }
 
     /// `_optimizer_loss` (peq.py:585-600) only ever sums `sharpness_penalty` into the
@@ -258,17 +302,18 @@ impl Solver {
         let band_frs: Vec<Vec<f64>> = self.bands.iter().map(|b| b.fr(&self.f, self.fs)).collect();
         let band_pens: Vec<f64> = self.bands.iter().zip(&band_frs).map(|(b, fr)| self.band_penalty_sum(b, fr)).collect();
         let cascade = sum_vectors(&band_frs, self.f.len());
+        let magnitude = sum_magnitudes(&band_frs, self.f.len());
         let penalty_sum: f64 = band_pens.iter().sum();
         // Matches `loss`'s `np.sqrt(loss_val)` (peq.py:600) so the gradient sweep below
         // differences the same scale `Solver::optimize`'s objective reports.
-        let loss = (self.mse_component(&cascade) + penalty_sum).sqrt();
+        let loss = (self.mse_component(&cascade) + penalty_sum + self.cancellation_penalty(&cascade, &magnitude)).sqrt();
 
         if let Some(g) = grad {
             for (i, slot) in map.iter().enumerate() {
                 let h = GRAD_EPS * params[i].abs().max(1.0);
 
-                let hi = self.perturbed_loss(slot, params[i] + h, &band_frs, &band_pens, &cascade, penalty_sum);
-                let lo = self.perturbed_loss(slot, params[i] - h, &band_frs, &band_pens, &cascade, penalty_sum);
+                let hi = self.perturbed_loss(slot, params[i] + h, &band_frs, &band_pens, &cascade, &magnitude, penalty_sum);
+                let lo = self.perturbed_loss(slot, params[i] - h, &band_frs, &band_pens, &cascade, &magnitude, penalty_sum);
                 g[i] = (hi - lo) / (2.0 * h);
 
                 // A band with more than one free parameter (every peaking band optimizes
@@ -289,25 +334,37 @@ impl Solver {
     /// recomputing them. Leaves `self.bands[slot.band_ix]` mutated to the probed value
     /// (the caller, [`Solver::evaluate`], restores every band to nominal once the whole
     /// gradient sweep is done rather than after each individual probe).
-    fn perturbed_loss(&mut self, slot: &ParamSlot, new_value: f64, band_frs: &[Vec<f64>], band_pens: &[f64], base_cascade: &[f64], base_penalty_sum: f64) -> f64 {
+    #[allow(clippy::too_many_arguments)]
+    fn perturbed_loss(
+        &mut self,
+        slot: &ParamSlot,
+        new_value: f64,
+        band_frs: &[Vec<f64>],
+        band_pens: &[f64],
+        base_cascade: &[f64],
+        base_magnitude: &[f64],
+        base_penalty_sum: f64,
+    ) -> f64 {
         slot.field.set(&mut self.bands[slot.band_ix], new_value);
         let new_fr = self.bands[slot.band_ix].fr(&self.f, self.fs);
         let new_pen = self.band_penalty_sum(&self.bands[slot.band_ix], &new_fr);
 
         let mut cascade = base_cascade.to_vec();
+        let mut magnitude = base_magnitude.to_vec();
         let old_fr = &band_frs[slot.band_ix];
         for i in 0..cascade.len() {
             cascade[i] += new_fr[i] - old_fr[i];
+            magnitude[i] += smooth_abs(new_fr[i]) - smooth_abs(old_fr[i]);
         }
         let penalty_sum = base_penalty_sum - band_pens[slot.band_ix] + new_pen;
-        (self.mse_component(&cascade) + penalty_sum).sqrt()
+        (self.mse_component(&cascade) + penalty_sum + self.cancellation_penalty(&cascade, &magnitude)).sqrt()
     }
 
     /// `PEQ.optimize` (peq.py:706-725). No-op if every band is fully pinned (no free fc/q/gain).
     pub fn optimize(&mut self) -> Result<OptimizeReport, SolverError> {
         let has_free = self.bands.iter().any(|b| b.optimize_fc || b.optimize_q || b.optimize_gain);
         if !has_free {
-            return Ok(OptimizeReport { loss: self.loss() });
+            return Ok(self.report());
         }
 
         let mut params = self.init_params();
@@ -332,7 +389,7 @@ impl Solver {
 
         let outcome = opt.optimize(&mut params);
         let state = opt.recover_user_data();
-        let (best_params, best_loss) = (state.best_params, state.best_loss);
+        let best_params = state.best_params;
 
         match outcome {
             Ok(_) | Err(_) => {
@@ -340,7 +397,7 @@ impl Solver {
                 // once it's near the optimum), the best point observed during the whole
                 // run is what we keep — see the module doc's divergence note.
                 self.apply_params(&best_params);
-                Ok(OptimizeReport { loss: best_loss })
+                Ok(self.report())
             }
         }
     }
@@ -408,4 +465,24 @@ fn sum_vectors(vs: &[Vec<f64>], len: usize) -> Vec<f64> {
         }
     }
     total
+}
+
+/// `sqrt(x² + ε²) − ε`: |x| with a rounded corner at 0 (ε = 0.05 dB), so the cancellation
+/// penalty stays differentiable where a band's response crosses 0 dB — the central-difference
+/// gradient would otherwise see a kink there.
+fn smooth_abs(x: f64) -> f64 {
+    const EPS: f64 = 0.05;
+    (x * x + EPS * EPS).sqrt() - EPS
+}
+
+/// Per-bin `Σ_b smooth_abs(fr_b)` — the cancellation penalty's "how much each band does on its
+/// own", next to `sum_vectors`' "what they do together".
+fn sum_magnitudes(band_frs: &[Vec<f64>], n: usize) -> Vec<f64> {
+    let mut out = vec![0.0; n];
+    for fr in band_frs {
+        for (o, v) in out.iter_mut().zip(fr) {
+            *o += smooth_abs(*v);
+        }
+    }
+    out
 }

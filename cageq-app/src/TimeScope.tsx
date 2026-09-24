@@ -254,7 +254,7 @@ export function TimeScope() {
   // The active EQ cascade (for undistort) + the built, crossfading inverse cascade — identical
   // structure to Vectorscope's, independent instance (own running filter state, since this draws
   // its own trace from the same raw stream). `null` until the first EQ arrives.
-  const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0 });
+  const eqRef = useRef<ScopeEq>({ filters: [], preampDb: 0, model: "Rbj" }); // placeholder until the first `scope-eq` arrives
   const invRef = useRef<FadingInverse | null>(null);
 
   // Own the scope-stream + `scope-eq` subscriptions — independent of the vectorscope's, so either
@@ -448,8 +448,8 @@ export function TimeScope() {
         const rate = s!.rate && s!.rate > 0 ? s!.rate : 48000;
         if (p.undistort) {
           const iv = invRef.current;
-          if (iv === null || iv.filtersRef !== eq.filters || iv.rate !== rate) {
-            invRef.current = retargetFadingInverse(iv, eq.filters, eq.preampDb, rate);
+          if (iv === null || iv.filtersRef !== eq.filters || iv.model !== eq.model || iv.rate !== rate) {
+            invRef.current = retargetFadingInverse(iv, eq.filters, eq.preampDb, eq.model, rate);
           }
         } else {
           invRef.current = null; // dropped while off; turning back on starts a fresh cascade, no crossfade to a mode that wasn't running
