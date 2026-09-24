@@ -152,7 +152,11 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──biquad
   cookbook formulas are what the rest of the chain speaks. AutoEq fits its filter parameters (Fc,
   gain, Q) against their response, Equalizer APO turns those parameters back into coefficients
   with the same formulas, and so does nearly every phone or desktop EQ app an export lands in. So
-  RBJ stays the default (and the only design Equalizer APO can run). The cost is the bilinear
+  RBJ stays the default. It is also the only design Equalizer APO computes itself: its config does
+  accept raw biquad coefficients, but those are only valid at the sample rate they were designed
+  for, so a device rate change would run the wrong filter until a new set is written. CAGEq
+  therefore offers the corrected model only on its own engine, which designs coefficients at the
+  rate it is actually running. The cost is the bilinear
   transform's frequency warping: every shape gets squeezed toward Nyquist, so a 12 kHz, Q 1 bell
   at 48 kHz is ~2.3 dB off its analog shape at 19 kHz, and the same band sounds slightly different
   at 44.1, 48 and 96 kHz. With CAGEq's own engine, an opt-in warping-corrected model follows the
