@@ -29,11 +29,14 @@ $stage = Join-Path $repo 'cageq-app\src-tauri\apo'
 # `cargo rustc -p cageq-apo` / `-p cageq-apo-backend --bin cageq-apo-setup` calls. cageq-backend
 # is included because cageq-apo-backend depends on it directly (the Capabilities/EqBackend
 # trait), so a change there feeds the staged setup helper just as much as a change in either
-# crate's own src\.
+# crate's own src\. cageq-biquad likewise: cageq-apo designs its coefficients with it, so a
+# change there changes what the staged DLL computes.
 $watch = @(
     (Join-Path $repo 'cageq-apo\src'),
     (Join-Path $repo 'cageq-apo\shim'),
     (Join-Path $repo 'cageq-apo\Cargo.toml'),
+    (Join-Path $repo 'cageq-biquad\src'),
+    (Join-Path $repo 'cageq-biquad\Cargo.toml'),
     (Join-Path $repo 'cageq-apo-backend\src'),
     (Join-Path $repo 'cageq-apo-backend\Cargo.toml'),
     (Join-Path $repo 'cageq-backend\src'),
@@ -56,7 +59,7 @@ $sourceNewest = $watch |
     Select-Object -ExpandProperty Maximum
 
 if ($sourceNewest -and $sourceNewest -gt $stagedOldest) {
-    Write-Warning ("[apo-staleness] cageq-apo / cageq-apo-backend / cageq-backend source is " +
+    Write-Warning ("[apo-staleness] cageq-apo / cageq-biquad / cageq-apo-backend / cageq-backend source is " +
         "newer than the staged DLL/setup helper in src-tauri\apo -- run " +
         "cageq-app\scripts\build-apo.ps1 before shipping, or the in-app update check " +
         "(dll_current) will not notice the new build either, since it compares the stale " +

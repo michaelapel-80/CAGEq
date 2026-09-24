@@ -70,13 +70,16 @@ npm run tauri build -- --bundles nsis
 ```
 
 Step 2 will **refuse to run** (`beforeBuildCommand` → `scripts\check-apo-staleness.ps1 -Block`) if
-anything under `cageq-apo`, `cageq-apo-backend`, or `cageq-backend` is newer than what's staged in
+anything under `cageq-apo`, `cageq-biquad`, `cageq-apo-backend`, or `cageq-backend` is newer than what's staged in
 `src-tauri\apo\` — i.e. if step 1 was skipped, or those crates changed after the last time it ran.
 Re-run `build-apo.ps1` and try again. (`npm run tauri dev` runs the same check but only warns, so a
 frontend-only dev session isn't blocked by an unrelated stale APO build.)
 
 Building `cageq-peq-solver` needs CMake (for `nlopt-sys`'s vendored NLopt build) on top of the
 usual MSVC Rust prerequisites — see that crate's own doc if `cargo build` fails looking for it.
+The frontend build (`npm run dev`/`npm run build`, and so step 2) also compiles
+`cageq-biquad-wasm` to WebAssembly, which needs that target installed once:
+`rustup target add wasm32-unknown-unknown`.
 
 A Python 3.10 venv under `cageq-sidecar/.venv` (`autoeq`, `numpy`, `scipy`) is still useful for
 development — `cageq-core`'s `tests/*_vs_sidecar.rs` and `cageq-peq-solver`/`cageq-catalog`'s own

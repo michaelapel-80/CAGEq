@@ -35,8 +35,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The wasm target is for the frontend: `npm run build` (via beforeBuildCommand) first
+      # compiles cageq-biquad-wasm, the coefficient design the chart runs, to WebAssembly.
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry and build output
         uses: actions/cache@v6
