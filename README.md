@@ -239,3 +239,16 @@ their license texts.
   building a real UI for.
 * [Peace](https://sourceforge.net/projects/peace-equalizer-apo-extension/) — another Equalizer APO GUI,
   with a much deeper feature set than AQUA's, if a dated UI.
+* The warping-corrected filter model builds on:
+  * Mark Muranov, [*Analysis and Design of Digital Parametric Filters Without Frequency
+    Warping*](https://escholarship.org/uc/item/04z7p1h7) (MS thesis, UC San Diego, 2025), and its
+    reference implementation [CustomParametricFilters](https://github.com/Speechrezz/CustomParametricFilters),
+    which CAGEq's version was checked against. This is the peaking and band-pass design.
+  * Sophocles J. Orfanidis, *Digital Parametric Equalizer Design with Prescribed Nyquist-Frequency
+    Gain* (J. Audio Eng. Soc. 45, 1997), which the thesis builds on.
+  * Martin Vicanek, [*Matched Two-Pole Digital Shelving
+    Filters*](https://www.vicanek.de/articles/2poleShelvingFits.pdf) (2024, rev. 2025),
+    generalised in CAGEq from Butterworth to any Q for the shelves.
+  * Yuriy Ivantsov, [*On the Ideal Bilinear and Biquadratic Digital
+    Filter*](https://ivantsovy.com/research/paper1.pdf) (2025, rev. 2026), the shelf design
+    CAGEq blends to where Vicanek's cannot be realised.
