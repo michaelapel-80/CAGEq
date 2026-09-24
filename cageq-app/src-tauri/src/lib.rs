@@ -5,7 +5,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use cageq_core::{
-    Applied, AudioDevice, BackendError, CalcRequest, Capabilities, Core, CurvePoint, ResponseModel,
+    Applied, AudioDevice, BackendError, CalcRequest, Capabilities, Core, CurvePoint, ResponseModel, SlotFit,
     DEFAULT_BASE_PREGAIN_DB, DEFAULT_ISP_HEADROOM_DB, DeviceConfig, EqApoBackend, EqBackend,
     Filter, LoudnessSettings, Slot, StartupDecision,
     detect_eqapo_config_dir, list_render_devices,
@@ -398,6 +398,25 @@ fn activate_slot(slot: Slot, state: State<Backend>) -> Result<ApplyResult, Strin
             let applied = core.activate_slot(slot).map_err(|e| e.to_string())?;
             Ok(apply_result(applied, eq))
         }
+    }
+}
+
+/// What slots A and B hold right now (`null` for an empty one), without writing anything — so
+/// the frontend can refresh its launch cache (§3.5) after the core re-fitted *every* slot on
+/// its own (a model change or backend swap), when a write only reported the active one.
+#[derive(serde::Serialize)]
+struct SlotFits {
+    #[serde(rename = "A")]
+    a: Option<SlotFit>,
+    #[serde(rename = "B")]
+    b: Option<SlotFit>,
+}
+
+#[tauri::command]
+fn slot_fits(state: State<Backend>) -> Result<SlotFits, String> {
+    match state.inner() {
+        Backend::Failed(e) => Err(e.clone()),
+        Backend::Ready { core, .. } => Ok(SlotFits { a: core.slot_fit(Slot::A), b: core.slot_fit(Slot::B) }),
     }
 }
 
@@ -1659,6 +1678,7 @@ pub fn run() {
             set_loudness,
             get_response_model,
             set_response_model,
+            slot_fits,
             preview_loudness,
             get_confirm_final_volume,
             set_confirm_final_volume,

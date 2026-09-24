@@ -111,6 +111,19 @@ pub struct Applied {
     pub model: ResponseModel,
 }
 
+/// A slot's cached fit as [`Core::slot_fit`] reports it — exactly what [`Core::seed_slot`] takes
+/// back at the next launch.
+#[derive(Debug, Clone, Serialize)]
+pub struct SlotFit {
+    pub device: String,
+    pub filters: Vec<Filter>,
+    pub g_target_db: f64,
+    pub g_max_peak_db: f64,
+    pub reference_curve: Vec<CurvePoint>,
+    /// The model `filters` were fitted for — the effective one, once [`refresh_slots`] has run.
+    pub model: ResponseModel,
+}
+
 /// filter.md §4.0 default base pre-gain (user headroom), in dB. A conservative,
 /// always-applied reserve so the §4.1 loudness match stays the binding term for
 /// typical curves and the §4.2 ceiling only trips on genuinely extreme ones.
@@ -719,6 +732,26 @@ impl Core {
         };
         let base = self.inner.loudness.lock().unwrap().base_pregain_db;
         write_effective(&self.inner, effective, base, false)
+    }
+
+    /// What slot A or B holds right now, without writing anything (`None` for an empty slot and
+    /// for Dry). For the app's launch cache (§3.5): the core re-fits *every* slot on its own when
+    /// the effective model changes ([`Core::update_response_model`], or a backend swap followed
+    /// by any write), and a write only reports the active one — so the app reads the others back
+    /// here rather than persisting fits made for a model no longer in effect.
+    pub fn slot_fit(&self, slot: Slot) -> Option<SlotFit> {
+        if slot == Slot::Dry {
+            return None;
+        }
+        let mut store = self.inner.slots.lock().unwrap();
+        store.slot_mut(slot).as_ref().map(|r| SlotFit {
+            device: r.device.clone(),
+            filters: r.filters.clone(),
+            g_target_db: r.g_target_db,
+            g_max_peak_db: r.g_max_peak_db,
+            reference_curve: r.reference_curve.clone(),
+            model: r.model,
+        })
     }
 
     /// The currently active slot.

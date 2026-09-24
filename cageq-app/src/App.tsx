@@ -1113,27 +1113,29 @@ function App() {
       const update = await invoke<ResponseModelUpdate>("set_response_model", { model: matched ? "AnalogMatched" : "Rbj" });
       setModelState(update.state);
       if (update.applied) {
-        const applied = update.applied;
-        setResult(applied);
-        if (activeSlot === "A" || activeSlot === "B") {
-          setSlotFits((prev) => ({
-            ...prev,
-            [activeSlot]: {
-              device: applied.device,
-              filters: applied.filters,
-              g_target_db: applied.g_target_db,
-              g_max_peak_db: applied.g_max_peak_db,
-              reference_curve: applied.reference_curve,
-              model: applied.model,
-            },
-          }));
-        }
+        setResult(update.applied);
+        await syncSlotFits();
       }
     } catch (e) {
       setError(String(e));
     } finally {
       setModelBusy(false);
     }
+  }
+
+  // Pull both slots' fits back from the core into the launch cache (§3.5). A model change (toggle
+  // or backend swap) re-fits *every* slot in the core, but a write reports only the active one —
+  // so without this the other slot would be persisted with the previous model's bands, and
+  // restored as those bands realised in the new model (a fit restored from cache is never
+  // re-fitted until edited). A soloed active slot keeps its entry, as in writeFit: the core then
+  // holds the soloed view, which must not leak into the persisted slot.
+  async function syncSlotFits() {
+    const fits = await invoke<Record<"A" | "B", PersistedFit | null>>("slot_fits");
+    const soloing = soloRef.current != null;
+    setSlotFits((prev) => ({
+      A: (soloing && activeSlot === "A") || !fits.A ? prev.A : fits.A,
+      B: (soloing && activeSlot === "B") || !fits.B ? prev.B : fits.B,
+    }));
   }
 
   async function toggleConfirmFinalVolume(enabled: boolean) {
@@ -2134,7 +2136,10 @@ function App() {
     if (!result || !modelState || modelBusy || isolateAudition || result.model === modelState.effective) return;
     // `activate_slot` on the slot already active is a pure rewrite that returns the current state.
     invoke<ApplyResult>("activate_slot", { slot: activeSlot })
-      .then(setResult)
+      .then((applied) => {
+        setResult(applied);
+        return syncSlotFits(); // the swap re-fitted both slots, not just this one
+      })
       .catch((e) => setError(String(e)));
     // Only a change of the effective model is a reason to refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps

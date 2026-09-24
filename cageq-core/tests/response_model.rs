@@ -119,6 +119,25 @@ fn analog_matched_refits_and_reaches_the_backend() {
     assert_eq!(back.g_target_db, rbj.g_target_db);
 }
 
+/// The *inactive* slot is re-fitted by a model change too, and [`Core::slot_fit`] reports it —
+/// what the app persists for the next launch, so it must not keep the previous model's fit.
+#[test]
+fn slot_fit_reports_the_inactive_slot_refitted_for_a_model_change() {
+    let (core, _backend) = start(true);
+    let b_rbj = core.apply_to_slot(Slot::B, request()).unwrap();
+    core.apply_to_slot(Slot::A, request()).unwrap(); // A active, B inactive
+    assert_eq!(core.slot_fit(Slot::B).unwrap().model, ResponseModel::Rbj);
+
+    core.update_response_model(ResponseModel::AnalogMatched).unwrap().unwrap();
+    let b = core.slot_fit(Slot::B).expect("B holds a fit");
+    assert_eq!(b.model, ResponseModel::AnalogMatched);
+    assert!(
+        b.filters.iter().zip(&b_rbj.filters).any(|(m, r)| (m.gain_db - r.gain_db).abs() > 1e-6 || (m.freq_hz - r.freq_hz).abs() > 1e-6),
+        "the inactive slot's bands must be the matched fit, not the RBJ one"
+    );
+    assert!(core.slot_fit(Slot::Dry).is_none());
+}
+
 /// A backend without the capability (Equalizer APO) never gets the matched model, whatever
 /// the preference says — the preference is remembered, the effective model is RBJ.
 #[test]
