@@ -61,6 +61,13 @@ output, since that's what actually needs measuring for safety.
 The scopes share a CRT-phosphor-style persistence/bloom renderer — a trailing glow that decays at
 a real, tunable rate, closer to a real analog scope's look than a plain clear-and-redraw.
 
+* **Smooth on high-refresh displays.** New data arrives every ~16 ms, with a fresh spectrum every
+  ~43 ms, but the renderer runs at the display's own refresh rate. Each frame
+  advances the phosphor decay by the real time elapsed, and the spectrum traces glide toward each
+  new reading with a short time constant instead of jumping to it, so nothing sits still between
+  updates. The renderer is optimized to hold a consistent frame time of 4.2 ms or less (one frame
+  at 240 Hz), including keeping garbage-collection pauses from dropping frames.
+
 ![The oscilloscope (with trigger/mix controls) and stereo vectorscope side by side, both rendered
 with the CRT-phosphor persistence trail.](docs/Scope.png)
 
@@ -74,8 +81,10 @@ A few things about the spectrum analyzer specifically:
   steps) rather than in the usual power-of-two jumps — every window is zero-padded into the same
   fixed-size FFT, so an arbitrary length costs nothing extra.
 * **Interpolated on top of that**, both in frequency (zero-padding resolves the same window's
-  transform more finely, not adding fake information) and between successive updates on the
-  frontend, so the display reads as continuous motion rather than a stepped, sample-and-hold look.
+  transform more finely, not adding fake information, and the trace is a smooth spline through
+  the bins) and over time (between updates the trace glides toward each new reading with a
+  ~30 ms time constant), so the display reads as continuous motion rather than a stepped,
+  sample-and-hold look.
 * **Still readable on fast-moving signals**, since the CRT-phosphor persistence above integrates
   rapid change into a legible trail instead of flickering into noise.
 * **A "Distribution" render-tuning preset for a denser read than a single trace** — a much longer
