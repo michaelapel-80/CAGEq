@@ -382,8 +382,8 @@
     "band10": "10-band",
     "band31": "31-band",
     "fixedBandHint": "AutoEq's own standard preset: fixed frequencies and bandwidth. A correction with detail narrower than that can show ripple here — for a tighter, low-ripple export, use Parametric instead.",
-    "bandModel": "Analog-matched app",
-    "bandModelHint": "Leave off for nearly every EQ app: they design standard (RBJ) filters, and the export is fitted so those reproduce what you hear here. Turn on only if your app uses warping-corrected (analog-matched) filters.",
+    "bandModel": "Warping-corrected app",
+    "bandModelHint": "Leave off for nearly every EQ app: they design standard (RBJ) filters, and the export is fitted so those reproduce what you hear here. Turn on only if your app uses warping-corrected (matched) filters.",
     "fitCurve": "Exported fit",
     "fullCurve": "Full correction",
     "fitError": "Fit error — RMS {{rms}} dB · Max {{max}} dB",
@@ -458,8 +458,8 @@
   },
 
   "model": {
-    "toggle": "Warping-corrected filters (analog-matched)",
-    "desc": "Filters keep their analog shape up to 20 kHz instead of being squeezed toward Nyquist by the standard (RBJ) design, and sound the same at 44.1, 48 or 96 kHz. Mostly audible on treble bands; the AutoEq fit is redone for it. Resonant shelves (Q above ~1) stay RBJ, where it is the more accurate design.",
+    "toggle": "Warping-corrected filters",
+    "desc": "Each band keeps the shape its Fc, gain and Q describe up to 20 kHz instead of being squeezed toward Nyquist by the standard (RBJ) design, and comes out the same at 44.1, 48 or 96 kHz. A matter of accuracy, not of sound character. Mostly audible on treble bands; the AutoEq fit is redone for it. Resonant shelves (Q above ~1) stay RBJ, where it is the more accurate design.",
     "unavailable": "Needs CAGEq's own audio engine — Equalizer APO designs its own (RBJ) filters.",
     "inactive": "Switched on, but inactive: Equalizer APO is the active engine and designs its own (RBJ) filters. It takes effect with CAGEq's own engine.",
     "refitting": "re-fitting…"

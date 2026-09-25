@@ -382,8 +382,8 @@
     "band10": "10-Band",
     "band31": "31-Band",
     "fixedBandHint": "AutoEqs eigenes Standard-Preset: feste Frequenzen und Bandbreite. Eine Korrektur mit feineren Details als das kann hier Welligkeit zeigen – für einen präziseren, welligkeitsarmen Export stattdessen Parametrisch verwenden.",
-    "bandModel": "Analog-angepasste App",
-    "bandModelHint": "Für fast jede EQ-App aus lassen: Sie berechnen Standardfilter (RBJ), und der Export wird so angepasst, dass diese wiedergeben, was du hier hörst. Nur einschalten, wenn deine App verzerrungskorrigierte (analog-angepasste) Filter nutzt.",
+    "bandModel": "Warping-korrigierte App",
+    "bandModelHint": "Für fast jede EQ-App aus lassen: Sie berechnen Standardfilter (RBJ), und der Export wird so angepasst, dass diese wiedergeben, was du hier hörst. Nur einschalten, wenn deine App Warping-korrigierte (matched) Filter nutzt.",
     "fitCurve": "Exportierte Anpassung",
     "fullCurve": "Volle Korrektur",
     "fitError": "Anpassungsfehler — RMS {{rms}} dB · Max {{max}} dB",
@@ -458,8 +458,8 @@
   },
 
   "model": {
-    "toggle": "Verzerrungskorrigierte Filter (analog-angepasst)",
-    "desc": "Filter behalten ihre analoge Form bis 20 kHz, statt vom Standardentwurf (RBJ) Richtung Nyquist gestaucht zu werden, und klingen bei 44,1, 48 und 96 kHz gleich. Vor allem bei Höhenbändern hörbar; der AutoEq-Fit wird dafür neu berechnet. Resonante Shelves (Q über ~1) bleiben RBJ, dort ist es der genauere Entwurf.",
+    "toggle": "Warping-korrigierte Filter",
+    "desc": "Jedes Band behält bis 20 kHz die Form, die Fc, Gain und Q beschreiben, statt vom Standardentwurf (RBJ) Richtung Nyquist gestaucht zu werden, und verhält sich bei 44,1, 48 und 96 kHz gleich. Eine Frage der Genauigkeit, nicht des Klangcharakters. Vor allem bei Höhenbändern hörbar; der AutoEq-Fit wird dafür neu berechnet. Resonante Shelves (Q über ~1) bleiben RBJ, dort ist es der genauere Entwurf.",
     "unavailable": "Benötigt CAGEqs eigene Audio-Engine — Equalizer APO berechnet seine eigenen (RBJ-)Filter.",
     "inactive": "Eingeschaltet, aber inaktiv: Equalizer APO ist die aktive Engine und berechnet seine eigenen (RBJ-)Filter. Wirkt mit CAGEqs eigener Engine.",
     "refitting": "Neuberechnung…"
