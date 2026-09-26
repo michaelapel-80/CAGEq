@@ -1,15 +1,9 @@
-Warping-corrected (analog-matched) filters.
+A steadier oscilloscope trigger.
 
-- **New:** an optional warping-corrected filter design, next to the loudness controls. Filters
-  keep their analog shape up to 20 kHz instead of being squeezed toward Nyquist by the standard
-  (RBJ) design, and sound the same at 44.1, 48 or 96 kHz. It is mostly audible on treble bands,
-  and turning it on redoes the AutoEq fit for the new design. It needs CAGEq's own audio engine,
-  because Equalizer APO always designs standard filters.
-- **New:** the chart, the scopes and the export preview now use the same filter code as the
-  audio engine (compiled to WebAssembly), so what you see can't drift from what you hear.
-- **New:** export has an "App uses analog-matched filters" option. Leave it off for nearly every
-  EQ app. The export is fitted so standard filters reproduce what you hear in CAGEq.
-- **Engine update:** CAGEq's own audio engine has a new version that reads the new configuration
-  format. The app flags it after updating: Continue refreshes it, with a brief machine-wide
-  audio interruption.
-- **Fixed:** the third-party license file was out of date and now credits NLopt (LGPL-2.1).
+- **Improved:** the oscilloscope's trigger now locks exactly onto the waveform's zero crossing at
+  every pitch. Before, its filter delayed the trigger by a pitch-dependent 2-10 ms, so the
+  waveform sat off the trigger point and slid sideways as notes changed. The trigger filter
+  now defaults to 120 Hz, which follows more bass lines, and goes down to 20 Hz. Saved
+  oscilloscope settings keep their old cutoff until you reset them.
+- **Changed:** the warping-corrected filter option no longer says "analog-matched" in the app,
+  which read like an analog sound. It's about accuracy, not sound character.
