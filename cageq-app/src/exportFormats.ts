@@ -5,7 +5,7 @@
  * - **Parametric** (`fit_export_eq`, a backend solve): a Peaking/LowShelf/HighShelf `Band[]` in
  *   the EqualizerAPO/AutoEq parametric syntax — a port of AutoEq's `write_eqapo_parametric_eq`.
  * - **Graphic EQ**, no solver — the slot's own composed curve, sampled:
- *   - the dense `GraphicEQ:` curve (AutoEq's 127-point format), exact by construction;
+ *   - the dense `GraphicEQ:` curve (AutoEq's 127-point format): the curve's own magnitude;
  *   - slider values for a 10-/31-band graphic EQ: the curve's average over each band.
  *
  * The graphic presets used to be a second solve, as AutoEq does it: each slider modelled as a
@@ -15,8 +15,13 @@
  * with no overlap; Poweramp imports a `GraphicEQ` curve by averaging it into its sliders;
  * Android's stock equalizer is 5 bands at Q 0.96; Equalizer APO's `GraphicEQ` interpolates its
  * points. Gains compensating for an overlap those apps don't have are wrong in them, so the
- * export samples the curve instead — exact for the dense format, and the per-band average is
- * what flat-band and averaging apps do with a curve themselves.
+ * export samples the curve instead — the dense format carries the magnitude as is, and the
+ * per-band average is what flat-band and averaging apps do with a curve themselves.
+ *
+ * Phase is the receiving app's: these formats carry magnitude only. Equalizer APO's GraphicEQ
+ * builds a minimum-phase FIR from it (cepstrum, 16384 taps), which for CAGEq's own minimum-phase
+ * cascade recovers essentially the same phase; Wavelet's zero-phase FFT bands pre-ring within a
+ * block, whatever it is fed. An impulse-response export would carry the phase too.
  */
 import { Band, composedCurveDb, type ResponseModel } from "./biquad";
 
