@@ -290,7 +290,9 @@ export const SPEC_FFT_MIN = 8192;
 export const SPEC_FFT_MAX = 32768;
 export const SPEC_FFT_STEP = 256;
 /** Window size for a fresh install (nothing stored yet): 240 ms at 48 kHz, on the step grid. A bit
- *  above the minimum for finer frequency resolution — the update rate doesn't depend on it. */
+ *  above the minimum to calm the spectrum down — each update averages over a longer stretch of
+ *  audio, at the same update rate. Not for resolution: zero-padding already resolves the minimum
+ *  window finely enough for music, which rarely has closely spaced low fundamentals. */
 export const SPEC_FFT_DEFAULT = 11520;
 /** Clamp + snap a window size to the slider's grid — the same rule as the backend's
  *  `snap_fft_size`, so a stored/unset/garbage value always lands on a size the backend would

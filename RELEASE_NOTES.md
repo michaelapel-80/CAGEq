@@ -10,5 +10,5 @@ A more faithful mobile export.
   level, and can place bands up to 16 kHz. A hand-placed treble band, like a notch at 12-15 kHz,
   now comes through the export intact.
 - **Changed:** on a fresh install the spectrum analyzer starts with a slightly longer window
-  (240 ms) for finer frequency resolution. Existing settings are kept.
+  (240 ms), for a calmer, steadier display at the same update rate. Existing settings are kept.
 - **Fixed:** the arrow keys on a band's frequency got stuck between 20 and 25 Hz.
