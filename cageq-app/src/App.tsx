@@ -7,7 +7,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
 import { Band, composedCurveDb, logGrid, type ResponseModel } from "./biquad";
-import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_MIN, snapFftSize } from "./EqChart";
+import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_DEFAULT, SPEC_FFT_MIN, snapFftSize } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import { ScrubNumber } from "./ScrubNumber";
@@ -587,17 +587,23 @@ function App() {
   // `Spectrum::reconfigure`'s own doc for why a window-size change never needs to reopen the WASAPI
   // session), the same way harmonic folding already toggled live. Each fires its own Tauri
   // command directly from the setter's effect below, independent of Meter's start/stop lifecycle.
-  const [specFftSize, setSpecFftSize] = useState<number>(() => snapFftSize(Number(localStorage.getItem("cageq-spec-fft-size"))));
+  const [specFftSize, setSpecFftSize] = useState<number>(() => {
+    const stored = localStorage.getItem("cageq-spec-fft-size");
+    return stored === null ? SPEC_FFT_DEFAULT : snapFftSize(Number(stored));
+  });
   useEffect(() => {
     localStorage.setItem("cageq-spec-fft-size", String(specFftSize));
     invoke("set_spectrum_fft_size", { fftSize: specFftSize }).catch(() => {});
   }, [specFftSize]);
   // "Hi-res peaks" is its own switch now. Before it existed, the backend implied it for any window
-  // longer than the default — so with no stored choice yet, carry that over rather than silently
-  // changing how peaks behave for someone who'd picked a long window.
+  // longer than the minimum — so with no stored choice yet, carry that over rather than silently
+  // changing how peaks behave for someone who'd picked a long window. A fresh install (no stored
+  // window either) starts with it off, even though its default window is above the minimum.
   const [specHiResPeaks, setSpecHiResPeaks] = useState<boolean>(() => {
     const stored = localStorage.getItem("cageq-spec-hires");
-    return stored === null ? snapFftSize(Number(localStorage.getItem("cageq-spec-fft-size"))) > SPEC_FFT_MIN : stored === "1";
+    if (stored !== null) return stored === "1";
+    const storedWindow = localStorage.getItem("cageq-spec-fft-size");
+    return storedWindow !== null && snapFftSize(Number(storedWindow)) > SPEC_FFT_MIN;
   });
   useEffect(() => {
     localStorage.setItem("cageq-spec-hires", specHiResPeaks ? "1" : "0");

@@ -286,6 +286,9 @@ const CURSOR_LINE_COLOR = "rgba(230,240,255,0.55)";
 export const SPEC_FFT_MIN = 8192;
 export const SPEC_FFT_MAX = 32768;
 export const SPEC_FFT_STEP = 256;
+/** Window size for a fresh install (nothing stored yet): 240 ms at 48 kHz, on the step grid. A bit
+ *  above the minimum for finer frequency resolution — the update rate doesn't depend on it. */
+export const SPEC_FFT_DEFAULT = 11520;
 /** Clamp + snap a window size to the slider's grid — the same rule as the backend's
  *  `snap_fft_size`, so a stored/unset/garbage value always lands on a size the backend would
  *  accept unchanged. (`Math.round` and the backend's `(x + step/2) / step` agree on ties.) */
