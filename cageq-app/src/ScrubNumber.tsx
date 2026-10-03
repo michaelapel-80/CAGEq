@@ -108,7 +108,11 @@ export function ScrubNumber({
 
   const step = (dir: 1 | -1) => {
     const next = mode === "mult" ? value * arrowStep ** dir : value + arrowStep * dir;
-    const r = roundClamp(next);
+    let r = roundClamp(next);
+    // A multiplicative step can be smaller than the display precision near the bottom of the
+    // range (Fc: 2% of 24 Hz is under half a hertz, so it rounds straight back), which left the
+    // arrows stuck there; move at least one unit of the shown precision instead.
+    if (r === value) r = roundClamp(value + dir * 10 ** -decimals);
     onInput(r);
     if (editing) setText(editText(r));
   };
