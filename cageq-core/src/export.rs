@@ -3,12 +3,13 @@
 //! slot's own composed curve (`filters`, the same `Band[]` `Applied::filters` already
 //! carries), not to a headphone measurement the way `fit.rs`'s main path does.
 //!
-//! Both reuse [`cageq_peq_solver::Solver`] wholesale — the only thing that differs from
-//! the main fit is what curve gets fitted (a slot's own cascade via [`filter_curve_db`]
-//! rather than a measurement's error curve) and what the band set looks like
-//! (free-band-count for export, one of AutoEq's own fixed 10-/31-band graphic-EQ
-//! presets for the other). Neither needs `equalize()` at all: the target *is* the
-//! curve, with no peak/dip-detection or slope-limiting step in between.
+//! Both reuse [`cageq_peq_solver::Solver`] wholesale — what differs from the main fit is
+//! what curve gets fitted (a slot's own cascade via [`filter_curve_db`] rather than a
+//! measurement's error curve), what the band set looks like (free-band-count for export,
+//! one of AutoEq's own fixed 10-/31-band graphic-EQ presets for the other), and that both
+//! drop AutoEq's treble rule, which only protects against measurement noise (see
+//! [`EXPORT_MAX_FC`]). Neither needs `equalize()` at all: the target *is* the curve, with
+//! no peak/dip-detection or slope-limiting step in between.
 //!
 //! `sidecar_dsp.py`'s `_optimize_peq_filters` (which both `optimize_parametric_eq` and
 //! `optimize_fixed_band_eq` funnel through) actually re-grids onto
@@ -29,6 +30,16 @@ const FS: f64 = 48_000.0;
 /// `_FIXED_BAND_GAIN_RANGE_DB` (`sidecar_dsp.py:629`) — see its own doc for why an
 /// unconstrained fixed-band fit measurably overshoots/ripples.
 const FIXED_BAND_GAIN_RANGE_DB: f64 = 4.0;
+/// Highest centre frequency an exported peaking band may take — above AutoEq's 10 kHz cap.
+///
+/// Both export fits drop AutoEq's treble rule (match only the mean above 10 kHz, no band above
+/// it): that rule exists because a *measurement* is unreliable up there, but the export's target
+/// is the slot's own composed filter curve, exact, with nothing to overcompensate. Measured with
+/// `examples/export_sweep.rs` (real + synthetic headphone fits, 6-16 bands): the full-range loss
+/// alone cuts the error above 10 kHz 3-15x with no cost below it, and the raised ceiling is what
+/// a hand-placed treble band needs — a 6 dB notch at 12 or 15 kHz came out ~4.4 dB off at worst,
+/// ~0.2-0.6 dB with it. 14 kHz still missed a 15 kHz notch; 18 kHz made the top end worse.
+const EXPORT_MAX_FC: f64 = 16_000.0;
 const CACHE_MAX: usize = 32;
 
 fn filters_key(filters: &[Filter]) -> Vec<(u8, i64, i64, i64)> {
@@ -124,9 +135,13 @@ pub(crate) fn fit_export_eq(
 
     let f = standard_grid();
     let target = filter_curve_db_in(filters, &f, model);
-    let bands = cageq_peq_solver::cageq_default_bands_in((band_count - 2) as usize, crate::biquad_model(band_model));
+    let mut bands = cageq_peq_solver::cageq_default_bands_in((band_count - 2) as usize, crate::biquad_model(band_model));
+    for band in bands.iter_mut().filter(|b| b.kind == BandKind::Peaking) {
+        band.max_fc = EXPORT_MAX_FC;
+    }
 
     let mut solver = Solver::new(f, FS, bands, target);
+    solver.tail_mean = false; // see EXPORT_MAX_FC
     solver.optimize()?;
     let out_filters = cageq_peq_solver::bands_to_filters(&solver.bands);
     let preamp = preamp_db(&solver.fr());
@@ -186,6 +201,7 @@ pub(crate) fn fit_fixed_band_eq(
     }
 
     let mut solver = Solver::new(f, FS, bands, target);
+    solver.tail_mean = false; // see EXPORT_MAX_FC
     solver.optimize()?;
     let out_filters = cageq_peq_solver::bands_to_filters(&solver.bands);
     let preamp = preamp_db(&solver.fr());

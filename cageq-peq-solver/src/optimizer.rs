@@ -83,6 +83,10 @@ pub struct Solver {
     ix_10k: usize,
     /// Weight of the cancellation penalty — see [`Solver::cancellation_penalty`].
     pub cancellation_weight: f64,
+    /// AutoEq's treble rule: above 10 kHz the fit error compares only the *mean* of target and
+    /// response, since a measurement is unreliable up there. On by default (the main fit);
+    /// `false` takes the error over the full range, for a target that is an exact curve.
+    pub tail_mean: bool,
 }
 
 impl Solver {
@@ -93,7 +97,7 @@ impl Solver {
         let max_f_ix = argmin_abs(&f, 20_000.0);
         let ix_10k = argmin_abs(&f, 10_000.0);
         Solver {
-            cancellation_weight: CANCELLATION_WEIGHT, f, fs, bands, target, min_f_ix, max_f_ix, ix_10k }
+            cancellation_weight: CANCELLATION_WEIGHT, tail_mean: true, f, fs, bands, target, min_f_ix, max_f_ix, ix_10k }
     }
 
     /// `PEQ.fr` (peq.py:537-540): the cascade response, bands summed in dB.
@@ -231,10 +235,12 @@ impl Solver {
     fn mse_component(&self, cascade: &[f64]) -> f64 {
         let mut fr = cascade.to_vec();
         let mut target = self.target.clone();
-        let tail_t = mean(&target[self.ix_10k..]);
-        let tail_f = mean(&fr[self.ix_10k..]);
-        target[self.ix_10k..].iter_mut().for_each(|v| *v = tail_t);
-        fr[self.ix_10k..].iter_mut().for_each(|v| *v = tail_f);
+        if self.tail_mean {
+            let tail_t = mean(&target[self.ix_10k..]);
+            let tail_f = mean(&fr[self.ix_10k..]);
+            target[self.ix_10k..].iter_mut().for_each(|v| *v = tail_t);
+            fr[self.ix_10k..].iter_mut().for_each(|v| *v = tail_f);
+        }
         mean_sq_diff(&target[self.min_f_ix..self.max_f_ix], &fr[self.min_f_ix..self.max_f_ix])
     }
 

@@ -3,6 +3,10 @@
 //! reference implementations — see `export.rs`'s module doc). The reference side
 //! spawns a `cageq_sidecar::Sidecar` directly (no `Core`/watchdog involved). Needs the
 //! AutoEq venv; soft-skips without it, like `rust_vs_sidecar.rs`.
+//!
+//! The Rust export deliberately drops AutoEq's treble rule (see `export.rs`'s
+//! `EXPORT_MAX_FC`), so this checks the two stay close, not identical: 0.1-0.4 dB curve
+//! RMSE at the time of that change, well inside the tolerances below.
 
 use std::path::PathBuf;
 use std::sync::Arc;
