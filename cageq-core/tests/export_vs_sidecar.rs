@@ -1,6 +1,5 @@
-//! Old-vs-new comparison for `Core::fit_export_eq`/`fit_fixed_band_eq` against the
-//! sidecar's `fit_export_eq`/`fit_fixed_band_eq` (kept working in `sidecar_dsp.py` as
-//! reference implementations — see `export.rs`'s module doc). The reference side
+//! Old-vs-new comparison for `Core::fit_export_eq` against the sidecar's `fit_export_eq`
+//! (kept working in `sidecar_dsp.py` as a reference implementation — see `export.rs`'s module doc). The reference side
 //! spawns a `cageq_sidecar::Sidecar` directly (no `Core`/watchdog involved). Needs the
 //! AutoEq venv; soft-skips without it, like `rust_vs_sidecar.rs`.
 //!
@@ -82,37 +81,6 @@ fn rust_export_eq_matches_the_reference_sidecar() {
 
     assert!(curve_rmse < 1.5, "export_eq curves diverge by {curve_rmse:.4} dB RMSE");
     assert!((old_preamp - new_preamp).abs() < 1.0, "export_eq preamp diverges: old {old_preamp:.4} new {new_preamp:.4}");
-
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-#[test]
-fn rust_fixed_band_eq_matches_the_reference_sidecar_for_both_presets() {
-    let Some((mut sidecar, core, tmp)) = rig() else {
-        eprintln!("skipping fixed-band-vs-sidecar check: no .venv (run the AutoEq setup to enable)");
-        return;
-    };
-    let filters = sample_filters();
-
-    for preset in ["10", "31"] {
-        let old_reply = sidecar
-            .call("fit_fixed_band_eq", json!({"filters": filters, "preset": preset}))
-            .unwrap_or_else(|e| panic!("fit_fixed_band_eq preset {preset}: {e}"));
-        let old_filters: Vec<Filter> = serde_json::from_value(old_reply["filters"].clone()).expect("old filters");
-        let old_preamp = old_reply["preamp_db"].as_f64().expect("old preamp_db");
-
-        let (new_filters, new_preamp) = core.fit_fixed_band_eq(&filters, preset, ResponseModel::Rbj).unwrap_or_else(|e| panic!("rust fit_fixed_band_eq preset {preset}: {e}"));
-        assert_eq!(new_filters.len(), old_filters.len(), "preset {preset}: band count mismatch");
-
-        let grid = cageq_peq_solver::grid::standard_grid();
-        let old_curve = filter_curve_db(&old_filters, &grid);
-        let new_curve = filter_curve_db(&new_filters, &grid);
-        let curve_rmse = rmse(&old_curve, &new_curve);
-        eprintln!("fixed_band[{preset}]: preamp old {old_preamp:.4} new {new_preamp:.4}  curve RMSE {curve_rmse:.4} dB");
-
-        assert!(curve_rmse < 1.5, "preset {preset}: curves diverge by {curve_rmse:.4} dB RMSE");
-        assert!((old_preamp - new_preamp).abs() < 1.0, "preset {preset}: preamp diverges: old {old_preamp:.4} new {new_preamp:.4}");
-    }
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

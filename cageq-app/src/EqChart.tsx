@@ -62,6 +62,9 @@ export type RefCurve = {
   color: string;
   label: string;
   defaultHidden?: boolean;
+  /** Draw as a solid curve, like a band series, instead of thin dotted context — for a curve that
+   *  is itself the subject (the export dialog's graphic-EQ preview, which has points, not bands). */
+  solid?: boolean;
 };
 
 /** The filter chain's phase response, drawn on a **secondary right axis** (degrees) — a
@@ -626,7 +629,7 @@ export function EqChart({
   type LegendStyle = "solid" | "dashed" | "dotted" | "diamond";
   const legend: { id: string; color: string; label: string; style: LegendStyle }[] = [
     ...series.map((s) => ({ id: s.id, color: s.color, label: s.label, style: (s.muted ? "dashed" : "solid") as LegendStyle })),
-    ...refs.map((rc) => ({ id: rc.id, color: rc.color, label: rc.label, style: "dotted" as LegendStyle })),
+    ...refs.map((rc) => ({ id: rc.id, color: rc.color, label: rc.label, style: (rc.solid ? "solid" : "dotted") as LegendStyle })),
     ...(phase ? [{ id: phase.id, color: phase.color, label: phase.label, style: "dashed" as LegendStyle }] : []),
     ...markers.map((m) => ({ id: m.id, color: m.color, label: m.label, style: "diamond" as LegendStyle })),
   ];
@@ -1182,9 +1185,9 @@ export function EqChart({
             d={refPaths[i]}
             fill="none"
             stroke={rc.color}
-            strokeWidth={1.4}
-            strokeOpacity={0.7}
-            strokeDasharray="1 3"
+            strokeWidth={rc.solid ? 2 : 1.4}
+            strokeOpacity={rc.solid ? 1 : 0.7}
+            strokeDasharray={rc.solid ? undefined : "1 3"}
             strokeLinecap="round"
             strokeLinejoin="round"
           />

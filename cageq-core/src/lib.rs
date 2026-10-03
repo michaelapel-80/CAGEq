@@ -508,12 +508,9 @@ struct Inner {
     /// (the common interactive case) reuses the cached SLSQP result instead of paying
     /// its ~1-4 s cost again.
     fit_cache: Mutex<fit::FitCache>,
-    /// §8 mobile-export caches (`export.rs`) — independent of `fit_cache` (keyed on the
-    /// slot's own composed filters, not a measurement/target selection), one per
-    /// export mode so a band-count slider drag and a preset switch don't evict
-    /// each other's cache.
+    /// §8 mobile-export cache (`export.rs`) — independent of `fit_cache` (keyed on the
+    /// slot's own composed filters, not a measurement/target selection).
     export_cache: Mutex<export::ExportCache>,
-    fixed_band_cache: Mutex<export::FixedBandCache>,
 }
 
 /// The orchestrator handle.
@@ -546,7 +543,6 @@ impl Core {
             morph_gen: AtomicU32::new(0),
             fit_cache: Mutex::new(fit::FitCache::new()),
             export_cache: Mutex::new(export::ExportCache::new()),
-            fixed_band_cache: Mutex::new(export::FixedBandCache::new()),
         });
 
         Ok(Core { inner })
@@ -598,15 +594,6 @@ impl Core {
     /// model), whatever the export targets.
     pub fn fit_export_eq(&self, filters: &[Filter], band_count: u32, band_model: ResponseModel) -> Result<(Vec<Filter>, f64), CoreError> {
         export::fit_export_eq(&self.inner.export_cache, filters, band_count, effective_model(&self.inner), band_model)
-    }
-
-    /// §8 mobile export: AutoEq's own standard 10-/31-band graphic EQ (`preset`, any
-    /// value other than `"10"` is treated as `"31"`, matching `sidecar_dsp.py`'s own
-    /// fallback), fit the same way [`Core::fit_export_eq`] is but with fixed ISO center
-    /// frequencies/Q. Returns `(filters, preamp_db)`.
-    /// `band_model`: as for [`Core::fit_export_eq`].
-    pub fn fit_fixed_band_eq(&self, filters: &[Filter], preset: &str, band_model: ResponseModel) -> Result<(Vec<Filter>, f64), CoreError> {
-        export::fit_fixed_band_eq(&self.inner.fixed_band_cache, filters, preset, effective_model(&self.inner), band_model)
     }
 
     /// The AutoEq headphone measurement catalogue: `[{source, form_factor, name, path,

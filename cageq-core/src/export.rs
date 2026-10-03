@@ -1,18 +1,22 @@
-//! Replaces the sidecar's `fit_export_eq`/`fit_fixed_band_eq` RPCs (filter.md §8,
-//! mobile export) — a *second*, independent AutoEq PEQ pass that fits directly to a
+//! Replaces the sidecar's `fit_export_eq` RPC (filter.md §8, mobile export) — a
+//! *second*, independent AutoEq PEQ pass that fits directly to a
 //! slot's own composed curve (`filters`, the same `Band[]` `Applied::filters` already
 //! carries), not to a headphone measurement the way `fit.rs`'s main path does.
 //!
-//! Both reuse [`cageq_peq_solver::Solver`] wholesale — what differs from the main fit is
+//! It reuses [`cageq_peq_solver::Solver`] wholesale — what differs from the main fit is
 //! what curve gets fitted (a slot's own cascade via [`filter_curve_db`] rather than a
-//! measurement's error curve), what the band set looks like (free-band-count for export,
-//! one of AutoEq's own fixed 10-/31-band graphic-EQ presets for the other), and that both
-//! drop AutoEq's treble rule, which only protects against measurement noise (see
-//! [`EXPORT_MAX_FC`]). Neither needs `equalize()` at all: the target *is* the curve, with
-//! no peak/dip-detection or slope-limiting step in between.
+//! measurement's error curve), the free band count, and that it drops AutoEq's treble rule,
+//! which only protects against measurement noise (see [`EXPORT_MAX_FC`]). It doesn't need
+//! `equalize()` at all: the target *is* the curve, with no peak/dip-detection or
+//! slope-limiting step in between.
 //!
-//! `sidecar_dsp.py`'s `_optimize_peq_filters` (which both `optimize_parametric_eq` and
-//! `optimize_fixed_band_eq` funnel through) actually re-grids onto
+//! The graphic-EQ export used to be a second solver pass here too (AutoEq's 10-/31-band
+//! presets, gains fitted for an assumed constant-Q peaking filter per slider). It is now
+//! plain curve sampling in the frontend (`exportFormats.ts`): real graphic EQs don't share
+//! that filter model, so overlap-compensated gains were a guess at best.
+//!
+//! `sidecar_dsp.py`'s `_optimize_peq_filters` (which `optimize_parametric_eq` funnels
+//! through) actually re-grids onto
 //! `DEFAULT_BIQUAD_OPTIMIZATION_F_STEP` (`1.02`) for the SLSQP pass itself, rather than
 //! the standard grid's `1.01` — a difference this port doesn't reproduce, matching the
 //! same simplification already made (and empirically validated:
@@ -22,17 +26,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-use cageq_peq_solver::{grid::linear_interp_log, grid::standard_grid, Band, BandKind, Solver};
+use cageq_peq_solver::{grid::standard_grid, BandKind, Solver};
 
 use crate::{filter_curve_db_in, validate_filters, CoreError, Filter, ResponseModel};
 
 const FS: f64 = 48_000.0;
-/// `_FIXED_BAND_GAIN_RANGE_DB` (`sidecar_dsp.py:629`) — see its own doc for why an
-/// unconstrained fixed-band fit measurably overshoots/ripples.
-const FIXED_BAND_GAIN_RANGE_DB: f64 = 4.0;
 /// Highest centre frequency an exported peaking band may take — above AutoEq's 10 kHz cap.
 ///
-/// Both export fits drop AutoEq's treble rule (match only the mean above 10 kHz, no band above
+/// The export fit drops AutoEq's treble rule (match only the mean above 10 kHz, no band above
 /// it): that rule exists because a *measurement* is unreliable up there, but the export's target
 /// is the slot's own composed filter curve, exact, with nothing to overcompensate. Measured with
 /// `examples/export_sweep.rs` (real + synthetic headphone fits, 6-16 bands): the full-range loss
@@ -62,10 +63,9 @@ fn filters_key(filters: &[Filter]) -> Vec<(u8, i64, i64, i64)> {
         .collect()
 }
 
-/// A small bounded FIFO cache, shared shape for both `fit_export_eq`'s and
-/// `fit_fixed_band_eq`'s independent caches (`sidecar_dsp.py`'s `_EXPORT_FIT_CACHE`/
-/// `_FIXED_BAND_CACHE`) — the export dialog's band-count/preset control re-fits on
-/// every change, and a repeat value should be instant, not a second SLSQP pass.
+/// A small bounded FIFO cache for `fit_export_eq` (`sidecar_dsp.py`'s `_EXPORT_FIT_CACHE`)
+/// — the export dialog's band-count control re-fits on every change, and a repeat value
+/// should be instant, not a second SLSQP pass.
 pub(crate) struct BoundedCache<K, V> {
     entries: HashMap<K, V>,
     order: VecDeque<K>,
@@ -93,14 +93,12 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> BoundedCache<K, V> {
     }
 }
 
-// Two models in both keys: how the slot's bands are realised (the curve being approximated),
+// Two models in the key: how the slot's bands are realised (the curve being approximated),
 // and how the receiving app realises the *exported* bands (what the fit optimises).
 type ExportKey = (Vec<(u8, i64, i64, i64)>, u32, ResponseModel, ResponseModel);
-type FixedBandKey = (Vec<(u8, i64, i64, i64)>, &'static str, ResponseModel, ResponseModel);
 type FitResult = (Vec<Filter>, f64);
 
 pub(crate) type ExportCache = BoundedCache<ExportKey, FitResult>;
-pub(crate) type FixedBandCache = BoundedCache<FixedBandKey, FitResult>;
 
 fn preamp_db(achieved_curve: &[f64]) -> f64 {
     // `-max(achieved) - 0.2 dB` headroom (`sidecar_dsp.py:605`), mirroring AutoEq's own
@@ -138,66 +136,6 @@ pub(crate) fn fit_export_eq(
     let mut bands = cageq_peq_solver::cageq_default_bands_in((band_count - 2) as usize, crate::biquad_model(band_model));
     for band in bands.iter_mut().filter(|b| b.kind == BandKind::Peaking) {
         band.max_fc = EXPORT_MAX_FC;
-    }
-
-    let mut solver = Solver::new(f, FS, bands, target);
-    solver.tail_mean = false; // see EXPORT_MAX_FC
-    solver.optimize()?;
-    let out_filters = cageq_peq_solver::bands_to_filters(&solver.bands);
-    let preamp = preamp_db(&solver.fr());
-
-    let result = (out_filters, preamp);
-    cache.lock().unwrap().insert(key, result.clone());
-    Ok(result)
-}
-
-/// AutoEq's own two standard graphic-EQ presets (`autoeq/constants.py`'s
-/// `PEQ_CONFIGS`) — fixed ISO center frequencies, one shared `q` per preset, only gain
-/// ever optimized.
-fn preset_bands(preset: &str) -> Vec<Band> {
-    match preset {
-        "10" => (0..10).map(|i| Band::fixed_fc_q(BandKind::Peaking, 31.25 * 2f64.powi(i), std::f64::consts::SQRT_2)).collect(),
-        _ => (0..31).map(|i| Band::fixed_fc_q(BandKind::Peaking, 20.0 * 2f64.powf(i as f64 / 3.0), 4.318473)).collect(),
-    }
-}
-
-fn preset_key(preset: &str) -> &'static str {
-    if preset == "10" {
-        "10"
-    } else {
-        "31"
-    }
-}
-
-/// `fit_fixed_band_eq` (`sidecar_dsp.py:646-689`): AutoEq's standard 10-/31-band
-/// graphic EQ, gain-only fit to `filters`' own composed curve. Each band's gain is
-/// bounded to within [`FIXED_BAND_GAIN_RANGE_DB`] of the curve's own value sampled at
-/// that band's exact `fc` (`optimize_fixed_band_eq`'s `gain_range`, `frequency_response.
-/// py:182-190`) — left unconstrained, a dense preset's neighbouring bands measurably
-/// overshoot/ripple against each other (see `sidecar_dsp.py`'s own doc on that constant).
-/// `model`/`band_model`: as for [`fit_export_eq`].
-pub(crate) fn fit_fixed_band_eq(
-    cache: &Mutex<FixedBandCache>,
-    filters: &[Filter],
-    preset: &str,
-    model: ResponseModel,
-    band_model: ResponseModel,
-) -> Result<FitResult, CoreError> {
-    validate_filters(filters)?;
-    let preset = preset_key(preset);
-    let key = (filters_key(filters), preset, model, band_model);
-    if let Some(cached) = cache.lock().unwrap().get(&key) {
-        return Ok(cached);
-    }
-
-    let f = standard_grid();
-    let target = filter_curve_db_in(filters, &f, model);
-    let mut bands = preset_bands(preset);
-    for band in &mut bands {
-        band.model = crate::biquad_model(band_model);
-        let target_at_fc = linear_interp_log(&f, &target, &[band.fc])[0];
-        band.min_gain = target_at_fc - FIXED_BAND_GAIN_RANGE_DB;
-        band.max_gain = target_at_fc + FIXED_BAND_GAIN_RANGE_DB;
     }
 
     let mut solver = Solver::new(f, FS, bands, target);

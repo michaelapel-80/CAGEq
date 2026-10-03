@@ -64,7 +64,7 @@
 //! sidecar is no longer in the main apply path at all; it's still needed only for
 //! catalogue *browsing* (`list_headphones`/`list_targets`/`measurement_curves` — a
 //! GitHub tree-API index build this crate doesn't do, separate from fetching a curve
-//! once a path is known) and for `fit_export_eq`/`fit_fixed_band_eq`.
+//! once a path is known) and for `fit_export_eq`.
 
 pub mod equalize;
 pub mod filter;

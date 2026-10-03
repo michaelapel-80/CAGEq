@@ -6,7 +6,7 @@
 //! `cargo run --release -p cageq-core --example export_sweep`
 //!
 //! `NOTCH_HZ=15000` moves the hand-placed notch (default 12 kHz), `NOTCH_ONLY=1` skips the
-//! as-fitted curves, `GRAPHIC=1` compares the loss rule for the 10-/31-band graphic presets instead.
+//! as-fitted curves.
 //!
 //! Offline: the real measurements in `tests/fixtures_real` plus seeded synthetic headphones.
 //! Each desktop curve is tried as fitted and with a hand-placed notch added. Errors are
@@ -108,29 +108,6 @@ fn main() {
     let rms = |a: &[f64], b: &[f64], ix: &[usize]| (ix.iter().map(|&i| (a[i] - b[i]).powi(2)).sum::<f64>() / ix.len() as f64).sqrt();
     let maxe = |a: &[f64], b: &[f64], ix: &[usize]| ix.iter().map(|&i| (a[i] - b[i]).abs()).fold(0.0, f64::max);
 
-    if std::env::var("GRAPHIC").is_ok() {
-        for notch in [false, true] {
-            for preset in [10usize, 31] {
-                println!("
-## graphic {preset}-band — {}  (mean over {} desktop curves; dB)", if notch { "with notch" } else { "as fitted" }, cases.len());
-                println!("{:<28} {:>8} {:>9} {:>9} {:>12}", "loss", "rms<10k", "rms>10k", "max>10k", "rms>10k@44k");
-                for tail_mean in [true, false] {
-                    let mut acc = [0.0f64; 4];
-                    for (_, _, desk) in desktops.iter().filter(|d| d.1 == notch) {
-                        let ex = graphic(desk, preset, tail_mean);
-                        let want = curve_at(desk, &f, 48_000.0);
-                        let got48 = curve_at(&ex, &f, 48_000.0);
-                        let got44 = curve_at(&ex, &f, 44_100.0);
-                        acc[0] += rms(&got48, &want, &lo); acc[1] += rms(&got48, &want, &hi);
-                        acc[2] += maxe(&got48, &want, &hi); acc[3] += rms(&got44, &want, &hi);
-                    }
-                    let n = cases.len() as f64;
-                    println!("{:<28} {:>8.3} {:>9.3} {:>9.3} {:>12.3}", if tail_mean { "AutoEq rule (old export)" } else { "full range (export now)" }, acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n);
-                }
-            }
-        }
-        return;
-    }
     let notch_only = std::env::var("NOTCH_ONLY").is_ok();
     for notch in [false, true] {
         if notch_only && !notch { continue; }
@@ -157,27 +134,4 @@ fn main() {
             }
         }
     }
-}
-
-/// The graphic-EQ export's presets (mirrors `export.rs`'s private `preset_bands` + gain bounds):
-/// only the loss rule can change there, since the band frequencies are fixed.
-#[allow(dead_code)]
-pub fn graphic(target_filters: &[Filter], preset: usize, tail_mean: bool) -> Vec<Filter> {
-    use cageq_peq_solver::{grid::linear_interp_log, Band};
-    let f = standard_grid();
-    let target = filter_curve_db_in(target_filters, &f, ResponseModel::Rbj);
-    let mut bands: Vec<Band> = if preset == 10 {
-        (0..10).map(|i| Band::fixed_fc_q(BandKind::Peaking, 31.25 * 2f64.powi(i), std::f64::consts::SQRT_2)).collect()
-    } else {
-        (0..31).map(|i| Band::fixed_fc_q(BandKind::Peaking, 20.0 * 2f64.powf(i as f64 / 3.0), 4.318473)).collect()
-    };
-    for b in &mut bands {
-        let at = linear_interp_log(&f, &target, &[b.fc])[0];
-        b.min_gain = at - 4.0;
-        b.max_gain = at + 4.0;
-    }
-    let mut solver = Solver::new(f, 48_000.0, bands, target);
-    solver.tail_mean = tail_mean;
-    solver.optimize().expect("graphic fit");
-    bands_to_filters(&solver.bands)
 }

@@ -3,41 +3,42 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { Band, composedCurveDb, logGrid, type ResponseModel } from "./biquad";
 import { EqChart, RefCurve, Series } from "./EqChart";
-import { parametricEqText } from "./exportFormats";
+import { flatBandCurve, graphicEqCurve, graphicEqText, interpolatePoints, parametricEqText, sliderValues, type SliderPreset } from "./exportFormats";
 
 type ExportFormat = "parametric" | "graphic";
-type FixedBandPreset = "10" | "31";
+/** Graphic EQ tab: the dense curve, or slider values for a 10-/31-band graphic EQ. */
+type GraphicKind = "curve" | SliderPreset;
 
 const BAND_COUNT_MIN = 3;
 const BAND_COUNT_MAX = 20;
 const BAND_COUNT_DEFAULT = 8;
-// Re-fit debounce: dragging the band-count slider (or switching the 10-/31-band preset)
-// shouldn't fire a ~1-2s SciPy optimization per tick — same reasoning as every other
-// live-tunable control that gates an expensive backend call behind a settle delay.
+// Re-fit debounce: dragging the band-count slider shouldn't fire a ~1-2 s optimization per tick
+// — same reasoning as every other live-tunable control that gates an expensive backend call
+// behind a settle delay.
 const DEBOUNCE_MS = 300;
 
 type ExportFit = { filters: Band[]; preamp_db: number };
+/** One row of the export table — a parametric band, or a graphic-EQ point (no kind/Q to set). */
+type Row = { kind?: string; freq_hz: number; gain_db: number; q?: number };
 
-/** §8 mobile export dialog: fits the active slot's full cascade to a phone-friendly band
- *  count — either a free band count (Parametric tab, `fit_export_eq`) or AutoEq's own standard
- *  10-/31-band graphic EQ (Graphic EQ tab, `fit_fixed_band_eq`, fixed ISO-standard Fc/Q, only
- *  gain optimized). Both resolve to the exact same `{filters, preamp_db}` shape and are shown
- *  the same way — a preview chart, an Fc/Gain/Q table (the "manual entry" path), and the
- *  parametric-syntax text AutoEq's own site writes for all three of these presets (see
- *  exportFormats.ts's own doc for why there's no separate dense-curve GraphicEQ format here).
+/** §8 mobile export dialog. Parametric tab: the active slot's full cascade fitted to a free band
+ *  count (`fit_export_eq`, a backend solve). Graphic EQ tab: the slot's curve sampled, no solver —
+ *  the dense 127-point `GraphicEQ` curve, or slider values for a 10-/31-band graphic EQ (see
+ *  exportFormats.ts's module doc for why sampling, not fitting). Every mode is shown the same way:
+ *  a preview chart, a table for typing values in by hand, and the text to paste.
  *  `filters` is the slot's full composed cascade — `result.filters` in App.tsx, the same
  *  `Band[]` the §5.2 chart already draws for the active slot. Reuses the existing `.modal-card`
  *  overlay convention (see the `presetSave` dialog in App.tsx) rather than inventing new modal
  *  chrome. */
 /** `model`: how the slot's own `filters` are realised on the desktop (the effective model) — the
- *  curve the export approximates, i.e. what is heard. The *exported* bands are designed (and
- *  previewed) for the receiving app's filter design instead — its own toggle, RBJ by default,
+ *  curve the export approximates, i.e. what is heard. The *exported* parametric bands are designed
+ *  (and previewed) for the receiving app's filter design instead — its own toggle, RBJ by default,
  *  since nearly every EQ app uses RBJ, independent of CAGEq's playback model. */
 export function ExportDialog({ filters, model, sampleRate, onClose }: { filters: Band[]; model: ResponseModel; sampleRate?: number; onClose: () => void }) {
   const { t } = useTranslation();
   const [format, setFormat] = useState<ExportFormat>("parametric");
   const [bandCount, setBandCount] = useState(BAND_COUNT_DEFAULT);
-  const [fixedBandPreset, setFixedBandPreset] = useState<FixedBandPreset>("31");
+  const [graphicKind, setGraphicKind] = useState<GraphicKind>("curve");
   // The receiving app's filter design. RBJ unless the user says their app is warping-corrected.
   const [bandModel, setBandModel] = useState<ResponseModel>("Rbj");
   const [fit, setFit] = useState<ExportFit | null>(null);
@@ -51,23 +52,20 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
   const [legendHost, setLegendHost] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (filters.length === 0) return;
+    if (filters.length === 0 || format !== "parametric") return;
     setFitting(true);
-    const method = format === "parametric" ? "export_eq_fit" : "fixed_band_eq_fit";
-    const params = format === "parametric" ? { filters, bandCount, bandModel } : { filters, preset: fixedBandPreset, bandModel };
     // Set by this effect's cleanup once a newer fit (or unmount) supersedes this one. The backend
     // call itself can't be cancelled, so an older, slower solve can still resolve after a newer one
     // started — without this it would flip `fitting` off (hiding the spinner) while the newer solve
     // is still running, and briefly show its stale result in place of the one being waited for.
     let superseded = false;
     const h = setTimeout(() => {
-      invoke<ExportFit>(method, params)
+      invoke<ExportFit>("export_eq_fit", { filters, bandCount, bandModel })
         // Sorted ascending by Fc — AutoEq's optimizer returns bands in fit order (shelves
-        // first, peaking bands not otherwise ordered — the fixed-band presets happen to come
-        // back roughly low-to-high already, but not guaranteed to), which reads poorly both
-        // in the table and as "Filter 1/2/3..." in the exported text. Sorted once here so
-        // every consumer (the table, parametricEqText, the preview curve — order-independent
-        // for that one) sees the same canonical order.
+        // first, peaking bands not otherwise ordered), which reads poorly both in the table and
+        // as "Filter 1/2/3..." in the exported text. Sorted once here so every consumer (the
+        // table, parametricEqText, the preview curve — order-independent for that one) sees the
+        // same canonical order.
         .then((r) => {
           if (!superseded) setFit({ ...r, filters: [...r.filters].sort((a, b) => a.freq_hz - b.freq_hz) });
         })
@@ -81,58 +79,84 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
     return () => {
       superseded = true;
       clearTimeout(h);
+      // Switching to the graphic tab mid-fit must not leave the spinner up: nothing would clear it.
+      setFitting(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [format, filters, bandCount, fixedBandPreset, bandModel]);
+  }, [format, filters, bandCount, bandModel]);
 
-  // Q omitted for the fixed-band presets — it's constant per preset, so AutoEq's own site
-  // doesn't state it either (see parametricEqText's own doc); the free-band-count fit still
-  // needs it, since there Q genuinely varies band to band.
-  const text = useMemo(() => (fit ? parametricEqText(fit.filters, fit.preamp_db, format === "parametric") : ""), [fit, format]);
-
-  // Preview curves: the fit's own response (solid) against the full cascade it's approximating
-  // (dotted reference) — the same fit-vs-ideal visual language EqChart already uses elsewhere
-  // (the AutoEq fit vs. its own reference_curve). Both computed client-side via composedCurveDb
-  // — the exact function both `fit_export_eq`/`fit_fixed_band_eq` fit against, so there's no
-  // second curve implementation to keep in sync (see exportFormats.ts's own doc).
   const previewFreqs = useMemo(() => logGrid(480, 20, 20000), []);
+  // The slot's own curve as heard — what every mode approximates.
+  const reference = useMemo(() => (filters.length ? composedCurveDb(filters, previewFreqs, model, sampleRate) : null), [filters, previewFreqs, model, sampleRate]);
+
+  // What the active mode exports, in one shape: the table rows, the text to paste, and the curve the
+  // receiving app ends up with (on the preview grid, without any preamp so it lines up with the
+  // slot's curve). Parametric comes from the backend fit; the graphic modes are computed right here.
+  const output = useMemo((): { rows: Row[]; text: string; achieved: Float64Array; graphic: boolean } | null => {
+    if (!filters.length) return null;
+    if (format === "parametric") {
+      if (!fit) return null;
+      return {
+        rows: fit.filters,
+        text: parametricEqText(fit.filters, fit.preamp_db),
+        achieved: composedCurveDb(fit.filters, previewFreqs, bandModel, sampleRate), // as the receiving app will run them
+        graphic: false,
+      };
+    }
+    if (graphicKind === "curve") {
+      const points = graphicEqCurve(filters, model, sampleRate);
+      // The points carry the folded-in preamp; add it back so the preview compares shapes.
+      const curveAtPoints = composedCurveDb(filters, Float64Array.from(points, (p) => p.freq_hz), model, sampleRate);
+      const shift = curveAtPoints[0] - points[0].gain_db;
+      return { rows: points, text: graphicEqText(points), achieved: interpolatePoints(points, previewFreqs).map((v) => v + shift), graphic: true };
+    }
+    const { bands, preampDb } = sliderValues(filters, graphicKind, model, sampleRate);
+    // Q omitted from the text: each app's sliders have their own band shape (see parametricEqText).
+    return { rows: bands, text: parametricEqText(bands, preampDb, false), achieved: flatBandCurve(bands, previewFreqs), graphic: true };
+  }, [format, fit, graphicKind, filters, model, sampleRate, bandModel, previewFreqs]);
+  const text = output?.text ?? "";
+
+  // Preview curves: the export (solid) against the full cascade it's approximating (dotted
+  // reference) — the same fit-vs-ideal visual language EqChart already uses elsewhere (the AutoEq
+  // fit vs. its own reference_curve). A parametric fit is drawn from its bands in the receiving
+  // app's design; the graphic modes have points, not bands, so they arrive as a solid curve instead
+  // (the dense curve interpolated, or the sliders as flat bands, as Wavelet would run them).
   const series: Series[] = useMemo(
-    () => (fit ? [{ id: "export-fit", bands: fit.filters, color: "var(--accent)", label: t("export.fitCurve") }] : []),
-    [fit, t],
+    () => (format === "parametric" && fit ? [{ id: "export-fit", bands: fit.filters, color: "var(--accent)", label: t("export.fitCurve") }] : []),
+    [format, fit, t],
   );
   const refs: RefCurve[] = useMemo(() => {
-    if (!filters.length) return [];
-    const curve = composedCurveDb(filters, previewFreqs, model, sampleRate);
-    return [
-      {
-        id: "export-full",
-        points: Array.from(previewFreqs, (f, i) => ({ f, db: curve[i] })),
-        color: "var(--fg)",
-        label: t("export.fullCurve"),
-      },
-    ];
-  }, [filters, previewFreqs, sampleRate, model, t]);
+    if (!reference) return [];
+    const out: RefCurve[] = [];
+    if (output?.graphic) {
+      const a = output.achieved;
+      out.push({
+        id: "export-graphic",
+        points: Array.from(previewFreqs, (f, i) => ({ f, db: a[i] })),
+        color: "var(--accent)",
+        label: t(graphicKind === "curve" ? "export.curvePreview" : "export.sliderPreview"),
+        solid: true,
+      });
+    }
+    out.push({ id: "export-full", points: Array.from(previewFreqs, (f, i) => ({ f, db: reference[i] })), color: "var(--fg)", label: t("export.fullCurve") });
+    return out;
+  }, [reference, output, previewFreqs, graphicKind, t]);
 
-  // How well the exported (reduced-band) fit actually matches the full cascade it's approximating
-  // — the same two curves the chart above already draws (`series`/`refs`), just reduced to two
-  // numbers instead of a shape someone has to eyeball. RMS is the fit's overall closeness; Max is
-  // its worst single point, since that's what the 31-band ripple (or an aggressive band-count cut)
-  // can hide inside an otherwise-good RMS. Both computed client-side via the same `composedCurveDb`
-  // the backend fit itself targets (see `fit_export_eq`/`fit_fixed_band_eq`'s own doc for why they
-  // don't hand back a curve at all) — no second error computation to keep in sync with the backend.
+  // How well the export matches the full cascade it's approximating — the same two curves the chart
+  // above draws, reduced to two numbers instead of a shape someone has to eyeball. RMS is the overall
+  // closeness; Max the worst single point, which an aggressive band-count cut (or a slider band too
+  // wide for the curve's detail) can hide inside an otherwise-good RMS.
   const fitError = useMemo(() => {
-    if (!fit || !filters.length) return null;
-    const achieved = composedCurveDb(fit.filters, previewFreqs, bandModel, sampleRate); // exported bands, as the receiving app will run them
-    const reference = composedCurveDb(filters, previewFreqs, model, sampleRate);
+    if (!output || !reference) return null;
     let sumSq = 0;
     let max = 0;
     for (let i = 0; i < previewFreqs.length; i++) {
-      const err = Math.abs(achieved[i] - reference[i]);
+      const err = Math.abs(output.achieved[i] - reference[i]);
       sumSq += err * err;
       max = Math.max(max, err);
     }
     return { rms: Math.sqrt(sumSq / previewFreqs.length), max };
-  }, [fit, filters, previewFreqs, sampleRate, model, bandModel]);
+  }, [output, reference, previewFreqs]);
 
   const copy = async () => {
     try {
@@ -175,7 +199,8 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
 
         {/* The app-design checkbox shares the format row rather than taking a line of its own —
             this card has a fixed height budget (see its own doc), and a separate row pushed it past
-            it again (reported live). Short label; the explanation is in the tooltip. */}
+            it again (reported live). Short label; the explanation is in the tooltip. Disabled on the
+            graphic tab: sampled curve values involve no filter design of the receiving app's. */}
         <div style={{ display: "flex", alignItems: "center", gap: "0.8em" }}>
           <div className="pl-toggle" style={{ flex: 1 }}>
             <button type="button" className={format === "parametric" ? "on" : ""} onClick={() => setFormat("parametric")}>
@@ -189,12 +214,13 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
             // lineHeight 1: the root's fixed `line-height: 24px` otherwise gives this small label a full
             // 24px line box — the same height as the switch buttons, so at some display scalings it
             // rounded up past them and grew the row (and the card) by a pixel or two.
-            style={{ fontSize: "0.75em", lineHeight: 1, opacity: 0.8, display: "flex", alignItems: "center", gap: "0.35em", flex: "none", whiteSpace: "nowrap" }}
-            title={t("export.bandModelHint")}
+            style={{ fontSize: "0.75em", lineHeight: 1, opacity: format === "parametric" ? 0.8 : 0.4, display: "flex", alignItems: "center", gap: "0.35em", flex: "none", whiteSpace: "nowrap" }}
+            title={t(format === "parametric" ? "export.bandModelHint" : "export.bandModelGraphicHint")}
           >
             <input
               name="export-band-model"
               type="checkbox"
+              disabled={format !== "parametric"}
               checked={bandModel === "AnalogMatched"}
               onChange={(e) => setBandModel(e.currentTarget.checked ? "AnalogMatched" : "Rbj")}
               style={{ flex: "none", margin: 0 }}
@@ -218,23 +244,26 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
             <b>{bandCount}</b>
           </label>
         ) : (
-          // Hint lives in `title` (hover), not a permanent paragraph — a visible line here
+          // Hints live in `title` (hover), not a permanent paragraph — a visible line here
           // pushed the dialog's total content past its own height budget again (reported live
           // as the scrollbar coming back), the same growth this dialog's other fixed-height
           // choices were already built to avoid.
-          <div className="pl-toggle" style={{ marginTop: "0.6em" }} title={t("export.fixedBandHint")}>
-            <button type="button" className={fixedBandPreset === "10" ? "on" : ""} onClick={() => setFixedBandPreset("10")}>
+          <div className="pl-toggle" style={{ marginTop: "0.6em" }}>
+            <button type="button" className={graphicKind === "curve" ? "on" : ""} title={t("export.curveHint")} onClick={() => setGraphicKind("curve")}>
+              {t("export.curve")}
+            </button>
+            <button type="button" className={graphicKind === "10" ? "on" : ""} title={t("export.sliderHint")} onClick={() => setGraphicKind("10")}>
               {t("export.band10")}
             </button>
-            <button type="button" className={fixedBandPreset === "31" ? "on" : ""} onClick={() => setFixedBandPreset("31")}>
+            <button type="button" className={graphicKind === "31" ? "on" : ""} title={t("export.sliderHint")} onClick={() => setGraphicKind("31")}>
               {t("export.band31")}
             </button>
           </div>
         )}
 
         <div style={{ height: 160, position: "relative", margin: "0.6em 0" }}>
-          {/* The only band series here is the exported fit, drawn in the receiving app's design; the
-              slot's own curve arrives as `refs`, already computed in its effective model. */}
+          {/* The only band series here is the parametric fit, drawn in the receiving app's design;
+              the slot's own curve (and a graphic export's points) arrive as `refs`. */}
           <EqChart model={bandModel} series={series} refs={refs} height={160} screen legendHost={legendHost} />
           {/* Absolutely positioned inside the chart's own fixed-height box, not a line of its
               own — same "nothing here may grow the dialog" discipline as everything else in it
@@ -246,10 +275,10 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
             </div>
           )}
           {/* Solver-running indicator, in the same reserved corner-overlay style as the fit-error
-              label (top-right, so it never collides with it) — a high band count or the 31-band
-              preset takes long enough that, with nothing here, the previous result just sat there
-              looking current until the new one popped in. `fitting` covers the debounce wait too,
-              so it starts the instant the control moves. */}
+              label (top-right, so it never collides with it) — a high band count takes long enough
+              that, with nothing here, the previous result just sat there looking current until the
+              new one popped in. `fitting` covers the debounce wait too, so it starts the instant
+              the control moves. */}
           {fitting && (
             <div
               role="status"
@@ -262,31 +291,32 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
         </div>
         <div ref={setLegendHost} className="chart-legend-host" />
 
-        {fit && (
+        {output && (
           // Fixed `height`, not `maxHeight`: a shrink-then-cap box still grows with every extra
           // row up to the cap (reported live as the dialog visibly expanding before the internal
           // scrollbar ever kicks in) — a fixed height scrolls internally from the very first row
           // past it, so the dialog's total size stops depending on the band count/preset at all.
+          // Graphic modes show frequency and gain only: there's no filter type or Q to set.
           <div style={{ height: "9.5em", overflowY: "auto", opacity: fitting ? 0.45 : 1, transition: "opacity 0.15s" }}>
             <table className="export-table">
               <thead>
                 <tr>
-                  <th>{t("export.tableType")}</th>
+                  {!output.graphic && <th>{t("export.tableType")}</th>}
                   <th>{t("export.tableFc")}</th>
                   <th>{t("export.tableGain")}</th>
-                  <th>{t("export.tableQ")}</th>
+                  {!output.graphic && <th>{t("export.tableQ")}</th>}
                 </tr>
               </thead>
               <tbody>
-                {fit.filters.map((b, i) => (
+                {output.rows.map((b, i) => (
                   <tr key={i}>
-                    <td>{b.kind}</td>
+                    {!output.graphic && <td>{b.kind}</td>}
                     <td>{Math.round(b.freq_hz)} Hz</td>
                     <td>
                       {b.gain_db > 0 ? "+" : ""}
                       {b.gain_db.toFixed(1)} dB
                     </td>
-                    <td>{b.q.toFixed(2)}</td>
+                    {!output.graphic && <td>{b.q?.toFixed(2)}</td>}
                   </tr>
                 ))}
               </tbody>
@@ -301,10 +331,10 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
           name="export-text"
           readOnly
           rows={6}
-          value={fitting && !fit ? t("export.fitting") : text}
+          value={fitting && !output ? t("export.fitting") : text}
           style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.6em", opacity: fitting ? 0.45 : 1, transition: "opacity 0.15s" }}
         />
-        <button type="button" disabled={!fit || fitting} onClick={copy}>
+        <button type="button" disabled={!output || fitting} onClick={copy}>
           {copied ? t("export.copied") : t("export.copy")}
         </button>
 

@@ -218,16 +218,11 @@ fn export_fits_the_effective_models_curve() {
 #[test]
 fn the_export_band_model_is_independent_of_the_playback_model() {
     let (core, _backend) = start(true);
-    // A treble bell: where the two designs differ most, and a curve the fixed-band (graphic) fit
-    // handles (it currently returns all-zero gains for a lone shelf, in either design — a
-    // separate, pre-existing issue).
+    // A treble bell: where the two designs differ most.
     let bands = [Filter { kind: FilterType::Peaking, freq_hz: 12_000.0, gain_db: 6.0, q: 1.0 }];
     let (for_rbj_app, _) = core.fit_export_eq(&bands, 5, ResponseModel::Rbj).unwrap();
     let (for_matched_app, _) = core.fit_export_eq(&bands, 5, ResponseModel::AnalogMatched).unwrap();
     assert!(differ(&for_rbj_app, &for_matched_app), "different app designs must give different export bands");
-    let (graphic_rbj, _) = core.fit_fixed_band_eq(&bands, "10", ResponseModel::Rbj).unwrap();
-    let (graphic_matched, _) = core.fit_fixed_band_eq(&bands, "10", ResponseModel::AnalogMatched).unwrap();
-    assert!(differ(&graphic_rbj, &graphic_matched), "the graphic-EQ export honours the app design too");
 }
 
 /// No self-cancelling band sets in either model: every fit's largest gain stays sane on seeded
