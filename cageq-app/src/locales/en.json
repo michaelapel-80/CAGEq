@@ -382,7 +382,7 @@
     "band10": "10-band",
     "band31": "31-band",
     "curve": "Curve",
-    "curveHint": "The curve's response as 127 points (AutoEq's GraphicEQ format), for apps that import it: Equalizer APO, Wavelet, Poweramp, JamesDSP, EasyEffects. Each app builds its own filter from it, so how faithfully it plays back depends on the app.",
+    "curveHint": "The curve's response as 127 points (AutoEq's GraphicEQ format), for apps that import it: Equalizer APO, Wavelet, Poweramp, JamesDSP, EasyEffects. Each app builds its own filter from it, so how faithfully it plays back depends on the app. Prefer Parametric where your app supports it.",
     "sliderHint": "Values to set on a 10- or 31-band graphic EQ: the curve's average over each band. Graphic EQs differ in how their bands overlap, so treat these as a close guide. For a closer result, use Curve or Parametric.",
     "curvePreview": "Exported curve",
     "sliderPreview": "Sliders (as flat bands)",
