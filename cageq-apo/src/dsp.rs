@@ -162,6 +162,11 @@ const GESTURE_GAP_MS: f64 = 150.0;
 /// source was checked instead of remeasured again.
 const DRY_FADE_MS: f64 = 10.0;
 
+/// How close a trailing twin's output must be to its input (in its delay registers, every
+/// channel) before `Cascade::trim_tail` stops processing it: about -120 dBFS, far below anything
+/// audible, so dropping it then is an inaudible step.
+const TAIL_SETTLED: f64 = 1e-6;
+
 impl Coeffs {
     /// Linear interpolation towards `other` by `t` in `[0, 1]`.
     ///
@@ -184,6 +189,23 @@ impl Coeffs {
 
     /// The identity filter — passes its input through untouched.
     pub const PASSTHROUGH: Coeffs = Coeffs { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
+
+    /// Numerator equal to denominator: an identity filter, whatever its poles. `PASSTHROUGH` is
+    /// one; so is every [`Coeffs::twin`]. Exact comparison on purpose — both are built exactly, and
+    /// a linear ramp between two identity filters stays exactly identity.
+    #[inline]
+    fn is_identity(&self) -> bool {
+        self.b0 == 1.0 && self.b1 == self.a1 && self.b2 == self.a2
+    }
+
+    /// This filter's **neutral twin**: the same poles, numerator set equal to the denominator —
+    /// an identity filter (what the same band is at 0 dB gain) that sits exactly where this one's
+    /// poles are. See `Cascade::start_ramp` for why a band is ramped to and from its twin rather
+    /// than `PASSTHROUGH`.
+    #[inline]
+    fn twin(&self) -> Coeffs {
+        Coeffs { b0: 1.0, b1: self.a1, b2: self.a2, a1: self.a1, a2: self.a2 }
+    }
 
     /// `|H|²` at a precomputed grid point.
     #[inline]
@@ -498,9 +520,42 @@ impl Cascade {
         // switch that interrupts a ramp still moves continuously.
         self.preamp_from_db = 20.0 * self.preamp.log10();
         self.preamp_to_db = preamp_db;
+        // A band leaving or entering a slot never ramps to or from `PASSTHROUGH` itself, but to or
+        // from its own **neutral twin** (same poles, numerator = denominator — see `Coeffs::twin`).
+        // Linear interpolation towards `PASSTHROUGH` drags the band's poles from where they are
+        // to the origin, sweeping a resonance across the spectrum on the way (a 280 Hz band's
+        // passes ~6 kHz); the response stays nearly flat, but a recursion whose poles move that
+        // far that fast rings, and on a steady tone that ringing is a click. Reported live: a
+        // -1.7 dB, 280 Hz, Q 0.8 band toggled on a 1 kHz sine clicked audibly; the loopback
+        // recording showed a -22 dB transient (re the tone) that a sample-jump metric could not
+        // see. Measured offline (`examples/rampcompare.rs`, notch-residual metric): -14 to -22 dB
+        // re the tone before, -40 dB with the twin — the same as an ideal blend of the two steady
+        // states. Ramping the parameters instead was measured too: no better here, and worse for
+        // a type change or a slot reused by a different band.
+        //
+        // Leaving: ramp to the twin of wherever the slot is now, so the poles stay put while the
+        // response goes flat. Entering a slot that holds an identity filter: switch it to the new
+        // band's twin *instantly* — seamless, since both are identity and the slot's output
+        // already equals its input — then ramp the gain in. A slot only re-entering processing
+        // here has stale delay registers; zeroed, they are consistent with an identity filter
+        // (output == input), so the instant switch is seamless there too.
+        let old_count = self.process_count;
         for i in 0..MAX_BANDS {
-            self.target[i] = target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH);
-            self.start[i] = self.coeffs[i];
+            let mut to = target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH);
+            let mut from = self.coeffs[i];
+            if to.is_identity() && !from.is_identity() {
+                to = from.twin();
+            } else if from.is_identity() && !to.is_identity() {
+                from = to.twin();
+                self.coeffs[i] = from;
+            }
+            if i >= old_count && i < new_count.max(old_count) {
+                for ch in 0..self.channels {
+                    self.state[ch * MAX_BANDS + i].reset();
+                }
+            }
+            self.target[i] = to;
+            self.start[i] = from;
         }
         // Keep walking the wider of the two sets until the ramp lands: a band that is going
         // away has to fade to identity, and dropping it immediately would reintroduce exactly
@@ -802,16 +857,41 @@ impl Cascade {
         self.ramp_left > 0
     }
 
+    /// Stop processing trailing slots past `band_count` once they no longer matter: each is an
+    /// identity filter after a ramp lands (a twin, or `PASSTHROUGH`), but a twin may still be
+    /// ringing out the transition — its output not yet equal to its input. Dropping it then
+    /// would step the signal by that remainder, so a slot is only dropped once output and input
+    /// agree in its delay registers on every channel (to [`TAIL_SETTLED`]). Called per frame
+    /// while there is something to trim; a few comparisons, and nothing at all otherwise.
+    #[inline]
+    fn trim_tail(&mut self) {
+        while self.process_count > self.band_count {
+            let i = self.process_count - 1;
+            if !self.coeffs[i].is_identity() {
+                return;
+            }
+            let settled = (0..self.channels).all(|ch| {
+                let s = &self.state[ch * MAX_BANDS + i];
+                (s.y1 - s.x1).abs() < TAIL_SETTLED && (s.y2 - s.x2).abs() < TAIL_SETTLED
+            });
+            if !settled {
+                return;
+            }
+            self.process_count -= 1;
+        }
+    }
+
     /// Advance one frame along the ramp. Called once per frame, not per sample: every channel
     /// shares one set of coefficients.
     #[inline]
     fn advance_ramp(&mut self) {
         self.ramp_left -= 1;
         if self.ramp_left == 0 {
-            // Land exactly on the target rather than on an interpolation of it.
+            // Land exactly on the target rather than on an interpolation of it. Bands dropped off
+            // the end are now twins (identity) and keep running until their own ringing has
+            // settled — see `trim_tail` — rather than being cut off here mid-decay.
             self.coeffs = self.target;
             self.preamp = db_to_gain(self.preamp_to_db);
-            self.process_count = self.band_count;
             return;
         }
         // Plain linear, not smoothstep — smoothstep was tried (a linear ramp's corners, where
@@ -1036,6 +1116,8 @@ impl Cascade {
             // half-finished transition dumped on the listener all at once.
             if self.ramp_left > 0 {
                 self.advance_ramp();
+            } else if self.process_count > self.band_count {
+                self.trim_tail();
             }
             if self.cooldown_left > 0 {
                 self.cooldown_left -= 1;
@@ -1095,6 +1177,8 @@ impl Cascade {
             // it between channels of the same frame would put them fractionally out of step.
             if self.ramp_left > 0 {
                 self.advance_ramp();
+            } else if self.process_count > self.band_count {
+                self.trim_tail();
             }
             if self.cooldown_left > 0 {
                 self.cooldown_left -= 1;
@@ -2423,6 +2507,12 @@ mod tests {
     /// pure tone sitting exactly on that band's own centre frequency — the same "mostly
     /// academic" territory the A/B ramp decision already accepted for a different mechanism.
     /// Not chased further here for the same reason: no realistic correction reaches it.
+    ///
+    /// **Later finding**: that "academic" case was the visible tip of a general one. The jump
+    /// metric here only sees large cases; a tone-notched residual showed even a -1.7 dB band
+    /// ringing audibly when ramped to `PASSTHROUGH` — the band's poles being dragged to the
+    /// origin. Bands now ramp to and from their neutral twin instead (`start_ramp`, and
+    /// `toggling_a_band_adds_no_transient_beyond_the_level_change`).
     #[test]
     fn a_band_ramps_cleanly_to_and_from_passthrough_on_a_count_change() {
         const WINDOW: usize = 960;
@@ -2925,13 +3015,16 @@ mod tests {
         worst
     }
 
-    /// The bug: a plain coefficient ramp (`apply_coeffs`) drops the whole correction to a
-    /// single isolate bandpass by sweeping every one of the 21 bands towards `PASSTHROUGH` on
-    /// one shared clock, and at 31 Hz that sails to +22 dB above both endpoints (measured; see
-    /// `real_isolate_correction`'s doc). Confirms the regression is real before proving the fix
-    /// below closes it — a fix test with no matching failure-mode test proves nothing.
+    /// This used to be the failure-mode test: a plain coefficient ramp dropping the whole
+    /// correction to a single isolate bandpass swept every one of the 21 bands towards
+    /// `PASSTHROUGH` on one shared clock, and at 31 Hz that sailed to +22 dB above both endpoints
+    /// (measured; see `real_isolate_correction`'s doc) — the reason isolate crossfades instead.
+    /// Ramping each leaving band to its neutral twin (`Coeffs::twin`, see `start_ramp`) keeps
+    /// its poles in place, and the spike is gone: 0.0 dB over the start, measured when the twin
+    /// landed. Isolate still crossfades (it swaps the whole correction for something unrelated);
+    /// this pins that a plain ramp no longer sweeps poles into a spike.
     #[test]
-    fn a_coefficient_ramp_spikes_on_this_real_correction() {
+    fn a_coefficient_ramp_no_longer_spikes_on_this_real_correction() {
         let mut c = Cascade::new(1, FS);
         assert!(c.set_bands(&real_isolate_correction()));
         c.settle();
@@ -2949,10 +3042,106 @@ mod tests {
         let worst = worst_response_along_transition(&mut c);
         eprintln!("coefficient ramp: start_max={start_max:.1} dB, worst_mid_ramp={worst:.1} dB");
         assert!(
-            worst > start_max + 10.0,
-            "expected the known coefficient-ramp spike (>10 dB over start), got only {:.1} dB over",
+            worst <= start_max + 0.5,
+            "a coefficient ramp spiked {:.1} dB over the start — bands are sweeping their poles again",
             worst - start_max
         );
+    }
+
+    /// **The bug, reported live**: toggling one small band (-1.7 dB, 280 Hz, Q 0.8) clicked
+    /// audibly on a 1 kHz sine, though the band barely changes 1 kHz at all. Not a sample jump —
+    /// `worst_jump_ratio` rated it clean — but a short ringing burst: ramping the band's
+    /// coefficients to `PASSTHROUGH` dragged its poles across the spectrum. Measured as a
+    /// tone-notched residual (a linear filter maps a sine to a sine, so what survives a notch at
+    /// the tone is what the transition added), against an *ideal* reference — the two steady
+    /// states blended over the same 8 ms, i.e. the intended level change done as cleanly as it
+    /// can be. Before the twin: -14 to -22 dB re the tone at 1 kHz, 18-26 dB above ideal. Now
+    /// -44 dB there (ideal -40), both directions, on its own and among other bands; at 5 kHz
+    /// -58 dB, above an ideal of -68 but far below anything audible.
+    #[test]
+    fn toggling_a_band_adds_no_transient_beyond_the_level_change() {
+        let band = coefficients(&peaking(280.0, -1.7, 0.8), FS);
+        let low = coefficients(&Band { kind: FilterKind::LowShelf, freq_hz: 105.0, gain_db: 2.0, q: 0.7 }, FS);
+        let high = coefficients(&Band { kind: FilterKind::HighShelf, freq_hz: 10_000.0, gain_db: -1.5, q: 0.7 }, FS);
+        let n = (FS * 0.9) as usize;
+        let (s1, s2) = ((FS * 0.4) as usize, (FS * 0.65) as usize);
+        let notch_residual = |x: &[f64], hz: f64| -> Vec<f64> {
+            let w0 = 2.0 * std::f64::consts::PI * hz / FS;
+            let al = w0.sin() / 20.0;
+            let a0 = 1.0 + al;
+            let c = Coeffs { b0: 1.0 / a0, b1: -2.0 * w0.cos() / a0, b2: 1.0 / a0, a1: -2.0 * w0.cos() / a0, a2: (1.0 - al) / a0 };
+            let mut r = x.to_vec();
+            for _ in 0..2 {
+                let mut st = BiquadState::default();
+                for v in r.iter_mut() {
+                    *v = st.step(&c, *v);
+                }
+            }
+            r
+        };
+        let run = |on: &[Coeffs], off: &[Coeffs], input: &[f32], switched: bool| -> Vec<f64> {
+            let mut c = Cascade::new(1, FS);
+            assert!(c.apply_coeffs(on, -6.0));
+            c.settle();
+            let mut out = vec![0.0f32; n];
+            for start in (0..n).step_by(480) {
+                if switched && start == s1 {
+                    assert!(c.apply_coeffs(off, -6.4));
+                }
+                if switched && start == s2 {
+                    assert!(c.apply_coeffs(on, -6.0));
+                }
+                let m = 480.min(n - start);
+                c.process(&input[start..start + m], &mut out[start..start + m], m);
+            }
+            out.iter().map(|&v| v as f64).collect()
+        };
+        // Single band (the reported case), and the band among others, removed from the middle.
+        let single: (Vec<Coeffs>, Vec<Coeffs>) = (vec![band], vec![Coeffs::PASSTHROUGH]);
+        let multi: (Vec<Coeffs>, Vec<Coeffs>) = (vec![low, band, high], vec![low, Coeffs::PASSTHROUGH, high]);
+        for (name, (on, off)) in [("single", &single), ("among others", &multi)] {
+            for hz in [100.0, 1000.0, 5000.0] {
+                let input = tone(hz, 0, n, 0.25);
+                let out = run(on, off, &input, true);
+                let steady_on = run(on, off, &input, false);
+                let steady_off = run(off, on, &input, false);
+                let ramp = (FS * RAMP_MS / 1000.0) as usize;
+                let ideal: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let w = |s: usize| ((i as f64 - s as f64) / ramp as f64).clamp(0.0, 1.0);
+                        let to_off = w(s1) * (1.0 - w(s2));
+                        steady_on[i] * (1.0 - to_off) + steady_off[i] * to_off
+                    })
+                    .collect();
+                let (r, ri) = (notch_residual(&out, hz), notch_residual(&ideal, hz));
+                let tone_pk = out[(FS * 0.2) as usize..(FS * 0.35) as usize].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                let w = (FS * 0.06) as usize;
+                let db = |v: &[f64], a: usize| 20.0 * (v[a..a + w].iter().fold(0.0f64, |m, x| m.max(x.abs())) / tone_pk).log10();
+                for (dir, at) in [("off", s1), ("on", s2)] {
+                    let (got, best) = (db(&r, at), db(&ri, at));
+                    // Within 3 dB of ideal, or far below audibility where the ideal itself is tiny (5 kHz:
+                    // ~-58 dB vs an ideal -68, where the click was -22 and the old ramp ~-50).
+                    assert!(got <= (best + 3.0).max(-50.0), "{name}, {hz} Hz, toggle {dir}: {got:.1} dB re tone vs ideal {best:.1} dB");
+                }
+            }
+        }
+    }
+
+    /// Bands dropped off the end keep running as twins until their own ringing has settled, then
+    /// stop costing anything: the processed count must come back down to the band count.
+    #[test]
+    fn dropped_trailing_bands_are_trimmed_once_settled() {
+        let mut c = Cascade::new(2, FS);
+        assert!(c.set_bands(&[peaking(1000.0, 3.0, 1.0), peaking(60.0, -6.0, 2.0)]));
+        c.settle();
+        let input: Vec<f32> = tone(200.0, 0, 9600, 0.3).iter().flat_map(|&v| [v, v]).collect();
+        let mut out = vec![0.0f32; input.len()];
+        c.process(&input, &mut out, 9600);
+        assert!(c.set_bands(&[peaking(1000.0, 3.0, 1.0)]));
+        let more: Vec<f32> = tone(200.0, 9600, 48_000, 0.3).iter().flat_map(|&v| [v, v]).collect();
+        let mut out2 = vec![0.0f32; more.len()];
+        c.process(&more, &mut out2, 48_000);
+        assert_eq!(c.process_count, c.band_count, "a dropped band was never trimmed from processing");
     }
 
     /// The fix, proven directly on real audio rather than an analytic frequency-response proxy
