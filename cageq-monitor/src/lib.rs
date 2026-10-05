@@ -1642,14 +1642,15 @@ mod windows_impl {
     impl WavRecorder {
         fn new(path: &std::path::Path, rate: u32, channels: u16) -> std::io::Result<WavRecorder> {
             use std::io::Write;
-            let mut file = std::fs::File::create(path)?;
-            // Sizes are patched in `finish`; zeros for now.
-            file.write_all(&[0u8; 44])?;
-            Ok(WavRecorder { file, bytes: 0, channels, rate })
+            let file = std::fs::File::create(path)?;
+            let mut rec = WavRecorder { file, bytes: 0, channels, rate };
+            let header = rec.header();
+            rec.file.write_all(&header)?;
+            Ok(rec)
         }
 
         fn write(&mut self, interleaved: &[f32]) {
-            use std::io::Write;
+            use std::io::{Seek, SeekFrom, Write};
             // A recorder that kills the capture thread would be worse than no recorder, so a
             // write failure is dropped rather than propagated onto the audio path.
             let mut buf = Vec::with_capacity(interleaved.len() * 4);
@@ -1659,10 +1660,27 @@ mod windows_impl {
             if self.file.write_all(&buf).is_ok() {
                 self.bytes = self.bytes.saturating_add(buf.len() as u32);
             }
+            // Keep the header's sizes current after every buffer, not just in `finish`: closing
+            // the app ends the process without the capture loop ever exiting cleanly, which left
+            // a header still claiming zero bytes — a file no tool would read. Two small seeks per
+            // ~10 ms buffer, only while recording is switched on at all.
+            let header = self.header();
+            if self.file.seek(SeekFrom::Start(0)).is_ok() {
+                let _ = self.file.write_all(&header);
+            }
+            let _ = self.file.seek(SeekFrom::End(0));
         }
 
         fn finish(mut self) {
             use std::io::{Seek, SeekFrom, Write};
+            let h = self.header();
+            let _ = self.file.seek(SeekFrom::Start(0));
+            let _ = self.file.write_all(&h);
+            let _ = self.file.flush();
+        }
+
+        /// The 44-byte IEEE-float WAV header for what has been written so far.
+        fn header(&self) -> Vec<u8> {
             let block_align = self.channels * 4;
             let mut h = Vec::with_capacity(44);
             h.extend_from_slice(b"RIFF");
@@ -1677,9 +1695,7 @@ mod windows_impl {
             h.extend_from_slice(&32u16.to_le_bytes()); // bits per sample
             h.extend_from_slice(b"data");
             h.extend_from_slice(&self.bytes.to_le_bytes());
-            let _ = self.file.seek(SeekFrom::Start(0));
-            let _ = self.file.write_all(&h);
-            let _ = self.file.flush();
+            h
         }
     }
     fn capture_loop<F, G, H>(

@@ -42,6 +42,34 @@ fn main() {
     let n = left.len();
     println!("{path}: {rate} Hz, {channels} ch, {n} frames ({:.2} s)", n as f64 / rate as f64);
 
+    // Over full scale, on every channel. A float loopback carries samples above 1.0 untouched,
+    // so an overshoot is smooth here and invisible to the jump test below — but the conversion
+    // to the device's integer format clips it, which is heard as a click.
+    let all: Vec<f32> = bytes[44..].chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let peak = all.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    println!("peak: {:.4} ({:+.2} dBFS)", peak, 20.0 * peak.max(1e-12).log10());
+    let over: Vec<usize> = (0..all.len()).filter(|&i| all[i].abs() > 1.0).map(|i| i / channels).collect();
+    if over.is_empty() {
+        println!("over full scale: none");
+    } else {
+        // Group into events (gaps over 10 ms start a new one), report where and how far over.
+        println!("over full scale: {} samples — clipped by the device's integer conversion:", over.len());
+        let mut start = over[0];
+        let mut prev = over[0];
+        for &f in over.iter().skip(1).chain(std::iter::once(&usize::MAX)) {
+            if f == usize::MAX || f - prev > rate as usize / 100 {
+                let ev_peak = all[start * channels..(prev + 1) * channels].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+                println!("  {:8.1} ms .. {:8.1} ms, up to {:+.2} dBFS", start as f64 * 1000.0 / rate as f64, prev as f64 * 1000.0 / rate as f64, 20.0 * ev_peak.log10());
+                if f != usize::MAX {
+                    start = f;
+                }
+            }
+            if f != usize::MAX {
+                prev = f;
+            }
+        }
+    }
+
     // Per-sample jumps, and the median as the "natural slew" baseline — a median cannot be
     // inflated by the very outlier being looked for, which a mean or max could.
     let jumps: Vec<f32> = left.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
