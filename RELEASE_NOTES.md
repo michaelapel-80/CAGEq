@@ -6,6 +6,7 @@ Click-free band toggles.
   spike that could appear when many bands faded out at once.
 - **Fixed:** sweeping the frequency finder (middle mouse button) back and forth hard enough
   could end in "the correction ... was refused by CAGEq's own engine".
-- **Engine update:** both fixes are in CAGEq's own audio engine. The app flags the update after
-  updating: Continue refreshes it, with a brief machine-wide audio interruption.
+- **Engine update:** the toggle fix is in CAGEq's own audio engine. The app flags the update
+  after updating: Continue refreshes it, with a brief machine-wide audio interruption. The
+  frequency-finder fix is in the app itself and needs no engine refresh.
 - Small wording fixes in the export dialog's tooltips.
