@@ -876,19 +876,27 @@ impl SlotAssignment {
     /// back near one of them, rather than either settling immediately (slow) or never revisiting
     /// old territory at all (one continuous fast sweep).
     ///
-    /// Explicitly never searches any slot *other* than the tracked one: reusing any slot beyond
-    /// it — even one that happens to match by Fc/Q — is exactly the class of bug this exists to
-    /// close, not a case worth optimising for.
+    /// Explicitly never searches for a *match* beyond the tracked slot: the band either retargets
+    /// its own slot (a plain ramp) or moves. And when it moves, it takes the lowest slot other
+    /// than its current one, rather than opening a fresh one past the end. That is safe because
+    /// a move is always a crossfade (`isolate_boundary_crossed` sees the slot change): the new
+    /// array plays on the cascade's secondary bank, reset fresh, and replaces the primary bank
+    /// wholesale when it lands (`Cascade::promote_secondary`), so whatever an earlier slot was
+    /// fading toward never reaches the band. It matters because appending grew the array by one
+    /// per far jump and nothing trimmed the gaps in between — a long, wild sweep in one press
+    /// passed `MAX_BANDS` and the control channel refused the push (reported live: "the
+    /// correction ... was refused by CAGEq's own engine" while dragging the frequency finder).
     fn assign_isolate<'a>(&mut self, band: &'a Band) -> Vec<Option<&'a Band>> {
         let mut out: Vec<Option<&Band>> = vec![None; self.slots.len()];
 
         let reuse_at = self
             .isolate_slot
             .filter(|&i| i < self.slots.len() && slot_reusable(&self.slots[i], band));
-        match reuse_at {
-            Some(i) => out[i] = Some(band),
-            None => out.push(Some(band)),
+        let at = reuse_at.unwrap_or_else(|| if self.isolate_slot == Some(0) { 1 } else { 0 });
+        if at >= out.len() {
+            out.resize(at + 1, None);
         }
+        out[at] = Some(band);
         while out.last().is_some_and(Option::is_none) {
             out.pop();
         }
@@ -1643,7 +1651,9 @@ mod tests {
     /// true current slot becomes the new trailing gap and gets trimmed), which the old
     /// length-only check (`out.len() > slots_before`) read as "nothing new happened" — exactly
     /// backwards. `assign_isolate` fixes this by tracking the live slot explicitly instead of
-    /// searching for any match.
+    /// searching for any match. (A far jump may now land in an old, abandoned slot again — the
+    /// lowest one other than its current — but only as a recognised move, i.e. a crossfade onto a
+    /// fresh bank, never as a silent ramp; see `a_wild_sweep_never_grows_the_slot_array`.)
     #[test]
     fn a_drag_that_swings_back_near_an_abandoned_slot_still_tracks_the_current_one() {
         let mut sa = SlotAssignment::default();
@@ -1665,17 +1675,14 @@ mod tests {
         // Swing back near the FIRST position — close to the old, abandoned `far` slot (8000 Hz
         // vs. its remembered 9000 Hz — well inside `MAX_REUSE_FC_RATIO`), nowhere near where the
         // band actually, currently is (`low`'s slot, at 31 Hz). Since `back` isn't close to the
-        // *tracked* slot either, this is a genuine new jump — it must land in a fresh slot of
-        // its own, and critically must NOT resurrect the old `far` slot just because it happens
-        // to match by Fc/Q: that slot has been independently fading since round 2, and reusing
-        // it is exactly the bug this test guards.
+        // *tracked* slot, this is a genuine move: it must leave `low`'s slot, and that move must
+        // be recognised as one (below) — what made the old bug audible was a reclaim that read as
+        // an in-place ramp.
         let third = sa.assign(std::slice::from_ref(&back));
-        assert!(third[far_slot.unwrap()].is_none(), "the old (far) slot must stay untouched, not get reclaimed");
-        assert!(third[low_slot.unwrap()].is_none(), "the old (low) slot must also stay an explicit gap");
+        assert!(third.get(low_slot.unwrap()).is_none_or(Option::is_none), "the old (low) slot must become a gap (or be trimmed)");
         let back_slot = sa.isolate_slot.expect("back must have landed somewhere");
-        assert_ne!(back_slot, far_slot.unwrap(), "must NOT resurrect the abandoned far slot");
-        assert_ne!(back_slot, low_slot.unwrap(), "back is not close to low either — must be a fresh slot");
-        assert_eq!(third[back_slot].map(|b| b.freq_hz), Some(8000.0), "back must land in its own, genuinely new slot");
+        assert_ne!(back_slot, low_slot.unwrap(), "back is not close to low — it must move, not ramp in place");
+        assert_eq!(third[back_slot].map(|b| b.freq_hz), Some(8000.0), "back must land in the slot the tracking says");
 
         // And the actual decision `push_live` makes off this: landing on a different slot than
         // the previous push must still be recognised as a boundary crossing, exactly like the
@@ -1685,6 +1692,39 @@ mod tests {
             isolate_boundary_crossed(true, true, back_slot != low_slot.unwrap()),
             "landing on a different slot than last time must still trigger the crossfade"
         );
+    }
+
+    /// **The bug this fixes, reported live**: holding the frequency finder and swinging it wildly
+    /// made every far jump open a fresh slot past the end, and nothing trimmed the gaps in between
+    /// — the array grew by one per jump until it passed `MAX_BANDS` and the control channel
+    /// refused the push. A move now takes the lowest slot other than the current one, so the
+    /// array stays as short as the correction the sweep started from (or two slots), however long
+    /// the sweep, and every move is still recognised as a crossfade.
+    #[test]
+    fn a_wild_sweep_never_grows_the_slot_array() {
+        let mut sa = SlotAssignment::default();
+        // Enter the sweep from a real 12-band correction, so its slots are there as gaps.
+        let cascade: Vec<Band> = (0..12).map(|i| band(40.0 * 1.6f64.powi(i), 2.0, 1.0)).collect();
+        sa.assign(&cascade);
+        let mut was_isolate = false;
+        for k in 0..500 {
+            let freq_hz = if k % 2 == 0 { 9000.0 } else { 31.0 };
+            let b = Band { kind: FilterKind::Bandpass, freq_hz, gain_db: 0.0, q: 8.0 };
+            let prev = sa.isolate_slot;
+            let out = sa.assign(std::slice::from_ref(&b));
+            assert!(out.len() <= cascade.len(), "push {k}: slot array grew to {}", out.len());
+            assert!(
+                isolate_boundary_crossed(was_isolate, true, sa.isolate_slot != prev),
+                "push {k}: every far jump must still crossfade"
+            );
+            was_isolate = true;
+        }
+        // Started from nothing: the array never needs more than two slots.
+        let mut fresh = SlotAssignment::default();
+        for k in 0..500 {
+            let b = Band { kind: FilterKind::Bandpass, freq_hz: if k % 2 == 0 { 9000.0 } else { 31.0 }, gain_db: 0.0, q: 8.0 };
+            assert!(fresh.assign(std::slice::from_ref(&b)).len() <= 2, "push {k}");
+        }
     }
 
     /// The bug this whole type exists to fix: dropping a band in the *middle* of the list must
@@ -1831,11 +1871,11 @@ mod tests {
     }
 
     /// The actual isolate scenario — a full multi-band correction (a low shelf plus peaking
-    /// bands) replaced wholesale by a single isolate bandpass. Every old band must end up an
-    /// explicit gap (fading to passthrough on its own slot), and the bandpass must land in a
-    /// brand new slot, never reusing any of them directly. Broader than
-    /// `a_different_filter_kind_does_not_reuse_a_freed_slot_even_at_the_same_fc` (which isolates
-    /// just the kind gate): this is the whole `push_live` input shape isolate actually produces.
+    /// bands) replaced wholesale by a single isolate bandpass. Entering isolate is always a
+    /// crossfade onto the cascade's freshly reset secondary bank (`isolate_boundary_crossed`), so
+    /// the bandpass may take the lowest slot even though the shelf held it: nothing of the shelf's
+    /// coefficients or state reaches it. What must hold: every other old band becomes a gap, the
+    /// array doesn't grow, and the switch is recognised as a crossfade.
     #[test]
     fn a_full_correction_yields_entirely_to_an_isolate_bandpass() {
         let mut sa = SlotAssignment::default();
@@ -1849,12 +1889,15 @@ mod tests {
         // exactly the case the old Fc-only check would have handed the shelf's slot to.
         let bandpass = Band { kind: FilterKind::Bandpass, freq_hz: 150.0, gain_db: 0.0, q: 8.0 };
         let just_bandpass = [bandpass];
+        let prev_isolate_slot = sa.isolate_slot;
         let second = sa.assign(&just_bandpass);
-        assert_eq!(second.len(), 4, "three old bands fade in place, the bandpass gets a 4th slot");
-        for (i, b) in second[..3].iter().enumerate() {
-            assert!(b.is_none(), "slot {i} must be an explicit gap, not reused by the bandpass");
-        }
-        assert_eq!(second[3].unwrap().kind, FilterKind::Bandpass, "the bandpass lands in a fresh slot");
+        assert!(second.len() <= 3, "entering isolate must not grow the array");
+        assert_eq!(second.iter().flatten().count(), 1, "only the bandpass is live, every other slot is a gap");
+        assert_eq!(second.iter().flatten().next().unwrap().kind, FilterKind::Bandpass);
+        assert!(
+            isolate_boundary_crossed(false, true, sa.isolate_slot != prev_isolate_slot),
+            "entering isolate must crossfade"
+        );
     }
 
     /// Trailing frees must still shrink the array — the existing "correction gets shorter"
