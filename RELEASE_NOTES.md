@@ -1,12 +1,14 @@
-Click-free band toggles.
+High-pass filter against infrasound.
 
-- **Fixed:** switching a band on or off (in a stage, or by A/B switching between slots that
-  differ by a band) could click, most audibly on a steady tone. CAGEq's own audio engine now
-  fades a band in and out without the brief ringing that caused it. This also removes a larger
-  spike that could appear when many bands faded out at once.
-- **Fixed:** sweeping the frequency finder (middle mouse button) back and forth hard enough
-  could end in "the correction ... was refused by CAGEq's own engine".
-- **Engine update:** the toggle fix is in CAGEq's own audio engine. The app flags the update
-  after updating: Continue refreshes it, with a brief machine-wide audio interruption. The
-  frequency-finder fix is in the app itself and needs no engine refresh.
-- Small wording fixes in the export dialog's tooltips.
+- **New:** a high-pass band type. Open headphones need a lot of bass boost to reach the Harman
+  target, and a bass shelf keeps boosting all the way down, so infrasound in films or some music
+  can push the drivers to their excursion limit. Click a band's type icon to cycle to High-pass
+  (after Tilt): set its frequency and a slope of 12, 24, 36 or 48 dB/oct. It starts at 20 Hz,
+  24 dB/oct. On the chart, drag its node sideways for the frequency and scroll to change the
+  slope. One high-pass per slot.
+- The spectrum, scope and vectorscope "undo EQ" views leave the high-pass in: what it removed
+  can't be restored.
+- Parametric export fits the other bands as before and adds the high-pass as `HPQ` lines.
+- **Engine update:** CAGEq's own audio engine needs updating for the high-pass. The app flags
+  the update after updating: Continue refreshes it, with a brief machine-wide audio interruption.
+  Equalizer APO users need nothing.
