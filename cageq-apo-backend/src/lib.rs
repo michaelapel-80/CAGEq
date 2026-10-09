@@ -610,6 +610,7 @@ fn to_band(f: &Filter) -> Band {
             FilterType::LowShelf => FilterKind::LowShelf,
             FilterType::HighShelf => FilterKind::HighShelf,
             FilterType::Bandpass => FilterKind::Bandpass,
+            FilterType::HighPass => FilterKind::HighPass,
             FilterType::Tilt => unreachable!("expand_tilts runs before to_band is ever called"),
         },
         freq_hz: f.freq_hz,
@@ -659,6 +660,7 @@ fn band_key(b: &Band) -> (u8, i64, i64) {
         FilterKind::HighShelf => 1,
         FilterKind::Peaking => 2,
         FilterKind::Bandpass => 3,
+        FilterKind::HighPass => 4,
     };
     (kind, (b.freq_hz * 1000.0).round() as i64, (b.q * 1000.0).round() as i64)
 }

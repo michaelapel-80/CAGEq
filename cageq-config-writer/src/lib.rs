@@ -87,6 +87,7 @@ fn eqapo_token(kind: FilterType) -> &'static str {
         FilterType::LowShelf => "LSC",
         FilterType::HighShelf => "HSC",
         FilterType::Bandpass => "BP",
+        FilterType::HighPass => "HPQ",
         FilterType::Tilt => unreachable!("expand_tilts runs before eqapo_token is ever called"),
     }
 }
@@ -513,9 +514,10 @@ fn render_device_block(cfg: &DeviceConfig) -> String {
     let mut filters: Vec<&Filter> = expanded.iter().collect();
     filters.sort_by(|a, b| a.freq_hz.total_cmp(&b.freq_hz));
     for (i, f) in filters.iter().enumerate() {
-        // A bandpass carries no gain (unity-peak), and EqAPO's BP line takes only Fc + Q.
-        if f.kind == FilterType::Bandpass {
-            let _ = write!(s, "Filter {}: ON BP Fc {:.0} Hz Q {:.2}{NL}", i + 1, f.freq_hz, f.q);
+        // A bandpass carries no gain (unity-peak), nor does a high-pass section; EqAPO's BP and
+        // HPQ lines take only Fc + Q.
+        if matches!(f.kind, FilterType::Bandpass | FilterType::HighPass) {
+            let _ = write!(s, "Filter {}: ON {} Fc {:.0} Hz Q {:.2}{NL}", i + 1, eqapo_token(f.kind), f.freq_hz, f.q);
         } else {
             let _ = write!(
                 s,
@@ -781,6 +783,15 @@ mod tests {
         assert!(block.contains("Preamp: -9.0 dB"));
         assert!(block.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"));
         assert!(block.contains("Filter 2: ON PK Fc 2500 Hz Gain -2.4 dB Q 1.40"));
+    }
+
+    /// A high-pass section is EqAPO's `HPQ`, which — like `BP` — takes no gain field.
+    #[test]
+    fn renders_a_high_pass_section_without_gain() {
+        let mut cfg = sample().remove(0);
+        cfg.filters.push(Filter { kind: FilterType::HighPass, freq_hz: 20.0, gain_db: 0.0, q: 0.5412 });
+        let block = render_device_block(&cfg);
+        assert!(block.contains("Filter 1: ON HPQ Fc 20 Hz Q 0.54"), "{block}");
     }
 
     #[test]

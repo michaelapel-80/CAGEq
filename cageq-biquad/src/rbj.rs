@@ -28,6 +28,7 @@ pub fn coefficients(band: &Band, fs: f64) -> Coeffs {
             [a + 1.0 - (a - 1.0) * cosw + 2.0 * sa * alpha, 2.0 * (a - 1.0 - (a + 1.0) * cosw), a + 1.0 - (a - 1.0) * cosw - 2.0 * sa * alpha],
         ),
         Kind::Bandpass => ([alpha, 0.0, -alpha], [1.0 + alpha, -2.0 * cosw, 1.0 - alpha]),
+        Kind::HighPass => ([(1.0 + cosw) / 2.0, -(1.0 + cosw), (1.0 + cosw) / 2.0], [1.0 + alpha, -2.0 * cosw, 1.0 - alpha]),
     };
     Coeffs::from_raw(b, d)
 }

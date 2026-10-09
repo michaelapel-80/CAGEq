@@ -227,6 +227,7 @@ pub(crate) fn biquad_band(f: &Filter) -> cageq_biquad::Band {
         FilterType::LowShelf => cageq_biquad::Kind::LowShelf,
         FilterType::HighShelf => cageq_biquad::Kind::HighShelf,
         FilterType::Bandpass => cageq_biquad::Kind::Bandpass,
+        FilterType::HighPass => cageq_biquad::Kind::HighPass,
         FilterType::Tilt => unreachable!("tilts are expanded into shelf pairs before any band is designed"),
     };
     cageq_biquad::Band { kind, freq_hz: f.freq_hz, gain_db: f.gain_db, q: f.q }

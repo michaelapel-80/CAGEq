@@ -59,9 +59,14 @@ pub enum ResponseModel {
 /// band CAGEq's UI can make at every rate it meets (Fc ≤ 20 kHz, fs ≥ 44.1 kHz), which
 /// `tests/design.rs` pins — so in practice the fallback only catches parameters RBJ cannot
 /// handle sensibly either.
+///
+/// [`Kind::HighPass`] is RBJ in both models: the bilinear transform maps the analog high-pass's
+/// passband at `s → ∞` onto Nyquist, so it has no top octaves to cramp, and its corner sits far
+/// below Nyquist anyway (it exists to stop infrasound).
 pub fn design(band: &Band, fs: f64, model: ResponseModel) -> Coeffs {
     match model {
         ResponseModel::Rbj => rbj::coefficients(band, fs),
+        ResponseModel::AnalogMatched if band.kind == Kind::HighPass => rbj::coefficients(band, fs),
         ResponseModel::AnalogMatched => matched::design(band, fs).unwrap_or_else(|_| rbj::coefficients(band, fs)),
     }
 }
@@ -75,10 +80,15 @@ pub enum Kind {
     HighShelf,
     /// Constant-0 dB-peak band-pass (the isolate audition); gain is ignored.
     Bandpass,
+    /// One second-order high-pass section (EqAPO's `HPQ`); gain is ignored. A steeper slope is
+    /// a cascade of these at Butterworth Qs, built by the app — this level only knows sections.
+    HighPass,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Peaking, Kind::LowShelf, Kind::HighShelf, Kind::Bandpass];
+    /// Every kind with a warping-corrected design ([`matched::design`]). [`Kind::HighPass`] is not
+    /// one — see [`design`].
+    pub const MATCHED: [Kind; 4] = [Kind::Peaking, Kind::LowShelf, Kind::HighShelf, Kind::Bandpass];
 
     pub fn token(self) -> &'static str {
         match self {
@@ -86,6 +96,7 @@ impl Kind {
             Kind::LowShelf => "LSC",
             Kind::HighShelf => "HSC",
             Kind::Bandpass => "BP",
+            Kind::HighPass => "HPQ",
         }
     }
 }

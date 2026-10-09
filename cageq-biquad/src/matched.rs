@@ -54,6 +54,7 @@ pub fn design(band: &Band, fs: f64) -> Result<Coeffs, Failure> {
     let c = match band.kind {
         Kind::Peaking | Kind::Bandpass => prescribed(band, fs)?,
         Kind::LowShelf | Kind::HighShelf => shelf(band, fs)?,
+        Kind::HighPass => return Err(Failure::Unsupported),
     };
     let min_phase = band.kind == Kind::Bandpass || c.zero_radius() < 1.0;
     if c.is_finite() && c.pole_radius() < 1.0 && min_phase { Ok(c) } else { Err(Failure::Unsafe) }
@@ -100,7 +101,7 @@ pub fn prescribed(band: &Band, fs: f64) -> Result<Coeffs, Failure> {
             let q = band.q;
             (1.0, 0.0, gb2, (-k / q + (k * k / (q * q) + 4.0).sqrt()) / 2.0)
         }
-        Kind::LowShelf | Kind::HighShelf => return Err(Failure::Unsupported),
+        Kind::LowShelf | Kind::HighShelf | Kind::HighPass => return Err(Failure::Unsupported),
     };
     let g1sq = proto.power_x(PI / w0);
     let g1 = g1sq.sqrt();
@@ -156,6 +157,9 @@ pub fn prescribed(band: &Band, fs: f64) -> Result<Coeffs, Failure> {
 /// denominator `(ω·g^-¼, ζ)`, low shelf the reverse, peaking ("band-shelf") `(ω, ζ·√g)` over
 /// `(ω, ζ/√g)`. So CAGEq's Q keeps its meaning.
 pub fn ivantsov(band: &Band, fs: f64, sigma: f64) -> Result<Coeffs, Failure> {
+    if band.kind == Kind::HighPass {
+        return Err(Failure::Unsupported);
+    }
     if band.gain_db == 0.0 && band.kind != Kind::Bandpass {
         return Ok(IDENTITY);
     }
@@ -188,6 +192,7 @@ pub fn ivantsov(band: &Band, fs: f64, sigma: f64) -> Result<Coeffs, Failure> {
             let c = Coeffs { b0: num[0] * k, b1: num[1] * k, b2: num[2] * k, a1: b1, a2: b2 };
             return if c.is_finite() { Ok(c) } else { Err(Failure::NoSolution) };
         }
+        Kind::HighPass => unreachable!("refused above"),
     };
     // H = G·(1+β1+β2)·(1 + α1 z⁻¹ + α2 z⁻²)/(1 + β1 z⁻¹ + β2 z⁻²), G = dc/(1+α1+α2): unity
     // (or g, for the low shelf) at DC.

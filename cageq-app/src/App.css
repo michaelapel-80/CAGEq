@@ -1794,6 +1794,48 @@ select:disabled {
   box-shadow: none;
 }
 
+/* A high-pass column's slope picker sits in the fader's slot: four detents, steepest on top, the
+   chosen one lit in the stage colour like the fader's thumb. The slot's track and 0 dB fiducial
+   don't apply. */
+.tg-slope {
+  width: 100%;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2px 4px;
+  box-sizing: border-box;
+}
+.tg-slope::before,
+.tg-slope::after {
+  display: none;
+}
+.tg-slope button {
+  width: 100%;
+  height: 19px;
+  padding: 0;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid rgba(128, 128, 128, 0.35);
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+}
+.tg-slope button.on {
+  opacity: 1;
+  font-weight: 600;
+  border-color: var(--tg, #16a34a);
+  background: color-mix(in srgb, var(--tg, #16a34a) 22%, transparent);
+  box-shadow: 0 0 5px -1px color-mix(in srgb, var(--tg, #16a34a) 80%, transparent);
+}
+/* Static text where an editable number would be — the slope's unit, and "BW" for the Q a
+   Butterworth high-pass doesn't have. Same box as the inputs beside it, so rows line up. */
+.tg-slope-unit,
+.tg-q-none {
+  display: block;
+  box-sizing: border-box;
+  font-size: 0.7rem;
+  opacity: 0.7;
+}
+
 .tg-cell {
   display: flex;
   flex-direction: column;

@@ -25,8 +25,11 @@
 //! before (its startup-integrity hash included), and an older DLL that meets a v2 file
 //! rejects it whole and keeps what it was running rather than applying the wrong model.
 //!
-//! Filter tokens are the ones CAGEq already writes (`PK`/`LSC`/`HSC`/`BP`, AutoEq's), so
-//! the same vocabulary reads the same everywhere in the project.
+//! Filter tokens are the ones CAGEq already writes (`PK`/`LSC`/`HSC`/`BP`, AutoEq's, plus
+//! EqAPO's `HPQ` for a high-pass section), so the same vocabulary reads the same everywhere in
+//! the project. A high-pass line still carries a gain field (ignored), so every band line has
+//! the same shape. An older DLL meets `HPQ` as an unknown filter type and rejects the file
+//! whole, which is why the token came with an `APO_VERSION` bump.
 //!
 //! ## Parsing posture: strict, and all-or-nothing
 //! This is read inside `audiodg`, and the result is applied to what someone is listening to.
@@ -318,6 +321,7 @@ pub fn parse(text: &str) -> Result<ApoConfig, ParseError> {
                     Some("LSC") => FilterKind::LowShelf,
                     Some("HSC") => FilterKind::HighShelf,
                     Some("BP") => FilterKind::Bandpass,
+                    Some("HPQ") => FilterKind::HighPass,
                     _ => return Err(ParseError { line: no, reason: "unknown filter type" }),
                 };
                 let freq_hz = parse_finite(tok.next(), no, "frequency")?;
@@ -385,6 +389,7 @@ pub fn render(config: &ApoConfig) -> String {
             FilterKind::LowShelf => "LSC",
             FilterKind::HighShelf => "HSC",
             FilterKind::Bandpass => "BP",
+            FilterKind::HighPass => "HPQ",
         };
         s.push_str(&format!("band {token} {:.4} {:.4} {:.4}\n", b.freq_hz, b.gain_db, b.q));
     }
@@ -402,6 +407,20 @@ mod tests {
     /// must name the same section, or the writer silently never finds the channel and the
     /// failure looks exactly like "the APO isn't running". That is how the first VM attempt
     /// at the control channel failed.
+    /// A high-pass section round-trips through the file under EqAPO's `HPQ` token.
+    #[test]
+    fn a_high_pass_section_round_trips() {
+        let text = "cageq-apo 1
+preamp -3.0000
+band HPQ 20.0000 0.0000 0.5412
+band HPQ 20.0000 0.0000 1.3066
+";
+        let c = parse(text).expect("an HPQ band is a valid band");
+        assert_eq!(c.bands.len(), 2);
+        assert!(c.bands.iter().all(|b| b.kind == FilterKind::HighPass));
+        assert_eq!(render(&c), text);
+    }
+
     #[test]
     fn bare_and_braced_guids_normalise_to_the_same_id() {
         let braced = "{6cafe423-cde5-4ec1-a1e2-e3fcec778349}";

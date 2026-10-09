@@ -44,6 +44,9 @@ fn legacy_rbj(band: &Band, sample_rate: f64) -> Coeffs {
         FilterKind::Bandpass => {
             (1.0 + alpha, -2.0 * cosw, 1.0 - alpha, alpha, 0.0, -alpha)
         }
+        // Postdates the freeze, so there is no legacy transcription to hold it to; the test
+        // below never asks for it.
+        FilterKind::HighPass => unreachable!("not part of the frozen transcription"),
     };
 
     Coeffs { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 }

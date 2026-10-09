@@ -65,6 +65,7 @@ fn param_grid(kind: Kind) -> Vec<(f64, f64, f64)> {
         Kind::Peaking => &[0.1, 0.18, 0.3, 0.5, 0.7, 1.0, 1.41, 2.0, 3.0, 4.0, 6.0, 10.0, 20.0],
         Kind::LowShelf | Kind::HighShelf => &[0.1, 0.3, 0.4, 0.5, 0.7, 1.0, 1.41, 2.0, 4.0, 10.0, 20.0],
         Kind::Bandpass => &[0.5, 0.7, 1.0, 2.0, 4.0, 8.0],
+        Kind::HighPass => unreachable!("the spike covers Kind::MATCHED only"),
     };
     let gains: &[f64] = if kind == Kind::Bandpass { &[0.0] } else { gains };
     let mut out = Vec::new();
@@ -142,6 +143,7 @@ fn methods_for(kind: Kind) -> Vec<Method> {
             m.push(Method::VicanekShelf);
             m.push(Method::Shelf);
         }
+        Kind::HighPass => unreachable!("the spike covers Kind::MATCHED only"),
     }
     m.push(Method::Ivantsov(2.0));
     m.push(Method::Ivantsov(PI * (2.0f64 / 3.0).sqrt()));
@@ -153,7 +155,7 @@ fn report(out: &mut String) {
     for fs in RATES {
         writeln!(out, "\n=== fs = {fs} Hz — worst |error| vs analog over 20 Hz–20 kHz, dB, by corner frequency ===").unwrap();
         writeln!(out, "{:<4} {:<14} {:>8} {:>8} {:>8} {:>8} {:>8}   fail unst nminph", "", "method", "<1k", "1-5k", "5-10k", "10-15k", "15-20k").unwrap();
-        for kind in Kind::ALL {
+        for kind in Kind::MATCHED {
             for method in methods_for(kind) {
                 let row = evaluate(kind, method, fs, &freqs);
                 write!(out, "{:<4} {:<14}", kind.token(), method.name()).unwrap();
@@ -164,7 +166,7 @@ fn report(out: &mut String) {
             }
         }
         writeln!(out, "\n  worst case per bucket (fc, gain, Q -> at Hz):").unwrap();
-        for kind in Kind::ALL {
+        for kind in Kind::MATCHED {
             for method in methods_for(kind) {
                 let row = evaluate(kind, method, fs, &freqs);
                 for b in 0..5 {

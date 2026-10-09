@@ -1,6 +1,6 @@
 import { useEffect, useRef, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
-import { Band, FilterKind } from "./biquad";
+import { Band, FilterKind, HP_DEFAULT, HP_SLOPES } from "./biquad";
 import { fcHue, logNorm } from "./fcColor";
 import { ScrubNumber } from "./ScrubNumber";
 
@@ -67,9 +67,12 @@ export type ToneGridProps = {
   isolateIndex?: number | null;
   /** Toggle isolate for a band (its storage index). Shown only for peaking bands. */
   onIsolate?: (index: number) => void;
+  /** Whether the kind cycle may offer HighPass — false while the slot already has one (App.tsx
+   *  allows one per slot). Defaults to true. */
+  allowHighPass?: boolean;
 };
 
-const KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf", "Tilt"];
+const KINDS: FilterKind[] = ["Peaking", "LowShelf", "HighShelf", "Tilt", "HighPass"];
 const GAIN_MIN = -20;
 const GAIN_MAX = 20;
 // Gain's tint ramps logarithmically from this floor (dB) up to full at ±GAIN_MAX — the same
@@ -116,10 +119,13 @@ const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 const tint = (c: string, amt: number): CSSProperties => ({ color: `color-mix(in srgb, var(--fg), ${c} ${Math.round(amt)}%)` });
 
 /** A tiny pictogram of each filter's shape, so the kind reads at a glance (memory: curve
- *  icons, not "PK/LS/HS" text). Click cycles Peaking → LowShelf → HighShelf → Tilt. */
+ *  icons, not "PK/LS/HS" text). Click cycles Peaking → LowShelf → HighShelf → Tilt → HighPass. */
 function KindGlyph({ kind }: { kind: FilterKind }) {
   const d =
-    kind === "Peaking"
+    // High-pass: nothing at the bottom, a steep rise, then flat — no low plateau like a shelf.
+    kind === "HighPass"
+      ? "M4,13 C6,6 8,4 12,4 L18,4"
+      : kind === "Peaking"
       ? "M2,11 L7,11 L10,3 L13,11 L18,11"
       : kind === "LowShelf"
         ? "M2,4 L8,4 L11,10 L18,10"
@@ -148,6 +154,7 @@ export function ToneGrid({
   onSolo,
   isolateIndex,
   onIsolate,
+  allowHighPass = true,
   onInput,
   onCommit,
   onAdd,
@@ -178,8 +185,13 @@ export function ToneGrid({
   }, [focusNonce]);
 
   const cycleKind = (i: number, kind: FilterKind) => {
-    const next = KINDS[(KINDS.indexOf(kind) + 1) % KINDS.length];
-    onCommit(i, { kind: next });
+    const kinds = allowHighPass || kind === "HighPass" ? KINDS : KINDS.filter((k) => k !== "HighPass");
+    const next = kinds[(kinds.indexOf(kind) + 1) % kinds.length];
+    // Entering a high-pass starts it where it protects without taking anything audible (a band
+    // cycled from a 1 kHz bell would otherwise become a 1 kHz high-pass); leaving one drops the
+    // slope, which only a high-pass carries.
+    if (next === "HighPass") onCommit(i, { kind: next, ...HP_DEFAULT, gain_db: 0 });
+    else onCommit(i, { kind: next, slope: undefined });
   };
 
   return (
@@ -275,41 +287,68 @@ export function ToneGrid({
               </button>
             )}
 
-            <ScrubNumber
-              className="tg-num tg-gain"
-              value={f.gain_db}
-              min={GAIN_MIN}
-              max={GAIN_MAX}
-              mode="add"
-              arrowStep={0.1}
-              decimals={1}
-              format={fmtGain}
-              disabled={inert}
-              style={tint(gainTint, gainAmt)}
-              name="band-gain"
-              ariaLabel={t("bands.gainAria", { name, unit: "dB" })}
-              onInput={(v) => onInput(i, { gain_db: v })}
-              onCommit={(v) => onCommit(i, { gain_db: v })}
-            />
+            {f.kind === "HighPass" ? (
+              // No gain on a high-pass: the fader's slot holds its slope instead, as four detents
+              // stacked steepest-on-top, so the column keeps its shape and the setting reads at a
+              // glance like a fader position.
+              <>
+                <span className="tg-num tg-gain tg-slope-unit">{t("bands.slopeUnit")}</span>
+                <div className="tg-fader-wrap tg-slope" role="radiogroup" aria-label={t("bands.slopeAria", { name })}>
+                  {[...HP_SLOPES].reverse().map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      role="radio"
+                      aria-checked={f.slope === s}
+                      className={f.slope === s ? "on" : ""}
+                      disabled={inert}
+                      title={t("bands.slopeTitle", { slope: s })}
+                      onClick={() => onCommit(i, { slope: s })}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <ScrubNumber
+                  className="tg-num tg-gain"
+                  value={f.gain_db}
+                  min={GAIN_MIN}
+                  max={GAIN_MAX}
+                  mode="add"
+                  arrowStep={0.1}
+                  decimals={1}
+                  format={fmtGain}
+                  disabled={inert}
+                  style={tint(gainTint, gainAmt)}
+                  name="band-gain"
+                  ariaLabel={t("bands.gainAria", { name, unit: "dB" })}
+                  onInput={(v) => onInput(i, { gain_db: v })}
+                  onCommit={(v) => onCommit(i, { gain_db: v })}
+                />
 
-            <div className="tg-fader-wrap">
-              <input
-                name="band-gain-fader"
-                type="range"
-                className="tg-fader"
-                min={GAIN_MIN}
-                max={GAIN_MAX}
-                step={0.1}
-                value={f.gain_db}
-                disabled={inert}
-                style={{ "--fill": fillPct } as CSSProperties}
-                aria-label={t("bands.gainFaderAria", { name })}
-                title={t("bands.faderTitle")}
-                onChange={(e) => onInput(i, { gain_db: Number(e.currentTarget.value) })}
-                onPointerUp={() => onCommit(i, { gain_db: f.gain_db })}
-                onDoubleClick={() => !inert && onCommit(i, { gain_db: 0 })}
-              />
-            </div>
+                <div className="tg-fader-wrap">
+                  <input
+                    name="band-gain-fader"
+                    type="range"
+                    className="tg-fader"
+                    min={GAIN_MIN}
+                    max={GAIN_MAX}
+                    step={0.1}
+                    value={f.gain_db}
+                    disabled={inert}
+                    style={{ "--fill": fillPct } as CSSProperties}
+                    aria-label={t("bands.gainFaderAria", { name })}
+                    title={t("bands.faderTitle")}
+                    onChange={(e) => onInput(i, { gain_db: Number(e.currentTarget.value) })}
+                    onPointerUp={() => onCommit(i, { gain_db: f.gain_db })}
+                    onDoubleClick={() => !inert && onCommit(i, { gain_db: 0 })}
+                  />
+                </div>
+              </>
+            )}
 
             <label className="tg-cell">
               <span className="tg-lbl">{t("bands.fc")}</span>
@@ -332,28 +371,37 @@ export function ToneGrid({
               />
             </label>
 
-            <label className="tg-cell">
-              <span className="tg-lbl">{t("bands.q")}</span>
-              <ScrubNumber
-                className="tg-num"
-                value={f.q}
-                min={0.1}
-                max={20}
-                mode="mult"
-                arrowStep={1.05}
-                decimals={2}
-                disabled={inert}
-                style={tint(qTint, qAmt)}
-                name="band-q"
-                ariaLabel={t("bands.qAria", { kind: f.kind, hz: fmtHzUnit(f.freq_hz) })}
-                onInput={(v) => onInput(i, { q: v })}
-                onCommit={(v) => onCommit(i, { q: v })}
-              />
-            </label>
+            {f.kind === "HighPass" ? (
+              // Butterworth: no Q to set (see biquad.ts's `butterworthQs`). Kept as a cell so the
+              // column lines up with its neighbours.
+              <span className="tg-cell" title={t("bands.butterworthTitle")}>
+                <span className="tg-lbl">{t("bands.q")}</span>
+                <span className="tg-num tg-q-none">{t("bands.butterworth")}</span>
+              </span>
+            ) : (
+              <label className="tg-cell">
+                <span className="tg-lbl">{t("bands.q")}</span>
+                <ScrubNumber
+                  className="tg-num"
+                  value={f.q}
+                  min={0.1}
+                  max={20}
+                  mode="mult"
+                  arrowStep={1.05}
+                  decimals={2}
+                  disabled={inert}
+                  style={tint(qTint, qAmt)}
+                  name="band-q"
+                  ariaLabel={t("bands.qAria", { kind: f.kind, hz: fmtHzUnit(f.freq_hz) })}
+                  onInput={(v) => onInput(i, { q: v })}
+                  onCommit={(v) => onCommit(i, { q: v })}
+                />
+              </label>
+            )}
 
             {readOnly ? (
               <span className="tg-fixed">
-                {f.kind === "Peaking" ? "PK" : f.kind === "LowShelf" ? "LS" : f.kind === "HighShelf" ? "HS" : f.kind === "Tilt" ? "TL" : "BP"}
+                {f.kind === "Peaking" ? "PK" : f.kind === "LowShelf" ? "LS" : f.kind === "HighShelf" ? "HS" : f.kind === "Tilt" ? "TL" : f.kind === "HighPass" ? "HP" : "BP"}
               </span>
             ) : f.fixed ? (
               <span className="tg-fixed" title={t("bands.fixedTitle", { macro: macroLabel })}>

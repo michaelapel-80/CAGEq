@@ -25,10 +25,10 @@
  */
 import { Band, composedCurveDb, type ResponseModel } from "./biquad";
 
-// AutoEq's own filter-type -> EqAPO code map (`write_eqapo_parametric_eq`), reused verbatim —
-// Bandpass/Tilt never appear here (the export only emits Peaking/LowShelf/HighShelf), so PK is a
-// safe fallback rather than a real branch.
-const FILTER_TYPE_CODE: Record<string, string> = { Peaking: "PK", LowShelf: "LSC", HighShelf: "HSC" };
+// AutoEq's own filter-type -> EqAPO code map (`write_eqapo_parametric_eq`), plus EqAPO's `HPQ` for
+// the high-pass sections the fit passes through untouched (see `fit_export_eq`'s doc). Bandpass/Tilt
+// never appear here, so PK is a safe fallback rather than a real branch.
+const FILTER_TYPE_CODE: Record<string, string> = { Peaking: "PK", LowShelf: "LSC", HighShelf: "HSC", HighPass: "HPQ" };
 
 /** Headroom below 0 dB for a self-contained export (AutoEq's `PREAMP_HEADROOM`, the same 0.2 dB the
  *  parametric fit's preamp uses). */
@@ -46,7 +46,9 @@ export function parametricEqText(bands: Band[], preampDb: number, includeQ = tru
   bands.forEach((b, i) => {
     const code = FILTER_TYPE_CODE[b.kind] ?? "PK";
     const q = includeQ ? ` Q ${b.q.toFixed(2)}` : "";
-    s += `Filter ${i + 1}: ON ${code} Fc ${Math.round(b.freq_hz)} Hz Gain ${b.gain_db.toFixed(1)} dB${q}\n`;
+    // A high-pass section has no gain, and EqAPO's HPQ line takes none (same as CAGEq's own writer).
+    const gain = b.kind === "HighPass" ? "" : ` Gain ${b.gain_db.toFixed(1)} dB`;
+    s += `Filter ${i + 1}: ON ${code} Fc ${Math.round(b.freq_hz)} Hz${gain}${q}\n`;
   });
   return s;
 }

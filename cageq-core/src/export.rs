@@ -28,7 +28,7 @@ use std::sync::Mutex;
 
 use cageq_peq_solver::{grid::standard_grid, BandKind, Solver};
 
-use crate::{filter_curve_db_in, validate_filters, CoreError, Filter, ResponseModel};
+use crate::{filter_curve_db_in, validate_filters, CoreError, Filter, FilterType, ResponseModel};
 
 const FS: f64 = 48_000.0;
 /// Highest centre frequency an exported peaking band may take — above AutoEq's 10 kHz cap.
@@ -53,6 +53,7 @@ fn filters_key(filters: &[Filter]) -> Vec<(u8, i64, i64, i64)> {
                 cageq_backend::FilterType::HighShelf => 2,
                 cageq_backend::FilterType::Bandpass => 3,
                 cageq_backend::FilterType::Tilt => 4,
+                cageq_backend::FilterType::HighPass => 5,
             };
             // Rounded like `sidecar_dsp.py`'s own cache-key digests (`round(x, 2)`/
             // `round(x, 4)`) — this is a cache key, not a computation, so quantizing
@@ -117,6 +118,11 @@ fn preamp_db(achieved_curve: &[f64]) -> f64 {
 /// bands, and so what the fit optimises: RBJ for nearly every phone/desktop EQ app, the
 /// warping-corrected model for one that designs its filters that way. Independent on purpose —
 /// a warping-corrected desktop curve exported to an RBJ app is the common case.
+///
+/// High-pass sections are passed through rather than fitted: no shelf or peaking band can
+/// follow a 24-48 dB/oct stopband, and the solver would bend every low band trying. They are
+/// left out of the target curve and appended to the result as they are (`HPQ` lines, which
+/// EqAPO-syntax importers either honour or skip), on top of `band_count`.
 pub(crate) fn fit_export_eq(
     cache: &Mutex<ExportCache>,
     filters: &[Filter],
@@ -131,8 +137,9 @@ pub(crate) fn fit_export_eq(
         return Ok(cached);
     }
 
+    let (high_pass, shaping): (Vec<Filter>, Vec<Filter>) = filters.iter().partition(|f| f.kind == FilterType::HighPass);
     let f = standard_grid();
-    let target = filter_curve_db_in(filters, &f, model);
+    let target = filter_curve_db_in(&shaping, &f, model);
     let mut bands = cageq_peq_solver::cageq_default_bands_in((band_count - 2) as usize, crate::biquad_model(band_model));
     for band in bands.iter_mut().filter(|b| b.kind == BandKind::Peaking) {
         band.max_fc = EXPORT_MAX_FC;
@@ -141,10 +148,48 @@ pub(crate) fn fit_export_eq(
     let mut solver = Solver::new(f, FS, bands, target);
     solver.tail_mean = false; // see EXPORT_MAX_FC
     solver.optimize()?;
-    let out_filters = cageq_peq_solver::bands_to_filters(&solver.bands);
+    let mut out_filters = cageq_peq_solver::bands_to_filters(&solver.bands);
+    // A high-pass only ever cuts, so the preamp computed without it still holds with it.
     let preamp = preamp_db(&solver.fr());
+    out_filters.extend(high_pass);
 
     let result = (out_filters, preamp);
     cache.lock().unwrap().insert(key, result.clone());
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn band(kind: FilterType, freq_hz: f64, gain_db: f64, q: f64) -> Filter {
+        Filter { kind, freq_hz, gain_db, q }
+    }
+
+    /// High-pass sections don't enter the fit: the fitted bands are exactly those of the same
+    /// cascade without them, and the sections come back unchanged after them.
+    #[test]
+    fn high_pass_sections_pass_through_the_export_fit() {
+        let shaping = vec![
+            band(FilterType::LowShelf, 105.0, 6.0, 0.7),
+            band(FilterType::Peaking, 3000.0, -4.0, 2.0),
+            band(FilterType::Peaking, 8000.0, 3.0, 1.0),
+        ];
+        let hp = [band(FilterType::HighPass, 20.0, 0.0, 0.5412), band(FilterType::HighPass, 20.0, 0.0, 1.3066)];
+        let mut with_hp = shaping.clone();
+        with_hp.extend(hp);
+
+        let cache = Mutex::new(ExportCache::new());
+        let (plain, plain_preamp) = fit_export_eq(&cache, &shaping, 5, ResponseModel::Rbj, ResponseModel::Rbj).unwrap();
+        let (fitted, preamp) = fit_export_eq(&cache, &with_hp, 5, ResponseModel::Rbj, ResponseModel::Rbj).unwrap();
+
+        assert_eq!(fitted.len(), plain.len() + 2);
+        for (a, b) in fitted.iter().zip(&plain) {
+            assert_eq!((a.kind, a.freq_hz, a.gain_db, a.q), (b.kind, b.freq_hz, b.gain_db, b.q));
+        }
+        for (a, b) in fitted[plain.len()..].iter().zip(&hp) {
+            assert_eq!((a.kind, a.freq_hz, a.q), (b.kind, b.freq_hz, b.q));
+        }
+        assert_eq!(preamp, plain_preamp);
+    }
 }

@@ -42,7 +42,7 @@ fn analog_prototypes_have_their_defining_gains() {
 /// analog prototype — this is what makes the prototype a fair reference for RBJ's own Q.
 #[test]
 fn rbj_matches_the_prototype_far_below_nyquist() {
-    for kind in Kind::ALL {
+    for kind in Kind::MATCHED {
         let b = band(kind, 200.0, 6.0, 1.0);
         let c = rbj::coefficients(&b, FS);
         // The band-pass is the one exception worth naming: its BLT zero at Nyquist (the
@@ -88,7 +88,7 @@ fn prescribed_bandpass_meets_its_constraints() {
 /// The matched design hits the prototype exactly at its three match points, for every kind.
 #[test]
 fn mz_matches_the_prototype_at_its_three_points() {
-    for kind in Kind::ALL {
+    for kind in Kind::MATCHED {
         for (fc, gain, q) in [(10_000.0, 6.0, 0.7), (12_000.0, -6.0, 1.0), (200.0, 4.0, 2.0)] {
             let b = band(kind, fc, gain, q);
             let c = spike::mz(&b, FS, MidPoint::W0).unwrap();

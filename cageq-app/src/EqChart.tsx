@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { Band, composedCurveDb, logGrid, phaseDeg, type FadingCurve, type ResponseModel, retargetFadingCurve, stepFadingCurve } from "./biquad";
+import { Band, composedCurveDb, highPassFc, HP_SLOPES, logGrid, phaseDeg, type FadingCurve, type ResponseModel, retargetFadingCurve, stepFadingCurve, undistortable } from "./biquad";
 import { fftWindowMs } from "./fftWindow";
 import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
 import { TiltGlyph } from "./TiltGlyph";
@@ -106,7 +106,8 @@ export type SpectrumData = {
   peaks: { hz: number; db: number }[];
 };
 
-/** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). */
+/** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). A high-pass has no
+ *  gain or Q: X only, and the wheel steps its slope. */
 export type Nodes = {
   bands: Band[];
   color: string;
@@ -495,10 +496,12 @@ export function EqChart({
     // that field's doc) — still drawn, just not allowed to set the axis.
     series.forEach((s, i) => {
       if (isHidden(s.id) || s.excludeFromScale) return;
-      for (const v of curves[i]) {
+      const floorHz = highPassFc(s.bands); // a high-pass's stopband doesn't set the scale
+      curves[i].forEach((v, k) => {
+        if (freqs[k] < floorHz) return;
         if (v < lo) lo = v;
         if (v > hi) hi = v;
-      }
+      });
     });
     for (const m of markers) {
       if (isHidden(m.id)) continue;
@@ -558,6 +561,13 @@ export function EqChart({
       e.preventDefault();
       const band = nodes.bands[hoverIdx];
       if (!band) return;
+      if (band.kind === "HighPass") {
+        // No Q to set on a Butterworth high-pass; the wheel steps its slope instead (up = steeper).
+        const i = HP_SLOPES.indexOf((band.slope ?? 24) as (typeof HP_SLOPES)[number]);
+        const next = HP_SLOPES[clamp(i + (e.deltaY > 0 ? -1 : 1), 0, HP_SLOPES.length - 1)];
+        if (next !== band.slope) nodes.onChange(hoverIdx, { slope: next });
+        return;
+      }
       const factor = e.deltaY > 0 ? 1 / 1.12 : 1.12;
       nodes.onChange(hoverIdx, { q: Math.round(clamp(band.q * factor, 0.1, 20) * 100) / 100 });
     };
@@ -766,7 +776,7 @@ export function EqChart({
             for (let i = 0; i < n; i++) bf[i] = binF(i);
             const to = new Float64Array(n);
             if (eqBands.length) {
-              const curve = composedCurveDb(eqBands, bf, model, sampleRate);
+              const curve = composedCurveDb(undistortable(eqBands), bf, model, sampleRate); // never a high-pass, see `undistortable`
               for (let i = 0; i < n; i++) to[i] = curve[i] + preampDb;
             } else {
               to.fill(preampDb);
@@ -1227,8 +1237,10 @@ export function EqChart({
       {/* draggable band handles (§5.2): X = fc, Y = gain, wheel = Q. Hidden entirely when
           disabled (e.g. Dry active) — stale handles from the last slot shouldn't linger. */}
       {nodes && !nodes.disabled && nodes.bands.map((b, i) => {
+        // A high-pass has no gain: its node sits on its own corner, -3 dB at Fc for every slope.
+        const highPass = b.kind === "HighPass";
         const cx = x(clamp(b.freq_hz, F_MIN, F_MAX));
-        const cy = y(clamp(b.gain_db, yMin, yMax));
+        const cy = y(clamp(highPass ? -3 : b.gain_db, yMin, yMax));
         const active = dragIdx === i || hoverIdx === i || nodes.hoverIdx === i;
         const isNew = nodes.highlightIdx === i;
         // Fixed macro bands (Bass/Treble/Air) ride along at runtime even though the type is
@@ -1273,10 +1285,8 @@ export function EqChart({
                   return;
                 }
                 const { vx, vy } = toViewBox(e.clientX, e.clientY);
-                nodes.onChange(i, {
-                  freq_hz: Math.round(clamp(invX(vx), F_MIN, F_MAX)),
-                  gain_db: Math.round(clamp(invY(vy), -20, 20) * 10) / 10,
-                });
+                const freq_hz = Math.round(clamp(invX(vx), F_MIN, F_MAX));
+                nodes.onChange(i, highPass ? { freq_hz } : { freq_hz, gain_db: Math.round(clamp(invY(vy), -20, 20) * 10) / 10 });
               }}
               onPointerUp={(e) => {
                 if (dragIdx !== i) return;
@@ -1296,8 +1306,8 @@ export function EqChart({
             />
             {active && (
               <text x={cx} y={cy - 11} textAnchor="middle" fontSize="9.5" fill="currentColor" opacity={0.8}>
-                {b.freq_hz >= 1000 ? `${(b.freq_hz / 1000).toFixed(2)}k` : b.freq_hz} Hz · {b.gain_db > 0 ? "+" : ""}
-                {b.gain_db.toFixed(1)} dB · Q {b.q.toFixed(2)}
+                {b.freq_hz >= 1000 ? `${(b.freq_hz / 1000).toFixed(2)}k` : b.freq_hz} Hz ·{" "}
+                {highPass ? `${b.slope ?? 24} dB/oct` : `${b.gain_db > 0 ? "+" : ""}${b.gain_db.toFixed(1)} dB · Q ${b.q.toFixed(2)}`}
               </text>
             )}
           </g>

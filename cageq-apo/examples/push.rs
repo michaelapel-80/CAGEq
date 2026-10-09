@@ -31,6 +31,7 @@ fn parse_band(spec: &str) -> Result<Band, String> {
         "LSC" => FilterKind::LowShelf,
         "HSC" => FilterKind::HighShelf,
         "BP" => FilterKind::Bandpass,
+        "HPQ" => FilterKind::HighPass,
         other => return Err(format!("unknown filter type {other:?}")),
     };
     let num = |i: usize, what: &str| {

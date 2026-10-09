@@ -6,7 +6,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
-import { Band, composedCurveDb, logGrid, type ResponseModel } from "./biquad";
+import { Band, composedCurveDb, expandHighPass, highPassFc, logGrid, type ResponseModel } from "./biquad";
 import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_DEFAULT, SPEC_FFT_MIN, snapFftSize } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
@@ -64,8 +64,9 @@ type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null 
 type SlotName = "A" | "B" | "Dry";
 // Mirrors biquad's FilterKind. "Bandpass" only ever appears in the §5.2 isolate *result* (drawn on
 // the chart), never as an editable band — the grid cycles Peaking/LowShelf/HighShelf/Tilt.
-type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass" | "Tilt";
-type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; fixed?: boolean; enabled?: boolean; macro?: string };
+type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass" | "Tilt" | "HighPass";
+// `slope` (dB/oct): a HighPass band only. See biquad.ts's `Band`.
+type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; slope?: number; fixed?: boolean; enabled?: boolean; macro?: string };
 // §3.4 custom EQ is split into three per-slot **stages** — organizational groups of bands
 // that all sum into the one biquad cascade (EqAPO flattens everything; the Rust core still
 // receives a single combined list, so it's unchanged). Each stage toggles on/off as a whole.
@@ -163,7 +164,13 @@ function stableStringify(v: unknown): string {
   if (v === null || typeof v !== "object") return JSON.stringify(v);
   if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
   const o = v as Record<string, unknown>;
-  return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(o[k])}`).join(",")}}`;
+  // Undefined-valued keys are skipped, as JSON.stringify skips them: the persisted blob never has
+  // them, so a field cleared in memory (a band leaving HighPass drops `slope`) must sign the same.
+  return `{${Object.keys(o)
+    .filter((k) => o[k] !== undefined)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(o[k])}`)
+    .join(",")}}`;
 }
 
 /** A stable fingerprint of a slot's *document* (model + measurement + target + all stages),
@@ -185,8 +192,11 @@ type LoadedRef = { id: string; name: string; at?: number | "head"; sig: string }
 
 /** The custom bands actually written: every enabled stage's enabled bands, in stage order —
  *  what rides to the sidecar (appended to the AutoEq fit) and drives the §4.1/§4.2 policy. */
-const appliedBands = (st: Stages): CustomFilter[] =>
-  STAGE_ORDER.flatMap((id) => (st[id].enabled ? st[id].bands.filter((b) => b.enabled !== false) : []));
+/** A high-pass band leaves here as its second-order sections (`expandHighPass`): the backend, the
+ *  applied filter list it hands back, and so `totalBandsUsed` all count sections, which is what
+ *  CAGEq's own APO actually runs. */
+const appliedBands = (st: Stages): Band[] =>
+  expandHighPass(STAGE_ORDER.flatMap((id) => (st[id].enabled ? st[id].bands.filter((b) => b.enabled !== false) : [])));
 
 /** Mirrors `MAX_BANDS` in `cageq-apo/src/dsp.rs` — CAGEq's own APO holds coefficients in a
  *  fixed-size array and refuses anything past this, silently as far as this app used to be
@@ -2267,6 +2277,9 @@ function App() {
   // The active stage's bands (the grid/nodes edit these) and the full applied custom set.
   const activeBands = stages[activeStage].bands;
   const appliedCustom = useMemo(() => appliedBands(stages), [stages]);
+  // One high-pass per slot, any stage: a second one only stacks slope onto the first, at up to
+  // four more of the engine's slots. The grid stops offering the kind while one exists.
+  const highPassInSlot = STAGE_ORDER.some((id) => stages[id].bands.some((b) => b.kind === "HighPass"));
   // Library filtering: templates for the active stage unless "show all" is on; curated
   // shapes are all Tone-staged, so they only show on the Tone tab (or with show-all).
   const visibleTemplates = showAllStages ? library.templates : library.templates.filter((t) => t.stage === activeStage);
@@ -2327,7 +2340,10 @@ function App() {
     for (const s of ["A", "B"] as const) {
       const fit = slotFits[s];
       if (!fit) continue;
-      for (const v of composedCurveDb(fit.filters, freqs, fit.model ?? "Rbj", sampleRate ?? undefined)) m = Math.max(m, Math.abs(v));
+      const floorHz = highPassFc(fit.filters); // a high-pass's stopband doesn't set the scale (see highPassFc)
+      composedCurveDb(fit.filters, freqs, fit.model ?? "Rbj", sampleRate ?? undefined).forEach((v, k) => {
+        if (freqs[k] >= floorHz) m = Math.max(m, Math.abs(v));
+      });
     }
     return m > 0 ? Math.max(6, Math.ceil(m + 1)) : undefined;
   }, [loudness?.mode, slotFits, sampleRate]);
@@ -3209,6 +3225,7 @@ function App() {
                         onInput={(i, patch) => updateFilter(i, patch, 70)}
                         onCommit={(i, patch) => updateFilter(i, patch, 0)}
                         onAdd={addFilter}
+                        allowHighPass={!highPassInSlot}
                         addDisabled={atMaxBands()}
                         addDisabledTitle={tr("errors.tooManyBands", { max: MAX_BANDS })}
                         onRemove={removeFilter}

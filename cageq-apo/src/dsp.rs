@@ -46,6 +46,9 @@ pub enum FilterKind {
     HighShelf,
     /// RBJ band-pass at unity peak; `gain_db` is ignored (the §5.2 isolate audition).
     Bandpass,
+    /// One RBJ second-order high-pass section; `gain_db` is ignored. Steeper slopes arrive as
+    /// several of these (see `cageq_backend::FilterType::HighPass`).
+    HighPass,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -264,6 +267,7 @@ pub fn coefficients_in(band: &Band, sample_rate: f64, model: ResponseModel) -> C
         FilterKind::LowShelf => cageq_biquad::Kind::LowShelf,
         FilterKind::HighShelf => cageq_biquad::Kind::HighShelf,
         FilterKind::Bandpass => cageq_biquad::Kind::Bandpass,
+        FilterKind::HighPass => cageq_biquad::Kind::HighPass,
     };
     let c = cageq_biquad::design(&cageq_biquad::Band { kind, freq_hz: band.freq_hz, gain_db: band.gain_db, q: band.q }, sample_rate, model);
     Coeffs { b0: c.b0, b1: c.b1, b2: c.b2, a1: c.a1, a2: c.a2 }
@@ -1299,6 +1303,7 @@ mod tests {
             ("low shelf", Band { kind: FilterKind::LowShelf, freq_hz: 105.0, gain_db: 5.0, q: 0.7 }),
             ("high shelf", Band { kind: FilterKind::HighShelf, freq_hz: 8000.0, gain_db: -4.0, q: 0.7 }),
             ("bandpass", Band { kind: FilterKind::Bandpass, freq_hz: 500.0, gain_db: 0.0, q: 2.0 }),
+            ("high-pass", Band { kind: FilterKind::HighPass, freq_hz: 60.0, gain_db: 0.0, q: 1.3066 }),
         ];
 
         for (name, band) in cases {

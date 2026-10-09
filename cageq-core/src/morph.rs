@@ -172,6 +172,7 @@ fn key(f: &Filter) -> (u8, i64, i64) {
         FilterType::Peaking => 2,
         FilterType::Bandpass => 3,
         FilterType::Tilt => 4,
+        FilterType::HighPass => 5,
     };
     (kind, (f.freq_hz * 1000.0).round() as i64, (f.q * 1000.0).round() as i64)
 }
@@ -179,12 +180,20 @@ fn key(f: &Filter) -> (u8, i64, i64) {
 /// The band set partway (`t` in `0..=1`) from `a` to `b`: the union of both, with each
 /// band's gain interpolated between its value on either side (0 dB where absent).
 /// `t = 0` reproduces `a`'s curve, `t = 1` reproduces `b`'s.
+///
+/// A [`FilterType::HighPass`] section has no gain to fade, so one present on only one side
+/// would otherwise sit in every frame — fully on from the first frame of a morph that adds it.
+/// It switches at the midpoint instead: in the frames up to `t = ½` if it is `a`'s, from there
+/// on if it is `b`'s. Not smooth, but each write is still crossfaded by the backend, and the
+/// step lands where the rest of the curve is halfway too.
 pub(crate) fn lerp_bands(a: &[Filter], b: &[Filter], t: f64) -> Vec<Filter> {
     // Order: `a`'s bands first (stable, so the written config stays recognisable
     // through the morph), then whatever `b` adds. Repeated keys on one side accumulate
     // — two identical bands really do sum in dB.
     let mut out: Vec<Filter> = Vec::with_capacity(a.len() + b.len());
     let mut gains: Vec<(f64, f64)> = Vec::with_capacity(a.len() + b.len());
+    // Which side(s) each entry came from — only the gainless high-pass needs to know.
+    let mut sides: Vec<(bool, bool)> = Vec::with_capacity(a.len() + b.len());
 
     let mut push = |band: &Filter, to_side: bool| {
         let k = key(band);
@@ -192,13 +201,16 @@ pub(crate) fn lerp_bands(a: &[Filter], b: &[Filter], t: f64) -> Vec<Filter> {
             Some(i) => {
                 if to_side {
                     gains[i].1 += band.gain_db;
+                    sides[i].1 = true;
                 } else {
                     gains[i].0 += band.gain_db;
+                    sides[i].0 = true;
                 }
             }
             None => {
                 out.push(*band);
                 gains.push(if to_side { (0.0, band.gain_db) } else { (band.gain_db, 0.0) });
+                sides.push((!to_side, to_side));
             }
         }
     };
@@ -209,10 +221,15 @@ pub(crate) fn lerp_bands(a: &[Filter], b: &[Filter], t: f64) -> Vec<Filter> {
         push(band, true);
     }
 
-    for (band, (ga, gb)) in out.iter_mut().zip(gains) {
+    let mut frame = Vec::with_capacity(out.len());
+    for ((mut band, (ga, gb)), (in_a, in_b)) in out.into_iter().zip(gains).zip(sides) {
+        if band.kind == FilterType::HighPass && !(if t < 0.5 { in_a } else { in_b }) {
+            continue;
+        }
         band.gain_db = ga + (gb - ga) * t;
+        frame.push(band);
     }
-    out
+    frame
 }
 
 #[cfg(test)]
@@ -337,6 +354,25 @@ mod tests {
         }
         approx(c_tilt[0], -3.0, 0.5); // well below 1 kHz (grid starts at 20 Hz)
         approx(*c_tilt.last().unwrap(), 3.0, 0.5); // well above (grid ends at 20 kHz)
+    }
+
+    /// A high-pass section has no gain to fade, so a one-sided one switches at the midpoint
+    /// rather than being fully in place from a morph's first frame (or to its last).
+    #[test]
+    fn a_one_sided_high_pass_switches_at_the_midpoint() {
+        let hp = Filter { kind: FilterType::HighPass, freq_hz: 20.0, gain_db: 0.0, q: 0.7071 };
+        let a = vec![peak(1000.0, 3.0, 1.0)];
+        let b = vec![peak(1000.0, 3.0, 1.0), hp];
+        let has_hp = |bands: &[Filter]| bands.iter().any(|f| f.kind == FilterType::HighPass);
+        assert!(!has_hp(&lerp_bands(&a, &b, 0.0)));
+        assert!(!has_hp(&lerp_bands(&a, &b, 0.49)));
+        assert!(has_hp(&lerp_bands(&a, &b, 0.5)));
+        assert!(has_hp(&lerp_bands(&a, &b, 1.0)));
+        // ...and the reverse direction, removing it.
+        assert!(has_hp(&lerp_bands(&b, &a, 0.49)));
+        assert!(!has_hp(&lerp_bands(&b, &a, 0.5)));
+        // On both sides it simply stays.
+        assert!(has_hp(&lerp_bands(&b, &b, 0.3)));
     }
 
     /// Loudness of a flat curve is exactly level-neutral, and a broadband boost is

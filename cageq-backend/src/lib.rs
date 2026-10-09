@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// The filter shapes CAGEq fits and applies. Deliberately the *whole* set the app uses:
-/// a custom backend only has to implement these five, which is what makes replacing
+/// a custom backend only has to implement these six, which is what makes replacing
 /// EqualizerAPO tractable at all (it implements a great deal more that CAGEq never asks
 /// for — graphic EQ, convolution, expressions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +57,13 @@ pub enum FilterType {
     /// run before matching on `FilterType`, since neither EqualizerAPO nor the RBJ
     /// cookbook has a native single-stage tilt.
     Tilt,
+    /// One second-order high-pass section at `freq_hz` with damping set by `q` (EqAPO's `HPQ`,
+    /// the RBJ cookbook's HPF); `gain_db` is ignored. The user-facing control is a slope
+    /// (12–48 dB/oct), which the app turns into a cascade of these at Butterworth Qs before
+    /// anything reaches the backend — so every backend, curve and wire format sees plain
+    /// sections, and none needs a notion of order. Never fitted: it is an excursion limit the
+    /// user places on purpose, not part of a correction.
+    HighPass,
 }
 
 /// One parametric band. All four fields are the standard RBJ-biquad parameters, so any

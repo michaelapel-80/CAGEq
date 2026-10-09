@@ -543,6 +543,7 @@ mod cageq {
             FilterKind::LowShelf => "LSC",
             FilterKind::HighShelf => "HSC",
             FilterKind::Bandpass => "BP",
+            FilterKind::HighPass => "HPQ",
         }
     }
 

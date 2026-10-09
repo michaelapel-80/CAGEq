@@ -152,7 +152,7 @@ impl Drop for DenormalGuard {
 /// Compared against `install_dir()`'s own `CAGEqApo.version` marker file (written by
 /// `register`, read by `status` — see both their own docs) instead of the DLL's bytes, so
 /// staleness now means "an intentional version bump", not "recompiled".
-pub const APO_VERSION: u32 = 9;
+pub const APO_VERSION: u32 = 10;
 
 /// Per-instance state. One of these exists per APO instance (per endpoint, per mode),
 /// created at `LockForProcess` and destroyed at `UnlockForProcess`.
@@ -240,7 +240,8 @@ impl CageqApo {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct CageqBand {
-    /// 0 = peaking, 1 = low shelf, 2 = high shelf, 3 = band-pass. Anything else is rejected
+    /// 0 = peaking, 1 = low shelf, 2 = high shelf, 3 = band-pass, 4 = high-pass section.
+    /// Anything else is rejected
     /// rather than guessed at — see [`cageq_apo_set_bands`].
     pub kind: u32,
     pub freq_hz: f64,
@@ -255,6 +256,7 @@ impl CageqBand {
             1 => dsp::FilterKind::LowShelf,
             2 => dsp::FilterKind::HighShelf,
             3 => dsp::FilterKind::Bandpass,
+            4 => dsp::FilterKind::HighPass,
             _ => return None,
         };
         // A band with a non-finite or nonsensical parameter would produce NaN coefficients,

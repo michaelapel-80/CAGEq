@@ -16,9 +16,10 @@ struct Out(UnsafeCell<[f64; 5]>);
 unsafe impl Sync for Out {}
 static OUT: Out = Out(UnsafeCell::new([0.0; 5]));
 
-/// Design one band. `kind`: 0 peaking, 1 low shelf, 2 high shelf, 3 band-pass. `model`: 0 RBJ,
-/// 1 analog-matched. Returns a pointer to `[b0, b1, b2, a1, a2]`, or null for a code it does
-/// not know — refused rather than guessed at, like every other boundary in CAGEq.
+/// Design one band. `kind`: 0 peaking, 1 low shelf, 2 high shelf, 3 band-pass, 4 high-pass
+/// section. `model`: 0 RBJ, 1 analog-matched. Returns a pointer to `[b0, b1, b2, a1, a2]`, or
+/// null for a code it does not know — refused rather than guessed at, like every other boundary
+/// in CAGEq.
 #[unsafe(no_mangle)]
 pub extern "C" fn biquad_design(kind: u32, freq_hz: f64, gain_db: f64, q: f64, fs: f64, model: u32) -> *const f64 {
     let kind = match kind {
@@ -26,6 +27,7 @@ pub extern "C" fn biquad_design(kind: u32, freq_hz: f64, gain_db: f64, q: f64, f
         1 => Kind::LowShelf,
         2 => Kind::HighShelf,
         3 => Kind::Bandpass,
+        4 => Kind::HighPass,
         _ => return std::ptr::null(),
     };
     let model = match model {

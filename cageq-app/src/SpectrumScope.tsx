@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
-import { composedCurveDb, type FadingCurve, retargetFadingCurve, stepFadingCurve } from "./biquad";
+import { composedCurveDb, type FadingCurve, retargetFadingCurve, stepFadingCurve, undistortable } from "./biquad";
 import { fcHue } from "./fcColor";
 import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
 import { TiltGlyph } from "./TiltGlyph";
@@ -92,7 +92,8 @@ function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number, sampleR
       const lnF1 = Math.log(s.f_max);
       for (let i = 0; i < n; i++) bf[i] = Math.exp(lnF0 + (i / (n - 1)) * (lnF1 - lnF0));
     }
-    const curve = composedCurveDb(eq.filters, bf, eq.model, sampleRate);
+    // Never a high-pass: what it removed can't be restored (see `undistortable`).
+    const curve = composedCurveDb(undistortable(eq.filters), bf, eq.model, sampleRate);
     for (let i = 0; i < n; i++) arr[i] = curve[i] + eq.preampDb;
   } else {
     arr.fill(eq.preampDb); // Dry: no filters, still undo the §4.1 loudness-match preamp

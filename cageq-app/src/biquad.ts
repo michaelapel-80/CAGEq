@@ -20,8 +20,11 @@
 
 import initWasm from "./wasm/cageq_biquad.wasm?init";
 
-export type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass" | "Tilt";
-export type Band = { kind: FilterKind; freq_hz: number; gain_db: number; q: number };
+export type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass" | "Tilt" | "HighPass";
+/** `slope` (dB/oct, one of {@link HP_SLOPES}) marks a user-facing `HighPass` band; see
+ *  {@link expandHighPass}. A `HighPass` without it is one second-order section at `q` — what the
+ *  backend receives and hands back. `gain_db` means nothing on either. */
+export type Band = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; slope?: number };
 /** How bands are realised — mirrors `cageq_backend::ResponseModel` (serde's unit-variant names). */
 export type ResponseModel = "Rbj" | "AnalogMatched";
 
@@ -37,8 +40,58 @@ export async function initBiquad(): Promise<void> {
   wasm = instance.exports as unknown as WasmExports;
 }
 
-const KIND_CODE: Record<Exclude<FilterKind, "Tilt">, number> = { Peaking: 0, LowShelf: 1, HighShelf: 2, Bandpass: 3 };
+const KIND_CODE: Record<Exclude<FilterKind, "Tilt">, number> = { Peaking: 0, LowShelf: 1, HighShelf: 2, Bandpass: 3, HighPass: 4 };
 const MODEL_CODE: Record<ResponseModel, number> = { Rbj: 0, AnalogMatched: 1 };
+
+/** The high-pass slopes on offer, dB/oct — even orders only, so each is a whole number of
+ *  second-order sections (Equalizer APO has no first-order high-pass to round one out with). */
+export const HP_SLOPES = [12, 24, 36, 48] as const;
+/** What a band becomes when switched to a high-pass: low enough to keep everything audible, steep
+ *  enough to matter for infrasound under a bass boost. */
+export const HP_DEFAULT = { freq_hz: 20, slope: 24 } as const;
+
+/** The Qs of the second-order sections of an even-order Butterworth high-pass of `slope` dB/oct:
+ *  `1 / (2·cos((2k−1)·π / 2n))`, k = 1…n/2, for order n = slope/6. Maximally flat — no resonance
+ *  anywhere, −3 dB at Fc for every order. */
+export function butterworthQs(slope: number): number[] {
+  const n = Math.max(2, 2 * Math.round(slope / 12));
+  return Array.from({ length: n / 2 }, (_, i) => 1 / (2 * Math.cos(((2 * i + 1) * Math.PI) / (2 * n))));
+}
+
+/**
+ * Expand every user-facing `HighPass` band (one carrying a `slope`) into its Butterworth sections
+ * — one second-order `HighPass` per 12 dB/oct, all at the band's Fc — passing everything else
+ * through. The backend only ever sees sections: App.tsx expands before applying, so the applied
+ * filter list (and `ApplyResult.filters`) holds sections, while the stages keep the one band the
+ * user edits.
+ */
+export function expandHighPass<B extends Band>(bands: B[]): Band[] {
+  const out: Band[] = [];
+  for (const b of bands) {
+    if (b.kind === "HighPass" && b.slope !== undefined) {
+      for (const q of butterworthQs(b.slope)) out.push({ kind: "HighPass", freq_hz: b.freq_hz, gain_db: 0, q });
+    } else {
+      out.push(b);
+    }
+  }
+  return out;
+}
+
+/** The highest high-pass corner in `bands` (0 without one). Below it the curve is a stopband that
+ *  plunges as far as the slope takes it, so chart auto-ranging starts here — otherwise a 48 dB/oct
+ *  cut would zoom the whole axis out to show its own skirt. */
+export const highPassFc = (bands: Band[]): number => bands.reduce((m, b) => (b.kind === "HighPass" ? Math.max(m, b.freq_hz) : m), 0);
+
+/** Every composite band expanded into the biquads that realise it. */
+const expandBands = (bands: Band[]): Band[] => expandTilts(expandHighPass(bands));
+
+/**
+ * The bands an undistort view can invert — every biquad except high-pass sections. A high-pass has
+ * its zeros at DC, so its inverse has poles there and grows without bound; and what it removed is
+ * gone anyway. So the undistort views restore the signal as it was before every *other* filter,
+ * with the high-pass's cut still in it — which is also the honest picture of what reaches the ear.
+ */
+export const undistortable = (bands: Band[]): Band[] => expandBands(bands).filter((b) => b.kind !== "HighPass");
 
 /**
  * Expand every `Tilt` band into the complementary shelf pair that actually realises it
@@ -47,7 +100,7 @@ const MODEL_CODE: Record<ResponseModel, number> = { Rbj: 0, AnalogMatched: 1 };
  * `cageq_backend::expand_tilts` (Rust); {@link coefficients} has no tilt formula of its
  * own, by the same reasoning as that function's doc: neither EqualizerAPO nor the RBJ
  * cookbook has a native single-stage tilt, so every entry point below that walks a
- * `Band[]` calls this first instead.
+ * `Band[]` expands first (via `expandBands`, which also splits a high-pass into sections).
  */
 export function expandTilts(bands: Band[]): Band[] {
   const out: Band[] = [];
@@ -120,7 +173,7 @@ export function stepBiquad(c: BiquadCoeffs, s: BiquadState, x: number): number {
 export type InverseCascade = { coeffs: BiquadCoeffs[]; stateL: BiquadState[]; stateR: BiquadState[]; gain: number };
 
 export function buildInverseCascade(filters: Band[], preampDb: number, model: ResponseModel, fs: number): InverseCascade {
-  const coeffs = expandTilts(filters).map((b) => inverseBiquadCoeffs(b, model, fs)).reverse(); // undo in reverse order
+  const coeffs = undistortable(filters).map((b) => inverseBiquadCoeffs(b, model, fs)).reverse(); // undo in reverse order
   return { coeffs, stateL: coeffs.map(zeroState), stateR: coeffs.map(zeroState), gain: Math.pow(10, preampDb / 20) };
 }
 
@@ -242,7 +295,7 @@ export function filterResponseDb(band: Band, freqs: Float64Array, model: Respons
 /** The composed EQ curve: every band summed (a biquad cascade adds in dB). */
 export function composedCurveDb(bands: Band[], freqs: Float64Array, model: ResponseModel, fs = FS): Float64Array {
   const total = new Float64Array(freqs.length);
-  for (const band of expandTilts(bands)) {
+  for (const band of expandBands(bands)) {
     const r = filterResponseDb(band, freqs, model, fs);
     for (let i = 0; i < total.length; i++) total[i] += r[i];
   }
@@ -257,7 +310,7 @@ export function composedCurveDb(bands: Band[], freqs: Float64Array, model: Respo
  *  the negation of what `coefficients()` returns (that helper pre-negates them, a0 = 1). */
 export function phaseDeg(bands: Band[], freqs: Float64Array, model: ResponseModel, fs = FS): Float64Array {
   const out = new Float64Array(freqs.length);
-  for (const band of expandTilts(bands)) {
+  for (const band of expandBands(bands)) {
     const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, model, fs);
     const a1t = -a1;
     const a2t = -a2;
@@ -285,7 +338,7 @@ export function phaseDeg(bands: Band[], freqs: Float64Array, model: ResponseMode
 export function impulseResponse(bands: Band[], model: ResponseModel, n = 480, fs = FS): Float64Array {
   let sig = new Float64Array(n);
   sig[0] = 1;
-  for (const band of expandTilts(bands)) {
+  for (const band of expandBands(bands)) {
     const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, model, fs);
     const a1t = -a1;
     const a2t = -a2;

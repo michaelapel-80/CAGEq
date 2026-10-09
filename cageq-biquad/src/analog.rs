@@ -20,6 +20,7 @@ impl Prototype {
             Kind::Bandpass => Prototype { n: [0.0, 1.0 / q, 0.0], d: [1.0, 1.0 / q, 1.0] },
             Kind::LowShelf => Prototype { n: [a, a * sa / q, a * a], d: [a, sa / q, 1.0] },
             Kind::HighShelf => Prototype { n: [a * a, a * sa / q, a], d: [1.0, sa / q, a] },
+            Kind::HighPass => Prototype { n: [1.0, 0.0, 0.0], d: [1.0, 1.0 / q, 1.0] },
         }
     }
 

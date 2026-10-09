@@ -312,10 +312,7 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
                   <tr key={i}>
                     {!output.graphic && <td>{b.kind}</td>}
                     <td>{Math.round(b.freq_hz)} Hz</td>
-                    <td>
-                      {b.gain_db > 0 ? "+" : ""}
-                      {b.gain_db.toFixed(1)} dB
-                    </td>
+                    <td>{b.kind === "HighPass" ? "—" : `${b.gain_db > 0 ? "+" : ""}${b.gain_db.toFixed(1)} dB`}</td>
                     {!output.graphic && <td>{b.q?.toFixed(2)}</td>}
                   </tr>
                 ))}
