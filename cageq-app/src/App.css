@@ -1434,6 +1434,17 @@ select:disabled {
   font-weight: 500;
   opacity: 0.8;
 }
+/* The presets heading's Import…/Export… pair: pushed right as one group (two auto margins would
+   split the free space between them instead). */
+.pl-group .pl-group-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 0.3em;
+  opacity: 1; /* not `.pl-group span`'s extra dimming: match the templates' "show all" */
+}
+.pl-group-actions .pl-showall {
+  margin-left: 0;
+}
 
 /* --- §5.2 compare: slot chips as illuminated instrument buttons ------------
    Each chip carries its slot colour in --slot (set inline). The active slot lights up —

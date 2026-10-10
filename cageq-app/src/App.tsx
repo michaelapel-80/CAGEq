@@ -3664,7 +3664,29 @@ function App() {
 
               <h3 className="pl-group">
                 {tr("presets.presetsGroup")} <span>{tr("presets.presetsScope")}</span>
+                {/* In the heading, like the templates' "show all": anywhere below the list would
+                    stop the list being the panel's last child, which is what lets it fill the
+                    column (App.css, `.pl-scroll:last-child`). */}
+                <span className="pl-group-actions">
+                  <button type="button" className="pl-showall" onClick={() => void importLibrary()} title={tr("presets.importFileTitle")}>
+                    {tr("presets.importFile")}
+                  </button>
+                  <button
+                    type="button"
+                    className="pl-showall"
+                    disabled={library.presets.length + library.templates.length === 0}
+                    onClick={() => void exportLibrary()}
+                    title={tr("presets.exportFileTitle")}
+                  >
+                    {tr("presets.exportFile")}
+                  </button>
+                </span>
               </h3>
+              {libraryNote && (
+                <p role={libraryNote.error ? "alert" : "status"} className="pl-hint" style={{ marginTop: 0, color: libraryNote.error ? "crimson" : undefined }}>
+                  {libraryNote.text}
+                </p>
+              )}
               <div className="pl-scroll">
                 {sortedPresets.length > 0 ? (
                   <ul className="pl-list">
@@ -3791,26 +3813,6 @@ function App() {
                   </ul>
                 ) : (
                   <p className="pl-empty">{tr("presets.emptyPresets")}</p>
-                )}
-              </div>
-
-              <div className="row pl-file" style={{ gap: "0.4em", marginTop: "0.6em" }}>
-                <button
-                  type="button"
-                  className="pl-save"
-                  disabled={library.presets.length + library.templates.length === 0}
-                  onClick={() => void exportLibrary()}
-                  title={tr("presets.exportFileTitle")}
-                >
-                  {tr("presets.exportFile")}
-                </button>
-                <button type="button" className="pl-save" onClick={() => void importLibrary()} title={tr("presets.importFileTitle")}>
-                  {tr("presets.importFile")}
-                </button>
-                {libraryNote && (
-                  <span role={libraryNote.error ? "alert" : "status"} className="pl-hint" style={{ margin: 0, color: libraryNote.error ? "crimson" : undefined }}>
-                    {libraryNote.text}
-                  </span>
                 )}
               </div>
             </div>
