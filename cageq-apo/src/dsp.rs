@@ -61,7 +61,7 @@ pub struct Band {
 
 /// One biquad's difference-equation coefficients, `a0` normalised to 1 and `a1`/`a2` in the
 /// standard (un-negated) convention — see the module doc.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Coeffs {
     pub b0: f64,
     pub b1: f64,
@@ -122,7 +122,9 @@ const RAMP_MS: f64 = 8.0;
 /// Not shared as an actual Rust constant across the two crates — `cageq-apo` doesn't depend on
 /// `cageq-core` (and shouldn't start to just for one `f64`) — so this is a second copy, the
 /// same tradeoff already made three times over for the K-weighting constants in `morph.rs`,
-/// the sidecar, and `biquad.ts`.
+/// the sidecar, and `biquad.ts`. The *distance* it is applied to differs, though: this one counts
+/// phase as well as level (see [`Cascade::ramp_distance_db`]), which `morph.rs`'s does not —
+/// so the same edit ramps somewhat longer here, and a high-pass toggle far longer.
 const RAMP_RATE_DB_PER_SEC: f64 = 40.0;
 
 /// Ceiling on the adaptive ramp, matching `cageq-core::morph::TONE_MORPH_MAX` — see that
@@ -210,6 +212,16 @@ impl Coeffs {
         Coeffs { b0: 1.0, b1: self.a1, b2: self.a2, a1: self.a1, a2: self.a2 }
     }
 
+    /// `H(e^{jω})` at a precomputed grid point, as `(numerator, denominator)` complex pairs
+    /// `(re, im)` — left undivided so a caller can form ratios of two filters without dividing
+    /// by a denominator that may sit near zero.
+    #[inline]
+    fn parts_at(&self, g: &GridPoint) -> ((f64, f64), (f64, f64)) {
+        let num = (self.b0 + self.b1 * g.c1 + self.b2 * g.c2, -(self.b1 * g.s1 + self.b2 * g.s2));
+        let den = (1.0 + self.a1 * g.c1 + self.a2 * g.c2, -(self.a1 * g.s1 + self.a2 * g.s2));
+        (num, den)
+    }
+
     /// `|H|²` at a precomputed grid point.
     #[inline]
     fn power_at(&self, g: &GridPoint) -> f64 {
@@ -242,6 +254,12 @@ impl Coeffs {
 
 
 /// dB to a linear gain. One place, so the ramp and the setters cannot disagree about it.
+/// Complex product, `(re, im)` pairs.
+#[inline]
+fn cmul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
+}
+
 #[inline]
 fn db_to_gain(db: f64) -> f64 {
     10.0_f64.powf(db / 20.0)
@@ -518,8 +536,20 @@ impl Cascade {
     ///
     /// There is no discontinuity at a retarget either way: the ramp always starts from wherever
     /// the coefficients currently sit, never from the previous target.
+    ///
+    /// **A structural change is never truncated.** The truncation exists for *continuous* moves —
+    /// the same bands sliding along with a pointer — not for a band appearing or disappearing:
+    /// a toggle, a slot switch, a slope change that adds or drops sections. Those are discrete
+    /// edits that only happen to arrive quickly, and cutting their ramp to the floor brings back
+    /// exactly the artefact their full length removes (reported live: once a high-pass toggle
+    /// ramped 0.1-0.3 s, toggling it again before the ramp landed snapped back to 8 ms and
+    /// thumped). Detected against the previous *target*, not the current coefficients, so a
+    /// slot still mid-way through leaving counts as gone: on → off → on in quick succession is
+    /// structural every time. The ramp still starts from wherever the coefficients are.
     fn start_ramp(&mut self, target: &[Coeffs], new_count: usize, preamp_db: f64) {
-        let interrupting = self.ramp_left > 0 || self.cooldown_left > 0;
+        let structural = (0..MAX_BANDS)
+            .any(|i| self.target[i].is_identity() != target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH).is_identity());
+        let interrupting = (self.ramp_left > 0 || self.cooldown_left > 0) && !structural;
         // From wherever the preamp has actually reached, not from the previous target, so a
         // switch that interrupts a ramp still moves continuously.
         self.preamp_from_db = 20.0 * self.preamp.log10();
@@ -582,7 +612,23 @@ impl Cascade {
         self.cooldown_left = self.gesture_gap_frames;
     }
 
-    /// How far apart `start` and `target` are, combined response in dB, RMS over [`Cascade::grid`].
+    /// How far apart `start` and `target` are, RMS over [`Cascade::grid`], in dB — counting the
+    /// change in **phase** as well as level.
+    ///
+    /// At each grid point this is `|ln(H_target / H_start)|`, the complex log of the change: its
+    /// real part is the level change (in nepers, so ×8.69 is the familiar dB), its imaginary part
+    /// the phase change in radians, so one radian counts as 8.69 dB. That is the right exchange
+    /// rate for sizing a ramp, not a taste: any transition blends the old response into the new,
+    /// and how much the blend adds of its own scales with `|H_target − H_start| / |H_start|`, which
+    /// for small changes *is* that complex log, level and phase alike. Magnitude alone used to be
+    /// the whole measure, and a high-pass toggle is where that failed: below a few hundred Hz it
+    /// rotates the phase far more than it changes the level, so it was sized as a nudge and
+    /// ramped in the 8 ms floor — measured (`examples/hpcompare.rs`), even an ideal 8 ms blend of
+    /// the two steady states leaves a 100 Hz tone's residual at -3 dB re the tone for a 48 dB/oct
+    /// high-pass, audible as a thump; at 100 ms it is -18 dB, at 300 ms -28 dB.
+    ///
+    /// Phases are summed per slot (each slot's own change lies within ±π), so a cascade's total
+    /// rotation is unwrapped rather than folded back into ±π.
     ///
     /// A deliberately simpler cousin of `cageq-core::morph::tonal_distance_db`: that one is
     /// K-weighted and pink-noise-bin-weighted because it feeds a number people compare presets
@@ -593,18 +639,31 @@ impl Cascade {
     /// porting K-weighting a fourth time for a heuristic that never reaches the user as a
     /// number.
     fn ramp_distance_db(&self) -> f64 {
+        const DB_PER_NEPER: f64 = 20.0 / std::f64::consts::LN_10;
         let mut sum_sq = 0.0;
         for g in &self.grid {
-            let mut db_from = self.preamp_from_db;
-            let mut db_to = self.preamp_to_db;
+            // ln|r| accumulated as power (dB/10 → nepers at the end) and arg r in radians.
+            let mut db = self.preamp_to_db - self.preamp_from_db;
+            let mut rad = 0.0;
             for i in 0..MAX_BANDS {
+                if self.start[i] == self.target[i] {
+                    continue;
+                }
+                let ((sn, sd), (tn, td)) = (self.start[i].parts_at(g), self.target[i].parts_at(g));
+                // r = (tn·sd) / (td·sn): the change in this slot's response, as one ratio.
+                let p = cmul(tn, sd);
+                let q = cmul(td, sn);
+                let (pp, qp) = (p.0 * p.0 + p.1 * p.1, q.0 * q.0 + q.1 * q.1);
                 // Floored, not left to reach zero/negative-infinite: a genuine null in one
                 // curve at one grid point must not make the whole distance metric blow up or
                 // go NaN over a difference that is really "very large but finite".
-                db_from += 10.0 * self.start[i].power_at(g).max(1e-12).log10();
-                db_to += 10.0 * self.target[i].power_at(g).max(1e-12).log10();
+                db += 10.0 * pp.max(1e-24).log10() - 10.0 * qp.max(1e-24).log10();
+                if pp > 0.0 && qp > 0.0 {
+                    // arg(p / q) = arg(p · conj(q))
+                    rad += (p.1 * q.0 - p.0 * q.1).atan2(p.0 * q.0 + p.1 * q.1);
+                }
             }
-            let d = db_to - db_from;
+            let d = db.hypot(rad * DB_PER_NEPER);
             sum_sq += d * d;
         }
         (sum_sq / self.grid.len() as f64).sqrt()
@@ -3130,6 +3189,158 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The high-pass sections of a Butterworth slope (`cageq_backend::FilterType::HighPass`).
+    fn high_pass(fc: f64, slope: u32) -> Vec<Band> {
+        let n = slope / 6;
+        (1..=n / 2)
+            .map(|k| {
+                let q = 1.0 / (2.0 * ((2 * k - 1) as f64 * std::f64::consts::PI / (2 * n) as f64).cos());
+                Band { kind: FilterKind::HighPass, freq_hz: fc, gain_db: 0.0, q }
+            })
+            .collect()
+    }
+
+    /// A high-pass toggle barely changes the level above its corner but rotates the phase there a
+    /// long way, and the ramp is sized by both (see `ramp_distance_db`): a 24 dB/oct, 20 Hz
+    /// high-pass used to land in the 8 ms floor like a nudge; it now gets well over 100 ms, while
+    /// a small bell's toggle stays short.
+    #[test]
+    fn a_high_pass_toggle_is_sized_by_its_phase_change() {
+        let ramp_ms = |from: &[Band], to: &[Band]| {
+            let mut c = Cascade::new(1, FS);
+            assert!(c.set_bands(from));
+            c.settle();
+            c.cooldown_left = 0; // a fresh edit, not the continuation of a gesture
+            assert!(c.set_bands(to));
+            c.ramp_frames as f64 / FS * 1000.0
+        };
+        let base = realistic_correction(3.0);
+        let with = |extra: Vec<Band>| [base.clone(), extra].concat();
+        let hp = ramp_ms(&base, &with(high_pass(20.0, 24)));
+        assert!(hp >= 100.0, "24 dB/oct high-pass toggle ramps {hp:.0} ms");
+        let off = ramp_ms(&with(high_pass(20.0, 48)), &base);
+        assert!(off >= 200.0, "48 dB/oct high-pass toggle off ramps {off:.0} ms");
+        let bell = ramp_ms(&base, &with(vec![peaking(280.0, -1.7, 0.8)]));
+        assert!(bell < 30.0, "a -1.7 dB bell toggle ramps {bell:.0} ms");
+    }
+
+    /// **Reported live**: toggling a 20 Hz high-pass was clearly audible on a 100 Hz sine, worse
+    /// with every added section. Through the real engine, a 48 dB/oct one toggled off and back on
+    /// under a 100 Hz tone now leaves a notched residual below -20 dB re the tone (measured about
+    /// -27 dB; it was about 0 dB in the 8 ms floor — `examples/hpcompare.rs`).
+    #[test]
+    fn toggling_a_high_pass_leaves_no_thump_on_a_bass_tone() {
+        let shelf = Band { kind: FilterKind::LowShelf, freq_hz: 105.0, gain_db: 6.0, q: 0.7 };
+        let on: Vec<Band> = [vec![shelf], high_pass(20.0, 48)].concat();
+        let off = vec![shelf];
+        let n = (FS * 2.2) as usize;
+        let (s1, s2) = ((FS * 0.6) as usize, (FS * 1.4) as usize);
+        let input = tone(100.0, 0, n, 0.25);
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&on));
+        c.settle();
+        let mut out = vec![0.0f32; n];
+        for start in (0..n).step_by(480) {
+            if start == s1 {
+                assert!(c.set_bands(&off));
+            }
+            if start == s2 {
+                assert!(c.set_bands(&on));
+            }
+            let m = 480.min(n - start);
+            c.process(&input[start..start + m], &mut out[start..start + m], m);
+        }
+        let w0 = 2.0 * std::f64::consts::PI * 100.0 / FS;
+        let al = w0.sin() / 20.0;
+        let a0 = 1.0 + al;
+        let notch = Coeffs { b0: 1.0 / a0, b1: -2.0 * w0.cos() / a0, b2: 1.0 / a0, a1: -2.0 * w0.cos() / a0, a2: (1.0 - al) / a0 };
+        let mut r: Vec<f64> = out.iter().map(|&v| v as f64).collect();
+        for _ in 0..2 {
+            let mut st = BiquadState::default();
+            for v in r.iter_mut() {
+                *v = st.step(&notch, *v);
+            }
+        }
+        let tone_pk = out[(FS * 0.3) as usize..s1].iter().fold(0.0f64, |m, v| m.max(v.abs() as f64));
+        for (dir, at) in [("off", s1), ("on", s2)] {
+            let pk = r[at..at + (FS * 0.4) as usize].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+            let db = 20.0 * (pk / tone_pk).log10();
+            assert!(db < -20.0, "high-pass toggled {dir}: residual {db:.1} dB re the tone");
+        }
+    }
+
+    /// A toggle that arrives while the previous one is still ramping is a structural change, not
+    /// the continuation of a drag, so it keeps its full ramp instead of snapping to the floor —
+    /// on → off → on alike. A continuous move of the same bands still truncates as before.
+    #[test]
+    fn a_quick_re_toggle_keeps_its_full_ramp() {
+        let base = realistic_correction(3.0);
+        let with_hp = [base.clone(), high_pass(20.0, 48)].concat();
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&base));
+        c.settle();
+        let mut out = [0.0f32; 1];
+        let mut run_ms = |c: &mut Cascade, ms: f64| {
+            for _ in 0..(ms / 1000.0 * FS) as usize {
+                c.process(&[0.1], &mut out, 1);
+            }
+        };
+        let floor = ((RAMP_MS / 1000.0) * FS).round() as u32;
+        for (k, bands) in [&with_hp, &base, &with_hp].into_iter().enumerate() {
+            assert!(c.set_bands(bands));
+            // Sized by what is left to move from where the coefficients are (a toggle undone
+            // part-way has less to travel), never cut to the floor.
+            let expected = ((Cascade::ramp_ms_for(c.ramp_distance_db()) / 1000.0) * FS).round() as u32;
+            assert_eq!(c.ramp_frames, expected, "toggle {k} was not given its own distance-sized ramp");
+            assert!(c.ramp_frames > 4 * floor, "toggle {k} ramped only {} frames", c.ramp_frames);
+            run_ms(&mut c, 60.0); // well inside both the ramp and the gesture gap
+        }
+        // Moving the same high-pass along (a drag of its Fc) continues a gesture: truncated.
+        let moved = [base.clone(), high_pass(21.0, 48)].concat();
+        assert!(c.set_bands(&moved));
+        assert_eq!(c.ramp_frames, floor, "a continuous move mid-gesture must still truncate");
+    }
+
+    /// The same, heard: a 48 dB/oct high-pass toggled on, off and on again 120 ms apart under a
+    /// 100 Hz tone stays below -20 dB re the tone (it snapped to the 8 ms floor before).
+    #[test]
+    fn a_quick_high_pass_re_toggle_stays_clean_on_a_bass_tone() {
+        let shelf = Band { kind: FilterKind::LowShelf, freq_hz: 105.0, gain_db: 6.0, q: 0.7 };
+        let on: Vec<Band> = [vec![shelf], high_pass(20.0, 48)].concat();
+        let off = vec![shelf];
+        let n = (FS * 2.0) as usize;
+        let pushes = [((FS * 0.6) as usize, &on), ((FS * 0.72) as usize, &off), ((FS * 0.84) as usize, &on)];
+        let input = tone(100.0, 0, n, 0.25);
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&off));
+        c.settle();
+        let mut out = vec![0.0f32; n];
+        for start in (0..n).step_by(480) {
+            for &(at, bands) in &pushes {
+                if start == at - at % 480 {
+                    assert!(c.set_bands(bands));
+                }
+            }
+            let m = 480.min(n - start);
+            c.process(&input[start..start + m], &mut out[start..start + m], m);
+        }
+        let w0 = 2.0 * std::f64::consts::PI * 100.0 / FS;
+        let al = w0.sin() / 20.0;
+        let a0 = 1.0 + al;
+        let notch = Coeffs { b0: 1.0 / a0, b1: -2.0 * w0.cos() / a0, b2: 1.0 / a0, a1: -2.0 * w0.cos() / a0, a2: (1.0 - al) / a0 };
+        let mut r: Vec<f64> = out.iter().map(|&v| v as f64).collect();
+        for _ in 0..2 {
+            let mut st = BiquadState::default();
+            for v in r.iter_mut() {
+                *v = st.step(&notch, *v);
+            }
+        }
+        let tone_pk = out[(FS * 0.3) as usize..(FS * 0.6) as usize].iter().fold(0.0f64, |m, v| m.max(v.abs() as f64));
+        let pk = r[(FS * 0.6) as usize..(FS * 1.4) as usize].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let db = 20.0 * (pk / tone_pk).log10();
+        assert!(db < -20.0, "quick re-toggle: residual {db:.1} dB re the tone");
     }
 
     /// Bands dropped off the end keep running as twins until their own ringing has settled, then
