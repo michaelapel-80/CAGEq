@@ -100,6 +100,14 @@ impl Solver {
             cancellation_weight: CANCELLATION_WEIGHT, tail_mean: true, f, fs, bands, target, min_f_ix, max_f_ix, ix_10k }
     }
 
+    /// Move the low end of the range the fit error is taken over (20 Hz unless set; see
+    /// [`Solver::new`]). Only meaningful on a grid that reaches below 20 Hz, which none of
+    /// CAGEq's own fits use — it exists for `cageq-core`'s `examples/bass_fit.rs`, which asks
+    /// whether fitting a target extended below 20 Hz would stop the infrasound boost.
+    pub fn set_min_f(&mut self, hz: f64) {
+        self.min_f_ix = argmin_abs(&self.f, hz);
+    }
+
     /// `PEQ.fr` (peq.py:537-540): the cascade response, bands summed in dB.
     pub fn fr(&self) -> Vec<f64> {
         let mut total = vec![0.0; self.f.len()];
