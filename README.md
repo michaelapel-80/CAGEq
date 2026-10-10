@@ -30,9 +30,13 @@ risks digital clipping or jarring level jumps.
 
 ## What CAGEq does about it
 
-* **Loudness-neutral comparison (auto-LUFS).** Every correction gets an automatic compensation
-  gain, computed from human hearing-weighted loudness (ITU-R BS.1770-4) — A/B/Dry then differ
-  only in tone, not level.
+* **Loudness-neutral comparison (auto-LUFS).** Every correction gets a compensation gain worked
+  out from the EQ curve itself: how much louder or quieter the curve makes pink noise — a
+  stand-in for an average music spectrum — under the hearing-weighted loudness of ITU-R
+  BS.1770-4. A/B/Dry then differ only in tone, not level. It is one static preamp value,
+  recalculated only when the correction changes: CAGEq never listens to the music to chase a
+  loudness target, and the processing stays strictly linear — no compressor, no gain riding
+  the signal.
 * **Click-free real-time switching** between two independent filter slots (A/B) and the
   unmodified original (Dry) — including one-key switching (`A`/`S`/`D`) so you don't have to look
   at the screen while listening.
