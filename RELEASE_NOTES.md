@@ -1,14 +1,15 @@
-High-pass filter against infrasound.
+Smoother high-pass and band toggles.
 
-- **New:** a high-pass band type. Open headphones need a lot of bass boost to reach the Harman
-  target, and a bass shelf keeps boosting all the way down, so infrasound in films or some music
-  can push the drivers to their excursion limit. Click a band's type icon to cycle to High-pass
-  (after Tilt): set its frequency and a slope of 12, 24, 36 or 48 dB/oct. It starts at 20 Hz,
-  24 dB/oct. On the chart, drag its node sideways for the frequency and scroll to change the
-  slope. One high-pass per slot.
-- The spectrum, scope and vectorscope "undo EQ" views leave the high-pass in: what it removed
-  can't be restored.
-- Parametric export fits the other bands as before and adds the high-pass as `HPQ` lines.
-- **Engine update:** CAGEq's own audio engine needs updating for the high-pass. The app flags
-  the update after updating: Continue refreshes it, with a brief machine-wide audio interruption.
-  Equalizer APO users need nothing.
+- **Fixed:** switching the high-pass on or off could thump audibly on bass, more so at steeper
+  slopes. CAGEq's own audio engine now takes as long over a change as the change needs — it
+  measures how far the bass's timing shifts, not only how much the level changes — so the
+  high-pass fades in and out over a fraction of a second instead of snapping.
+- **Fixed:** toggling a band again before its previous fade had finished cut the new fade short
+  and could click. Toggles always get their full fade now; dragging stays as immediate as before.
+- **Fixed:** the first band toggle after starting the app could click, while later ones were
+  clean. The app now checks which filter the engine is actually running in each position
+  before changing anything.
+- Other changes fade a little more gradually too (about a third longer), for the same reason.
+- **Engine update:** the high-pass and re-toggle fixes are in CAGEq's own audio engine. The app
+  flags the update after updating: Continue refreshes it, with a brief machine-wide audio
+  interruption. The first-toggle fix is in the app itself. Equalizer APO users need nothing.
