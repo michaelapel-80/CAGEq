@@ -343,6 +343,56 @@ fn set_library(library: Value) {
     update_settings(|s| s.library = Some(library));
 }
 
+/// Largest preset file `import_library_file` reads. A whole library of presets with their
+/// version histories is a few hundred KB at most; this only stops a wrongly picked large file
+/// from being pulled into memory and handed to the webview.
+const MAX_LIBRARY_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Ask where to save, then write `contents` (the frontend's serialised preset export) there.
+/// `Ok(false)` when the user cancels the dialog.
+///
+/// The native dialog and the write both live here, so the frontend never touches the file
+/// system or handles a path. `async` because a blocking dialog must not run on the main thread.
+#[tauri::command]
+async fn export_library_file(window: tauri::WebviewWindow, contents: String) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let Some(path) = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .add_filter("CAGEq presets", &["json"])
+        .set_file_name("CAGEq presets.json")
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let path = path.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, contents).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    Ok(true)
+}
+
+/// Ask for a preset file and return its text, or `None` when the user cancels. Parsing and
+/// merging are the frontend's: the library is its own opaque shape (see `get_library`).
+#[tauri::command]
+async fn import_library_file(window: tauri::WebviewWindow) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let Some(path) = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .add_filter("CAGEq presets", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(|e| e.to_string())?;
+    let len = std::fs::metadata(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?.len();
+    if len > MAX_LIBRARY_FILE_BYTES {
+        return Err(format!("{} is too large to be a CAGEq preset file", path.display()));
+    }
+    std::fs::read_to_string(&path).map(Some).map_err(|e| format!("could not read {}: {e}", path.display()))
+}
+
 /// Seed a slot with a fit **persisted from a previous session** (§3.5), no sidecar call.
 /// The launch-from-cache path: the frontend saved each slot's last composed bands + curve
 /// quantities, so startup can restore the exact EQ without waiting on the ~1–2 s cold fit.
@@ -1590,6 +1640,7 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         // Release a destroyed webview's stream channels. Without this the closed pop-out scope
         // window's channel stays subscribed forever and its ~20 KB/frame payloads pile up in
         // Tauri's `ChannelDataIpcQueue` — a ~1 MB/s leak in *this* process, see `StreamSubs`.
@@ -1622,6 +1673,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            export_library_file,
+            import_library_file,
             apply,
             seed_slot,
             warm_fit,

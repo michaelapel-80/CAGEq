@@ -46,7 +46,8 @@ RUST_REPORTS = ["rust_licenses_apo.json", "rust_licenses_apo_backend.json", "rus
 # carries AutoEq's own copyright notice, which the MIT terms require reproducing.
 OWN_RUST_CRATES = {
     "cageq-apo", "cageq-apo-backend", "cageq-backend", "cageq-catalog", "cageq-config-writer",
-    "cageq-sidecar", "cageq-watchdog", "cageq-core", "cageq-monitor", "cageq-app",
+    "cageq-sidecar", "cageq-watchdog", "cageq-core", "cageq-monitor", "cageq-app", "cageq-biquad",
+    "cageq-biquad-wasm",
 }
 
 # Only what's actually bundled into the shipped frontend JS — devDependencies

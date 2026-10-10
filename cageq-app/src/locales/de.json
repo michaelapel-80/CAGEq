@@ -373,7 +373,16 @@
     "deleteHeadVersionAria": "Version {{ver}} löschen",
     "deleteTitle": "Löschen",
     "deleteAria": "{{name}} löschen",
-    "emptyPresets": "Kopfhörer + Ziel wählen, dann 💾 ein volles Preset speichern, um das ganze Setup abzurufen."
+    "emptyPresets": "Kopfhörer + Ziel wählen, dann 💾 ein volles Preset speichern, um das ganze Setup abzurufen.",
+    "exportFile": "Presets exportieren…",
+    "exportFileTitle": "Alle Presets (mit ihren Versionen) und Filtervorlagen in eine Datei speichern, um sie auf einen anderen Rechner mitzunehmen.",
+    "importFile": "Presets importieren…",
+    "importFileTitle": "Die Presets und Filtervorlagen aus einer CAGEq-Preset-Datei hinzufügen. Vorhandenes wird nicht verändert oder ersetzt.",
+    "exported": "Exportiert – Presets: {{presets}}, Filtervorlagen: {{templates}}.",
+    "imported": "Importiert – Presets: {{presets}}, Filtervorlagen: {{templates}}.",
+    "importedNothing": "Nichts Neues: alles aus dieser Datei ist schon vorhanden.",
+    "importNotPresets": "Diese Datei ist keine CAGEq-Preset-Datei.",
+    "importNewer": "Diese Preset-Datei stammt von einer neueren CAGEq-Version. Bitte CAGEq aktualisieren, um sie zu importieren."
   },
 
   "export": {

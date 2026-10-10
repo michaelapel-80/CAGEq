@@ -21,6 +21,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+# Native open/save dialogs for preset export/import — used from Rust only (see
+# `export_library_file`), so the frontend never handles file paths and needs no fs access.
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 cageq-core = { path = "../../cageq-core" }

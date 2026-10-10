@@ -373,7 +373,16 @@
     "deleteHeadVersionAria": "Delete version {{ver}}",
     "deleteTitle": "Delete",
     "deleteAria": "Delete {{name}}",
-    "emptyPresets": "Pick a headphone + target, then 💾 Save a full preset to recall the whole setup."
+    "emptyPresets": "Pick a headphone + target, then 💾 Save a full preset to recall the whole setup.",
+    "exportFile": "Export presets…",
+    "exportFileTitle": "Save every preset (with its versions) and filter template to one file, to take them to another computer.",
+    "importFile": "Import presets…",
+    "importFileTitle": "Add the presets and filter templates from a CAGEq preset file. Nothing already here is changed or replaced.",
+    "exported": "Exported — presets: {{presets}}, filter templates: {{templates}}.",
+    "imported": "Imported — presets: {{presets}}, filter templates: {{templates}}.",
+    "importedNothing": "Nothing new: everything in that file is already here.",
+    "importNotPresets": "That file isn't a CAGEq preset file.",
+    "importNewer": "That preset file was made by a newer version of CAGEq. Update CAGEq to import it."
   },
 
   "export": {

@@ -293,6 +293,63 @@ function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyP
   return { presets, templates };
 }
 
+// §3.5 preset export/import: the whole library (session presets with their versions, plus the
+// user's filter templates) in one file, to move it to another machine or take it along for a
+// demo. The library's own shape, tagged so an import can tell a CAGEq preset file from any
+// other JSON and refuse one written by a newer, incompatible CAGEq.
+const LIBRARY_FILE_FORMAT = "cageq-presets";
+const LIBRARY_FILE_VERSION = 1;
+
+function libraryFileText(lib: Library, appVersion: string): string {
+  return JSON.stringify(
+    { format: LIBRARY_FILE_FORMAT, version: LIBRARY_FILE_VERSION, app: appVersion, exported: new Date().toISOString(), presets: lib.presets, templates: lib.templates },
+    null,
+    2,
+  );
+}
+
+/** A preset file's library (normalized like a stored one, so older shapes migrate the same
+ *  way), or why it can't be used. */
+function parseLibraryFile(text: string): Library | "notPresets" | "newer" {
+  let o: { format?: unknown; version?: unknown; presets?: unknown; templates?: unknown };
+  try {
+    o = JSON.parse(text);
+  } catch {
+    return "notPresets";
+  }
+  if (o?.format !== LIBRARY_FILE_FORMAT || typeof o.version !== "number") return "notPresets";
+  if (o.version > LIBRARY_FILE_VERSION) return "newer";
+  return normalizeLibrary({
+    presets: Array.isArray(o.presets) ? (o.presets as LegacyPreset[]) : [],
+    templates: Array.isArray(o.templates) ? (o.templates as LegacyTemplate[]) : [],
+  });
+}
+
+/** Add `incoming` to `current` without touching anything already there. An entry whose content
+ *  matches one already present (ignoring id and name) is skipped — re-importing the same file, or
+ *  importing back what came from here, adds nothing, even after a clash renamed it on the way in.
+ *  Everything else is added: under a fresh id if its id is taken, and as "Name (2)" if its name
+ *  is (names are what the list shows and what a save finds a preset by). */
+function mergeLibrary(current: Library, incoming: Library): { library: Library; presets: number; templates: number } {
+  const body = <T extends { id: string; name: string }>(e: T) => stableStringify({ ...e, id: undefined, name: undefined });
+  const add = <T extends { id: string; name: string }>(have: T[], incoming: T[]): [T[], number] => {
+    const out = [...have];
+    let added = 0;
+    for (const e of incoming) {
+      if (out.some((h) => body(h) === body(e))) continue;
+      const taken = (n: string) => out.some((h) => h.name.toLowerCase() === n.toLowerCase());
+      let name = e.name;
+      for (let k = 2; taken(name); k++) name = `${e.name} (${k})`;
+      out.push({ ...e, id: out.some((h) => h.id === e.id) ? crypto.randomUUID() : e.id, name });
+      added++;
+    }
+    return [out, added];
+  };
+  const [presets, np] = add(current.presets, incoming.presets);
+  const [templates, nt] = add(current.templates, incoming.templates);
+  return { library: { presets, templates }, presets: np, templates: nt };
+}
+
 // Presets are bass/treble/air gain triples applied to the three fixed macro bands;
 // picking one resets the tone to exactly those three bands at the given gains.
 // `name` is the stable identity (feeds the curated template id, persisted); `key` is its i18n
@@ -706,6 +763,15 @@ function App() {
   const [renaming, setRenaming] = useState<{ kind: "preset" | "template"; id: string; name: string } | null>(null);
   const [expandedPreset, setExpandedPreset] = useState<string | null>(null); // which preset's version history is open
   const [presetSave, setPresetSave] = useState<UserPreset | null>(null); // the preset whose save dialog is open
+  // What the last preset export/import did — or why it failed — shown briefly in the presets
+  // panel. Failures included: they are about one file the user picked, not a state of the app,
+  // so they must not outstay the moment the way the global error line does.
+  const [libraryNote, setLibraryNote] = useState<{ text: string; error: boolean } | null>(null);
+  useEffect(() => {
+    if (!libraryNote) return;
+    const t = window.setTimeout(() => setLibraryNote(null), libraryNote.error ? 9000 : 6000);
+    return () => window.clearTimeout(t);
+  }, [libraryNote]);
   const [exportOpen, setExportOpen] = useState(false); // §8 mobile-export dialog open for the active slot
   const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
   const [selfTest, setSelfTest] = useState<SelfTestState | null>(null); // §5.4 output self-test
@@ -2007,6 +2073,40 @@ function App() {
       onConfirm: () =>
         setLibrary((lib) => ({ ...lib, templates: upsert(lib.templates, { id: t.id, name: t.name, stage: t.stage, bands: stages[t.stage].bands }) })),
     });
+
+  // §3.5 preset export/import (see `libraryFileText`). The file dialogs and the file I/O are the
+  // backend's; this side only builds and merges the library. A short confirmation line in the
+  // presets panel reports what happened, since a save dialog closing says nothing on its own.
+  const exportLibrary = async () => {
+    try {
+      if (await invoke<boolean>("export_library_file", { contents: libraryFileText(library, appVersion) }))
+        setLibraryNote({ text: tr("presets.exported", { presets: library.presets.length, templates: library.templates.length }), error: false });
+    } catch (e) {
+      setLibraryNote({ text: String(e), error: true });
+    }
+  };
+  const importLibrary = async () => {
+    try {
+      const text = await invoke<string | null>("import_library_file");
+      if (text == null) return; // cancelled
+      const parsed = parseLibraryFile(text);
+      if (parsed === "notPresets" || parsed === "newer") {
+        setLibraryNote({ text: tr(parsed === "newer" ? "presets.importNewer" : "presets.importNotPresets"), error: true });
+        return;
+      }
+      const merged = mergeLibrary(library, parsed);
+      setLibrary(merged.library);
+      setLibraryNote({
+        text:
+          merged.presets + merged.templates === 0
+            ? tr("presets.importedNothing")
+            : tr("presets.imported", { presets: merged.presets, templates: merged.templates }),
+        error: false,
+      });
+    } catch (e) {
+      setLibraryNote({ text: String(e), error: true });
+    }
+  };
 
   // Delete asks first — same confirm overlay as the other destructive actions.
   const deletePreset = (p: UserPreset) =>
@@ -3691,6 +3791,26 @@ function App() {
                   </ul>
                 ) : (
                   <p className="pl-empty">{tr("presets.emptyPresets")}</p>
+                )}
+              </div>
+
+              <div className="row pl-file" style={{ gap: "0.4em", marginTop: "0.6em" }}>
+                <button
+                  type="button"
+                  className="pl-save"
+                  disabled={library.presets.length + library.templates.length === 0}
+                  onClick={() => void exportLibrary()}
+                  title={tr("presets.exportFileTitle")}
+                >
+                  {tr("presets.exportFile")}
+                </button>
+                <button type="button" className="pl-save" onClick={() => void importLibrary()} title={tr("presets.importFileTitle")}>
+                  {tr("presets.importFile")}
+                </button>
+                {libraryNote && (
+                  <span role={libraryNote.error ? "alert" : "status"} className="pl-hint" style={{ margin: 0, color: libraryNote.error ? "crimson" : undefined }}>
+                    {libraryNote.text}
+                  </span>
                 )}
               </div>
             </div>
