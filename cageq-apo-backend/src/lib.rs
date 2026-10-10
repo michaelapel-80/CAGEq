@@ -398,6 +398,12 @@ impl CageqApoBackend {
         let (assigned, crossfade) = {
             let mut slots = self.slots.lock().unwrap();
             let entry = slots.entry(endpoint_id.to_string()).or_default();
+            // Re-read the engine's real layout whenever this assignment can no longer vouch for
+            // it — see `engine_layout`'s own doc for how the two part ways.
+            if entry.last_seq != Some(cageq_apo::control::sequence(channel.block())) {
+                let file = config::load_from(&config::config_path_in(&self.config_dir, endpoint_id)).ok().flatten();
+                entry.adopt(engine_layout(channel.block(), rate, cfg, file.as_ref()));
+            }
             let was_isolate = entry.was_isolate;
             let prev_isolate_slot = entry.isolate_slot;
             let out = entry.assign(&cfg.bands);
@@ -441,6 +447,12 @@ impl CageqApoBackend {
         // asked for, but the caller decides whether a refusal is worth surfacing (`apply_one`
         // does).
         let published = channel.publish(cfg.preamp_db, &coeffs, crossfade);
+        // Vouch for the layout only if it actually reached the block; a refused push left the
+        // block (and so the engine) as it was, which the next push then re-reads.
+        let seq = published.then(|| cageq_apo::control::sequence(channel.block()));
+        if let Some(entry) = self.slots.lock().unwrap().get_mut(endpoint_id) {
+            entry.last_seq = seq;
+        }
         Ok(if published { PushOutcome::Published } else { PushOutcome::Refused })
     }
 }
@@ -655,14 +667,18 @@ fn is_isolate_filters(filters: &[Filter]) -> bool {
 /// Quantised (not compared as raw floats) so a value that round-tripped through JSON/config text
 /// can't fail to match itself by a float-formatting ULP.
 fn band_key(b: &Band) -> (u8, i64, i64) {
-    let kind = match b.kind {
+    (kind_code(b.kind), (b.freq_hz * 1000.0).round() as i64, (b.q * 1000.0).round() as i64)
+}
+
+/// The kind half of [`band_key`].
+fn kind_code(kind: FilterKind) -> u8 {
+    match kind {
         FilterKind::LowShelf => 0,
         FilterKind::HighShelf => 1,
         FilterKind::Peaking => 2,
         FilterKind::Bandpass => 3,
         FilterKind::HighPass => 4,
-    };
-    (kind, (b.freq_hz * 1000.0).round() as i64, (b.q * 1000.0).round() as i64)
+    }
 }
 
 /// Is `bands` the §5.2 isolate audition — a bandpass-only substitute for the real correction,
@@ -791,9 +807,31 @@ struct SlotAssignment {
     /// — see [`Self::assign_isolate`]'s own doc for why this needs to be tracked explicitly
     /// rather than left to the generic search in [`Self::assign`].
     isolate_slot: Option<usize>,
+    /// The control block's sequence number right after this assignment's last successful
+    /// publish — the proof that `slots` still describes what the engine runs. Anything else
+    /// (`None` in a fresh app session, or a block another instance or session has moved since)
+    /// means the layout must be re-read from the engine first: see [`engine_layout`].
+    last_seq: Option<u32>,
 }
 
+/// Identity of a slot the engine runs but no band this session knows about produced — kept
+/// occupied (never [`slot_reusable`], since no real kind code matches it) so it fades out in
+/// place instead of being ramped into an unrelated band.
+const FOREIGN_SLOT: (u8, i64, i64) = (u8::MAX, 0, 0);
+
 impl SlotAssignment {
+    /// Take `layout` — the engine's actual slot occupancy, from [`engine_layout`] — as the
+    /// starting point, forgetting whatever this assignment believed before.
+    fn adopt(&mut self, mut layout: Vec<Option<(u8, i64, i64)>>) {
+        while layout.last().is_some_and(Option::is_none) {
+            layout.pop();
+        }
+        let isolate = matches!(layout.as_slice(), [Some((kind, _, _))] if *kind == kind_code(FilterKind::Bandpass));
+        self.was_isolate = isolate;
+        self.isolate_slot = if isolate { Some(0) } else { None };
+        self.slots = layout;
+    }
+
     /// Reorders `bands` into slot order — the §5.2 isolate audition (always exactly one
     /// `Bandpass`) is handled separately by [`Self::assign_isolate`]; this is the general path
     /// for everything else. A band whose identity matches a previous slot stays in that exact
@@ -913,6 +951,53 @@ impl SlotAssignment {
         }
         out
     }
+}
+
+/// What the engine on the other end of `block` is actually running, slot by slot, as
+/// [`SlotAssignment`] identities.
+///
+/// **Why this is needed.** `Cascade::start_ramp` pairs old and new coefficients by slot, so a
+/// push is only smooth if the backend's assignment matches the engine's real layout. Within one
+/// app session that holds by construction. But the assignment lives in the app process and the
+/// engine in audiodg, and the two can part ways: the app starts while the engine already runs a
+/// layout from an earlier session or from its config file (or starts while nothing plays, so
+/// its first push finds no channel and records nothing), or a stream restarts mid-session and
+/// the engine reloads its file. The first push afterwards was then assigned from scratch, every
+/// band after a toggled one landed in its neighbour's slot, and the ramp blended unrelated bands
+/// into each other (reported live: "the first toggle after starting the app has artefacts,
+/// later ones don't").
+///
+/// There are exactly two possibilities, and the block says which:
+///
+///   * **A valid published block** — the engine runs those coefficients (an instance re-locking
+///     onto an existing block adopts them too). Each slot is identified by matching its
+///     coefficients exactly against the bands this push and the config file describe, computed
+///     the same way; a slot nothing matches is [`FOREIGN_SLOT`].
+///   * **A fresh, never-published block** — the engine runs its config file, bands in file order.
+pub(crate) fn engine_layout(
+    block: &cageq_apo::control::ControlBlock,
+    rate: u32,
+    cfg: &ApoConfig,
+    file: Option<&ApoConfig>,
+) -> Vec<Option<(u8, i64, i64)>> {
+    use cageq_apo::control::{try_read, ReadOutcome, Snapshot};
+    let mut snap = Snapshot::default();
+    if !matches!(try_read(block, &mut snap), ReadOutcome::Updated(_)) {
+        return file.map(|f| f.bands.iter().map(|b| Some(band_key(b))).collect()).unwrap_or_default();
+    }
+    let known: Vec<(Band, dsp::Coeffs)> = std::iter::once(cfg)
+        .chain(file)
+        .flat_map(|c| c.bands.iter().map(move |b| (*b, dsp::coefficients_in(b, rate as f64, c.model))))
+        .collect();
+    snap.coeffs[..snap.band_count]
+        .iter()
+        .map(|c| {
+            if *c == dsp::Coeffs::PASSTHROUGH {
+                return None;
+            }
+            Some(known.iter().find(|(_, k)| k == c).map_or(FOREIGN_SLOT, |(b, _)| band_key(b)))
+        })
+        .collect()
 }
 
 /// Drop the hash marker so the remainder is exactly what was hashed.
@@ -1694,6 +1779,59 @@ mod tests {
             isolate_boundary_crossed(true, true, back_slot != low_slot.unwrap()),
             "landing on a different slot than last time must still trigger the crossfade"
         );
+    }
+
+    fn block_with(coeffs: &[dsp::Coeffs]) -> Box<cageq_apo::control::ControlBlock> {
+        // SAFETY: an all-zero block is exactly what a freshly created section holds.
+        let mut block: Box<cageq_apo::control::ControlBlock> = Box::new(unsafe { std::mem::zeroed() });
+        if !coeffs.is_empty() {
+            let raw: Vec<RawCoeffs> =
+                coeffs.iter().map(|c| RawCoeffs { b0: c.b0, b1: c.b1, b2: c.b2, a1: c.a1, a2: c.a2 }).collect();
+            assert!(cageq_apo::control::publish(&mut block, -6.0, &raw, false));
+        }
+        block
+    }
+
+    fn rbj(bands: &[Band]) -> ApoConfig {
+        ApoConfig { preamp_db: -6.0, bands: bands.to_vec(), model: dsp::ResponseModel::Rbj }
+    }
+
+    /// A block nobody has published to means the engine runs its config file: the layout is the
+    /// file's bands, in file order.
+    #[test]
+    fn a_fresh_block_means_the_engine_runs_its_file() {
+        let file = rbj(&[band(100.0, 3.0, 1.0), band(1000.0, -2.0, 2.0), band(5000.0, 1.0, 1.0)]);
+        let layout = engine_layout(&block_with(&[]), 48_000, &rbj(&[]), Some(&file));
+        let keys: Vec<_> = file.bands.iter().map(|b| Some(band_key(b))).collect();
+        assert_eq!(layout, keys);
+    }
+
+    /// A published block — an earlier app session's last push, gaps and reordering included —
+    /// is read back slot by slot: known bands by their exact coefficients, a gap as free, and
+    /// coefficients nothing here produced as a foreign occupant that only fades out.
+    #[test]
+    fn a_published_block_is_read_back_slot_by_slot() {
+        let (a, b, c) = (band(100.0, 3.0, 1.0), band(1000.0, -2.0, 2.0), band(5000.0, 1.0, 1.0));
+        let stranger = band(7777.0, 4.0, 3.0);
+        let co = |b: &Band| dsp::coefficients_in(b, 48_000.0, dsp::ResponseModel::Rbj);
+        let block = block_with(&[co(&c), dsp::Coeffs::PASSTHROUGH, co(&stranger), co(&a)]);
+        let layout = engine_layout(&block, 48_000, &rbj(&[a, b]), Some(&rbj(&[a, b, c])));
+        assert_eq!(layout, vec![Some(band_key(&c)), None, Some(FOREIGN_SLOT), Some(band_key(&a))]);
+    }
+
+    /// The reported case end to end: the engine runs its file, the app's assignment knows nothing
+    /// (fresh session, or its startup push found no stream), and the first edit toggles a band in
+    /// the middle off. Every other band must stay in the slot the engine already has it in, the
+    /// toggled one's slot fading out in place — not the whole tail shifting down one slot.
+    #[test]
+    fn the_first_push_after_startup_keeps_every_band_in_its_engine_slot() {
+        let bands = [band(100.0, 3.0, 1.0), band(1000.0, -2.0, 2.0), band(5000.0, 1.0, 1.0), band(9000.0, -1.0, 0.7)];
+        let file = rbj(&bands);
+        let toggled: Vec<Band> = bands.iter().enumerate().filter(|&(i, _)| i != 1).map(|(_, b)| *b).collect();
+        let mut sa = SlotAssignment::default();
+        sa.adopt(engine_layout(&block_with(&[]), 48_000, &rbj(&toggled), Some(&file)));
+        let out = sa.assign(&toggled);
+        assert_eq!(out, vec![Some(&bands[0]), None, Some(&bands[2]), Some(&bands[3])]);
     }
 
     /// **The bug this fixes, reported live**: holding the frequency finder and swinging it wildly
