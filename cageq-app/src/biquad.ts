@@ -304,8 +304,9 @@ export function composedCurveDb(bands: Band[], freqs: Float64Array, model: Respo
 
 /** Composed **phase** response in degrees over `freqs` — the phase shift the filter chain
  *  introduces (a nerd overlay; the magnitude is what you hear). A cascade multiplies, so
- *  phases add: sum each biquad's arg(H(e^jω)) = arg(numerator) − arg(denominator). Not
- *  wrapped — a minimum-phase EQ stays bounded and wrapping would add fake ±180° jumps.
+ *  phases add: sum each biquad's arg(H(e^jω)) = arg(numerator) − arg(denominator). Returned
+ *  unwrapped (each section's own arg is continuous, so the sum is too); EqChart wraps it to
+ *  ±180° for display and uses the unwrapped values to place the breaks.
  *  Uses the same coefficients as {@link filterResponseDb}; the denominator's true a1/a2 are
  *  the negation of what `coefficients()` returns (that helper pre-negates them, a0 = 1). */
 export function phaseDeg(bands: Band[], freqs: Float64Array, model: ResponseModel, fs = FS): Float64Array {

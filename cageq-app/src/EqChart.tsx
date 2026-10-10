@@ -130,6 +130,8 @@ export type Nodes = {
 };
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+/** A phase in degrees folded into [-180°, 180°]. */
+const wrapDeg = (v: number) => v - 360 * Math.round(v / 360);
 
 /** Parse a `#rrggbb` hex (e.g. the `--accent` CSS var) to [r,g,b]; null if not a 6-digit hex. */
 function parseHex(hex: string): [number, number, number] | null {
@@ -526,14 +528,18 @@ export function EqChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [series, markers, refs, overrides, defaultHidden, minSpan, sampleRate, model]);
 
-  // Phase curve on the secondary axis (computed on the same freq grid). Its degrees range
-  // is symmetric and snapped to 45°, independent of the dB axis.
+  // Phase curve on the secondary axis (computed on the same freq grid). Drawn wrapped to ±180°,
+  // the usual way: a high-pass adds up to 180° per section towards DC (a 48 dB/oct one at 20 Hz
+  // reaches ~360° at the chart's edge), and following that unwrapped would rescale the axis until
+  // the correction's own ±10-30° is a flat line. Its degrees range is symmetric and snapped to
+  // 45°, so a curve that never wraps keeps its zoomed axis; one that does caps at ±180°.
+  // `phaseCurve` stays unwrapped — `phasePath` needs it to find where each wrap happens.
   const { phaseCurve, phaseRange } = useMemo(() => {
     if (!phase) return { phaseCurve: null as Float64Array | null, phaseRange: 90 };
     const p = phaseDeg(phase.bands, freqs, model, sampleRate);
     let m = 45;
-    for (const v of p) m = Math.max(m, Math.abs(v));
-    return { phaseCurve: p, phaseRange: Math.ceil(m / 45) * 45 };
+    for (const v of p) m = Math.max(m, Math.abs(wrapDeg(v)));
+    return { phaseCurve: p, phaseRange: Math.min(180, Math.ceil(m / 45) * 45) };
   }, [phase, freqs, sampleRate, model]);
 
   const lnMin = Math.log(F_MIN);
@@ -613,8 +619,28 @@ export function EqChart({
 
   const phasePath = useMemo(() => {
     if (!phaseCurve) return "";
+    const pt = (px: number, deg: number) => `${px.toFixed(2)},${yPhase(deg).toFixed(2)}`;
     let d = "";
-    for (let i = 0; i < freqs.length; i++) d += `${i ? "L" : "M"}${x(freqs[i]).toFixed(2)},${yPhase(phaseCurve[i]).toFixed(2)}`;
+    for (let i = 0; i < freqs.length; i++) {
+      const u = phaseCurve[i];
+      const px = x(freqs[i]);
+      if (i > 0) {
+        // Crossing a wrap: run the line out to the axis edge where the unwrapped curve passes
+        // ±180°, and pick it up again at the opposite edge — a break, not a full-height stroke
+        // across the plot, which is what joining the two wrapped points would draw.
+        const u0 = phaseCurve[i - 1];
+        const k0 = Math.round(u0 / 360);
+        const k1 = Math.round(u / 360);
+        if (k0 !== k1) {
+          const up = k1 > k0;
+          const edge = 360 * Math.min(k0, k1) + 180; // the unwrapped value at the crossing
+          const px0 = x(freqs[i - 1]);
+          const xc = px0 + ((px - px0) * (edge - u0)) / (u - u0);
+          d += `L${pt(xc, up ? 180 : -180)}M${pt(xc, up ? -180 : 180)}`;
+        }
+      }
+      d += `${i ? "L" : "M"}${pt(px, wrapDeg(u))}`;
+    }
     return d;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phaseCurve, freqs, phaseRange, PAD.r, H]);
