@@ -465,9 +465,9 @@
   },
 
   "infrasound": {
-    "hint": "This correction lifts the infrasound range by {{db}} dB (at 16 Hz). Those frequencies aren't audible, and unlike a large subwoofer, headphones can't make you feel them with your whole body — but they can quickly push the driver to its excursion limit, causing distortion or even damage. A high-pass filter removes them from the signal.",
+    "hint": "This correction lifts the infrasound range by {{db}} dB (at 16 Hz). Little content carries any — music mastered for consumer playback rarely does, and a film's stereo downmix usually filters it out of the LFE channel too. Where it is present, it isn't audible, and unlike a large subwoofer, headphones can't make you feel it with your whole body — but it can quickly push the driver to its excursion limit, causing distortion or even damage. A high-pass filter removes it from the signal.",
     "add": "Add high-pass (20 Hz, 24 dB/oct)",
-    "dismiss": "Not now"
+    "dismiss": "Don't show again for this setup"
   },
   "errors": {
     "pickHeadphone": "Pick a headphone model and measurement first.",

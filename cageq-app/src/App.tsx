@@ -78,7 +78,8 @@ type Stages = { fit: Stage; content: Stage; tone: Stage };
 // no measurement, no optimizer, the Fit/Content/Tone stages are the whole correction.
 // `measurementPath`/`targetPath` are left whatever they last were (not cleared) so
 // toggling back to AutoEq restores the picker instead of losing the pick.
-type SlotInputs = { model: string; measurementPath: string; targetPath: string; flat: boolean; stages: Stages };
+// `infrasoundAck`: the user dismissed the infrasound notice for this document (absent = not).
+type SlotInputs = { model: string; measurementPath: string; targetPath: string; flat: boolean; stages: Stages; infrasoundAck?: boolean };
 type Selection = { headphone: string | null; target: string | null };
 // A slot's last computed fit, persisted so launch can write cageq.txt immediately without
 // waiting on the ~1–2 s cold AutoEq fit (§3.5 launch-from-cache). Exactly the fields the
@@ -177,8 +178,9 @@ function stableStringify(v: unknown): string {
  *  used to tell whether the editor has diverged from the preset last loaded into a slot
  *  (the "dirty" flag). Compared against the sig captured at load time — see `slotPreset`.
  *  Canonical (sorted-key) so it survives a persist→reload round-trip unchanged. */
-const presetSig = (model: string, measurementPath: string, targetPath: string, flat: boolean, stages: Stages) =>
-  stableStringify({ model, measurementPath, targetPath, flat, stages });
+const presetSig = (model: string, measurementPath: string, targetPath: string, flat: boolean, stages: Stages, infrasoundAck = false) =>
+  // `infrasoundAck` only when set, so a document without it signs exactly as before it existed.
+  stableStringify({ model, measurementPath, targetPath, flat, stages, infrasoundAck: infrasoundAck || undefined });
 
 /** Which preset (or archived version) a slot was last loaded from, plus the document sig at
  *  load time — so the slot can show the preset name and flag divergence. Persisted in the resume
@@ -260,6 +262,7 @@ function migrateInputs(inp: Partial<SlotInputs> & { customFilters?: CustomFilter
     targetPath: inp.targetPath ?? "",
     flat: inp.flat ?? false, // pre-§3.4a blobs predate "flat start" — always AutoEq-origin
     stages,
+    infrasoundAck: inp.infrasoundAck,
   };
 }
 
@@ -269,7 +272,7 @@ function migrateInputs(inp: Partial<SlotInputs> & { customFilters?: CustomFilter
 type LegacyTemplate = { id: string; name: string; stage?: StageId; bands?: CustomFilter[]; customFilters?: CustomFilter[] };
 type LegacyPreset = {
   id: string; name: string; model: string; measurementPath: string; targetPath: string; flat?: boolean;
-  stages?: Partial<Stages>; customFilters?: CustomFilter[];
+  stages?: Partial<Stages>; customFilters?: CustomFilter[]; infrasoundAck?: boolean;
   versions?: (Partial<PresetState> & { at?: number })[];
 };
 function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyPreset[] } | null): Library {
@@ -286,6 +289,7 @@ function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyP
     targetPath: p.targetPath,
     flat: p.flat ?? false, // pre-§3.4a presets predate "flat start" — always AutoEq-origin
     stages: p.stages ? normalizeStages(p.stages) : normalizeStages({ tone: { enabled: true, bands: p.customFilters ?? defaultTone() } }),
+    infrasoundAck: p.infrasoundAck,
     versions: (p.versions ?? []).map((v) => ({
       at: v.at ?? 0,
       model: v.model ?? p.model,
@@ -293,6 +297,7 @@ function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyP
       targetPath: v.targetPath ?? p.targetPath,
       flat: v.flat ?? p.flat ?? false,
       stages: normalizeStages(v.stages),
+      infrasoundAck: v.infrasoundAck,
     })),
   }));
   return { presets, templates };
@@ -378,7 +383,7 @@ const TONE_PRESET_KEY: Record<string, string> = Object.fromEntries(TONE_PRESETS.
 // same UI-owned-blob treatment as the resume state — no per-field Rust change.
 type FilterTemplate = { id: string; name: string; stage: StageId; bands: CustomFilter[] };
 // The loadable payload shared by a preset and its archived versions (everything a full load needs).
-type PresetState = { model: string; measurementPath: string; targetPath: string; flat: boolean; stages: Stages };
+type PresetState = { model: string; measurementPath: string; targetPath: string; flat: boolean; stages: Stages; infrasoundAck?: boolean };
 // A past state of a preset, kept when the user explicitly saves a new version. `at` = timestamp.
 type PresetVersion = PresetState & { at: number };
 // A UserPreset is its *current* state plus a linear history of explicitly-saved previous versions
@@ -624,6 +629,7 @@ function App() {
   // §3.4a "flat start": skip AutoEq's fit entirely for the active slot. `measurementPath`/
   // `targetPath` are left as whatever they were so toggling back to AutoEq restores the pick.
   const [flat, setFlat] = useState(false);
+  const [infrasoundAck, setInfrasoundAck] = useState(false); // see SlotInputs.infrasoundAck
   const [stages, setStages] = useState<Stages>(defaultStages()); // §3.4 the three per-slot filter stages
   const [activeStage, setActiveStage] = useState<StageId>("fit"); // which stage the grid/chart edits (restored from resume)
   // Read-only "AutoEq fit" tab in the band section: shows the automatic parametric fit (not one
@@ -974,6 +980,7 @@ function App() {
           setMeasurementPath(inp.measurementPath);
           setTargetPath(inp.targetPath);
           setFlat(inp.flat);
+          setInfrasoundAck(inp.infrasoundAck ?? false);
           setStages(inp.stages);
           try {
             if (activeFit) {
@@ -1274,6 +1281,7 @@ function App() {
     if (ms) {
       setMeasurementPath(ms[0].path);
       setFlat(false);
+      setInfrasoundAck(false); // a different headphone's fit: let the notice judge it afresh
     } else {
       setMeasurementPath("");
     }
@@ -1295,7 +1303,7 @@ function App() {
       setError("");
       inFlight.current = true;
       if (!auto) setApplying(true);
-      const inp: SlotInputs = { model: query, measurementPath, targetPath, flat, stages };
+      const inp: SlotInputs = { model: query, measurementPath, targetPath, flat, stages, infrasoundAck };
       setResult(await writeFit(activeSlot as "A" | "B", inp, dev));
       if (!auto) setStatus(await invoke<Status>("status"));
     } catch (e) {
@@ -1543,6 +1551,7 @@ function App() {
         setMeasurementPath(s.measurementPath);
         setTargetPath(s.targetPath);
         setFlat(s.flat);
+        setInfrasoundAck(s.infrasoundAck ?? false);
         setStages(s.stages);
       }
       if (!s) return; // empty slot: nothing written yet, user will configure + apply
@@ -1593,6 +1602,7 @@ function App() {
       setMeasurementPath(src.measurementPath);
       setTargetPath(src.targetPath);
       setFlat(src.flat);
+      setInfrasoundAck(src.infrasoundAck ?? false);
       setStages(src.stages);
       setResult(applied);
     } catch (e) {
@@ -1918,6 +1928,7 @@ function App() {
     setMeasurementPath(p.measurementPath);
     setTargetPath(p.targetPath);
     setFlat(p.flat);
+    setInfrasoundAck(p.infrasoundAck ?? false);
     setStages(stages);
     requestApply(0);
     // A full preset swaps measurement + target + all stages — a new document, not an edit; undo
@@ -1926,7 +1937,7 @@ function App() {
     if (activeSlot === "A" || activeSlot === "B")
       setSlotPreset((sp) => ({
         ...sp,
-        [activeSlot]: ref ? { ...ref, sig: presetSig(p.model, p.measurementPath, p.targetPath, p.flat, stages) } : null,
+        [activeSlot]: ref ? { ...ref, sig: presetSig(p.model, p.measurementPath, p.targetPath, p.flat, stages, p.infrasoundAck) } : null,
       }));
   };
   // Re-anchor the active slot's loaded-preset attribution to a freshly saved state (so a
@@ -1935,7 +1946,7 @@ function App() {
   // always writes (or promotes the editor state to) the head.
   const setActiveSlotLoaded = (id: string, name: string) => {
     if (activeSlot !== "A" && activeSlot !== "B") return;
-    setSlotPreset((sp) => ({ ...sp, [activeSlot]: { id, name, at: "head", sig: presetSig(query, measurementPath, targetPath, flat, stages) } }));
+    setSlotPreset((sp) => ({ ...sp, [activeSlot]: { id, name, at: "head", sig: presetSig(query, measurementPath, targetPath, flat, stages, infrasoundAck) } }));
   };
   // The other editable slot, if any (null on Dry, which has no `slotPreset` entry at all).
   const siblingSlot = (): "A" | "B" | null => (activeSlot === "A" ? "B" : activeSlot === "B" ? "A" : null);
@@ -1962,7 +1973,7 @@ function App() {
     if (!other || !ref || ref.id !== id || ref.at !== "head") return;
     setSlotPreset((sp) => ({
       ...sp,
-      [other]: archivedAt != null ? { ...ref, at: archivedAt } : { ...ref, sig: presetSig(query, measurementPath, targetPath, flat, stages) },
+      [other]: archivedAt != null ? { ...ref, at: archivedAt } : { ...ref, sig: presetSig(query, measurementPath, targetPath, flat, stages, infrasoundAck) },
     }));
   };
 
@@ -1987,7 +1998,7 @@ function App() {
     const write = () => {
       setLibrary((lib) =>
         kind === "preset"
-          ? { ...lib, presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, flat, stages, versions: existingVersions }) }
+          ? { ...lib, presets: upsert(lib.presets, { id, name, model: query, measurementPath, targetPath, flat, stages, infrasoundAck, versions: existingVersions }) }
           : { ...lib, templates: upsert(lib.templates, { id, name, stage: activeStage, bands: stages[activeStage].bands }) },
       );
       if (kind === "preset") {
@@ -2018,7 +2029,7 @@ function App() {
   const overwritePresetInPlace = (p: UserPreset) => {
     setLibrary((lib) => ({
       ...lib,
-      presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, flat, stages, versions: p.versions }),
+      presets: upsert(lib.presets, { id: p.id, name: p.name, model: query, measurementPath, targetPath, flat, stages, infrasoundAck, versions: p.versions }),
     }));
     reconcileSiblingSlot(p.id);
     setActiveSlotLoaded(p.id, p.name);
@@ -2046,7 +2057,7 @@ function App() {
         stages,
         versions: [
           ...(p.versions ?? []),
-          { at: archivedAt, model: p.model, measurementPath: p.measurementPath, targetPath: p.targetPath, flat: p.flat, stages: p.stages },
+          { at: archivedAt, model: p.model, measurementPath: p.measurementPath, targetPath: p.targetPath, flat: p.flat, stages: p.stages, infrasoundAck: p.infrasoundAck },
         ].slice(-MAX_VERSIONS),
       }),
     }));
@@ -2085,7 +2096,7 @@ function App() {
           ...lib,
           presets: lib.presets.map((x) =>
             x.id === p.id
-              ? { id: x.id, name: x.name, model: prev.model, measurementPath: prev.measurementPath, targetPath: prev.targetPath, flat: prev.flat, stages: prev.stages, versions: versions.slice(0, -1) }
+              ? { id: x.id, name: x.name, model: prev.model, measurementPath: prev.measurementPath, targetPath: prev.targetPath, flat: prev.flat, stages: prev.stages, infrasoundAck: prev.infrasoundAck, versions: versions.slice(0, -1) }
               : x,
           ),
         })),
@@ -2305,9 +2316,9 @@ function App() {
   const slotDirty = (s: "A" | "B") => {
     const ref = slotPreset[s];
     if (!ref) return false;
-    if (s === activeSlot) return presetSig(query, measurementPath, targetPath, flat, stages) !== ref.sig;
+    if (s === activeSlot) return presetSig(query, measurementPath, targetPath, flat, stages, infrasoundAck) !== ref.sig;
     const inp = slotInputs[s];
-    return !inp || presetSig(inp.model, inp.measurementPath, inp.targetPath, inp.flat, inp.stages) !== ref.sig;
+    return !inp || presetSig(inp.model, inp.measurementPath, inp.targetPath, inp.flat, inp.stages, inp.infrasoundAck) !== ref.sig;
   };
   // The vN label for a loaded ref, derived live from the current library instead of a cached
   // string — position-based labels (v1, v2, …) shift whenever *any* version of that preset is
@@ -2414,8 +2425,14 @@ function App() {
     () => (result && !dryActive && !isolateAudition ? composedCurveDb(result.filters, new Float64Array([16]), drawModel, sampleRate ?? undefined)[0] : 0),
     [result, dryActive, isolateAudition, drawModel, sampleRate],
   );
-  const [infrasoundDismissed, setInfrasoundDismissed] = useState(false);
-  const showInfrasoundHint = infrasoundDb > INFRASOUND_HINT_DB && !highPassInSlot && !infrasoundDismissed && !autoEqView;
+  const showInfrasoundHint = infrasoundDb > INFRASOUND_HINT_DB && !highPassInSlot && !infrasoundAck && !autoEqView;
+  // "Not now" is part of the slot's document: kept in its inputs (so the resume state has it at
+  // once, not only after the next apply) and saved with a preset like everything else.
+  const dismissInfrasoundHint = () => {
+    setInfrasoundAck(true);
+    if (activeSlot === "A" || activeSlot === "B")
+      setSlotInputs((prev) => (prev[activeSlot] ? { ...prev, [activeSlot]: { ...prev[activeSlot]!, infrasoundAck: true } } : prev));
+  };
   // Library filtering: templates for the active stage unless "show all" is on; curated
   // shapes are all Tone-staged, so they only show on the Tone tab (or with show-all).
   const visibleTemplates = showAllStages ? library.templates : library.templates.filter((t) => t.stage === activeStage);
@@ -3385,7 +3402,7 @@ function App() {
                         <button type="button" disabled={dryActive} onClick={addInfrasoundHighPass}>
                           {tr("infrasound.add")}
                         </button>
-                        <button type="button" onClick={() => setInfrasoundDismissed(true)}>
+                        <button type="button" onClick={dismissInfrasoundHint}>
                           {tr("infrasound.dismiss")}
                         </button>
                       </div>

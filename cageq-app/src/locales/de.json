@@ -465,9 +465,9 @@
   },
 
   "infrasound": {
-    "hint": "Diese Korrektur hebt den Infraschallbereich um {{db}} dB an (bei 16 Hz). Diese Frequenzen sind nicht hörbar, und anders als ein großer Subwoofer können Kopfhörer sie nicht mit dem ganzen Körper spürbar machen – sie können den Treiber aber schnell an seine Auslenkungsgrenze bringen, mit Verzerrungen oder sogar Schäden als Folge. Ein Hochpassfilter entfernt sie aus dem Signal.",
+    "hint": "Diese Korrektur hebt den Infraschallbereich um {{db}} dB an (bei 16 Hz). Nur wenige Inhalte enthalten ihn – für den Endverbraucher gemasterte Musik selten, und der Stereo-Downmix eines Films filtert ihn meist auch aus dem LFE-Kanal heraus. Wo er vorhanden ist, ist er nicht hörbar, und anders als ein großer Subwoofer können Kopfhörer ihn nicht mit dem ganzen Körper spürbar machen – er kann den Treiber aber schnell an seine Auslenkungsgrenze bringen, mit Verzerrungen oder sogar Schäden als Folge. Ein Hochpassfilter entfernt ihn aus dem Signal.",
     "add": "Hochpass hinzufügen (20 Hz, 24 dB/Okt)",
-    "dismiss": "Nicht jetzt"
+    "dismiss": "Für dieses Setup nicht mehr zeigen"
   },
   "errors": {
     "pickHeadphone": "Zuerst ein Kopfhörer-Modell und eine Messung wählen.",
