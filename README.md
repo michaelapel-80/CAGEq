@@ -248,7 +248,10 @@ their license texts.
   building a real UI for.
 * [Peace](https://sourceforge.net/projects/peace-equalizer-apo-extension/) — another Equalizer APO GUI,
   with a much deeper feature set than AQUA's, if a dated UI.
-* The warping-corrected filter model builds on:
+* [FabFilter Pro-Q 4](https://www.fabfilter.com/products/pro-q-4-equalizer-plug-in), whose bells
+  and shelves keep their shape up to Nyquist instead of cramping there, prompted the search for a
+  published way to do the same. Its own design is proprietary and isn't what CAGEq implements —
+  the warping-corrected filter model builds on:
   * Mark Muranov, [*Analysis and Design of Digital Parametric Filters Without Frequency
     Warping*](https://escholarship.org/uc/item/04z7p1h7) (MS thesis, UC San Diego, 2025), and its
     reference implementation [CustomParametricFilters](https://github.com/Speechrezz/CustomParametricFilters),
