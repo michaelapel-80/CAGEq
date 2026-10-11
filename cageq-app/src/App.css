@@ -1436,6 +1436,21 @@ select:disabled {
 }
 /* The presets heading's Import…/Export… pair: pushed right as one group (two auto margins would
    split the free space between them instead). */
+/* The infrasound notice in the filter-bands panel: amber like the band-count warning, with its
+   two actions under the text. */
+.infra-hint {
+  margin: 0.5em 0 0;
+  font-size: 0.85em;
+}
+.infra-hint p {
+  color: #b8860b;
+  margin: 0 0 0.35em;
+  line-height: 1.4;
+}
+.infra-hint button {
+  font-size: 0.85em;
+}
+
 .pl-group .pl-group-actions {
   margin-left: auto;
   display: flex;

@@ -6,7 +6,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
-import { Band, composedCurveDb, expandHighPass, highPassFc, logGrid, type ResponseModel } from "./biquad";
+import { Band, composedCurveDb, expandHighPass, highPassFc, HP_DEFAULT, logGrid, type ResponseModel } from "./biquad";
 import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_DEFAULT, SPEC_FFT_MIN, snapFftSize } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
@@ -216,6 +216,11 @@ const appliedBands = (st: Stages): Band[] =>
  *  reuse headroom (a slot held back from an unrelated band doesn't shrink the real band count,
  *  but does use up array space until something close enough reclaims it). */
 const MAX_BANDS = 64;
+
+/** Gain at 16 Hz (dB, preamp excluded) above which the infrasound notice suggests a high-pass.
+ *  Below it the lift is small next to the ordinary level variation of real content; at it, the
+ *  typical AutoEq bass shelf on an open-back (+4-6 dB carried down to DC) is caught. */
+const INFRASOUND_HINT_DB = 3;
 
 // §3.4a "flat start": a synthetic option folded into the header's measurement `<select>`
 // rather than a separate control, so it's selectable regardless of what's in (or not in) the
@@ -1821,6 +1826,27 @@ function App() {
     requestApply(0);
     commitHistory();
   };
+  // The infrasound notice's "Add high-pass": a high-pass at its defaults, into the Fit stage —
+  // pads, seal, the headphone itself, which is what protecting its driver is about — or the
+  // first enabled stage if Fit is switched off, so the band takes effect. Shown on its tab.
+  const addInfrasoundHighPass = () => {
+    if (atMaxBands()) {
+      setError(tr("errors.tooManyBands", { max: MAX_BANDS }));
+      return;
+    }
+    const stage = STAGE_ORDER.find((id) => stages[id].enabled) ?? "fit";
+    const target: StageId = stages.fit.enabled ? "fit" : stage;
+    captureBaseline();
+    dropAudition();
+    const idx = stages[target].bands.length;
+    setStageBands(target, (cf) => [...cf, { kind: "HighPass", ...HP_DEFAULT, gain_db: 0, q: Math.SQRT1_2 }]);
+    setAutoEqView(false);
+    setActiveStage(target);
+    newBandNonce.current += 1;
+    setNewBand({ stage: target, idx, nonce: newBandNonce.current, focusGrid: false });
+    requestApply(0);
+    commitHistory();
+  };
   const updateFilter = (i: number, patch: Partial<CustomFilter>, delay = 0) => {
     captureBaseline();
     const iso = isolateRef.current;
@@ -2380,6 +2406,16 @@ function App() {
   // One high-pass per slot, any stage: a second one only stacks slope onto the first, at up to
   // four more of the engine's slots. The grid stops offering the kind while one exists.
   const highPassInSlot = STAGE_ORDER.some((id) => stages[id].bands.some((b) => b.kind === "HighPass"));
+  // Infrasound notice: the applied correction's gain at 16 Hz, against the rest of the curve (the
+  // preamp is a level for everything, not a lift of the infrasound). Keyed on the gain rather than
+  // on the headphone type, which nothing here knows: an AutoEq fit for an open-back typically
+  // lifts it +4-6 dB through its bass shelf, and a hand-made bass boost does the same.
+  const infrasoundDb = useMemo(
+    () => (result && !dryActive && !isolateAudition ? composedCurveDb(result.filters, new Float64Array([16]), drawModel, sampleRate ?? undefined)[0] : 0),
+    [result, dryActive, isolateAudition, drawModel, sampleRate],
+  );
+  const [infrasoundDismissed, setInfrasoundDismissed] = useState(false);
+  const showInfrasoundHint = infrasoundDb > INFRASOUND_HINT_DB && !highPassInSlot && !infrasoundDismissed && !autoEqView;
   // Library filtering: templates for the active stage unless "show all" is on; curated
   // shapes are all Tone-staged, so they only show on the Tone tab (or with show-all).
   const visibleTemplates = showAllStages ? library.templates : library.templates.filter((t) => t.stage === activeStage);
@@ -3342,6 +3378,19 @@ function App() {
                       redo — none of those go through addFilter's own check. Equalizer APO has
                       no such cap, so this is a heads-up, not a hard error: only CAGEq's own APO
                       actually refuses the excess. */}
+                  {showInfrasoundHint && (
+                    <div className="infra-hint" role="note">
+                      <p>{tr("infrasound.hint", { db: infrasoundDb.toFixed(1) })}</p>
+                      <div className="row" style={{ gap: "0.4em" }}>
+                        <button type="button" disabled={dryActive} onClick={addInfrasoundHighPass}>
+                          {tr("infrasound.add")}
+                        </button>
+                        <button type="button" onClick={() => setInfrasoundDismissed(true)}>
+                          {tr("infrasound.dismiss")}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   {totalBandsUsed > MAX_BANDS && (
                     <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0.5em 0 0" }}>
                       {tr("errors.overMaxBands", { count: totalBandsUsed, max: MAX_BANDS })}
