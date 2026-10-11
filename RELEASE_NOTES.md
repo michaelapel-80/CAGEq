@@ -1,15 +1,13 @@
-Smoother high-pass and band toggles.
+Preset export/import and an infrasound notice.
 
-- **Fixed:** switching the high-pass on or off could thump audibly on bass, more so at steeper
-  slopes. CAGEq's own audio engine now takes as long over a change as the change needs — it
-  measures how far the bass's timing shifts, not only how much the level changes — so the
-  high-pass fades in and out over a fraction of a second instead of snapping.
-- **Fixed:** toggling a band again before its previous fade had finished cut the new fade short
-  and could click. Toggles always get their full fade now; dragging stays as immediate as before.
-- **Fixed:** the first band toggle after starting the app could click, while later ones were
-  clean. The app now checks which filter the engine is actually running in each position
-  before changing anything.
-- Other changes fade a little more gradually too (about a third longer), for the same reason.
-- **Engine update:** the high-pass and re-toggle fixes are in CAGEq's own audio engine. The app
-  flags the update after updating: Continue refreshes it, with a brief machine-wide audio
-  interruption. The first-toggle fix is in the app itself. Equalizer APO users need nothing.
+- **New:** export and import presets. **Export…** in the Presets heading saves every preset
+  (with its versions) and your filter templates to one file; **Import…** adds a file's presets
+  to your library without changing anything already there. Handy for moving to another computer
+  or taking your setup along.
+- **New:** when a correction lifts the infrasound range noticeably (more than 3 dB at 16 Hz),
+  the filter-bands panel says so and offers to add a high-pass that keeps it from pushing the
+  headphone drivers to their limit. You can turn the notice off per setup; that choice is saved
+  with the slot and its preset.
+- The phase overlay on the chart is now drawn within ±180°, so a high-pass no longer squashes
+  the rest of the correction's phase into a flat line.
+- No engine update needed this time.
