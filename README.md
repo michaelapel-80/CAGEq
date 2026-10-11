@@ -39,7 +39,13 @@ risks digital clipping or jarring level jumps.
   the signal.
 * **Click-free real-time switching** between two independent filter slots (A/B) and the
   unmodified original (Dry) — including one-key switching (`A`/`S`/`D`) so you don't have to look
-  at the screen while listening.
+  at the screen while listening. Equalizer APO switches cleanly enough for everyday listening;
+  CAGEq's own audio engine is built for the stricter job of a fair comparison. Filter state
+  carries across every switch, each change is ramped over a time matched to how far the response
+  actually moves (in level *and* phase), and every band keeps its place when another is toggled.
+  Each kind of transition was measured offline against an ideal blend of the before and after,
+  then checked by ear, so that what you hear when switching is the difference between A and B —
+  not the switch itself (see below for why this needed its own engine).
 * **Cascaded clipping protection.** Several independent safety stages guard against digital
   overs, including when multiple filters stack in ways that look harmless individually.
 * **Custom filters for everyone, not just experts.** Set parametric bands by hand (graphical EQ,
