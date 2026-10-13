@@ -3112,10 +3112,11 @@ function App() {
                     which needed that corner more. `marginLeft:auto` moved here from Apply (below) so
                     the two sit together as one group at the row's right edge — Apply's own on-screen
                     position ends up roughly where it always was, just with this badge immediately to
-                    its left instead of a bare gap. Same visibility rule as before: a property of the
-                    correction, not the live signal, so hidden on the scope (stereo image, no level)
-                    and the CRT spectrum analyzer (its own clean instrument screen). */}
-                {result && !scopeView && !spectrumView && (
+                    its left instead of a bare gap. Shown on every view: it used to be hidden on
+                    Spectrum/Scope to keep their instrument screens clean, but that was while it sat
+                    inside the chart box — out here in the target row it covers nothing, and the
+                    preamp is as relevant while watching the signal as while editing the curve. */}
+                {result && (
                   <div
                     className="chart-preamp"
                     style={{ marginLeft: "auto" }}
@@ -3136,10 +3137,10 @@ function App() {
                   onClick={() => apply()}
                   disabled={applying || dryActive}
                   // The preamp badge above carries `marginLeft:auto` instead when it's rendered so
-                  // the two group together at the right; when it's absent (no result yet, or
-                  // Scope/Spectrum view) this falls back to carrying the auto margin itself, same as
-                  // the button always did before the badge moved here.
-                  style={result && !scopeView && !spectrumView ? undefined : { marginLeft: "auto" }}
+                  // the two group together at the right; when it's absent (no result yet) this
+                  // falls back to carrying the auto margin itself, same as the button always did
+                  // before the badge moved here.
+                  style={result ? undefined : { marginLeft: "auto" }}
                 >
                   {applying ? tr("correction.fitting") : dryActive ? tr("correction.applyDry") : tr("correction.apply", { slot: slotLabel(activeSlot) })}
                 </button>
