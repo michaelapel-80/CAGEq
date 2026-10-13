@@ -167,6 +167,12 @@ const GESTURE_GAP_MS: f64 = 150.0;
 /// source was checked instead of remeasured again.
 const DRY_FADE_MS: f64 = 10.0;
 
+/// A correction with no filters at or below this preamp is a mute (the fail-safe's safe state,
+/// -120 dB), not Dry — see `Cascade::apply_coeffs`: it keeps the fast [`DRY_FADE_MS`] fade
+/// instead of a ramp sized to its huge level change. Far below any real Dry preamp (the
+/// loudness match moves it by a few dB), far above the parser's -120 dB floor's neighbourhood.
+const SILENCE_PREAMP_DB: f64 = -100.0;
+
 /// How close a trailing twin's output must be to its input (in its delay registers, every
 /// channel) before `Cascade::trim_tail` stops processing it: about -120 dBFS, far below anything
 /// audible, so dropping it then is an inaudible step.
@@ -678,11 +684,9 @@ impl Cascade {
         (distance_db / RAMP_RATE_DB_PER_SEC * 1000.0).clamp(RAMP_MS, RAMP_MAX_MS)
     }
 
-    /// Fade to the untouched input, or back to the correction.
-    ///
-    /// Explicit rather than inferred from "a correction with no filters", because those are
-    /// not the same thing: a preamp-only correction is legitimate (§4 loudness matching) and
-    /// must still be applied, while dry means *nothing at all* — no filters and no preamp.
+    /// Fade to the untouched input (at `dry_preamp_db`), or back to the correction — a 10 ms
+    /// raised-cosine crossfade. Today only the fail-safe mute uses it (`apply_coeffs`, at or
+    /// below [`SILENCE_PREAMP_DB`]); Dry itself is an ordinary ramp now.
     ///
     /// Retargeting mid-fade continues from where the mix has actually reached, so a fast
     /// A/B/dry sequence never jumps.
@@ -1076,15 +1080,28 @@ impl Cascade {
             return false;
         }
 
-        // A correction with no filters is exactly what Dry is. Crossfade to it rather than
-        // dismantling the chain: the coefficients and their state keep running, so the
-        // transition has no intermediate filters nobody asked for, and coming back is warm.
-        if coeffs.is_empty() {
+        // A correction with no filters is what Dry is — and it is now ramped like any other
+        // correction: every band to its neutral twin, the preamp to Dry's, over a time sized by
+        // how far level and phase move (`ramp_ms_for`). It used to be a 10 ms crossfade to the
+        // untouched input (`set_dry`, Equalizer APO's own transition), chosen when a band leaving
+        // the chain still swept its poles across the spectrum on the way out. With neutral twins
+        // nothing sweeps, and a fixed 10 ms blend of two signals that differ in phase is itself
+        // the artefact: measured (`examples/dryswitch.rs`), a typical fit's switch to Dry left a
+        // 100 Hz tone's residual at -4.7 dB re the tone as a crossfade, -23.4 dB as a ramp, and
+        // 4-25 dB better across every case tried. An A/B switch to a slot without filters already
+        // took this path, which is how the difference was noticed.
+        //
+        // **Except silence.** The fail-safe (`cageq-apo-backend`'s `safe_state`) is also "no
+        // filters", at a preamp of -120 dB. Ramped, a ~114 dB move would take the full
+        // `RAMP_MAX_MS`; a safety mute should land in the crossfade's 10 ms instead, so anything
+        // at or below `SILENCE_PREAMP_DB` keeps the fast fade.
+        if coeffs.is_empty() && preamp_db <= SILENCE_PREAMP_DB {
             self.set_dry(true, preamp_db);
             return true;
         }
-        // Leaving dry runs the coefficient ramp AND the dry-unwind at once, on two different
-        // clocks (8 ms linear vs 10 ms raised cosine) — tried unifying this to "snap straight
+        // Leaving a crossfaded state (today only the fail-safe mute; Dry itself used to be one,
+        // which is what the measurements below were taken on) runs the coefficient ramp AND
+        // the unwind at once, on two different clocks (8 ms linear vs 10 ms raised cosine) — tried unifying this to "snap straight
         // to the target, let the crossfade's own fade-in be the only thing masking it" (one
         // mechanism, not two), on the reasoning that the crossfade already scales the wet
         // path's audibility from zero. Measured worse on both cases it was tried against: the
@@ -2097,6 +2114,10 @@ mod tests {
     /// irrelevant here). Recorded evidence: EqAPO — its real 10 ms transition, the "15 ms"
     /// only ever being `wavscan`'s misread of it (see `DRY_FADE_MS`) — puts -83 dB at 200 Hz,
     /// ours at 8 ms put -58 dB — 25 dB worse, purely from being quicker.
+    ///
+    /// Drives the crossfade directly (`set_dry`): Dry itself now goes through the ordinary ramp
+    /// (see `apply_coeffs`), and the crossfade only carries the fail-safe mute — which is what
+    /// this still measures.
     #[test]
     fn shorter_fades_spread_further_up_the_spectrum() {
         const N: usize = 8192;
@@ -2116,7 +2137,7 @@ mod tests {
             let pre = tone(50.0, 960 * 40, N / 2, 0.5);
             let mut a = vec![0.0f32; N / 2];
             c.process(&pre, &mut a, N / 2);
-            assert!(c.apply_coeffs(&[], -6.0));
+            c.set_dry(true, -6.0); // the crossfade itself (see the test doc)
             let post = tone(50.0, 960 * 40 + N / 2, N / 2, 0.5);
             let mut b = vec![0.0f32; N / 2];
             c.process(&post, &mut b, N / 2);
@@ -2186,6 +2207,10 @@ mod tests {
     ///
     /// The numbers below stay useful: they are what ruled out "any smooth curve is fine" and
     /// pointed at the corner/rate tradeoff, before the source was found and ended the guessing.
+    ///
+    /// Drives the crossfade directly (`set_dry`): Dry itself now goes through the ordinary ramp
+    /// (see `apply_coeffs`), and the crossfade only carries the fail-safe mute — which is what
+    /// this still measures.
     #[test]
     fn curve_choice_and_dry_switch_spectral_spread() {
         const N: usize = 8192;
@@ -2205,7 +2230,7 @@ mod tests {
             let pre = tone(50.0, 960 * 40, N / 2, 0.5);
             let mut a = vec![0.0f32; N / 2];
             c.process(&pre, &mut a, N / 2);
-            assert!(c.apply_coeffs(&[], -6.0));
+            c.set_dry(true, -6.0); // the crossfade itself (see the test doc)
             let post = tone(50.0, 960 * 40 + N / 2, N / 2, 0.5);
             let mut b = vec![0.0f32; N / 2];
             c.process(&post, &mut b, N / 2);
@@ -2248,7 +2273,7 @@ mod tests {
             let warm = tone(50.0, 0, 960 * 40, 0.5);
             let mut sink = vec![0.0f32; warm.len()];
             c.process(&warm, &mut sink, warm.len());
-            assert!(c.apply_coeffs(&[], -6.0));
+            c.set_dry(true, -6.0); // the crossfade itself (see the test doc)
             let cont = tone(50.0, 960 * 40, 960, 0.5);
             let mut out = vec![*sink.last().unwrap()];
             out.extend(std::iter::repeat(0.0f32).take(960));
@@ -2288,6 +2313,10 @@ mod tests {
     /// partly cancel or reinforce. Both endpoints are correct, yet the level can dip or swell
     /// on the way — which is heard as a bloom even though nothing clicked. If that is real, it
     /// is inherent to mixing signals, and two parallel A/B chains would do exactly the same.
+    ///
+    /// Drives the crossfade directly (`set_dry`): Dry itself now goes through the ordinary ramp
+    /// (see `apply_coeffs`), and the crossfade only carries the fail-safe mute — which is what
+    /// this still measures.
     #[test]
     fn does_the_dry_crossfade_swell() {
         const WINDOW: usize = 960 * 3;
@@ -2304,7 +2333,7 @@ mod tests {
         // Level before the switch, over a whole period.
         let before = rms(&sink[sink.len() - 960..]);
 
-        assert!(c.apply_coeffs(&[], -6.0));
+        c.set_dry(true, -6.0); // the crossfade itself (see the test doc)
         let mut out = vec![0.0f32; WINDOW];
         c.process(&cont, &mut out, WINDOW);
         let after = rms(&out[WINDOW - 960..]);
@@ -2343,6 +2372,10 @@ mod tests {
     /// Dry is loudness-matched, not unity — it keeps the base pre-gain, which is what makes
     /// the comparison unbiased — so it is modelled as a correction with no filters and a
     /// preamp of its own, exactly as the core composes it.
+    ///
+    /// Dry now reaches the engine as an ordinary ramp to no bands (`apply_coeffs`,
+    /// `examples/dryswitch.rs`), no longer the 10 ms crossfade the history above describes; this
+    /// test now covers that path, and its bars still hold.
     #[test]
     fn fading_to_and_from_dry_beats_switching_instantly() {
         const WINDOW: usize = 960;
@@ -2420,6 +2453,10 @@ mod tests {
     /// fade. Reverted; see `apply_coeffs`'s own comment. This test exercises the ordinary case
     /// (settled on dry, then a DIFFERENT correction) against a REAL prior correction, not a
     /// freshly-constructed cascade whose "before" would just be `Coeffs::PASSTHROUGH`.
+    ///
+    /// Dry now reaches the engine as an ordinary ramp to no bands (`apply_coeffs`,
+    /// `examples/dryswitch.rs`), no longer the 10 ms crossfade the history above describes; this
+    /// test now covers that path, and its bars still hold.
     #[test]
     fn leaving_dry_for_a_different_correction_ramps_and_unwinds_together() {
         const WINDOW: usize = 960;
@@ -2480,6 +2517,10 @@ mod tests {
     /// synthetic pure-tone worst case. Accepted rather than chased further: it needs an
     /// interruption within ~1 ms of the initial dry click to provoke, the same "mostly
     /// academic" territory the A/B ramp decision already accepted for a different mechanism.
+    ///
+    /// Dry now reaches the engine as an ordinary ramp to no bands (`apply_coeffs`,
+    /// `examples/dryswitch.rs`), no longer the 10 ms crossfade the history above describes; this
+    /// test now covers that path, and its bars still hold.
     #[test]
     fn interrupting_a_fade_to_dry_still_switches_cleanly() {
         const WINDOW: usize = 960;
@@ -3341,6 +3382,42 @@ mod tests {
         let pk = r[(FS * 0.6) as usize..(FS * 1.4) as usize].iter().fold(0.0f64, |m, v| m.max(v.abs()));
         let db = 20.0 * (pk / tone_pk).log10();
         assert!(db < -20.0, "quick re-toggle: residual {db:.1} dB re the tone");
+    }
+
+    /// Dry (no filters, an ordinary preamp) is an ordinary ramp now, sized by how far level and
+    /// phase move — a typical correction's switch to Dry gets far longer than the old 10 ms
+    /// crossfade, and the crossfade is never engaged.
+    #[test]
+    fn dry_is_an_ordinary_ramp_sized_by_the_change() {
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&realistic_correction(6.0)));
+        c.settle();
+        c.cooldown_left = 0;
+        assert!(c.apply_coeffs(&[], -6.0));
+        assert!(!c.is_dry(), "Dry must not engage the crossfade any more");
+        let expected = ((Cascade::ramp_ms_for(c.ramp_distance_db()) / 1000.0) * FS).round() as u32;
+        assert_eq!(c.ramp_frames, expected);
+        assert!(c.ramp_frames as f64 > 2.0 * DRY_FADE_MS / 1000.0 * FS, "ramp {} frames", c.ramp_frames);
+        c.settle();
+        // Landed: every band is identity (a neutral twin, or trimmed away).
+        assert!(c.coeffs[..c.process_count].iter().all(|k| k.is_identity()));
+    }
+
+    /// The fail-safe mute (no filters at -120 dB) keeps the fast crossfade: a safety mute must
+    /// land in 10 ms, not in the full ramp its ~114 dB level change would earn.
+    #[test]
+    fn the_fail_safe_mute_still_lands_in_ten_ms() {
+        let mut c = Cascade::new(1, FS);
+        assert!(c.set_bands(&realistic_correction(6.0)));
+        c.settle();
+        assert!(c.apply_coeffs(&[], -120.0));
+        assert!(c.is_dry(), "the mute should use the crossfade");
+        let input = tone(1000.0, 0, (FS * 0.02) as usize, 0.5);
+        let mut out = vec![0.0f32; input.len()];
+        c.process(&input, &mut out, input.len());
+        let tail = &out[(DRY_FADE_MS / 1000.0 * FS) as usize + 1..];
+        let peak = tail.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak < 1e-5, "still {peak} after the 10 ms fade");
     }
 
     /// Bands dropped off the end keep running as twins until their own ringing has settled, then
