@@ -1,13 +1,12 @@
-Preset export/import and an infrasound notice.
+Cleaner switching to Dry.
 
-- **New:** export and import presets. **Export…** in the Presets heading saves every preset
-  (with its versions) and your filter templates to one file; **Import…** adds a file's presets
-  to your library without changing anything already there. Handy for moving to another computer
-  or taking your setup along.
-- **New:** when a correction lifts the infrasound range noticeably (more than 3 dB at 16 Hz),
-  the filter-bands panel says so and offers to add a high-pass that keeps it from pushing the
-  headphone drivers to their limit. You can turn the notice off per setup; that choice is saved
-  with the slot and its preset.
-- The phase overlay on the chart is now drawn within ±180°, so a high-pass no longer squashes
-  the rest of the correction's phase into a flat line.
-- No engine update needed this time.
+- **Fixed:** switching to or from Dry could leave a short audible disturbance on bass-heavy
+  material, while an A/B switch between two slots was clean. CAGEq's own audio engine now
+  handles Dry the same way as an A/B switch, fading over as long as the change needs instead
+  of a fixed 10 ms.
+- **Fixed:** after updating CAGEq's engine, the "engine needs updating" notice stayed up until
+  dismissed or the app was restarted. It now disappears as soon as the update succeeds.
+- The preamp readout is now shown on every chart view, not only Eq and Impulse.
+- **Engine update:** the Dry fix is in CAGEq's own audio engine. The app flags the update after
+  updating: Continue refreshes it, with a brief machine-wide audio interruption. The other
+  changes are in the app itself. Equalizer APO users need nothing.
