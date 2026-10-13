@@ -2879,6 +2879,7 @@ function App() {
                     eqapoEnabled={selectedDevice?.eqapo_enabled ?? false}
                     sampleRate={sampleRate}
                     onOpenOutputSettings={openOutputSettings}
+                    onStatus={setApoDeviceStatus}
                   />
                 </>
               )}

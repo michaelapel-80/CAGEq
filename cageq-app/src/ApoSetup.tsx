@@ -76,6 +76,11 @@ type Props = {
       because the resampler turned out clean and most Bluetooth devices don't offer a rate
       choice anyway — not worth its own permanent icon, just a link inside this dialog. */
   onOpenOutputSettings: () => void;
+  /** Every status this component reads (on mount, after an action, while open), passed up so
+      App's own copy — which the stale-engine banner and the engine nudge read — follows a change
+      made here, such as an engine update, instead of keeping the pre-update answer until the
+      device changes or the app restarts. */
+  onStatus?: (status: ApoSetupStatus) => void;
 };
 
 // Windows playback rate, shown compactly (48 kHz, 44.1 kHz, 96 kHz…).
@@ -110,7 +115,7 @@ export function computeEngineReason(status: ApoSetupStatus | null, eqapoEnabled:
   return eqapoEnabled ? "eqapo" : "unattached";
 }
 
-export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEnabled, onOpenOutputSettings }: Props) {
+export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEnabled, onOpenOutputSettings, onStatus }: Props) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<ApoSetupStatus | null>(null);
@@ -120,8 +125,10 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
 
   const refresh = useCallback(async () => {
     if (endpointId === null) return;
-    setStatus(await invoke<ApoSetupStatus>("apo_setup_status", { endpoint: endpointId }));
-  }, [endpointId]);
+    const s = await invoke<ApoSetupStatus>("apo_setup_status", { endpoint: endpointId });
+    setStatus(s);
+    onStatus?.(s);
+  }, [endpointId, onStatus]);
 
   // Reading is free (no elevation): fetch once up front so the trigger's color reflects
   // reality before it's ever clicked, then again on every open to catch changes made
