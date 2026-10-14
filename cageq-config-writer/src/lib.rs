@@ -432,7 +432,7 @@ pub fn decide_startup(state: &BlockState, expected_hash: Option<&str>) -> Startu
 }
 
 /// CAGEq's hardcoded safe-state cageq.txt body (§7.2): effective silence on all
-/// devices. Written by the watchdog on a fail-safe (§7.1) and recognised by the
+/// devices. Written on a fail-safe (§7.1) and recognised by the
 /// startup check. One canonical definition so the writer and the detector can't
 /// drift apart.
 ///

@@ -1,7 +1,7 @@
 //! Old-vs-new comparison for `Core::measurement_curves` against the sidecar's own
 //! `measurement_curves` (kept working in `sidecar_dsp.py` as the reference — see
 //! `catalog.rs`'s module doc). The reference side spawns a `cageq_sidecar::Sidecar`
-//! directly (no `Core`/watchdog involved). Uses a real headphone/target from the
+//! directly (no `Core` involved). Uses a real headphone/target from the
 //! AutoEq catalogue, so this needs network access; soft-skips on any error.
 
 use std::path::PathBuf;

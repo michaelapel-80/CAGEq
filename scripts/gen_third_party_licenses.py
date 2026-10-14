@@ -10,8 +10,8 @@ Run from the repo root, in order:
     #    SPDX id if a fresh dependency uses one it hasn't seen yet — cargo-about refuses to run
     #    (rather than silently omit anything) until you review it and add it there.
     #    cageq-app/src-tauri is its own workspace, so it gets its own run; the other two are
-    #    scoped with -m (without --workspace) so dev-only root members (cageq-sidecar,
-    #    cageq-watchdog — test tooling since the Rust port) never leak in.
+    #    scoped with -m (without --workspace) so the dev-only root member cageq-sidecar
+    #    (test tooling since the Rust port) never leaks in.
     cargo install cargo-about --features cli   # once
     cargo about generate --format json -c about.toml -m cageq-apo/Cargo.toml \\
         -o rust_licenses_apo.json
@@ -46,7 +46,7 @@ RUST_REPORTS = ["rust_licenses_apo.json", "rust_licenses_apo_backend.json", "rus
 # carries AutoEq's own copyright notice, which the MIT terms require reproducing.
 OWN_RUST_CRATES = {
     "cageq-apo", "cageq-apo-backend", "cageq-backend", "cageq-catalog", "cageq-config-writer",
-    "cageq-sidecar", "cageq-watchdog", "cageq-core", "cageq-monitor", "cageq-app", "cageq-biquad",
+    "cageq-sidecar", "cageq-core", "cageq-monitor", "cageq-app", "cageq-biquad",
     "cageq-biquad-wasm",
 }
 

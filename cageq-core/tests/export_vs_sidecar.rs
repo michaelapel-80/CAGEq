@@ -1,6 +1,6 @@
 //! Old-vs-new comparison for `Core::fit_export_eq` against the sidecar's `fit_export_eq`
 //! (kept working in `sidecar_dsp.py` as a reference implementation — see `export.rs`'s module doc). The reference side
-//! spawns a `cageq_sidecar::Sidecar` directly (no `Core`/watchdog involved). Needs the
+//! spawns a `cageq_sidecar::Sidecar` directly (no `Core` involved). Needs the
 //! AutoEq venv; soft-skips without it, like `rust_vs_sidecar.rs`.
 //!
 //! The Rust export deliberately drops AutoEq's treble rule (see `export.rs`'s

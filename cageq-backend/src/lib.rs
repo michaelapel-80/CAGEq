@@ -239,7 +239,7 @@ pub struct Capabilities {
 /// Everything `cageq-core` needs from the thing that actually applies filters.
 ///
 /// `Send + Sync` because the core shares one backend across the caller's thread and the
-/// reconciler thread (and, for the safe state, the watchdog's threads); implementations
+/// reconciler thread; implementations
 /// carry their own interior synchronisation where they need it.
 pub trait EqBackend: Send + Sync {
     /// What this backend can do — see [`Capabilities`].
@@ -252,8 +252,8 @@ pub trait EqBackend: Send + Sync {
 
     /// Apply CAGEq's safe state (§7.1/7.2): effective silence, recognised by
     /// [`Self::startup_decision`] as [`StartupDecision::SafeStateStillActive`]. Called by
-    /// the watchdog on a fail-safe, so it must be independent of the Python sidecar and
-    /// as close to infallible as the backend can manage.
+    /// the core when an apply fails, so it must be as close to infallible as the backend
+    /// can manage.
     fn write_safe_state(&self) -> Result<(), BackendError>;
 
     /// The §3.0 startup-integrity verdict, given the hash settings.json remembered for

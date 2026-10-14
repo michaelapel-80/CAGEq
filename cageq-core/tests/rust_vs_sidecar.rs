@@ -4,7 +4,7 @@
 //! Rust-driven pipeline, on the same real input, through the real `autoeq` package.
 //!
 //! The reference side spawns a `cageq_sidecar::Sidecar` directly and calls it — no
-//! `Core`/watchdog involved, since `Core` has nothing to do with the sidecar any more.
+//! `Core` involved, since `Core` has nothing to do with the sidecar any more.
 //! Needs the AutoEq venv; soft-skips without it, like `biquad_crosscheck.rs`. Uses a
 //! directly-supplied synthetic `measurement` array (not a named headphone), so this
 //! needs no network access and is fully reproducible.

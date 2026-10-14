@@ -111,7 +111,7 @@ pub struct CageqApoBackend {
     /// `queue_write` stamps its entry with whatever this reads *at the time it is queued*, and
     /// a flush refuses to write any entry stamped with an older epoch than this reads *at flush
     /// time* — closing a real race: a live edit's queued write landing debounced, *after* a
-    /// watchdog trip, would otherwise silently overwrite the safe state that trip just wrote.
+    /// safe-state write, would otherwise silently overwrite the safe state just written.
     /// Shared with the background writer via the same `Arc` `pending` already needs.
     safe_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Wakes the background writer thread on every [`CageqApoBackend::queue_write`] — it
@@ -193,7 +193,7 @@ impl CageqApoBackend {
     /// was a §5.2 isolate audition and so was never written or queued at all (isolate is
     /// live-only by design — see `is_isolate_filters`'s own doc). Audio can be live on that
     /// endpoint, running the boosted narrow bandpass isolate pushes, with nothing in
-    /// `effective_endpoint_ids` to show for it; a watchdog trip landing at that exact moment
+    /// `effective_endpoint_ids` to show for it; a safe-state write landing at that exact moment
     /// must not skip silencing it just because no *file-worthy* correction ever existed there.
     fn endpoints_needing_safe_state(&self) -> Vec<String> {
         let mut ids: std::collections::HashSet<String> = self.effective_endpoint_ids().into_iter().collect();
@@ -509,7 +509,7 @@ impl EqBackend for CageqApoBackend {
         // in `pending` (never yet reached disk — see `queue_write`) nor one whose *only* live
         // push ever was a §5.2 isolate audition (deliberately never written or queued at all —
         // see `is_isolate_filters`'s own doc, and that method's own doc) is missed just because
-        // neither has a file yet; a watchdog trip can arrive at any moment, including
+        // neither has a file yet; a fail-safe can arrive at any moment, including
         // immediately after a live edit or mid-isolate-drag.
         //
         // Bumped *before* touching anything else: every `queue_write` from here on stamps its
@@ -523,7 +523,7 @@ impl EqBackend for CageqApoBackend {
         self.safe_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let safe = safe_state();
         // Both halves matter: the file makes the safe state survive a restart, and the live
-        // push makes it take effect *now*, which is the entire point of a watchdog fail-safe.
+        // push makes it take effect *now*, which is the entire point of a fail-safe.
         // Waiting for the next `LockForProcess` would be no fail-safe at all. Written directly
         // (not queued) — a fail-safe has to land now, not after a debounce window.
         for id in &self.endpoints_needing_safe_state() {
@@ -1218,7 +1218,7 @@ mod tests {
         );
     }
 
-    /// The safety-critical half of the same change: a watchdog trip can land at any moment,
+    /// The safety-critical half of the same change: a safe-state write can land at any moment,
     /// including the instant after a live edit whose write hasn't reached disk yet — even, for
     /// a brand-new endpoint, before it has ever had a file at all. `write_safe_state` must still
     /// cover it, not just whatever `config_files` (disk only) happens to already show.
@@ -1246,7 +1246,7 @@ mod tests {
     /// alone would never see it — even though audio is genuinely running the boosted narrow
     /// bandpass on that endpoint right now (hence a real live channel, like the other
     /// live-channel tests in this file — `self.slots` is only ever populated once `push_live`
-    /// gets far enough to reach it, which needs a channel to actually be open). A watchdog trip
+    /// gets far enough to reach it, which needs a channel to actually be open). A safe-state write
     /// landing at that moment must still silence it.
     #[test]
     fn write_safe_state_covers_an_endpoint_whose_only_push_was_isolate() {
@@ -1280,7 +1280,7 @@ mod tests {
         assert_eq!(parsed.preamp_db, -120.0, "safe state must silence, not neutralise");
     }
 
-    /// **The bug this guards**: a live edit racing a watchdog trip must never let its (now
+    /// **The bug this guards**: a live edit racing a safe-state write must never let its (now
     /// stale, pre-failure) content overwrite the safe state a moment later, once the debounced
     /// writer finally gets to it. `write_safe_state` deliberately does not clear `pending` — the
     /// epoch stamp alone (`safe_epoch`) must be enough to keep a stale entry from ever landing.
@@ -1288,7 +1288,7 @@ mod tests {
     fn write_safe_state_wins_over_a_stale_pending_write_even_if_one_lingers() {
         let (backend, dir) = temp_backend("safe-beats-stale-pending");
         // Queued but not yet flushed — this is the race: a live edit already in flight when the
-        // watchdog fires.
+        // fail-safe fires.
         backend.apply(&[device(EP, -6.0)]).unwrap();
 
         backend.write_safe_state().unwrap();
@@ -1429,7 +1429,7 @@ mod tests {
             StartupDecision::ExternallyModified,
         );
 
-        // The watchdog silenced things and the app never got to write a resume hash.
+        // A fail-safe silenced things and the app never got to write a resume hash.
         backend.write_safe_state().unwrap();
         assert_eq!(
             backend.startup_decision(Some(&hash)).unwrap(),

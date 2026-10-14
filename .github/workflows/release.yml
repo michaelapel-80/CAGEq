@@ -5,9 +5,8 @@
 # three stages a human would: build CAGEq's own APO (needs the MSVC C++ toolset), build the
 # frontend + Tauri bundle, then locate and publish the resulting .exe. No Python sidecar to
 # freeze/bundle any more — the app doesn't ship or depend on one (see cageq-core's "No sidecar"
-# module doc); `cageq-sidecar`/`cageq-watchdog` stay in the workspace purely as dev-only
-# infrastructure for the `tests/*_vs_sidecar.rs` comparison tests, which this release build
-# doesn't run.
+# module doc); `cageq-sidecar` stays in the workspace purely as dev-only infrastructure for
+# the `tests/*_vs_sidecar.rs` comparison tests, which this release build doesn't run.
 #
 # Triggers on a version tag push (the real release path) and workflow_dispatch (so the whole
 # pipeline can be test-run without cutting a release — see the "Publish release" step's own

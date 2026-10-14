@@ -155,15 +155,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cageq-watchdog"
-version = "0.17.3"
-dependencies = [
- "cageq-sidecar",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "cc"
 version = "1.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

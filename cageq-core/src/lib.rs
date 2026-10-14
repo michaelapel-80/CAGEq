@@ -19,11 +19,11 @@
 //! polling, crash recovery, a "safe state" reconciler thread). Every RPC method that
 //! sidecar exposed now has a Rust equivalent the core calls in-process
 //! (`cageq-peq-solver` for the fit itself, `cageq-catalog` for fetching/browsing
-//! AutoEq's measurement/target catalogue), so there's nothing left to supervise —
-//! `cageq-sidecar`/`cageq-watchdog` still exist in the workspace and the reference
-//! Python implementations they talk to (`sidecar_dsp.py`) are still what the
-//! `tests/*_vs_sidecar.rs` comparison tests validate this crate's ports against, but
-//! neither is a dependency of this crate or shipped with the app any more.
+//! AutoEq's measurement/target catalogue), so there's nothing left to supervise — the
+//! watchdog crate is gone. `cageq-sidecar` still exists in the workspace and the reference
+//! Python implementation it talks to (`sidecar_dsp.py`) is still what the
+//! `tests/*_vs_sidecar.rs` comparison tests validate this crate's ports against, but it is
+//! only a dev-dependency of this crate and not shipped with the app.
 //!
 //! ## Backends
 //! Nothing here knows how filters actually reach the audio pipeline — that is

@@ -28,6 +28,6 @@ thiserror = "2.0"
 [dev-dependencies]
 # Not shipped, not a dependency of this crate's own code any more (see lib.rs's "No
 # sidecar" module doc) — only the tests/*_vs_sidecar.rs comparison tests spawn a real
-# Python sidecar directly (`cageq_sidecar::Sidecar::spawn`/`call`, no `Core`/watchdog
+# Python sidecar directly (`cageq_sidecar::Sidecar::spawn`/`call`, no `Core`
 # involved) to keep validating the Rust port against the AutoEq reference.
 cageq-sidecar = { path = "../cageq-sidecar" }
