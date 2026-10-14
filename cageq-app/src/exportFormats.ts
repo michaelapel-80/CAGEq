@@ -21,9 +21,10 @@
  * Phase is the receiving app's: these formats carry magnitude only. Equalizer APO's GraphicEQ
  * builds a minimum-phase FIR from it (cepstrum, 16384 taps), which for CAGEq's own minimum-phase
  * cascade recovers essentially the same phase; Wavelet's zero-phase FFT bands pre-ring within a
- * block, whatever it is fed. An impulse-response export would carry the phase too.
+ * block, whatever it is fed. The impulse-response export carries the phase too: it is the
+ * slot's own cascade, sampled in time, for a convolver.
  */
-import { Band, composedCurveDb, type ResponseModel } from "./biquad";
+import { Band, composedCurveDb, impulseResponse, logGrid, type ResponseModel } from "./biquad";
 
 // AutoEq's own filter-type -> EqAPO code map (`write_eqapo_parametric_eq`), plus EqAPO's `HPQ` for
 // the high-pass sections the fit passes through untouched (see `fit_export_eq`'s doc). Bandpass/Tilt
@@ -142,4 +143,60 @@ export function interpolatePoints(points: GraphicPoint[], freqs: Float64Array): 
     out[i] = a.gain_db + (b.gain_db - a.gain_db) * t;
   }
   return out;
+}
+
+/** Sample rates the impulse response can be rendered at: the common ones, since a convolver
+ *  either wants a file per rate it runs at or resamples one itself (Equalizer APO does). */
+export const IR_RATES = [44100, 48000, 88200, 96000, 176400, 192000];
+
+/** How long a response may ring before it is cut: beyond what CAGEq's bands need (a 48 dB/oct
+ *  high-pass at 10 Hz settles within `IR_TAIL_DB` in 1.2 s, an extreme +6 dB, Q 10 bell at 20 Hz
+ *  in 3 s). Matches `MAX_IMPULSE_SAMPLES` in the Rust command that writes the file. */
+const IR_MAX_SECONDS = 5;
+
+/** How much the cut may change the response, relative to the curve's loudest point: whatever is
+ *  cut off sums to no more than this, and no frequency's response can move by more than that sum.
+ *  A bound on the cut tail's *sum*, not on single samples: a sample threshold depends on the rate
+ *  (the same low-frequency ring is spread over 4x the samples at 192 kHz), and cut a 48 dB/oct
+ *  high-pass's tail short enough there to move its stopband by a decibel. */
+const IR_TAIL_DB = -120;
+
+export type ImpulseExport = {
+  samples: Float32Array;
+  sampleRate: number;
+  /** Gain applied so the curve's loudest point sits at -0.2 dB (the graphic export's normalisation:
+   *  a file has no preamp line of its own). */
+  gainDb: number;
+  /** The tail still exceeded `IR_TAIL_DB` when `IR_MAX_SECONDS` ran out. */
+  truncated: boolean;
+};
+
+/** The slot's cascade as a convolver's impulse response at `sampleRate`: the exact time-domain
+ *  response of the same biquads, designed at that rate in the slot's own `model` (so it is what
+ *  CAGEq plays at that rate, phase included), cut where the rest of it no longer matters (see
+ *  `IR_TAIL_DB`), and normalised like the graphic export. The level reference runs from 5 Hz to 20 kHz (or just
+ *  below Nyquist), so an infrasound boost counts towards the headroom too. */
+export function impulseExport(filters: Band[], model: ResponseModel, sampleRate: number): ImpulseExport {
+  const cap = Math.round(IR_MAX_SECONDS * sampleRate);
+  const h = impulseResponse(filters, model, cap, sampleRate);
+  const curve = composedCurveDb(filters, logGrid(1024, 5, Math.min(20000, 0.45 * sampleRate)), model, sampleRate);
+  const maxDb = Math.max(...curve);
+  // Walk back from the end while the tail summed so far stays within the bound; `last` is the
+  // final sample that must be kept.
+  const bound = 10 ** ((maxDb + IR_TAIL_DB) / 20);
+  let tail = 0;
+  let last = cap - 1;
+  while (last > 0 && tail + Math.abs(h[last]) <= bound) tail += Math.abs(h[last--]);
+  const gainDb = -(maxDb + PREAMP_HEADROOM_DB);
+  const scale = 10 ** (gainDb / 20);
+  const samples = new Float32Array(last + 1);
+  for (let i = 0; i <= last; i++) samples[i] = h[i] * scale;
+  return { samples, sampleRate, gainDb, truncated: last >= cap - 1 };
+}
+
+/** How to load a saved response in Equalizer APO: its `Convolution:` line for config.txt, with the
+ *  file's path (or just its name, before it is saved). Other convolvers each have their own way of
+ *  loading a WAV, which their users know better than a snippet could. */
+export function impulseConfigText(file: string): string {
+  return `# Equalizer APO (config.txt)\nConvolution: ${file}\n`;
 }

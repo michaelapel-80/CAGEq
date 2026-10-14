@@ -13,6 +13,8 @@ use cageq_core::{
 use serde_json::{json, Map, Value};
 use tauri::State;
 
+mod wav;
+
 /// App state held in Tauri managed state. `Ready` on a successful start; `Failed`
 /// keeps the init error string so commands can report it instead of the app being
 /// silently dead (e.g. if no Python/sidecar is found).
@@ -391,6 +393,65 @@ async fn import_library_file(window: tauri::WebviewWindow) -> Result<Option<Stri
         return Err(format!("{} is too large to be a CAGEq preset file", path.display()));
     }
     std::fs::read_to_string(&path).map(Some).map_err(|e| format!("could not read {}: {e}", path.display()))
+}
+
+/// Longest impulse response `export_impulse_file` accepts: 5 s at 192 kHz, the frontend's own
+/// cap (`IR_MAX_SECONDS` in exportFormats.ts). Anything longer is not one of its exports.
+const MAX_IMPULSE_SAMPLES: usize = 5 * 192_000;
+
+/// Ask where to save, then write the frontend's impulse response there as a mono 32-bit float
+/// WAV (see `wav`). Returns the path written, for the frontend's config snippet, or `None` when
+/// the user cancels.
+///
+/// The samples arrive as the raw request body (little-endian `f32`s) rather than a JSON array,
+/// which would be several times their size for a long, high-rate response. The sample rate and
+/// the suggested file name ride along as headers, the name percent-encoded since header values
+/// must be ASCII.
+#[tauri::command]
+async fn export_impulse_file(window: tauri::WebviewWindow, request: tauri::ipc::Request<'_>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err("expected the samples as a binary body".into());
+    };
+    if body.len() % 4 != 0 || body.len() / 4 > MAX_IMPULSE_SAMPLES {
+        return Err("not an impulse response this app exports".into());
+    }
+    let header = |name: &str| request.headers().get(name).and_then(|v| v.to_str().ok());
+    let sample_rate: u32 = header("x-sample-rate")
+        .and_then(|v| v.parse().ok())
+        .filter(|r| (8_000..=768_000).contains(r))
+        .ok_or("missing or invalid sample rate")?;
+    let name = header("x-file-name")
+        .and_then(|v| percent_encoding::percent_decode_str(v).decode_utf8().ok())
+        .map(|n| safe_file_name(&n))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "CAGEq impulse response".into());
+    let samples: Vec<f32> = body.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+
+    let Some(path) = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .add_filter("WAV", &["wav"])
+        .set_file_name(format!("{name}.wav"))
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, wav::float_mono(&samples, sample_rate)).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    Ok(Some(path.display().to_string()))
+}
+
+/// `name` with the characters Windows forbids in a file name replaced, so a headphone or preset
+/// name can seed the save dialog as is.
+fn safe_file_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
+        .collect::<String>()
+        .trim()
+        .trim_end_matches('.')
+        .to_string()
 }
 
 /// Seed a slot with a fit **persisted from a previous session** (§3.5), no sidecar call.
@@ -1675,6 +1736,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             export_library_file,
             import_library_file,
+            export_impulse_file,
             apply,
             seed_slot,
             warm_fit,
@@ -1733,6 +1795,13 @@ pub fn run() {
 mod tests {
     use super::*;
     use cageq_core::LoudnessMode;
+
+    #[test]
+    fn a_suggested_file_name_loses_what_windows_forbids() {
+        assert_eq!(safe_file_name(r#"HD 600: "open" <A/B>?"#), "HD 600_ _open_ _A_B__");
+        assert_eq!(safe_file_name("  Sennheiser HD 800 S.  "), "Sennheiser HD 800 S");
+        assert_eq!(safe_file_name("DT 770 Pro 80 Ω"), "DT 770 Pro 80 Ω");
+    }
 
     /// A synthetic measurement (used by the offline e2e test so it needs no network):
     /// +5 dB ~3 kHz, -3 dB ~6 kHz, gentle bass rise.

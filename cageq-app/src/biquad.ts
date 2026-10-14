@@ -335,15 +335,16 @@ export function phaseDeg(bands: Band[], freqs: Float64Array, model: ResponseMode
 
 /** The filter chain's **impulse response** h[n] — a unit impulse cascaded through each
  *  biquad's difference equation (Direct Form I): the time-domain "ring" of the EQ. Exact
- *  (no FFT). `n` samples at `fs`. Same coefficient convention as above. */
+ *  (no FFT). `n` samples at `fs`. Same coefficient convention as above. Filtered in place:
+ *  each sample is read before it is overwritten and the history lives in x1/x2/y1/y2, so a
+ *  long export-length response costs one buffer, not one per section. */
 export function impulseResponse(bands: Band[], model: ResponseModel, n = 480, fs = FS): Float64Array {
-  let sig = new Float64Array(n);
+  const sig = new Float64Array(n);
   sig[0] = 1;
   for (const band of expandBands(bands)) {
     const [, a1, a2, b0, b1, b2] = coefficients(band.kind, band.freq_hz, band.gain_db, band.q, model, fs);
     const a1t = -a1;
     const a2t = -a2;
-    const out = new Float64Array(n);
     let x1 = 0;
     let x2 = 0;
     let y1 = 0;
@@ -351,13 +352,12 @@ export function impulseResponse(bands: Band[], model: ResponseModel, n = 480, fs
     for (let i = 0; i < n; i++) {
       const x = sig[i];
       const y = b0 * x + b1 * x1 + b2 * x2 - a1t * y1 - a2t * y2;
-      out[i] = y;
+      sig[i] = y;
       x2 = x1;
       x1 = x;
       y2 = y1;
       y1 = y;
     }
-    sig = out;
   }
   return sig;
 }

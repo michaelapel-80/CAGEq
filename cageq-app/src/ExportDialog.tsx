@@ -3,9 +3,21 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { Band, composedCurveDb, logGrid, type ResponseModel } from "./biquad";
 import { EqChart, RefCurve, Series } from "./EqChart";
-import { flatBandCurve, graphicEqCurve, graphicEqText, interpolatePoints, parametricEqText, sliderValues, type SliderPreset } from "./exportFormats";
+import { ImpulseChart } from "./NerdCharts";
+import {
+  IR_RATES,
+  flatBandCurve,
+  graphicEqCurve,
+  graphicEqText,
+  impulseConfigText,
+  impulseExport,
+  interpolatePoints,
+  parametricEqText,
+  sliderValues,
+  type SliderPreset,
+} from "./exportFormats";
 
-type ExportFormat = "parametric" | "graphic";
+type ExportFormat = "parametric" | "graphic" | "impulse";
 /** Graphic EQ tab: the dense curve, or slider values for a 10-/31-band graphic EQ. */
 type GraphicKind = "curve" | SliderPreset;
 
@@ -25,7 +37,9 @@ type Row = { kind?: string; freq_hz: number; gain_db: number; q?: number };
  *  count (`fit_export_eq`, a backend solve). Graphic EQ tab: the slot's curve sampled, no solver —
  *  the dense 127-point `GraphicEQ` curve, or slider values for a 10-/31-band graphic EQ (see
  *  exportFormats.ts's module doc for why sampling, not fitting). Every mode is shown the same way:
- *  a preview chart, a table for typing values in by hand, and the text to paste.
+ *  a preview chart, a table for typing values in by hand, and the text to paste. Impulse response
+ *  tab: the cascade itself as a WAV for a convolver, saved through a native dialog (Rust writes
+ *  the file), with its decay as the preview and the config lines to load it as the text.
  *  `filters` is the slot's full composed cascade — `result.filters` in App.tsx, the same
  *  `Band[]` the §5.2 chart already draws for the active slot. Reuses the existing `.modal-card`
  *  overlay convention (see the `presetSave` dialog in App.tsx) rather than inventing new modal
@@ -34,7 +48,20 @@ type Row = { kind?: string; freq_hz: number; gain_db: number; q?: number };
  *  curve the export approximates, i.e. what is heard. The *exported* parametric bands are designed
  *  (and previewed) for the receiving app's filter design instead — its own toggle, RBJ by default,
  *  since nearly every EQ app uses RBJ, independent of CAGEq's playback model. */
-export function ExportDialog({ filters, model, sampleRate, onClose }: { filters: Band[]; model: ResponseModel; sampleRate?: number; onClose: () => void }) {
+/** `name`: the slot's preset or headphone, to seed the impulse response's file name. */
+export function ExportDialog({
+  filters,
+  model,
+  sampleRate,
+  name,
+  onClose,
+}: {
+  filters: Band[];
+  model: ResponseModel;
+  sampleRate?: number;
+  name?: string;
+  onClose: () => void;
+}) {
   const { t } = useTranslation();
   const [format, setFormat] = useState<ExportFormat>("parametric");
   const [bandCount, setBandCount] = useState(BAND_COUNT_DEFAULT);
@@ -44,6 +71,18 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
   const [fit, setFit] = useState<ExportFit | null>(null);
   const [fitting, setFitting] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Impulse response: the rate to render at (the device's, when it is a common one), and the
+  // path of the last save, which the config lines then point at. A save is one file at one rate,
+  // so a different rate or correction drops the path again.
+  const [irRate, setIrRate] = useState(() => (sampleRate && IR_RATES.includes(sampleRate) ? sampleRate : 48000));
+  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [saveNote, setSaveNote] = useState<{ text: string; error: boolean } | null>(null);
+  useEffect(() => setSavedPath(null), [irRate, filters, model]);
+  useEffect(() => {
+    if (!saveNote) return;
+    const h = setTimeout(() => setSaveNote(null), saveNote.error ? 9000 : 1500);
+    return () => clearTimeout(h);
+  }, [saveNote]);
   // Own legend host (App.tsx's `chart-legend-host` convention) — without one, EqChart's inline
   // legend renders as normal-flow content below the chart's own fixed-height box and overflows
   // into whatever follows it in the DOM (reported live: the legend labels overlapping the band
@@ -93,7 +132,7 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
   // receiving app ends up with (on the preview grid, without any preamp so it lines up with the
   // slot's curve). Parametric comes from the backend fit; the graphic modes are computed right here.
   const output = useMemo((): { rows: Row[]; text: string; achieved: Float64Array; graphic: boolean } | null => {
-    if (!filters.length) return null;
+    if (!filters.length || format === "impulse") return null;
     if (format === "parametric") {
       if (!fit) return null;
       return {
@@ -114,7 +153,11 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
     // Q omitted from the text: each app's sliders have their own band shape (see parametricEqText).
     return { rows: bands, text: parametricEqText(bands, preampDb, false), achieved: flatBandCurve(bands, previewFreqs), graphic: true };
   }, [format, fit, graphicKind, filters, model, sampleRate, bandModel, previewFreqs]);
-  const text = output?.text ?? "";
+
+  // Only computed on its own tab: up to 5 s of samples at the chosen rate.
+  const ir = useMemo(() => (format === "impulse" ? impulseExport(filters, model, irRate) : null), [format, filters, model, irRate]);
+  const fileName = `${name ? `CAGEq ${name}` : "CAGEq"} ${irRate} Hz`;
+  const text = ir ? impulseConfigText(savedPath ?? `${fileName}.wav`) : (output?.text ?? "");
 
   // Preview curves: the export (solid) against the full cascade it's approximating (dotted
   // reference) — the same fit-vs-ideal visual language EqChart already uses elsewhere (the AutoEq
@@ -157,6 +200,23 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
     }
     return { rms: Math.sqrt(sumSq / previewFreqs.length), max };
   }, [output, reference, previewFreqs]);
+
+  // The samples go as the raw request body (little-endian f32, which every platform this runs on
+  // is), the rate and the suggested name as headers — see `export_impulse_file`.
+  const saveWav = async () => {
+    if (!ir) return;
+    try {
+      const bytes = new Uint8Array(ir.samples.buffer, ir.samples.byteOffset, ir.samples.byteLength);
+      const path = await invoke<string | null>("export_impulse_file", bytes, {
+        headers: { "x-sample-rate": String(ir.sampleRate), "x-file-name": encodeURIComponent(fileName) },
+      });
+      if (path == null) return; // cancelled
+      setSavedPath(path);
+      setSaveNote({ text: t("export.saved"), error: false });
+    } catch (e) {
+      setSaveNote({ text: String(e), error: true });
+    }
+  };
 
   const copy = async () => {
     try {
@@ -209,13 +269,16 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
             <button type="button" className={format === "graphic" ? "on" : ""} onClick={() => setFormat("graphic")}>
               {t("export.graphic")}
             </button>
+            <button type="button" className={format === "impulse" ? "on" : ""} title={t("export.impulseHint")} onClick={() => setFormat("impulse")}>
+              {t("export.impulse")}
+            </button>
           </div>
           <label
             // lineHeight 1: the root's fixed `line-height: 24px` otherwise gives this small label a full
             // 24px line box — the same height as the switch buttons, so at some display scalings it
             // rounded up past them and grew the row (and the card) by a pixel or two.
             style={{ fontSize: "0.75em", lineHeight: 1, opacity: format === "parametric" ? 0.8 : 0.4, display: "flex", alignItems: "center", gap: "0.35em", flex: "none", whiteSpace: "nowrap" }}
-            title={t(format === "parametric" ? "export.bandModelHint" : "export.bandModelGraphicHint")}
+            title={t(format === "parametric" ? "export.bandModelHint" : format === "impulse" ? "export.bandModelImpulseHint" : "export.bandModelGraphicHint")}
           >
             <input
               name="export-band-model"
@@ -243,6 +306,17 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
             />
             <b>{bandCount}</b>
           </label>
+        ) : format === "impulse" ? (
+          <label className="vs-tune-row" style={{ marginTop: "0.6em" }}>
+            <span className="vs-tune-label">{t("export.sampleRate")}</span>
+            <select name="ir-rate" value={irRate} onChange={(e) => setIrRate(Number(e.currentTarget.value))}>
+              {IR_RATES.map((r) => (
+                <option key={r} value={r}>
+                  {(r / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 })} kHz
+                </option>
+              ))}
+            </select>
+          </label>
         ) : (
           // Hints live in `title` (hover), not a permanent paragraph — a visible line here
           // pushed the dialog's total content past its own height budget again (reported live
@@ -264,7 +338,12 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
         <div style={{ height: 160, position: "relative", margin: "0.6em 0" }}>
           {/* The only band series here is the parametric fit, drawn in the receiving app's design;
               the slot's own curve (and a graphic export's points) arrive as `refs`. */}
-          <EqChart model={bandModel} series={series} refs={refs} height={160} screen legendHost={legendHost} />
+          {/* The impulse tab previews what it exports: the response's decay, at the chosen rate. */}
+          {format === "impulse" ? (
+            <ImpulseChart bands={filters} model={model} color="var(--accent)" height={160} fs={irRate} legendHost={legendHost} />
+          ) : (
+            <EqChart model={bandModel} series={series} refs={refs} height={160} screen legendHost={legendHost} />
+          )}
           {/* Absolutely positioned inside the chart's own fixed-height box, not a line of its
               own — same "nothing here may grow the dialog" discipline as everything else in it
               (see the modal-card's own doc). `pointerEvents: none` so it never steals the
@@ -290,6 +369,36 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
           )}
         </div>
         <div ref={setLegendHost} className="chart-legend-host" />
+
+        {ir && (
+          // The file's facts, in the table's slot and at its fixed height (see below).
+          <div style={{ height: "9.5em", overflowY: "auto" }}>
+            <table className="export-table">
+              <tbody>
+                <tr>
+                  <td>{t("export.irFormat")}</td>
+                  <td>{t("export.irFormatValue")}</td>
+                </tr>
+                <tr>
+                  <td>{t("export.sampleRate")}</td>
+                  <td>{ir.sampleRate} Hz</td>
+                </tr>
+                <tr>
+                  <td>{t("export.irLength")}</td>
+                  <td>
+                    {ir.truncated
+                      ? t("export.irTruncated", { samples: ir.samples.length })
+                      : t("export.irLengthValue", { samples: ir.samples.length, ms: ((ir.samples.length / ir.sampleRate) * 1000).toFixed(1) })}
+                  </td>
+                </tr>
+                <tr>
+                  <td>{t("export.irGain")}</td>
+                  <td>{t("export.irGainValue", { gain: ir.gainDb.toFixed(1) })}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
 
         {output && (
           // Fixed `height`, not `maxHeight`: a shrink-then-cap box still grows with every extra
@@ -331,9 +440,19 @@ export function ExportDialog({ filters, model, sampleRate, onClose }: { filters:
           value={fitting && !output ? t("export.fitting") : text}
           style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.6em", opacity: fitting ? 0.45 : 1, transition: "opacity 0.15s" }}
         />
-        <button type="button" disabled={!output || fitting} onClick={copy}>
+        {ir && (
+          <button type="button" onClick={() => void saveWav()} style={{ marginRight: "0.5em" }}>
+            {saveNote && !saveNote.error ? saveNote.text : t("export.saveWav")}
+          </button>
+        )}
+        <button type="button" disabled={!(output || ir) || fitting} onClick={copy}>
           {copied ? t("export.copied") : t("export.copy")}
         </button>
+        {saveNote?.error && (
+          <p role="alert" style={{ fontSize: "0.75em", color: "crimson", margin: "0.3em 0 0" }}>
+            {saveNote.text}
+          </p>
+        )}
 
         {/* lineHeight 1.35 + a small bottom margin: this 0.75em note otherwise inherits the root's fixed
             24px line-height (3–4 lines of 12px text taking 24px each) — the space the app-design

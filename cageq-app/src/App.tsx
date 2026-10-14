@@ -2687,7 +2687,13 @@ function App() {
       )}
 
       {exportOpen && result && (
-        <ExportDialog filters={result.filters} model={drawModel} sampleRate={sampleRate ?? undefined} onClose={() => setExportOpen(false)} />
+        <ExportDialog
+          filters={result.filters}
+          model={drawModel}
+          sampleRate={sampleRate ?? undefined}
+          name={(activeSlot !== "Dry" ? slotPreset[activeSlot]?.name : undefined) ?? (flat ? undefined : query || undefined)}
+          onClose={() => setExportOpen(false)}
+        />
       )}
 
       {selfTest && (
