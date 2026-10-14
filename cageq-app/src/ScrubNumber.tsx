@@ -10,6 +10,8 @@ import { useTranslation } from "react-i18next";
  *     gain) — the EQ-console feel without the imprecision of hitting a pixel on a log axis;
  *   • **click** (no drag) focuses it for direct type-in-place; a drag started from that
  *     edit state still scrubs (it drops out of edit mode on the first move);
+ *   • **Tab** into it lands in the same type-in-place mode, value selected — focus by keyboard
+ *     has no click to tell it apart, and a focused field that swallows typing is a dead end;
  *   • **↑/↓** step it (multiplicatively where `mode==="mult"`, so a fixed % feels equal at
  *     every frequency — the §5.2 log-step rule), so it's fully usable from the keyboard.
  *
@@ -85,6 +87,9 @@ export function ScrubNumber({
   const [text, setText] = useState("");
   const [invalid, setInvalid] = useState(false);
   const invalidTimer = useRef<number | null>(null);
+  // Whether this edit typed or stepped anything. Tabbing through a field enters and leaves edit
+  // mode without touching it, and the commit that ends an edit is a real write for the band grid.
+  const changed = useRef(false);
   // Drag bookkeeping for the active pointer, if any. `last` is the most recent scrubbed
   // value, so the final commit doesn't depend on the `value` prop having re-rendered
   // between the last move and the release. `fromEditing` remembers a drag begun while the
@@ -114,10 +119,14 @@ export function ScrubNumber({
     // arrows stuck there; move at least one unit of the shown precision instead.
     if (r === value) r = roundClamp(value + dir * 10 ** -decimals);
     onInput(r);
-    if (editing) setText(editText(r));
+    if (editing) {
+      setText(editText(r));
+      changed.current = true;
+    }
   };
 
   const beginEdit = () => {
+    changed.current = false;
     setText(editText(value));
     setEditing(true);
     requestAnimationFrame(() => inputRef.current?.select());
@@ -194,6 +203,10 @@ export function ScrubNumber({
   const onPointerCancel = (e: React.PointerEvent<HTMLInputElement>) => endDrag(e);
 
   const commitText = () => {
+    if (!changed.current) {
+      setEditing(false); // nothing typed: leave without a write
+      return;
+    }
     const parsed = parseTyped(text);
     // Reject invalid or out-of-range input outright (revert to the last good value) rather
     // than silently snapping to the limit — a typo shouldn't quietly become the max.
@@ -203,6 +216,9 @@ export function ScrubNumber({
     } else {
       onCommit(roundClamp(parsed));
     }
+    // Enter commits and then blurs, and the blur handler still sees `editing` from this render:
+    // without this it would commit (and write) the same value a second time.
+    changed.current = false;
     setEditing(false);
   };
 
@@ -221,7 +237,8 @@ export function ScrubNumber({
     } else if (e.key === "Escape" && editing) {
       e.preventDefault();
       setEditing(false);
-      onCommit(value); // discard the buffer, restore committed value
+      if (changed.current) onCommit(value); // discard the buffer, restore committed value
+      changed.current = false;
       inputRef.current?.blur();
     }
   };
@@ -249,12 +266,17 @@ export function ScrubNumber({
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
       onChange={(e) => {
+        changed.current = true;
         setText(e.currentTarget.value);
         const parsed = parseTyped(e.currentTarget.value);
         // Live-preview only a valid, in-range value; out-of-range typing previews nothing
         // (and is rejected on commit) rather than snapping the chart to the limit.
         if (parsed != null && parsed >= min && parsed <= max) onInput(roundClamp(parsed));
       }}
+      // Keyboard focus (Tab) enters type-in-place. A click never focuses a field that isn't
+      // editing (onPointerDown prevents it; the release calls beginEdit itself), so this only
+      // catches focus that arrived without one; a repeat beginEdit from that release is harmless.
+      onFocus={() => !editing && !disabled && beginEdit()}
       onBlur={() => editing && commitText()}
       onKeyDown={onKeyDown}
     />
