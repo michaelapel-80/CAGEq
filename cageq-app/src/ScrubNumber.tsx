@@ -15,10 +15,13 @@ import { useTranslation } from "react-i18next";
  *   • **↑/↓** step it (multiplicatively where `mode==="mult"`, so a fixed % feels equal at
  *     every frequency — the §5.2 log-step rule), so it's fully usable from the keyboard.
  *
- * Emits `onInput` live (every scrub frame / keystroke, so the chart and audio track the
- * edit) and `onCommit` once at the end (blur / Enter / drag release) for a final,
- * un-throttled write. Typed input is **validated, not clamped**: a value outside
- * [min, max] (or garbage) is rejected and the last good value is kept.
+ * Scrubbing and stepping emit `onInput` live (every scrub frame / arrow press, so the chart
+ * and audio track the gesture), then `onCommit` once at the end (drag release, or leaving the
+ * field) for a final, un-throttled write. **Typed** text is not previewed: half-typed numbers
+ * ("1" on the way to "1500") would audibly jump the filter around, so a typed value only takes
+ * effect on Enter or blur. It is **validated, not clamped**: a value outside [min, max] (or
+ * garbage) is rejected and the last good value is kept. **Escape** abandons the edit and
+ * restores the value the field had when editing began, undoing any arrow steps along the way.
  */
 export type ScrubNumberProps = {
   value: number;
@@ -87,9 +90,12 @@ export function ScrubNumber({
   const [text, setText] = useState("");
   const [invalid, setInvalid] = useState(false);
   const invalidTimer = useRef<number | null>(null);
-  // Whether this edit typed or stepped anything. Tabbing through a field enters and leaves edit
-  // mode without touching it, and the commit that ends an edit is a real write for the band grid.
-  const changed = useRef(false);
+  // The current edit's bookkeeping. `origin`: the value when it began, what Escape restores.
+  // `typed`: the text was edited and not yet committed. `live`: the last value arrow steps
+  // previewed through `onInput`, or null if none did — then the caller is still at `origin`.
+  // Tabbing through a field enters and leaves edit mode touching neither, and the commit that
+  // ends an edit is a real write for the band grid, so an untouched edit ends without one.
+  const edit = useRef<{ origin: number; typed: boolean; live: number | null }>({ origin: 0, typed: false, live: null });
   // Drag bookkeeping for the active pointer, if any. `last` is the most recent scrubbed
   // value, so the final commit doesn't depend on the `value` prop having re-rendered
   // between the last move and the release. `fromEditing` remembers a drag begun while the
@@ -111,22 +117,31 @@ export function ScrubNumber({
     invalidTimer.current = window.setTimeout(() => setInvalid(false), 700);
   };
 
+  // A typed value not yet committed, if it is a valid one — what an arrow step continues from.
+  const typedValue = (): number | null => {
+    if (!editing || !edit.current.typed) return null;
+    const parsed = parseTyped(text);
+    return parsed != null && parsed >= min && parsed <= max ? roundClamp(parsed) : null;
+  };
+
   const step = (dir: 1 | -1) => {
-    const next = mode === "mult" ? value * arrowStep ** dir : value + arrowStep * dir;
+    const base = typedValue() ?? value;
+    const next = mode === "mult" ? base * arrowStep ** dir : base + arrowStep * dir;
     let r = roundClamp(next);
     // A multiplicative step can be smaller than the display precision near the bottom of the
     // range (Fc: 2% of 24 Hz is under half a hertz, so it rounds straight back), which left the
     // arrows stuck there; move at least one unit of the shown precision instead.
-    if (r === value) r = roundClamp(value + dir * 10 ** -decimals);
+    if (r === base) r = roundClamp(base + dir * 10 ** -decimals);
     onInput(r);
     if (editing) {
       setText(editText(r));
-      changed.current = true;
+      edit.current.typed = false;
+      edit.current.live = r;
     }
   };
 
   const beginEdit = () => {
-    changed.current = false;
+    edit.current = { origin: value, typed: false, live: null };
     setText(editText(value));
     setEditing(true);
     requestAnimationFrame(() => inputRef.current?.select());
@@ -184,8 +199,10 @@ export function ScrubNumber({
     if (!d.scrubbed) {
       d.scrubbed = true;
       if (d.fromEditing) {
-        // Transition out of type-in-place into scrubbing: drop edit mode, clear any text
+        // Transition out of type-in-place into scrubbing: drop edit mode (and any typed text
+        // with it; the scrub starts from the live value and commits on release), clear any text
         // selection the press started, and grab the pointer so it tracks outside the field.
+        edit.current = { origin: value, typed: false, live: null };
         setEditing(false);
         window.getSelection()?.removeAllRanges();
         try {
@@ -202,23 +219,35 @@ export function ScrubNumber({
   const onPointerUp = (e: React.PointerEvent<HTMLInputElement>) => endDrag(e);
   const onPointerCancel = (e: React.PointerEvent<HTMLInputElement>) => endDrag(e);
 
+  /** End the edit (Enter / blur): commit the typed value, or the stepped one, or nothing. */
   const commitText = () => {
-    if (!changed.current) {
-      setEditing(false); // nothing typed: leave without a write
-      return;
-    }
-    const parsed = parseTyped(text);
-    // Reject invalid or out-of-range input outright (revert to the last good value) rather
-    // than silently snapping to the limit — a typo shouldn't quietly become the max.
-    if (parsed == null || parsed < min || parsed > max) {
-      onCommit(value);
-      flashInvalid();
-    } else {
-      onCommit(roundClamp(parsed));
+    const { typed, live } = edit.current;
+    if (typed) {
+      const parsed = typedValue();
+      // Reject invalid or out-of-range input outright rather than silently snapping to the
+      // limit — a typo shouldn't quietly become the max. The last good value stays: the one
+      // the arrows previewed, which still needs its commit, or else the untouched origin.
+      if (parsed == null) {
+        if (live != null) onCommit(live);
+        flashInvalid();
+      } else {
+        onCommit(parsed);
+      }
+    } else if (live != null) {
+      onCommit(live);
     }
     // Enter commits and then blurs, and the blur handler still sees `editing` from this render:
     // without this it would commit (and write) the same value a second time.
-    changed.current = false;
+    edit.current = { origin: value, typed: false, live: null };
+    setEditing(false);
+  };
+
+  /** Abandon the edit (Escape): back to the value it began with. Only arrow steps reached the
+   *  caller, so only they need undoing; typed text was never previewed. */
+  const revertEdit = () => {
+    const { origin, live } = edit.current;
+    if (live != null) onCommit(origin);
+    edit.current = { origin, typed: false, live: null };
     setEditing(false);
   };
 
@@ -236,9 +265,7 @@ export function ScrubNumber({
       inputRef.current?.blur();
     } else if (e.key === "Escape" && editing) {
       e.preventDefault();
-      setEditing(false);
-      if (changed.current) onCommit(value); // discard the buffer, restore committed value
-      changed.current = false;
+      revertEdit();
       inputRef.current?.blur();
     }
   };
@@ -265,13 +292,10 @@ export function ScrubNumber({
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerCancel}
+      // Typing only edits the text; it takes effect on Enter or blur (see the module doc).
       onChange={(e) => {
-        changed.current = true;
+        edit.current.typed = true;
         setText(e.currentTarget.value);
-        const parsed = parseTyped(e.currentTarget.value);
-        // Live-preview only a valid, in-range value; out-of-range typing previews nothing
-        // (and is rejected on commit) rather than snapping the chart to the limit.
-        if (parsed != null && parsed >= min && parsed <= max) onInput(roundClamp(parsed));
       }}
       // Keyboard focus (Tab) enters type-in-place. A click never focuses a field that isn't
       // editing (onPointerDown prevents it; the release calls beginEdit itself), so this only
