@@ -85,11 +85,14 @@ A few things about the spectrum analyzer specifically:
 
 * **A fast, constant update rate whatever the window size** — heavy window overlap means a new
   result lands every ~43 ms (a quarter of the shortest window) instead of waiting out a full window
-  per update, and that rate doesn't change with the window length: a longer window buys finer
-  frequency resolution without slowing the display, it just overlaps more (75% at the shortest,
-  ~94% at the longest). The window length itself is tuned smoothly (~171-683 ms at 48 kHz, in ~5 ms
-  steps) rather than in the usual power-of-two jumps — every window is zero-padded into the same
-  fixed-size FFT, so an arbitrary length costs nothing extra.
+  per update, and that rate doesn't change with the window length: a longer window just overlaps
+  more (75% at the shortest, ~94% at the longest). That leaves the window length as the plain
+  time/frequency trade-off: a shorter window follows the music more closely, a longer one resolves
+  finer detail. Even the shortest separates tones about 12 Hz apart, plenty for a spectrum read on
+  a log axis, so the quicker response is often the better choice. The window length itself is
+  tuned smoothly (~171-683 ms at 48 kHz, in ~5 ms steps) rather than in the usual power-of-two
+  jumps — every window is zero-padded into the same fixed-size FFT, so an arbitrary length costs
+  nothing extra.
 * **Interpolated on top of that**, both in frequency (zero-padding resolves the same window's
   transform more finely, not adding fake information, and the trace is a smooth spline through
   the bins) and over time (between updates the trace glides toward each new reading with a
