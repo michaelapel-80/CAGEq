@@ -496,7 +496,7 @@
 
   "model": {
     "toggle": "Warping-corrected filters",
-    "desc": "Each band keeps the shape its Fc, gain and Q describe up to 20 kHz instead of being squeezed toward Nyquist by the standard (RBJ) design, and comes out the same at 44.1, 48 or 96 kHz. A matter of accuracy, not of sound character. Mostly audible on treble bands; the AutoEq fit is redone for it. Resonant shelves (Q above ~1) stay RBJ, where it is the more accurate design.",
+    "desc": "Each band keeps the shape its Fc, gain and Q describe across the whole audible range, instead of being squeezed at the top end as in the standard (RBJ) design, and comes out the same at 44.1, 48 or 96 kHz. A matter of accuracy, not of sound character. Mostly audible on treble bands; the AutoEq fit is redone for it. Resonant shelves (Q above ~1) stay RBJ, where it is the more accurate design.",
     "unavailable": "Needs CAGEq's own audio engine — Equalizer APO designs its own (RBJ) filters.",
     "inactive": "Switched on, but inactive: Equalizer APO is the active engine and designs its own (RBJ) filters. It takes effect with CAGEq's own engine.",
     "refitting": "re-fitting…"

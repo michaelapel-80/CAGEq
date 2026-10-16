@@ -54,8 +54,8 @@ risks digital clipping or jarring level jumps.
 * **Auto-fit and hand-tuned filters stay separate but merge cleanly at runtime** — adjusting your
   own bands never loses or fights the underlying AutoEq correction.
 * **Optional warping-corrected filters** (with CAGEq's own audio engine): each band keeps the
-  shape its Fc, gain and Q describe up to 20 kHz instead of being squeezed toward Nyquist, and
-  comes out the same at 44.1, 48 or 96 kHz. The standard (RBJ) design stays the default. See [How it works](#how-it-works) for why.
+  shape its Fc, gain and Q describe across the whole audible range, instead of being squeezed at
+  the top end, and comes out the same at 44.1, 48 or 96 kHz. The standard (RBJ) design stays the default. See [How it works](#how-it-works) for why.
 
 ## Built-in instrumentation
 
@@ -174,17 +174,18 @@ Frontend (React/TypeScript) ──Tauri commands──▶ Rust core ──biquad
   its filter parameters (Fc, gain, Q) against the RBJ cookbook response, Equalizer APO computes
   its filters with the same formulas, and so does nearly every EQ app an export lands in, so RBJ
   is the default. Its one flaw is the bilinear transform's frequency warping: a band's shape gets
-  squeezed toward Nyquist (a 12 kHz, Q 1 bell at 48 kHz is ~2.3 dB off at 19 kHz), so the same
-  band comes out slightly differently at 44.1, 48 and 96 kHz. The optional warping-corrected
-  model follows the response the band's Fc, gain and Q actually describe, all the way up. That
-  reference is the "analog prototype": the ideal transfer function the cookbook itself starts
-  from, not analog hardware. So this is about accuracy, not a sound character; real analog EQs
-  track Fc and Q only loosely and add non-linearities of their own. Tests check, band by band,
-  that the corrected model never lands further from that ideal than RBJ does; the designs it uses
-  are credited under [Acknowledgments](#acknowledgments). The fit itself gains little, since
-  AutoEq keeps every centre frequency at or below 10 kHz and fits only a smoothed average above
-  ~6-8 kHz. The real gains are hand-placed treble bands, and a curve that carries over from the
-  48 kHz fit to 44.1 or 96 kHz nearly unchanged. Switching models re-runs the fit, so the engine
+  squeezed toward Nyquist, half the sample rate and the highest frequency the signal can carry (a
+  12 kHz, Q 1 bell at 48 kHz is ~2.3 dB off at 19 kHz), so the same band comes out slightly
+  differently at 44.1, 48 and 96 kHz. The optional warping-corrected model follows the response
+  the band's Fc, gain and Q actually describe, all the way up. That reference is the "analog
+  prototype": the ideal transfer function the cookbook itself starts from, not analog hardware.
+  So this is about accuracy, not a sound character; real analog EQs track Fc and Q only loosely
+  and add non-linearities of their own. Tests check, band by band, that the corrected model never
+  lands further from that ideal than RBJ does; the designs it uses are credited under
+  [Acknowledgments](#acknowledgments). The fit itself gains little, since AutoEq keeps every
+  centre frequency at or below 10 kHz and fits only a smoothed average above ~6-8 kHz. The real
+  gains are hand-placed treble bands, and a curve that carries over from the 48 kHz fit to 44.1
+  or 96 kHz nearly unchanged. Switching models re-runs the fit, so the engine
   never runs parameters optimized for the other model. It needs CAGEq's own engine: Equalizer APO
   does accept raw biquad coefficients, but those hold at one sample rate only and would run the
   wrong filter after a device rate change. Every curve the app draws comes from the same Rust
