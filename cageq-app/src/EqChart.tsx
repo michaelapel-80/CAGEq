@@ -70,6 +70,8 @@ export type RefCurve = {
 /** The filter chain's phase response, drawn on a **secondary right axis** (degrees) — a
  *  Bode-style overlay, off by default. Computed from bands, so it tracks live edits. */
 export type PhaseCurve = { id: string; bands: Band[]; color: string; label: string; defaultHidden?: boolean };
+/** The phase overlay's colour, wherever a chart shows one. */
+export const PHASE_COLOR = "#f59e0b";
 
 /** A live loopback-FFT spectrum snapshot — log-frequency magnitude bins, in dB (relative), plus
  *  the endpoint's silence flag (`signal`, same test as the meter's): during silence the backend

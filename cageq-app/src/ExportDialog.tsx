@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { Band, composedCurveDb, logGrid, type ResponseModel } from "./biquad";
-import { EqChart, RefCurve, Series } from "./EqChart";
-import { ImpulseChart } from "./NerdCharts";
+import { EqChart, PHASE_COLOR, type PhaseCurve, RefCurve, Series } from "./EqChart";
 import {
   IR_RATES,
   flatBandCurve,
@@ -39,7 +38,7 @@ type Row = { kind?: string; freq_hz: number; gain_db: number; q?: number };
  *  exportFormats.ts's module doc for why sampling, not fitting). Every mode is shown the same way:
  *  a preview chart, a table for typing values in by hand, and the text to paste. Impulse response
  *  tab: the cascade itself as a WAV for a convolver, saved through a native dialog (Rust writes
- *  the file), with its decay as the preview and the config lines to load it as the text.
+ *  the file), with the curve it reproduces as the preview and the config line to load it as the text.
  *  `filters` is the slot's full composed cascade — `result.filters` in App.tsx, the same
  *  `Band[]` the §5.2 chart already draws for the active slot. Reuses the existing `.modal-card`
  *  overlay convention (see the `presetSave` dialog in App.tsx) rather than inventing new modal
@@ -125,8 +124,10 @@ export function ExportDialog({
   }, [format, filters, bandCount, bandModel]);
 
   const previewFreqs = useMemo(() => logGrid(480, 20, 20000), []);
-  // The slot's own curve as heard — what every mode approximates.
-  const reference = useMemo(() => (filters.length ? composedCurveDb(filters, previewFreqs, model, sampleRate) : null), [filters, previewFreqs, model, sampleRate]);
+  // The slot's own curve as heard — what every mode approximates. On the impulse tab it is the
+  // file's own response, so it is drawn at the rate the file is rendered for.
+  const refRate = format === "impulse" ? irRate : sampleRate;
+  const reference = useMemo(() => (filters.length ? composedCurveDb(filters, previewFreqs, model, refRate) : null), [filters, previewFreqs, model, refRate]);
 
   // What the active mode exports, in one shape: the table rows, the text to paste, and the curve the
   // receiving app ends up with (on the preview grid, without any preamp so it lines up with the
@@ -184,6 +185,13 @@ export function ExportDialog({
     out.push({ id: "export-full", points: Array.from(previewFreqs, (f, i) => ({ f, db: reference[i] })), color: "var(--fg)", label: t("export.fullCurve") });
     return out;
   }, [reference, output, previewFreqs, graphicKind, t]);
+
+  // The impulse tab also draws the phase: the file carries it too, the same response in the time
+  // domain. In the slot's own model at the file's rate, like the curve.
+  const phase: PhaseCurve | undefined = useMemo(
+    () => (format === "impulse" && filters.length ? { id: "export-phase", bands: filters, color: PHASE_COLOR, label: t("chart.phase") } : undefined),
+    [format, filters, t],
+  );
 
   // How well the export matches the full cascade it's approximating — the same two curves the chart
   // above draws, reduced to two numbers instead of a shape someone has to eyeball. RMS is the overall
@@ -338,12 +346,20 @@ export function ExportDialog({
         <div style={{ height: 160, position: "relative", margin: "0.6em 0" }}>
           {/* The only band series here is the parametric fit, drawn in the receiving app's design;
               the slot's own curve (and a graphic export's points) arrive as `refs`. */}
-          {/* The impulse tab previews what it exports: the response's decay, at the chosen rate. */}
-          {format === "impulse" ? (
-            <ImpulseChart bands={filters} model={model} color="var(--accent)" height={160} fs={irRate} legendHost={legendHost} />
-          ) : (
-            <EqChart model={bandModel} series={series} refs={refs} height={160} screen legendHost={legendHost} />
-          )}
+          {/* The impulse tab shows that curve and its phase: the file reproduces both exactly. Not
+              the impulse chart — that frames the decay to its -80 dB display floor, which a reader
+              took for where the file ends (it runs on until its tail sums below -120 dB). Its
+              `model` is the slot's there, for the phase; elsewhere the receiving app's design. */}
+          <EqChart
+            model={format === "impulse" ? model : bandModel}
+            sampleRate={refRate}
+            series={series}
+            refs={refs}
+            phase={phase}
+            height={160}
+            screen
+            legendHost={legendHost}
+          />
           {/* Absolutely positioned inside the chart's own fixed-height box, not a line of its
               own — same "nothing here may grow the dialog" discipline as everything else in it
               (see the modal-card's own doc). `pointerEvents: none` so it never steals the

@@ -7,7 +7,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
 import { Band, composedCurveDb, expandHighPass, highPassFc, HP_DEFAULT, logGrid, type ResponseModel } from "./biquad";
-import { EqChart, EQ_V_INSET_FRAC, Marker, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_DEFAULT, SPEC_FFT_MIN, snapFftSize } from "./EqChart";
+import { EqChart, EQ_V_INSET_FRAC, Marker, PHASE_COLOR, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_DEFAULT, SPEC_FFT_MIN, snapFftSize } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
 import { ToneGrid } from "./ToneGrid";
 import { ScrubNumber } from "./ScrubNumber";
@@ -449,7 +449,6 @@ const AUTOEQ_COLOR = "#8b93a7";
 const REF_COLOR = "#a855f7"; // AutoEq's ideal-correction reference (target the fit chases)
 const RAW_COLOR = "#94a3b8"; // the raw headphone measurement (nerd overlay)
 const TARGET_COLOR = "#7dd3fc"; // the target curve — pale blue, à la AutoEq (nerd overlay)
-const PHASE_COLOR = "#f59e0b"; // the filter chain's phase, on the secondary axis (nerd overlay)
 
 // §5.4 self-test verdict — **delta method**. We measure the loopback with the correction applied and
 // again with it bypassed (Dry), and compare their *difference*: delta = corrected − dry. That delta
