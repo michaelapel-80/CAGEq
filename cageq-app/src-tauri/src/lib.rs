@@ -990,9 +990,7 @@ fn set_scope_viewer(active: bool, scope_viewers: State<ScopeViewers>) {
         scope_viewers.0.fetch_add(1, Ordering::Relaxed);
     } else {
         // Saturating decrement — never underflow if a stray "close" arrives.
-        let _ = scope_viewers
-            .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+        scope_viewers.0.update(Ordering::Relaxed, Ordering::Relaxed, |v| v.saturating_sub(1));
     }
 }
 
