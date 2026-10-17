@@ -9,8 +9,11 @@ through [Equalizer APO](https://sourceforge.net/projects/equalizerapo/) or throu
 purpose-built Windows Audio Processing Object — the A/B/Dry comparison, the safety mechanisms,
 and the click-free live editing around it are what make either one actually usable.
 
-Loosely inspired by [AQUA](https://github.com/h39s/AQUA), but an independent implementation with
-a deliberately different stack — not a fork, no shared code.
+CAGEq grew out of using [AQUA](https://github.com/h39s/AQUA): its AutoEq corrections worked well,
+but tuning them further by hand called for a real A/B comparison, automatic loudness matching, and
+a layer of your own on top of the AutoEq fit instead of edits to it. That was more than a fork
+could carry, so CAGEq is an independent implementation on a deliberately different stack (no
+shared code), and has since grown its own audio engine, instrumentation and filter design.
 
 ![The main correction view: an EQ curve against a live post-EQ spectrum backdrop, level/LUFS
 meters, filter-band editor, and A/B/Dry comparison controls.](docs/screenshot.png)
