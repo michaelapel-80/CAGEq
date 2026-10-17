@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { type BiquadCoeffs, zeroState, stepBiquad, type FadingInverse, retargetFadingInverse, stepFadingInverse } from "./biquad";
+import { type FadingInverse, retargetFadingInverse, stepFadingInverse } from "./biquad";
+import { detectorSample, findRisingEdge, triggerDetector, type TriggerDetector } from "./scopeTrigger";
 import { scopeStream } from "./streams";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { useTunableParams } from "./useTunableParams";
@@ -99,26 +100,8 @@ const PEAK_LINE_ALPHA = 0.65;
 const RING_CAP = 1 << 17; // ~2.7 s at 48 kHz / ~680 ms at 192 kHz — generous, trivial memory
 const TRIGGER_PRE_FRAC = 0.25; // where the trigger point sits across the display window
 const TRIGGER_SEARCH_MS = 250; // how far back to look for a qualifying edge before giving up
-const TRIGGER_FILTER_Q = 0.707; // Butterworth — a clean rolloff, no resonant peaking
-// The trigger detector is zero-phase: the Butterworth runs forward as samples arrive (into
-// `ringTrig`) and backward over that output at search time, so the edge it finds is the crossing
-// of the trace's own low-frequency content, at every pitch. A one-way IIR delays each frequency by
-// a different amount (2-4 ms at a 60 Hz cutoff, ~10 ms at 20 Hz), so the marker never
-// sat on the displayed crossing and the waveform slid under it as the pitch moved. Linear phase
-// costs latency and pre-ringing elsewhere; here neither matters, since the search runs over
-// buffered history and the filtered signal is never drawn or heard.
-//
-// Both passes use a raised cutoff so the combined response (|H|², 24 dB/oct) is -3 dB at the knob's
-// value: for a 2nd-order Butterworth, per-pass fc = knob / (√2 − 1)^(1/4) ≈ 1.25 × knob.
-const TRIGGER_PASS_FC_SCALE = 1 / Math.pow(Math.SQRT2 - 1, 0.25);
-// The backward pass starts at the newest sample, holding its state at that sample's value, and
-// needs time to shed that start-up transient: edges are accepted only this many of the pass's
-// envelope time constants (1/(Q·2π·fc)) back from the newest sample. Measured on a synthetic-
-// ground-truth harness (sines, harmonic-rich tones, glides, noise, 20 Hz-1 kHz cutoffs, 0.2-5
-// ms/div): 3 still left up to ±0.6 ms of error at short timebases and low cutoffs, 5 brings every
-// case to within a sample or two. At the default 5 ms/div the post-trigger span already covers it,
-// so it only adds display lag at short timebases or very low cutoffs.
-const TRIGGER_SETTLE_TAUS = 5;
+// The detector itself (zero-phase low-pass, AC-coupled level, settling) lives in scopeTrigger.ts.
+
 // The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
 // `doseMult` comment (same reasoning as Vectorscope.tsx's identical constant) for why this matters:
 // `glow`'s tuned defaults were dialed in under the OLD, refresh-rate-dependent dose behaviour, which
@@ -154,18 +137,6 @@ const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, no
 // renders identically to before the original decoupling change — only the number's meaning moved,
 // twice now.
 const TAU_REF = 0.1;
-
-/** RBJ low-pass biquad (cookbook form), in this file's `BiquadCoeffs` convention. Used only to
- *  condition the *trigger-detector* signal (HF-reject trigger coupling, same idea a real scope's
- *  trigger source filter uses) — the displayed trace is always full-bandwidth. Kept local: it's a
- *  TimeScope-internal rendering detail, not part of the EQ pipeline other code needs to share. */
-function lowpassCoeffs(f0: number, q: number, fs: number): BiquadCoeffs {
-  const w0 = (2 * Math.PI * f0) / fs;
-  const cosw0 = Math.cos(w0);
-  const alpha = Math.sin(w0) / (2 * q);
-  const a0 = 1 + alpha;
-  return { b0: (1 - cosw0) / 2 / a0, b1: (1 - cosw0) / a0, b2: (1 - cosw0) / 2 / a0, a1: (-2 * cosw0) / a0, a2: (1 - alpha) / a0 };
-}
 
 /** Lane geometry (vertical centre + amplitude scale + label) for the current channel mode — shared
  *  between the graticule and the trace so they always agree. `amp` leaves a small margin (0.5 of
@@ -209,9 +180,10 @@ function parseHex(hex: string): [number, number, number] {
  * span (ms/div × DIVISIONS) of the most recent samples, redrawn each `scope` event; on non-periodic material
  * (most real mixes) consecutive windows won't retrace the same shape, so persistence reads as a
  * soft blur rather than a locked waveform. `trigger` on searches a zero-phase lowpass-filtered mono
- * version of the signal (HF-reject trigger coupling — the display itself stays full-bandwidth; see
- * `TRIGGER_PASS_FC_SCALE` for why zero-phase) for the most recent rising zero-crossing within
- * `TRIGGER_SEARCH_MS`, anchoring the display window there
+ * version of the signal (HF-reject trigger coupling — the display itself stays full-bandwidth) for
+ * the most recent rising crossing of its own local mean (AC trigger coupling, so a near-DC offset
+ * can't hold the waveform clear of the level; see scopeTrigger.ts) within `TRIGGER_SEARCH_MS`,
+ * anchoring the display window there
  * instead; no qualifying edge in range falls back to the same free-running position (the auto-
  * trigger/timeout behaviour, for free — no separate timer needed since the search is itself bounded
  * to a fixed lookback each frame). Best on bass/kick-heavy or genuinely periodic (oscilloscope-
@@ -388,11 +360,9 @@ export function TimeScope() {
     const ringTrig = new Float64Array(RING_CAP);
     let totalWritten = 0;
     const phys = (globalIdx: number) => (((globalIdx % RING_CAP) + RING_CAP) % RING_CAP);
-    // The trigger filter's forward state persists across windows (a real filter, not re-zeroed each
-    // frame) — rebuilt only when the rate or the tuned cutoff changes, same pattern as `invRef`.
-    // `back` is the backward pass's state, re-seeded every search (reused, not reallocated per frame);
-    // `settle` is TRIGGER_SETTLE_TAUS time constants in samples, derived alongside the coefficients.
-    const trig = { coeffs: null as BiquadCoeffs | null, state: zeroState(), back: zeroState(), settle: 0, rate: 0, hz: 0 };
+    // The trigger detector's forward state persists across windows (a real filter, not re-zeroed
+    // each frame) — rebuilt only when the rate or the tuned cutoff changes, same pattern as `invRef`.
+    let trig: TriggerDetector | null = null;
 
     const render = () => {
       const now = performance.now();
@@ -517,29 +487,20 @@ export function TimeScope() {
         // Feed the ring buffer: raw display samples plus a lowpass-filtered mono trigger-detector
         // value, one sample at a time so the filter's state stays continuous across windows (no
         // re-filtering, no transient reset). Rebuild the filter only when rate/cutoff changed.
-        if (!trig.coeffs || trig.rate !== rate || trig.hz !== p.triggerFilterHz) {
-          const passHz = p.triggerFilterHz * TRIGGER_PASS_FC_SCALE;
-          trig.coeffs = lowpassCoeffs(passHz, TRIGGER_FILTER_Q, rate);
-          trig.settle = Math.ceil((TRIGGER_SETTLE_TAUS * rate) / (TRIGGER_FILTER_Q * 2 * Math.PI * passHz));
-          trig.state = zeroState();
-          trig.rate = rate;
-          trig.hz = p.triggerFilterHz;
-        }
+        if (!trig || trig.rate !== rate || trig.hz !== p.triggerFilterHz) trig = triggerDetector(rate, p.triggerFilterHz);
         for (let i = 0; i < n; i++) {
           const idx = phys(totalWritten);
           ringL[idx] = outL[i];
           ringR[idx] = outR[i];
-          ringTrig[idx] = stepBiquad(trig.coeffs, trig.state, (outL[i] + outR[i]) / 2);
+          ringTrig[idx] = detectorSample(trig, (outL[i] + outR[i]) / 2);
           totalWritten++;
         }
 
         // Pick the display window: free-run always anchors at the newest valid position; triggered
-        // searches backward (bounded to TRIGGER_SEARCH_MS) for the most recent rising zero-crossing
-        // in the zero-phase trigger signal, falling back to the free-run anchor if none qualifies —
+        // searches backward (bounded to TRIGGER_SEARCH_MS) for the most recent rising edge in the
+        // trigger signal (see findRisingEdge), falling back to the free-run anchor if none qualifies —
         // that fallback *is* the auto-trigger/timeout behaviour, no separate timer needed since the
-        // search window itself is bounded fresh every frame. The search *is* the backward pass: it
-        // runs the forward-filtered `ringTrig` back through the same biquad from the newest sample,
-        // so it only ever covers the settle span plus the distance to the edge it finds.
+        // search window itself is bounded fresh every frame.
         const msPerDiv = MS_PER_DIV_STEPS[p.msPerDivIdx] ?? MS_PER_DIV_STEPS[0];
         const windowSamples = Math.max(2, Math.round(rate * ((msPerDiv * DIVISIONS) / 1000)));
         const preSamples = Math.round(windowSamples * TRIGGER_PRE_FRAC);
@@ -551,23 +512,7 @@ export function TimeScope() {
           if (p.trigger) {
             const searchSamples = Math.round(rate * (TRIGGER_SEARCH_MS / 1000));
             const tMin = Math.max(totalWritten - ringCount + preSamples, tMax - searchSamples);
-            const newest = totalWritten - 1;
-            const cStart = Math.min(tMax, newest - trig.settle); // newest edge the backward pass has settled for
-            if (cStart > tMin) {
-              const b = trig.back;
-              const edge = ringTrig[phys(newest)];
-              b.x1 = b.x2 = b.y1 = b.y2 = edge; // as if the reversed input had sat at the edge value forever
-              let yAbove = stepBiquad(trig.coeffs, b, edge); // zero-phase output at c + 1 while walking down
-              for (let c = newest - 1; c >= tMin; c--) {
-                const y = stepBiquad(trig.coeffs, b, ringTrig[phys(c)]);
-                // Rising crossing between c and c + 1 in forward time; the trigger index is c + 1.
-                if (c + 1 <= cStart && y <= 0 && yAbove > 0) {
-                  t = c + 1;
-                  break;
-                }
-                yAbove = y;
-              }
-            }
+            t = findRisingEdge(trig, ringTrig, phys, totalWritten - ringCount, totalWritten - 1, tMin, tMax) ?? tMax;
           }
           dispN = windowSamples;
           if (dispLBuf.length < windowSamples) {
