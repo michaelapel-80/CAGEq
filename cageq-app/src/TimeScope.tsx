@@ -43,7 +43,11 @@ const DIVISIONS = 10;
 // bloom/haze default 0 (off) rather than copying Vectorscope's tuned 0.3/1.2 — this view's beam
 // (thicker, brighter by default) and content (two lanes of a continuous waveform, not a dwelling
 // point/curve) haven't been checked against those numbers at all yet.
-const DEFAULTS: Params = { trailTau: 0.06, tail: 6, glow: 0.40, beam: 3.0, bloom: 0.3, haze: 0.6, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 120, mode: "mix" }; // 5 ms/div × 10 = 50 ms
+// triggerFilterHz 60: a lower cutoff locks more steadily (fewer harmonics to hop between). It used
+// to sit at 120 because low cutoffs stopped triggering at all: the filtered waveform shrinks, and
+// any near-DC content then held it clear of the zero level. The AC-coupled level (scopeTrigger.ts)
+// removed that, so it now triggers reliably down to the knob's 20 Hz minimum.
+const DEFAULTS: Params = { trailTau: 0.06, tail: 6, glow: 0.40, beam: 3.0, bloom: 0.3, haze: 0.6, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 60, mode: "mix" }; // 5 ms/div × 10 = 50 ms
 // Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
 // reasoning (shared verbatim: the Trail/Glow orthogonality fix keeps *steady-state* brightness
 // independent of trailTau in theory, but live tuning showed glow still needs its own adjustment
