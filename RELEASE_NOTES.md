@@ -1,11 +1,11 @@
-Impulse-response export, and keyboard fixes for number fields.
+A steadier oscilloscope trigger.
 
-- **New:** Export can now save the correction as an impulse response (WAV, 32-bit float, mono)
-  for a convolution engine such as Equalizer APO's `Convolution:`. It is exact, phase included,
-  at a sample rate you choose from 44.1 to 192 kHz.
-- **Fixed:** tabbing into a number field (Fc, Q, gain, …) didn't let you type a value; only a
-  click did. Tab now selects the value ready to type over.
-- **Changed:** a typed value now applies on Enter or when you leave the field, not with every
-  keystroke, so the filter no longer jumps around while you type. Escape now restores the value
-  from before the edit. Arrow keys and dragging still apply live.
+- **Fixed:** the oscilloscope's trigger could stop locking when the waveform sat off-centre, as
+  in oscilloscope music, which uses near-DC content to position its image. It now triggers on
+  the waveform's own centre line wherever that sits.
+- **Changed:** the trigger filter now defaults to 60 Hz (was 120 Hz) for a steadier lock. Low
+  settings no longer stop the scope triggering. If you have used the scope before, your own
+  setting is kept.
+- The warping-corrected filters' description no longer says "up to 20 kHz": it describes the
+  whole audible range.
 - All changes are in the app itself; no engine update needed.
