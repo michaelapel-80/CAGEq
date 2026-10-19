@@ -70,10 +70,11 @@ they inverse-filter it back to the pre-EQ source image ("undistort"), so e.g. st
 still reads flat no matter how aggressive the correction is; each has its own toggle to switch to
 the raw post-EQ signal instead. The meters are the one exception and always show the real post-EQ
 output, since that's what actually needs measuring for safety. Undistort can't undo a high-pass
-band, though: it removes the lowest frequencies from the audio itself and shifts the phase well
-above its corner. Oscilloscope music relies on both, near-DC content to position the image and
-exact phase to draw it, so with a high-pass active the image comes out displaced and warped in the
-audio itself, not just on screen. Use Dry or a slot without one to watch it.
+band, though: toward DC its response falls away so steeply that the lowest frequencies drop below
+the signal's resolution, and DC itself is gone entirely, so there is nothing left to invert. The
+scopes show such a band as it is, phase shift included. Oscilloscope music relies on near-DC
+content to position its image and on exact phase to draw it, so with a high-pass active the image
+comes out displaced and warped. Use Dry or a slot without one to watch it.
 
 The scopes share a CRT-phosphor-style persistence/bloom renderer — a trailing glow that decays at
 a real, tunable rate, closer to a real analog scope's look than a plain clear-and-redraw.
