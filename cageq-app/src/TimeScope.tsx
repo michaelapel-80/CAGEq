@@ -55,7 +55,7 @@ const DEFAULTS: Params = { trailTau: 0.06, tail: 6, glow: 0.40, beam: 3.0, bloom
 // material, where a long window overlays many cycles into a waveform-density cloud rather than one
 // blurred average trace. Numbers below are a starting point for live tuning, not the final word.
 const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" | "glow">> = {
-  fast: { trailTau: 0.03, tail: 3, glow: 0.24 },
+  fast: { trailTau: 0.02, tail: 1, glow: 0.20 },
   distribution: { trailTau: 0.8, tail: 40, glow: 0.8 },
 };
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
