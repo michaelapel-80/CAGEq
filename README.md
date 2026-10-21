@@ -3,6 +3,9 @@
 A Windows desktop app for creating, managing, and **loudness-neutrally comparing** parametric
 headphone EQ corrections, built on real headphone measurement data.
 
+**[⬇ Download the latest installer](../../releases/latest)** (Windows, x64: the
+`CAGEq_…_x64-setup.exe` under Assets). See [Getting started](#getting-started) for more.
+
 CAGEq computes the correction (via [AutoEq](https://github.com/jaakkopasanen/AutoEq)'s fitting
 framework, plus its own custom-filter editor) and drives the actual audio processing either
 through [Equalizer APO](https://sourceforge.net/projects/equalizerapo/) or through its own
