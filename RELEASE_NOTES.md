@@ -1,11 +1,11 @@
-A steadier oscilloscope trigger.
+Small refinements to the spectrum, oscilloscope and impulse-response export.
 
-- **Fixed:** the oscilloscope's trigger could stop locking when the waveform sat off-centre, as
-  in oscilloscope music, which uses near-DC content to position its image. It now triggers on
-  the waveform's own centre line wherever that sits.
-- **Changed:** the trigger filter now defaults to 60 Hz (was 120 Hz) for a steadier lock. Low
-  settings no longer stop the scope triggering. If you have used the scope before, your own
-  setting is kept.
-- The warping-corrected filters' description no longer says "up to 20 kHz": it describes the
-  whole audible range.
+- **New:** the spectrum's window setting now shows the frequency resolution under the window
+  length, so you can see both sides of the trade-off as you tune it: a shorter window follows
+  the music more closely, a longer one separates closer tones.
+- **Changed:** the oscilloscope's Fast preset now draws the waveform without a trail. With the
+  steadier trigger from 0.17.5 there is no smear left to hide.
+- **Fixed:** the impulse-response export's preview showed the impulse chart, whose display
+  cut-off read as the end of the file. It now shows the curve and phase the file reproduces
+  exactly; the file's length is in the table below.
 - All changes are in the app itself; no engine update needed.
