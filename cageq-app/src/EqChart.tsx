@@ -312,10 +312,16 @@ export function snapFftSize(v: number | undefined): number {
  *  readout is the window's real duration on the current device (`fftWindowMs`), not a fixed
  *  samples/48 kHz — the slider value is in base-rate samples, and the same value lasts 186 ms at
  *  44.1 kHz but 171 ms at 48. Display only: the window itself is unchanged. Linear in window
- *  length: the step is fixed in samples. */
+ *  length: the step is fixed in samples. Under it, smaller, the frequency resolution that
+ *  duration buys, so both sides of the time/frequency trade-off move together as it is tuned. */
 export function FftSizeRow({ fftSize, sampleRate, onChange }: { fftSize?: number; sampleRate?: number; onChange: (v: number) => void }) {
   const { t } = useTranslation();
   const size = snapFftSize(fftSize);
+  const ms = fftWindowMs(size, sampleRate);
+  // The other side of the trade-off: the Hann window's -6 dB main-lobe width, 2 bins of the
+  // unpadded window (2/T). Two equal tones closer than this merge into one peak; zero-padding
+  // interpolates the trace but doesn't narrow it.
+  const hz = 2000 / ms;
   return (
     <label className="vs-tune-row vs-tune-fft" title={t("scope.fftSizeHint")}>
       <span className="vs-tune-label">{t("scope.fftSize")}</span>
@@ -328,7 +334,10 @@ export function FftSizeRow({ fftSize, sampleRate, onChange }: { fftSize?: number
         value={size}
         onChange={(e) => onChange(snapFftSize(Number(e.currentTarget.value)))}
       />
-      <b>{Math.round(fftWindowMs(size, sampleRate))} ms</b>
+      <b>
+        {Math.round(ms)} ms
+        <small>{hz < 10 ? hz.toFixed(1) : Math.round(hz)} Hz</small>
+      </b>
     </label>
   );
 }

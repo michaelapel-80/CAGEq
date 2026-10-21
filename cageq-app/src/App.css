@@ -1140,6 +1140,14 @@ select:disabled {
 .vs-tune-fft {
   grid-template-columns: 5.4em 1fr 3.6em;
 }
+/* Its frequency resolution, stacked under the duration in the same column rather than widening
+   it: the slider keeps its width, the row just grows by one small line. */
+.vs-tune-fft b small {
+  display: block;
+  font-size: 0.8em;
+  line-height: 1.1;
+  opacity: 0.7;
+}
 .vs-tune-check input[type="checkbox"] {
   justify-self: end;
   width: 1em;
