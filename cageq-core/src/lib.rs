@@ -206,6 +206,31 @@ pub fn filter_curve_db(bands: &[Filter], freqs: &[f64]) -> Vec<f64> {
     morph::curve_db_on(bands, freqs, ResponseModel::Rbj)
 }
 
+/// How many identical bandpass sections the §5.2 isolate audition cascades.
+///
+/// One 2nd-order bandpass falls off at only 6 dB/oct whatever its Q: at the frequency finder's
+/// Q 8 it is ~22 dB down an octave away and ~48 dB five octaves away, while the bass under a
+/// 3 kHz audition is typically 20-30 dB louder than what sits there, so it leaked through
+/// audibly. Four sections fall at 24 dB/oct: ~58 dB down an octave away at the same bandwidth.
+pub const ISOLATE_SECTIONS: usize = 4;
+
+/// The §5.2 isolate audition at `freq_hz`: [`ISOLATE_SECTIONS`] identical bandpass sections
+/// whose cascade has the -3 dB bandwidth a single section of quality `q` would have, so `q`
+/// keeps meaning what the caller asked for (a band's own Q, or the frequency finder's).
+///
+/// Each section sits at -3/N dB where the cascade reaches -3 dB. With a section's
+/// |H|² = 1/(1 + Q²x²), x = f/f0 - f0/f, and the edges at x = 1/q, that gives a section Q of
+/// q·√(2^(1/N) - 1). A non-positive or non-finite `q` passes through unchanged, so the
+/// validation that follows still rejects it.
+pub fn isolate_filters(freq_hz: f64, q: f64) -> Vec<Filter> {
+    let section_q = if q.is_finite() && q > 0.0 {
+        q * (2f64.powf(1.0 / ISOLATE_SECTIONS as f64) - 1.0).sqrt()
+    } else {
+        q
+    };
+    vec![Filter { kind: FilterType::Bandpass, freq_hz, gain_db: 0.0, q: section_q }; ISOLATE_SECTIONS]
+}
+
 /// [`filter_curve_db`] realised in `model`.
 pub fn filter_curve_db_in(bands: &[Filter], freqs: &[f64], model: ResponseModel) -> Vec<f64> {
     morph::curve_db_on(bands, freqs, model)
@@ -697,12 +722,15 @@ impl Core {
     }
 
     /// §5.2 isolate: write a **bandpass-only** config for the active slot — audition one band's
-    /// region with every other filter off. Base pre-gain only (no §4.1 loudness match: a bandpass
-    /// discards most of the energy, so a match would just chase it). Writes directly and does *not*
-    /// touch the slot cache, so a subsequent `activate_slot`/`apply` restores the real correction
-    /// with no extra bookkeeping. Errors if the active slot has no device to scope to.
+    /// region with every other filter off. The bandpass is [`isolate_filters`]' cascade, so its
+    /// skirts are steep enough to keep loud content an octave or more away out of the audition.
+    /// Base pre-gain only (no §4.1 loudness match: a bandpass discards most of the energy, so a
+    /// match would just chase it). Writes directly and does *not* touch the slot cache, so a
+    /// subsequent `activate_slot`/`apply` restores the real correction with no extra bookkeeping.
+    /// Errors if the active slot has no device to scope to.
     pub fn apply_isolate(&self, freq_hz: f64, q: f64) -> Result<Applied, CoreError> {
-        validate_filters(&[Filter { kind: FilterType::Bandpass, freq_hz, gain_db: 0.0, q }])?;
+        let filters = isolate_filters(freq_hz, q);
+        validate_filters(&filters)?;
         let _guard = self.inner.apply_lock.lock().unwrap();
         let device = {
             let store = self.inner.slots.lock().unwrap();
@@ -711,7 +739,7 @@ impl Core {
         };
         let effective = CalcResult {
             device,
-            filters: vec![Filter { kind: FilterType::Bandpass, freq_hz, gain_db: 0.0, q }],
+            filters,
             g_target_db: 0.0,
             g_max_peak_db: 0.0,
             reference_curve: Vec::new(),
@@ -1200,6 +1228,33 @@ mod tests {
 
     fn comparison(base: f64) -> LoudnessSettings {
         LoudnessSettings { base_pregain_db: base, ..Default::default() }
+    }
+
+    /// The isolate cascade keeps the bandwidth its `q` asks for (0 dB at the centre, -3 dB at a
+    /// single section's edges) while its skirts fall far faster than one section's.
+    #[test]
+    fn the_isolate_cascade_keeps_its_bandwidth_and_steepens_its_skirts() {
+        let (f0, q) = (1000.0_f64, 8.0_f64);
+        let half = 1.0 / (2.0 * q);
+        let edge_lo = f0 * ((1.0 + half * half).sqrt() - half);
+        let edge_hi = f0 * ((1.0 + half * half).sqrt() + half);
+        let freqs = [f0, edge_lo, edge_hi, f0 / 2.0, f0 * 2.0, f0 / 32.0];
+        for model in [ResponseModel::Rbj, ResponseModel::AnalogMatched] {
+            let cascade = filter_curve_db_in(&isolate_filters(f0, q), &freqs, model);
+            let single = filter_curve_db_in(&[Filter { kind: FilterType::Bandpass, freq_hz: f0, gain_db: 0.0, q }], &freqs, model);
+            assert!(cascade[0].abs() < 0.01, "{model:?}: centre at {} dB", cascade[0]);
+            for (i, edge) in [(1, "lower"), (2, "upper")] {
+                assert!((cascade[i] + 3.0).abs() < 0.1, "{model:?}: {edge} edge at {} dB", cascade[i]);
+                assert!((cascade[i] - single[i]).abs() < 0.1, "{model:?}: {edge} edge moved");
+            }
+            for i in [3, 4] {
+                assert!(single[i] > -23.0, "{model:?}: one section, an octave off: {} dB", single[i]);
+                assert!(cascade[i] < -55.0, "{model:?}: the cascade, an octave off: {} dB", cascade[i]);
+            }
+            assert!(cascade[5] < -150.0, "{model:?}: five octaves below: {} dB", cascade[5]);
+        }
+        // A bad q reaches validation untouched, so it is still rejected.
+        assert!(isolate_filters(f0, -1.0).iter().all(|f| f.q == -1.0));
     }
 
     fn final_volume(isp_headroom_db: f64) -> LoudnessSettings {

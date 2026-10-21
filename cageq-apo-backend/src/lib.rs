@@ -649,14 +649,15 @@ pub enum PushOutcome {
 }
 
 /// Is `filters` the §5.2 isolate audition — a bandpass-only substitute for the real correction,
-/// used to hear one filter's region in isolation? Always exactly one `Bandpass` band; anything
-/// else (an ordinary correction, a shelf/peaking band alone, two bandpasses) is not. Works over
+/// used to hear one filter's region in isolation? Always bandpass sections only (the core's
+/// `isolate_filters` cascade); anything else (an ordinary correction, a shelf/peaking band alone,
+/// a bandpass alongside other bands) is not. Works over
 /// `cageq_backend::Filter`/`FilterType` rather than the APO's own `Band`/`FilterKind` because
 /// `apply_one` sees `cfg.filters` *before* `to_apo_config` converts it — a second copy rather
 /// than a shared one, the same tradeoff [`band_key`]'s own doc already makes for this exact
 /// pair of types.
 fn is_isolate_filters(filters: &[Filter]) -> bool {
-    filters.len() == 1 && filters[0].kind == FilterType::Bandpass
+    !filters.is_empty() && filters.iter().all(|f| f.kind == FilterType::Bandpass)
 }
 
 /// Identity of a band for [`SlotAssignment`] — same reasoning as `cageq-core::morph::key()`
@@ -682,10 +683,11 @@ fn kind_code(kind: FilterKind) -> u8 {
 }
 
 /// Is `bands` the §5.2 isolate audition — a bandpass-only substitute for the real correction,
-/// used to hear one filter's region in isolation? Always exactly one `Bandpass` band; anything
-/// else (an ordinary correction, a shelf/peaking band alone, two bandpasses) is not.
+/// used to hear one filter's region in isolation? Always bandpass sections only (the core's
+/// `isolate_filters` cascade); anything else (an ordinary correction, a shelf/peaking band alone,
+/// a bandpass alongside other bands) is not.
 fn is_isolate_audition(bands: &[Band]) -> bool {
-    bands.len() == 1 && bands[0].kind == FilterKind::Bandpass
+    !bands.is_empty() && bands.iter().all(|b| b.kind == FilterKind::Bandpass)
 }
 
 /// Should *this* push cross the wire as a crossfade (see `cageq_apo::control::ControlBlock`'s
@@ -800,12 +802,12 @@ struct SlotAssignment {
     /// never held a band at all.
     slots: Vec<Option<(u8, i64, i64)>>,
     /// Whether the *previous* push to this endpoint was the §5.2 isolate audition (`cfg.bands`
-    /// was exactly one `Bandpass`) — `push_live` compares this against the current push to
+    /// was bandpass sections only) — `push_live` compares this against the current push to
     /// decide whether the boundary is being crossed (crossfade) or not (plain ramp, as ever).
     was_isolate: bool,
-    /// The slot index holding the §5.2 isolate audition band as of the *previous* push, if any
-    /// — see [`Self::assign_isolate`]'s own doc for why this needs to be tracked explicitly
-    /// rather than left to the generic search in [`Self::assign`].
+    /// The first slot of the block holding the §5.2 isolate audition's sections as of the
+    /// *previous* push, if any — see [`Self::assign_isolate`]'s own doc for why this needs to be
+    /// tracked explicitly rather than left to the generic search in [`Self::assign`].
     isolate_slot: Option<usize>,
     /// The control block's sequence number right after this assignment's last successful
     /// publish — the proof that `slots` still describes what the engine runs. Anything else
@@ -826,14 +828,15 @@ impl SlotAssignment {
         while layout.last().is_some_and(Option::is_none) {
             layout.pop();
         }
-        let isolate = matches!(layout.as_slice(), [Some((kind, _, _))] if *kind == kind_code(FilterKind::Bandpass));
+        let bandpass = kind_code(FilterKind::Bandpass);
+        let isolate = !layout.is_empty() && layout.iter().all(|s| matches!(s, Some((kind, _, _)) if *kind == bandpass));
         self.was_isolate = isolate;
         self.isolate_slot = if isolate { Some(0) } else { None };
         self.slots = layout;
     }
 
-    /// Reorders `bands` into slot order — the §5.2 isolate audition (always exactly one
-    /// `Bandpass`) is handled separately by [`Self::assign_isolate`]; this is the general path
+    /// Reorders `bands` into slot order — the §5.2 isolate audition (bandpass sections only) is
+    /// handled separately by [`Self::assign_isolate`]; this is the general path
     /// for everything else. A band whose identity matches a previous slot stays in that exact
     /// slot. Everything else (genuinely new, or a duplicate identity beyond the first match —
     /// rare, and not worth more bookkeeping to handle perfectly) reuses the lowest slot that is
@@ -843,10 +846,8 @@ impl SlotAssignment {
     /// gap — and keeps remembering what it held, so it stays off-limits to a distant band for
     /// as long as it takes something close enough to come reclaim it.
     fn assign<'a>(&mut self, bands: &'a [Band]) -> Vec<Option<&'a Band>> {
-        if let [band] = bands {
-            if band.kind == FilterKind::Bandpass {
-                return self.assign_isolate(band);
-            }
+        if is_isolate_audition(bands) {
+            return self.assign_isolate(bands);
         }
         // An ordinary push always ends any isolate session's slot tracking — a *later* isolate
         // press starts fresh rather than risking a stale index into a `self.slots` the generic
@@ -896,9 +897,11 @@ impl SlotAssignment {
 
     /// The §5.2 isolate half of [`Self::assign`], kept separate because isolate's invariant is
     /// different from an ordinary correction's: there is always at most **one** live isolate
-    /// band, and a later push must always retarget the *same* slot the previous one landed in
-    /// (if it is still [`slot_reusable`] compatible) — never fall back to the generic "any
-    /// matching slot, lowest index wins" search in [`Self::assign`].
+    /// audition, a contiguous block of bandpass sections, and a later push must always retarget
+    /// the *same* block the previous one landed in (if every slot in it is still
+    /// [`slot_reusable`] compatible) — never fall back to the generic "any matching slot, lowest
+    /// index wins" search in [`Self::assign`]. The block moves as a whole: its sections are one
+    /// filter, and sections drifting into different slots would ramp independently.
     ///
     /// **The bug this fixes, reported live**: a drag that swings back near an *earlier*,
     /// already-abandoned isolate position (having jumped elsewhere in between, opening a fresh
@@ -916,9 +919,9 @@ impl SlotAssignment {
     /// back near one of them, rather than either settling immediately (slow) or never revisiting
     /// old territory at all (one continuous fast sweep).
     ///
-    /// Explicitly never searches for a *match* beyond the tracked slot: the band either retargets
-    /// its own slot (a plain ramp) or moves. And when it moves, it takes the lowest slot other
-    /// than its current one, rather than opening a fresh one past the end. That is safe because
+    /// Explicitly never searches for a *match* beyond the tracked block: the audition either
+    /// retargets its own block (a plain ramp) or moves. And when it moves, it takes the lowest
+    /// block clear of its current one, rather than opening a fresh one past the end. That is safe because
     /// a move is always a crossfade (`isolate_boundary_crossed` sees the slot change): the new
     /// array plays on the cascade's secondary bank, reset fresh, and replaces the primary bank
     /// wholesale when it lands (`Cascade::promote_secondary`), so whatever an earlier slot was
@@ -926,29 +929,32 @@ impl SlotAssignment {
     /// per far jump and nothing trimmed the gaps in between — a long, wild sweep in one press
     /// passed `MAX_BANDS` and the control channel refused the push (reported live: "the
     /// correction ... was refused by CAGEq's own engine" while dragging the frequency finder).
-    fn assign_isolate<'a>(&mut self, band: &'a Band) -> Vec<Option<&'a Band>> {
+    fn assign_isolate<'a>(&mut self, bands: &'a [Band]) -> Vec<Option<&'a Band>> {
+        let n = bands.len();
         let mut out: Vec<Option<&Band>> = vec![None; self.slots.len()];
 
-        let reuse_at = self
-            .isolate_slot
-            .filter(|&i| i < self.slots.len() && slot_reusable(&self.slots[i], band));
-        let at = reuse_at.unwrap_or_else(|| if self.isolate_slot == Some(0) { 1 } else { 0 });
-        if at >= out.len() {
-            out.resize(at + 1, None);
+        let reuse_at = self.isolate_slot.filter(|&s| {
+            s + n <= self.slots.len() && bands.iter().enumerate().all(|(k, b)| slot_reusable(&self.slots[s + k], b))
+        });
+        // Moving: block 0, or right after it when block 0 is where the audition is now.
+        let at = reuse_at.unwrap_or_else(|| if self.isolate_slot == Some(0) { n } else { 0 });
+        if at + n > out.len() {
+            out.resize(at + n, None);
         }
-        out[at] = Some(band);
+        for (k, b) in bands.iter().enumerate() {
+            out[at + k] = Some(b);
+        }
         while out.last().is_some_and(Option::is_none) {
             out.pop();
         }
 
         self.slots.resize(out.len(), None);
-        self.isolate_slot = None;
         for (i, occupant) in out.iter().enumerate() {
             if let Some(b) = occupant {
                 self.slots[i] = Some(band_key(b));
-                self.isolate_slot = Some(i);
             }
         }
+        self.isolate_slot = Some(at);
         out
     }
 }
@@ -1650,20 +1656,55 @@ mod tests {
         Band { kind: FilterKind::Peaking, freq_hz, gain_db, q }
     }
 
-    /// The decision `push_live` bases its crossfade-vs-ramp choice on: only a single, bare
-    /// `Bandpass` counts. Anything else — empty, more than one band, a `Bandpass` alongside
-    /// other bands (never produced by isolate's own write path, but must still not be
-    /// misidentified if it ever arrived), or a single non-`Bandpass` band — is an ordinary
-    /// correction and must ramp as it always has.
+    /// The decision `push_live` bases its crossfade-vs-ramp choice on: only bandpass sections
+    /// count, one or a cascade of them. Anything else — empty, a `Bandpass` alongside other bands
+    /// (never produced by isolate's own write path, but must still not be misidentified if it
+    /// ever arrived), or a single non-`Bandpass` band — is an ordinary correction and must ramp
+    /// as it always has.
     #[test]
-    fn only_a_single_bare_bandpass_counts_as_the_isolate_audition() {
-        let bandpass = Band { kind: FilterKind::Bandpass, freq_hz: 100.0, gain_db: 0.0, q: 8.0 };
+    fn only_bandpass_sections_count_as_the_isolate_audition() {
+        let bandpass = Band { kind: FilterKind::Bandpass, freq_hz: 100.0, gain_db: 0.0, q: 3.5 };
         assert!(is_isolate_audition(std::slice::from_ref(&bandpass)));
+        assert!(is_isolate_audition(&[bandpass; 4]), "the isolate cascade is isolate");
 
         assert!(!is_isolate_audition(&[]), "no bands at all is not isolate");
         assert!(!is_isolate_audition(std::slice::from_ref(&band(1000.0, 3.0, 1.0))), "an ordinary single band is not isolate");
         assert!(!is_isolate_audition(&[bandpass, band(1000.0, 3.0, 1.0)]), "a bandpass alongside other bands is not isolate");
-        assert!(!is_isolate_audition(&[bandpass, bandpass]), "two bandpasses is not isolate either");
+    }
+
+    /// The isolate cascade's sections move as one block: a small sweep step retargets the same
+    /// slots (a ramp), a far jump moves the whole block clear of where it was (a crossfade), and
+    /// an engine found running only bandpass sections is read back as an isolate audition.
+    #[test]
+    fn the_isolate_cascade_moves_as_one_block() {
+        let cascade = |f: f64| [Band { kind: FilterKind::Bandpass, freq_hz: f, gain_db: 0.0, q: 3.5 }; 4];
+        let mut sa = SlotAssignment::default();
+
+        let first = cascade(1000.0);
+        let out = sa.assign(&first);
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(Option::is_some));
+        assert_eq!(sa.isolate_slot, Some(0));
+
+        let near = cascade(1100.0);
+        let out = sa.assign(&near);
+        assert_eq!(sa.isolate_slot, Some(0), "a small step must retarget the same block");
+        assert!(out.iter().all(|b| b.is_some_and(|b| b.freq_hz == 1100.0)));
+
+        let far = cascade(9000.0);
+        let out = sa.assign(&far);
+        assert_eq!(sa.isolate_slot, Some(4), "a far jump must move the block clear of its old one");
+        assert!(out[..4].iter().all(Option::is_none), "the old block must be gaps now");
+        assert!(out[4..].iter().all(|b| b.is_some_and(|b| b.freq_hz == 9000.0)));
+        assert!(isolate_boundary_crossed(true, true, true), "and that move is a boundary: a crossfade");
+
+        let back = cascade(1000.0);
+        sa.assign(&back);
+        assert_eq!(sa.isolate_slot, Some(0), "moving again takes block 0, clear of block 4");
+
+        let mut adopted = SlotAssignment::default();
+        adopted.adopt(cascade(500.0).iter().map(|b| Some(band_key(b))).collect());
+        assert!(adopted.was_isolate && adopted.isolate_slot == Some(0), "an engine running the cascade is mid-isolate");
     }
 
     /// The two triggers `isolate_boundary_crossed` covers, and the two things it must leave
