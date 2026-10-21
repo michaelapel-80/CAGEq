@@ -360,7 +360,7 @@ mod tests {
     /// rather than being fully in place from a morph's first frame (or to its last).
     #[test]
     fn a_one_sided_high_pass_switches_at_the_midpoint() {
-        let hp = Filter { kind: FilterType::HighPass, freq_hz: 20.0, gain_db: 0.0, q: 0.7071 };
+        let hp = Filter { kind: FilterType::HighPass, freq_hz: 20.0, gain_db: 0.0, q: std::f64::consts::FRAC_1_SQRT_2 };
         let a = vec![peak(1000.0, 3.0, 1.0)];
         let b = vec![peak(1000.0, 3.0, 1.0), hp];
         let has_hp = |bands: &[Filter]| bands.iter().any(|f| f.kind == FilterType::HighPass);
