@@ -471,7 +471,9 @@ type SelfTestVerdict =
   // compared at all: the loopback would otherwise report either nothing applied, or, on devices
   // with processing of their own (common on Bluetooth headphones), something unrelated shaping
   // the output, both less clear than the engine's own state.
-  | { kind: "engine"; channel: "no_channel" | "stalled" };
+  // "wrong_slot": the channel is missing because CAGEq is attached in a slot Windows doesn't run
+  // on this device (a combined Bluetooth device attached in EFX); the Engine panel moves it.
+  | { kind: "engine"; channel: "no_channel" | "stalled" | "wrong_slot" };
 // Residual RMS of `y` after removing its best-fit line vs `x` — i.e. how much the curve deviates
 // from a straight (tilted) line. Used to judge Dry-pink flatness: a broadband tilt/gain is allowed
 // (source slope, device volume), but spectral shaping (peaks/dips/roll-off) shows up in the residual.
@@ -1782,12 +1784,15 @@ function App() {
       const endpoint = selectedDevice?.eqapo_pattern ?? null;
       if (endpoint !== null) {
         let channel: string | null = null;
+        let wrongSlot = false;
         for (let i = 0; i < 3 && channel !== "processing"; i++) {
-          channel = (await invoke<ApoSetupStatus>("apo_setup_status", { endpoint })).live_channel;
+          const st = await invoke<ApoSetupStatus>("apo_setup_status", { endpoint });
+          channel = st.live_channel;
+          wrongSlot = st.wrong_slot.includes(endpoint);
           if (channel === null) break;
         }
         if (channel === "no_channel" || channel === "stalled") {
-          setSelfTest({ phase: "done", verdict: { kind: "engine", channel } });
+          setSelfTest({ phase: "done", verdict: { kind: "engine", channel: wrongSlot ? "wrong_slot" : channel } });
           return;
         }
       }

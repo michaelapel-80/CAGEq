@@ -42,6 +42,9 @@ export type ApoSetupStatus = {
    *  attaching looks done here too, and the APO is silently skipped. Self-healing: the same
    *  re-attach that fixes `effects_disabled` also rewrites this value. */
   modes_missing: string[];
+  /** Attached in a different effect slot than the one that runs on this device (a combined
+   *  Bluetooth device attached in EFX never loads); re-attaching moves it. */
+  wrong_slot: string[];
   active_backend_is_apo: boolean;
   /** Command string for the next step, e.g. `"open-gate"` — echoed back to the backend. */
   next_step: string | null;
@@ -104,13 +107,14 @@ export function computeEngineReason(status: ApoSetupStatus | null, eqapoEnabled:
   const attached = status !== null && status.attached.includes(endpointId);
   const inert = status !== null && status.effects_disabled.includes(endpointId);
   const modesMissing = status !== null && status.modes_missing.includes(endpointId);
+  const wrongSlot = status !== null && status.wrong_slot.includes(endpointId);
   // `active_backend_is_apo` is reconciled against reality on every status read (the backend
   // can now swap live — see `reconcile_backend` on the Rust side), so this flips true right
   // after attaching, on the very next poll. No "restart to take effect" state exists anymore.
   const activeIsApo = status !== null && attached && !inert && status.active_backend_is_apo;
   if (status === null) return "eqapo";
   if (!status.helper_available) return "helperMissing";
-  if (attached && (inert || !status.gate_open || modesMissing)) return "broken";
+  if (attached && (inert || !status.gate_open || modesMissing || wrongSlot)) return "broken";
   if (activeIsApo) return "apo";
   return eqapoEnabled ? "eqapo" : "unattached";
 }
@@ -156,7 +160,8 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
   const attached = status !== null && status.attached.includes(endpointId);
   const inert = status !== null && status.effects_disabled.includes(endpointId);
   const modesMissing = status !== null && status.modes_missing.includes(endpointId);
-  const activeIsApo = status !== null && attached && !inert && !modesMissing && status.active_backend_is_apo;
+  const wrongSlot = status !== null && status.wrong_slot.includes(endpointId);
+  const activeIsApo = status !== null && attached && !inert && !modesMissing && !wrongSlot && status.active_backend_is_apo;
   // An app update shipped a newer CAGEqApo.dll that was never installed — see
   // `ApoSetupStatus.dll_current`'s own doc. Independent of `activeIsApo`: it's readable even
   // before anything is attached, so it also fires for "registered, present, but stale" on its
@@ -280,7 +285,7 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
                   <ul className="setup-steps">
                     <Step done={status.registered_dll !== null && status.dll_present && status.dll_current} label={t("apoSetup.stepRegister")} />
                     <Step done={status.gate_open} label={t("apoSetup.stepGate")} />
-                    <Step done={attached && !inert && !modesMissing} label={t("apoSetup.stepAttach", { device: endpointName ?? "" })} />
+                    <Step done={attached && !inert && !modesMissing && !wrongSlot} label={t("apoSetup.stepAttach", { device: endpointName ?? "" })} />
                   </ul>
 
                   {/* The gate reduces a machine-wide security mitigation, so it gets its own
@@ -293,6 +298,7 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
                   {/* Attached but Windows will still skip the APO — the same silent-failure
                       shape as `effects_disabled`, just a different missing registry value. */}
                   {!inert && modesMissing && <p className="warn">{t("apoSetup.modesMissing")}</p>}
+                  {!inert && !modesMissing && wrongSlot && <p className="warn">{t("apoSetup.wrongSlot")}</p>}
 
                   {!status.helper_available && <p className="warn">{t("apoSetup.helperMissing")}</p>}
 

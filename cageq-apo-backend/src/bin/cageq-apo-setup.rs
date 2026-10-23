@@ -188,6 +188,11 @@ fn print_status(out: &mut Output) {
         // friction this listing exists to remove. The number is accepted in its place.
         out.line(&format!("  {n}  {:<36} {who}", e.name));
         out.line(&format!("     {}", e.id));
+        // Which slot `attach` picks for it, and why: a combined Bluetooth endpoint never runs
+        // EFX, so it gets MFX (see `setup::FxSlot`).
+        if setup::is_combined_bluetooth(&e.id) {
+            out.line("      combined Bluetooth device: attach uses the MFX slot");
+        }
         if let Some(prev) = &e.displaced {
             out.line(&format!(
                 "      note: CAGEq took this slot from {} — detach restores it",
@@ -238,6 +243,7 @@ fn usage() -> String {
          open-gate           allow Windows to load effects not signed by Microsoft (machine-wide)\n  \
          close-gate          restore Windows' effect-signing requirement\n  \
          attach <n|guid>     attach the effect to one playback endpoint (n from the list)\n  \
+         attach <n|guid> efx|mfx\n                             the same, in a slot chosen by hand instead of by the device\n  \
          detach <n|guid>     remove it from one playback endpoint\n  \
          reset               remove CAGEq from every device and this machine,\n  \
                              restoring whatever it displaced\n\n\

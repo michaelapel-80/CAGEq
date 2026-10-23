@@ -227,6 +227,7 @@
     "gateWarning": "This step lets Windows load audio effects that are not signed by Microsoft. Equalizer APO's installer sets the same option. Apps that require a protected audio path (some streaming services) may refuse to play while it is set.",
     "effectsDisabled": "Windows has audio enhancements switched off for this device, so no effect can run on it. Continuing will switch them back on.",
     "modesMissing": "A required registry value for this device is missing, so Windows silently skips the effect even though it looks attached. Continuing rewrites it.",
+    "wrongSlot": "CAGEq's engine is attached in a different effect slot than the one this device needs, so it may not run here (combined Bluetooth devices attached by an older version are the usual case). Continuing moves it to the right slot.",
     "dllUnreadable": "⚠ The audio service account (LOCAL SERVICE) may not be able to read CAGEq's audio engine file — antivirus or a security policy could be blocking it. If the engine won't load, check your antivirus's exclusions for the CAGEq install folder.",
     "helperMissing": "cageq-apo-setup.exe is missing from the CAGEq folder, so setup cannot run. Reinstall CAGEq.",
     "doStep": "Continue",
@@ -329,6 +330,8 @@
     "inconclusive": "Your current correction is too flat to test reliably. Pick a headphone correction with more shape (Slot A or B), then retry.",
     "engine_no_channelTitle": "✕ CAGEq's engine isn't running on this device",
     "engine_no_channel": "The test signal played through {{device}}, but CAGEq's engine never started for it: Windows didn't load it for this output, so none of your correction is applied.\n\nThis happens most often with Bluetooth headphones that appear as more than one device (for example a separate hands-free device). Check that {{device}} is the device you're actually listening on, then use the Engine button above to attach the engine to it again.",
+    "engine_wrong_slotTitle": "✕ CAGEq's engine is attached where it can't run",
+    "engine_wrong_slot": "CAGEq's engine is attached to {{device}} in a different effect slot than the one this device needs, and it isn't running there, so none of your correction is applied. Open the Engine panel above and continue: it moves the engine to the right slot.",
     "engine_stalledTitle": "✕ CAGEq's engine isn't processing this device's audio",
     "engine_stalled": "CAGEq's engine is loaded for {{device}}, but it isn't processing the test signal, so none of your correction is applied. Another app may hold the device in exclusive mode, or the audio may be going through a different device. Close other audio apps, check {{device}} is the device you're listening on, and retry.",
     "deviceColor": "⚠ The Dry signal isn't flat (±{{db}} dB) — the output device seems to apply its own processing (audio enhancements, spatial sound, a fixed EQ). Disable those for a truthful correction and A/B."

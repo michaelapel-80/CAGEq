@@ -33,8 +33,9 @@ const AUDIO_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Audio";
 const DG_VALUE: &str = "DisableProtectedAudioDG";
 const RENDER_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render";
 
-/// Effect-CLSID property, per slot. `,7` is EFX — the slot Equalizer APO uses and the only
-/// one the spike could get audiodg to load from (SFX `,5` and LFX `,1` were silently skipped).
+/// Effect-CLSID property, per slot. `,7` is EFX, the one the spike could get audiodg to load
+/// from (SFX `,5` and LFX `,1` were silently skipped); `,6` (MFX) is the fallback for endpoints
+/// where EFX never runs — see [`FxSlot`].
 const FX_CLSID_PROP: &str = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}";
 /// Supported-processing-modes property, per slot.
 const FX_MODES_PROP: &str = "{d3993a3f-99c2-4402-b5ec-a92a0367664b}";
@@ -43,8 +44,60 @@ const FX_MODES_PROP: &str = "{d3993a3f-99c2-4402-b5ec-a92a0367664b}";
 const FX_DISABLE_SYSFX: &str = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";
 /// `AUDIO_SIGNALPROCESSINGMODE_DEFAULT`.
 const MODE_DEFAULT: &str = "{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}";
-/// The slot to attach in, as an index into the per-slot property names above.
-const EFX_SLOT: &str = "7";
+/// `PKEY_Device_...,41` in an endpoint's `Properties` key: present on the combined endpoint
+/// Windows 11 builds for a Bluetooth headset's stereo and hands-free sides. EFX does not run
+/// there. Equalizer APO's installer checks exactly this value ("bluetooth devices may be
+/// combined in Windows 11, EFX will not work then", `DeviceAPOInfo.cpp`) and installs its
+/// post-mix part as MFX instead; CAGEq's APO never even loaded on such endpoints.
+const COMBINED_DEVICE_PROP: &str = "{b3f8fa53-0004-438e-9003-51a46e139bfc},41";
+
+/// The effect slot CAGEq's post-mix APO occupies on an endpoint.
+///
+/// **EFX** (endpoint effect, slot 7) by default: one instance per endpoint, after every
+/// stream and mode is mixed. **MFX** (mode effect, slot 6) where EFX does not run — the
+/// combined Bluetooth endpoints [`COMBINED_DEVICE_PROP`] marks. MFX runs once per processing
+/// mode after that mode's streams are mixed; CAGEq declares only the default mode, so it is
+/// still a single instance carrying the music, while a stream in another mode (a call in the
+/// communications mode, say) passes uncorrected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FxSlot {
+    Efx,
+    Mfx,
+}
+
+impl FxSlot {
+    /// The index in the per-slot property names.
+    fn index(self) -> &'static str {
+        match self {
+            FxSlot::Efx => "7",
+            FxSlot::Mfx => "6",
+        }
+    }
+
+    /// The helper's command-line spelling.
+    pub fn arg(self) -> &'static str {
+        match self {
+            FxSlot::Efx => "efx",
+            FxSlot::Mfx => "mfx",
+        }
+    }
+
+    fn from_arg(arg: &str) -> Option<FxSlot> {
+        match arg {
+            "efx" => Some(FxSlot::Efx),
+            "mfx" => Some(FxSlot::Mfx),
+            _ => None,
+        }
+    }
+
+    /// The slot for an endpoint, from whether Windows marks it as a combined Bluetooth device.
+    pub fn for_endpoint(combined_bluetooth: bool) -> FxSlot {
+        if combined_bluetooth { FxSlot::Mfx } else { FxSlot::Efx }
+    }
+}
+
+/// The slots CAGEq can occupy — what `status` and `detach` look in.
+const OUR_SLOTS: [FxSlot; 2] = [FxSlot::Efx, FxSlot::Mfx];
 
 /// Every effect slot index, in the order Windows evaluates them.
 ///
@@ -184,6 +237,11 @@ pub struct SetupStatus {
     /// Self-healing: `attach` already (re-)writes this value whenever it is absent, so the
     /// fix is the same re-attach `effects_disabled` already prompts for.
     pub modes_missing: Vec<String>,
+    /// Endpoints where CAGEq is attached in a different slot than [`FxSlot::for_endpoint`]
+    /// picks for them — above all a combined Bluetooth endpoint attached in EFX before the slot
+    /// choice existed, where it never loads. Attached looks done there too; re-attaching moves
+    /// it, the same self-healing step as `modes_missing`.
+    pub wrong_slot: Vec<String>,
 }
 
 impl SetupStatus {
@@ -230,6 +288,10 @@ impl SetupStatus {
         // Self-healing, same as `effects_disabled` above: `attach` already re-writes the
         // modes value whenever it finds it missing, so re-attaching is the whole fix.
         if self.modes_missing.iter().any(|e| e == endpoint_id) {
+            return Some(Action::Attach(endpoint_id.to_string()));
+        }
+        // And re-attaching picks the endpoint's own slot, moving CAGEq out of the other one.
+        if self.wrong_slot.iter().any(|e| e == endpoint_id) {
             return Some(Action::Attach(endpoint_id.to_string()));
         }
         None
@@ -344,8 +406,12 @@ pub enum Action {
     /// into a general "set up" button.
     OpenGate,
     CloseGate,
-    /// Attach to one endpoint, and clear anything that would stop it running there.
+    /// Attach to one endpoint, and clear anything that would stop it running there. The slot
+    /// follows the endpoint ([`FxSlot::for_endpoint`]).
     Attach(String),
+    /// [`Action::Attach`] in a slot chosen by hand, overriding the endpoint's own — for trying
+    /// a slot on a device the heuristic would not pick it for (`attach <device> mfx`).
+    AttachIn(String, FxSlot),
     Detach(String),
     /// Remove CAGEq from the machine entirely: detach every endpoint (restoring whatever was
     /// displaced), unregister the COM server, delete the installed DLL.
@@ -365,6 +431,7 @@ impl Action {
             Action::OpenGate => vec!["open-gate".into()],
             Action::CloseGate => vec!["close-gate".into()],
             Action::Attach(id) => vec!["attach".into(), id.clone()],
+            Action::AttachIn(id, slot) => vec!["attach".into(), id.clone(), slot.arg().into()],
             Action::Detach(id) => vec!["detach".into(), id.clone()],
             Action::Reset => vec!["reset".into()],
         }
@@ -378,7 +445,12 @@ impl Action {
             "unregister" => Some(Action::UnregisterServer),
             "open-gate" => Some(Action::OpenGate),
             "close-gate" => Some(Action::CloseGate),
-            "attach" => args.get(1).map(|id| Action::Attach(id.clone())),
+            "attach" => match (args.get(1), args.get(2)) {
+                (Some(id), None) => Some(Action::Attach(id.clone())),
+                // An unrecognised slot is refused, not ignored: it was asked for explicitly.
+                (Some(id), Some(slot)) => FxSlot::from_arg(slot).map(|s| Action::AttachIn(id.clone(), s)),
+                (None, _) => None,
+            },
             "detach" => args.get(1).map(|id| Action::Detach(id.clone())),
             "reset" => Some(Action::Reset),
             _ => None,
@@ -403,6 +475,9 @@ impl Action {
                     .into()
             }
             Action::Attach(id) => format!("Attach CAGEq's audio effect to device {id}."),
+            Action::AttachIn(id, slot) => {
+                format!("Attach CAGEq's audio effect to device {id}, in the {} slot.", slot.arg().to_uppercase())
+            }
             Action::Detach(id) => format!("Remove CAGEq's audio effect from device {id}."),
             Action::Reset => {
                 "Remove CAGEq from this machine: detach every device (restoring whatever was \n                 there before), unregister the effect, and delete the installed file."
@@ -481,19 +556,22 @@ pub fn status() -> SetupStatus {
     if let Ok(render) = hklm.open_subkey_with_flags(RENDER_KEY, KEY_READ) {
         for id in render.enum_keys().flatten() {
             let Ok(fx) = render.open_subkey(format!(r"{id}\FxProperties")) else { continue };
-            let slot = format!("{FX_CLSID_PROP},{EFX_SLOT}");
-            if fx
-                .get_value::<String, _>(&slot)
-                .is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID))
-            {
+            let ours = OUR_SLOTS.into_iter().find(|slot| {
+                fx.get_value::<String, _>(format!("{FX_CLSID_PROP},{}", slot.index()))
+                    .is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID))
+            });
+            if let Some(slot) = ours {
                 out.attached.push(id.clone());
                 // `attach` writes this alongside the CLSID slot (see its own comment: missing
                 // it makes Windows skip the APO with no error anywhere) — re-verified here
                 // rather than assumed, since nothing stops a later external change removing it
                 // while the CLSID slot is left alone.
-                let modes = format!("{FX_MODES_PROP},{EFX_SLOT}");
+                let modes = format!("{FX_MODES_PROP},{}", slot.index());
                 if fx.get_value::<Vec<String>, _>(&modes).is_err() {
                     out.modes_missing.push(id.clone());
+                }
+                if slot != FxSlot::for_endpoint(is_combined_bluetooth(&id)) {
+                    out.wrong_slot.push(id.clone());
                 }
             }
             // Any present value means the chain is bypassed; the value itself is a
@@ -505,6 +583,7 @@ pub fn status() -> SetupStatus {
     }
     out.attached.sort();
     out.modes_missing.sort();
+    out.wrong_slot.sort();
     out.effects_disabled.sort();
     out
 }
@@ -602,7 +681,8 @@ pub fn perform(action: &Action) -> Result<(), SetupError> {
         Action::CloseGate => set_gate(false),
         // One restart, after the registry work: audiodg only picks up an attachment when the
         // audio service rebuilds a stream's graph.
-        Action::Attach(id) => attach(id).and_then(|()| restart_audio()),
+        Action::Attach(id) => attach(id, None).and_then(|()| restart_audio()),
+        Action::AttachIn(id, slot) => attach(id, Some(*slot)).and_then(|()| restart_audio()),
         Action::Detach(id) => detach(id).and_then(|()| restart_audio()),
         // `reset` stops and starts audio itself: it has to touch the DLL, which audiodg holds
         // open while it lives.
@@ -950,11 +1030,30 @@ fn regtype_from_u32(v: u32) -> Option<winreg::enums::RegType> {
         _ => return None,
     })
 }
+/// Is `endpoint_id` the combined endpoint Windows 11 builds for a Bluetooth headset? See
+/// [`COMBINED_DEVICE_PROP`]. The `Properties` key is world-readable, so this needs no privilege.
 #[cfg(windows)]
-fn attach(endpoint_id: &str) -> Result<(), SetupError> {
+pub fn is_combined_bluetooth(endpoint_id: &str) -> bool {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    let Some(id) = cageq_apo::config::normalize_endpoint_id(endpoint_id) else { return false };
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(format!(r"{RENDER_KEY}\{id}\Properties"))
+        .is_ok_and(|k| k.get_raw_value(COMBINED_DEVICE_PROP).is_ok())
+}
+
+#[cfg(not(windows))]
+pub fn is_combined_bluetooth(_endpoint_id: &str) -> bool {
+    false
+}
+
+/// Attach to `endpoint_id`, in `forced` if given and otherwise in the endpoint's own slot.
+#[cfg(windows)]
+fn attach(endpoint_id: &str, forced: Option<FxSlot>) -> Result<(), SetupError> {
     use winreg::RegKey;
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE};
 
+    let target = forced.unwrap_or_else(|| FxSlot::for_endpoint(is_combined_bluetooth(endpoint_id)));
     let path = fx_key(endpoint_id)?;
     // MMDevices is owned by TrustedInstaller, so even an administrator cannot write here
     // until ownership is taken — see `take_ownership`.
@@ -973,17 +1072,24 @@ fn attach(endpoint_id: &str) -> Result<(), SetupError> {
     // That silently invalidated every listening comparison made against it.
     //
     // Everything removed is recorded first and put back by `detach`, so this is a takeover
-    // for as long as CAGEq is attached, not a deletion.
+    // for as long as CAGEq is attached, not a deletion. Our own CLSID in a slot other than the
+    // target (an earlier attach in the other slot) is simply removed: two copies would both run.
     let mut displaced: Vec<String> = Vec::new();
     for slot in ALL_SLOTS {
         let name = format!("{FX_CLSID_PROP},{slot}");
         let Ok(existing) = fx.get_value::<String, _>(&name) else { continue };
         let existing = existing.trim().to_string();
-        if existing.is_empty() || existing.eq_ignore_ascii_case(CLSID) {
+        if existing.is_empty() {
+            continue;
+        }
+        if existing.eq_ignore_ascii_case(CLSID) {
+            if slot != target.index() {
+                let _ = fx.delete_value(&name);
+            }
             continue;
         }
         displaced.push(format!("{slot}={existing}"));
-        if slot != EFX_SLOT {
+        if slot != target.index() {
             let _ = fx.delete_value(&name);
         }
     }
@@ -994,10 +1100,10 @@ fn attach(endpoint_id: &str) -> Result<(), SetupError> {
     // Three values, not one. Missing any of them makes Windows skip the APO with no error
     // anywhere — which is precisely how an earlier build appeared to work only on machines
     // that had once had Equalizer APO installed, silently inheriting its declarations.
-    fx.set_value(format!("{FX_CLSID_PROP},{EFX_SLOT}"), &CLSID.to_string())
+    fx.set_value(format!("{FX_CLSID_PROP},{}", target.index()), &CLSID.to_string())
         .map_err(|e| SetupError::Win32("set effect CLSID", e))?;
 
-    let modes_name = format!("{FX_MODES_PROP},{EFX_SLOT}");
+    let modes_name = format!("{FX_MODES_PROP},{}", target.index());
     if fx.get_value::<Vec<String>, _>(&modes_name).is_err() {
         fx.set_value(&modes_name, &vec![MODE_DEFAULT.to_string()])
             .map_err(|e| SetupError::Win32("declare processing modes", e))?;
@@ -1035,9 +1141,11 @@ fn detach(endpoint_id: &str) -> Result<(), SetupError> {
     // Put every displaced effect back, not just our own slot. Detaching should return the
     // machine to how it was found — leaving Equalizer APO removed because CAGEq once took
     // the endpoint over would be the same silent damage in the other direction.
-    let slot = format!("{FX_CLSID_PROP},{EFX_SLOT}");
-    if fx.get_value::<String, _>(&slot).is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID)) {
-        let _ = fx.delete_value(&slot);
+    for slot in OUR_SLOTS {
+        let name = format!("{FX_CLSID_PROP},{}", slot.index());
+        if fx.get_value::<String, _>(&name).is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID)) {
+            let _ = fx.delete_value(&name);
+        }
     }
     if let Some(record) = displaced_effect(endpoint_id) {
         for entry in record.split(',') {
@@ -1665,6 +1773,8 @@ mod tests {
             Action::OpenGate,
             Action::CloseGate,
             Action::Attach("{6cafe423-cde5-4ec1-a1e2-e3fcec778349}".into()),
+            Action::AttachIn("{6cafe423-cde5-4ec1-a1e2-e3fcec778349}".into(), FxSlot::Mfx),
+            Action::AttachIn("{6cafe423-cde5-4ec1-a1e2-e3fcec778349}".into(), FxSlot::Efx),
             Action::Detach("{6cafe423-cde5-4ec1-a1e2-e3fcec778349}".into()),
         ];
         for action in cases {
@@ -1675,6 +1785,18 @@ mod tests {
         assert_eq!(Action::from_argv(&["nonsense".into()]), None);
         // `attach` without a device must not be read as some other action.
         assert_eq!(Action::from_argv(&["attach".into()]), None);
+        // Nor an unknown slot as the default one.
+        assert_eq!(Action::from_argv(&["attach".into(), "{6cafe423-cde5-4ec1-a1e2-e3fcec778349}".into(), "sfx".into()]), None);
+    }
+
+    /// Equalizer APO's rule for its post-mix part: MFX on a combined Bluetooth endpoint, where
+    /// EFX does not run, EFX everywhere else.
+    #[test]
+    fn a_combined_bluetooth_endpoint_gets_the_mfx_slot() {
+        assert_eq!(FxSlot::for_endpoint(true), FxSlot::Mfx);
+        assert_eq!(FxSlot::for_endpoint(false), FxSlot::Efx);
+        assert_eq!(FxSlot::Mfx.index(), "6");
+        assert_eq!(FxSlot::Efx.index(), "7");
     }
 
     /// The step order is the point of `next_step`: attaching an endpoint while the gate is
@@ -1738,6 +1860,7 @@ mod tests {
             attached: vec![ep.to_string()],
             effects_disabled: vec![],
             modes_missing: vec![],
+            wrong_slot: vec![],
         };
         assert!(!stale_but_attached.machine_ready(), "a stale DLL is not \"ready\", even though it is running");
         assert_eq!(
@@ -1802,6 +1925,7 @@ mod tests {
             attached: vec![ep.to_string()],
             effects_disabled: vec![ep.to_string()],
             modes_missing: vec![],
+            wrong_slot: vec![],
         };
         assert_eq!(status.next_step(ep), Some(Action::Attach(ep.into())));
     }
@@ -1821,6 +1945,27 @@ mod tests {
             attached: vec![ep.to_string()],
             effects_disabled: vec![],
             modes_missing: vec![ep.to_string()],
+            wrong_slot: vec![],
+        };
+        assert_eq!(status.next_step(ep), Some(Action::Attach(ep.into())));
+    }
+
+    /// Same for an endpoint attached in a slot that does not run there (a combined Bluetooth
+    /// device still in EFX from before the slot choice): attached looks done, nothing loads,
+    /// and re-attaching is the fix.
+    #[test]
+    fn an_endpoint_attached_in_the_wrong_slot_still_needs_work() {
+        let ep = "{6cafe423-cde5-4ec1-a1e2-e3fcec778349}";
+        let status = SetupStatus {
+            registered_dll: Some(PathBuf::from("C:/x/CAGEqApo.dll")),
+            dll_present: true,
+            dll_current: true,
+            dll_readable: None,
+            gate_open: true,
+            attached: vec![ep.to_string()],
+            effects_disabled: vec![],
+            modes_missing: vec![],
+            wrong_slot: vec![ep.to_string()],
         };
         assert_eq!(status.next_step(ep), Some(Action::Attach(ep.into())));
     }
@@ -1838,6 +1983,7 @@ mod tests {
             attached: vec![],
             effects_disabled: vec![],
             modes_missing: vec![],
+            wrong_slot: vec![],
         };
         assert!(!status.machine_ready());
     }
@@ -1855,6 +2001,7 @@ mod tests {
             attached: vec![],
             effects_disabled: vec![],
             modes_missing: vec![],
+            wrong_slot: vec![],
         };
         assert!(status.machine_ready());
     }

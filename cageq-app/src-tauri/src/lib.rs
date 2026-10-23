@@ -698,6 +698,10 @@ struct ApoSetupDto {
     /// silently skipped (see `cageq_apo_backend::setup::SetupStatus::modes_missing`'s own
     /// doc). Self-healing: re-attaching rewrites the missing value.
     modes_missing: Vec<String>,
+    /// Endpoints where CAGEq is attached in a different effect slot than the one that runs
+    /// there (see `cageq_apo_backend::setup::SetupStatus::wrong_slot`) — a combined Bluetooth
+    /// device attached in EFX never loads. Self-healing the same way: re-attaching moves it.
+    wrong_slot: Vec<String>,
     /// Is CAGEq's own APO the active backend right now? Reconciled against reality on every
     /// call (see `reconcile_backend`), so finishing setup — or detaching — takes effect the
     /// next time anything asks, with no restart in between.
@@ -771,6 +775,7 @@ fn apo_setup_status(
         attached: s.attached.clone(),
         effects_disabled: s.effects_disabled.clone(),
         modes_missing: s.modes_missing.clone(),
+        wrong_slot: s.wrong_slot.clone(),
         active_backend_is_apo,
         next_step: next.as_ref().map(|a| a.argv().join(" ")),
         next_step_description: next.as_ref().map(|a| a.describe()),

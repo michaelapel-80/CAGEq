@@ -227,6 +227,7 @@
     "gateWarning": "Dieser Schritt erlaubt Windows, Audioeffekte zu laden, die nicht von Microsoft signiert sind. Der Installer von Equalizer APO setzt dieselbe Option. Anwendungen, die einen geschützten Audiopfad verlangen (manche Streamingdienste), verweigern die Wiedergabe möglicherweise, solange sie gesetzt ist.",
     "effectsDisabled": "Windows hat die Audioverbesserungen für dieses Gerät abgeschaltet, dadurch kann dort kein Effekt laufen. Beim Fortfahren werden sie wieder eingeschaltet.",
     "modesMissing": "Ein erforderlicher Registrierungswert für dieses Gerät fehlt, daher überspringt Windows den Effekt stillschweigend, obwohl er angehängt aussieht. Beim Fortfahren wird er neu geschrieben.",
+    "wrongSlot": "Die CAGEq-Engine ist in einem anderen Effekt-Slot angehängt als dem, den dieses Gerät braucht, und läuft hier daher womöglich nicht (typisch bei kombinierten Bluetooth-Geräten, die eine ältere Version angehängt hat). Beim Fortfahren wird sie in den richtigen Slot verschoben.",
     "dllUnreadable": "⚠ Das Audiodienstkonto (LOKALER DIENST) kann die Datei von CAGEqs Audio-Engine möglicherweise nicht lesen – ein Virenschutz oder eine Sicherheitsrichtlinie könnte das blockieren. Falls die Engine nicht lädt, prüfen Sie die Ausnahmen Ihres Virenschutzes für den CAGEq-Installationsordner.",
     "helperMissing": "cageq-apo-setup.exe fehlt im CAGEq-Ordner, die Einrichtung kann nicht ausgeführt werden. Bitte CAGEq neu installieren.",
     "doStep": "Weiter",
@@ -329,6 +330,8 @@
     "inconclusive": "Deine aktuelle Korrektur ist zu flach für einen zuverlässigen Test. Wähle eine Kopfhörer-Korrektur mit mehr Form (Slot A oder B) und versuche es erneut.",
     "engine_no_channelTitle": "✕ Die CAGEq-Engine läuft auf diesem Gerät nicht",
     "engine_no_channel": "Das Testsignal lief über {{device}}, aber die CAGEq-Engine wurde dafür nie gestartet: Windows hat sie für diesen Ausgang nicht geladen, deine Korrektur wird also nicht angewendet.\n\nDas passiert am häufigsten bei Bluetooth-Kopfhörern, die als mehrere Geräte erscheinen (etwa ein eigenes Freisprech-Gerät). Prüfe, ob {{device}} das Gerät ist, über das du tatsächlich hörst, und hänge die Engine dann über die Engine-Schaltfläche oben erneut an.",
+    "engine_wrong_slotTitle": "✕ Die CAGEq-Engine ist dort angehängt, wo sie nicht laufen kann",
+    "engine_wrong_slot": "Die CAGEq-Engine ist an {{device}} in einem anderen Effekt-Slot angehängt als dem, den dieses Gerät braucht, und läuft dort nicht, deine Korrektur wird also nicht angewendet. Öffne oben das Engine-Fenster und fahre fort: Die Engine wird in den richtigen Slot verschoben.",
     "engine_stalledTitle": "✕ Die CAGEq-Engine verarbeitet den Ton dieses Geräts nicht",
     "engine_stalled": "Die CAGEq-Engine ist für {{device}} geladen, verarbeitet das Testsignal aber nicht, deine Korrektur wird also nicht angewendet. Möglicherweise belegt eine andere App das Gerät im exklusiven Modus, oder der Ton läuft über ein anderes Gerät. Schließe andere Audio-Apps, prüfe, ob {{device}} das Gerät ist, über das du hörst, und versuche es erneut.",
     "deviceColor": "⚠ Das Dry-Signal ist nicht flach (±{{db}} dB) – das Ausgabegerät wendet offenbar eigene Verarbeitung an (Audioverbesserungen, Raumklang, ein fester EQ). Deaktiviere diese für eine wahrheitsgemäße Korrektur und A/B."
