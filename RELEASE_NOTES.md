@@ -1,14 +1,20 @@
-Small refinements to the spectrum, oscilloscope, frequency audition and impulse-response export.
+Bluetooth headset support for CAGEq's own engine, a clearer self-test, and chart and scope refinements.
 
-- **New:** the spectrum's window setting now shows the frequency resolution under the window
-  length, so you can see both sides of the trade-off as you tune it: a shorter window follows
-  the music more closely, a longer one separates closer tones.
-- **Changed:** the oscilloscope's Fast preset now draws the waveform without a trail. With the
-  steadier trigger from 0.17.5 there is no smear left to hide.
-- **Fixed:** the impulse-response export's preview showed the impulse chart, whose display
-  cut-off read as the end of the file. It now shows the curve and phase the file reproduces
-  exactly; the file's length is in the table below.
-- **Fixed:** auditioning a frequency (middle mouse button, or isolating a band) let loud content
-  far from it leak through, most noticeably the bass under a treble audition. It now uses a much
-  steeper filter of the same width, so only the region you're listening to comes through.
-- All changes are in the app itself; no engine update needed.
+- **Fixed (needs testing):** CAGEq's own engine never ran on some Bluetooth headsets that
+  Windows 11 shows as a combined device (stereo and hands-free in one), while Equalizer APO
+  worked on them. Windows doesn't run the effect slot CAGEq used there; CAGEq now attaches
+  those devices in the slot that does run, as Equalizer APO's installer does. If yours was
+  affected, the Engine panel offers to re-attach it. We couldn't test this on such a headset
+  ourselves, so please report whether it works for yours.
+- **New:** the self-test now checks that CAGEq's engine is actually running on the device
+  before comparing the sound, and says so directly when it isn't, instead of reporting that no
+  correction (or something unexpected) reaches the output.
+- **Changed:** the "Ideal EQ" curve is now "Target EQ" and is drawn level-matched to your
+  correction, the way auto-gain matches what you hear, so a mostly cutting correction no longer
+  sits far below it and only the shapes differ.
+- **Changed:** the oscilloscope now starts with the Fast preset's instant trace; the former
+  default is available as the new Smooth preset.
+- **New:** a saved scope default can now be deleted: with the Saved preset selected, the
+  "Save as default" button becomes "Delete default".
+- No engine update needed. Attaching a Bluetooth device in its new slot asks for administrator
+  rights once, like attaching any device.
