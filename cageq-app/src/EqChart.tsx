@@ -62,6 +62,8 @@ export type RefCurve = {
   color: string;
   label: string;
   defaultHidden?: boolean;
+  /** What the curve is, for its legend chip's tooltip — room for more than the short label. */
+  hint?: string;
   /** Draw as a solid curve, like a band series, instead of thin dotted context — for a curve that
    *  is itself the subject (the export dialog's graphic-EQ preview, which has points, not bands). */
   solid?: boolean;
@@ -676,9 +678,9 @@ export function EqChart({
 
   // Legend rows: every series, then reference curves, phase, then markers, in draw order.
   type LegendStyle = "solid" | "dashed" | "dotted" | "diamond";
-  const legend: { id: string; color: string; label: string; style: LegendStyle }[] = [
+  const legend: { id: string; color: string; label: string; style: LegendStyle; hint?: string }[] = [
     ...series.map((s) => ({ id: s.id, color: s.color, label: s.label, style: (s.muted ? "dashed" : "solid") as LegendStyle })),
-    ...refs.map((rc) => ({ id: rc.id, color: rc.color, label: rc.label, style: (rc.solid ? "solid" : "dotted") as LegendStyle })),
+    ...refs.map((rc) => ({ id: rc.id, color: rc.color, label: rc.label, style: (rc.solid ? "solid" : "dotted") as LegendStyle, hint: rc.hint })),
     ...(phase ? [{ id: phase.id, color: phase.color, label: phase.label, style: "dashed" as LegendStyle }] : []),
     ...markers.map((m) => ({ id: m.id, color: m.color, label: m.label, style: "diamond" as LegendStyle })),
   ];
@@ -1002,7 +1004,7 @@ export function EqChart({
             className={`eq-legend-item${off ? " off" : ""}`}
             aria-pressed={!off}
             onClick={() => toggle(row.id)}
-            title={off ? t("chart.show", { label: row.label }) : t("chart.hide", { label: row.label })}
+            title={(row.hint ? `${row.hint}\n` : "") + (off ? t("chart.show", { label: row.label }) : t("chart.hide", { label: row.label }))}
           >
             <svg className="eq-swatch" viewBox="0 0 18 10" width="18" height="10" aria-hidden="true">
               {row.style === "diamond" ? (

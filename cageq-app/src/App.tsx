@@ -6,6 +6,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LANGS, setLang, type LangCode } from "./i18n";
+import { loudnessDb } from "./kWeighting";
 import { Band, composedCurveDb, expandHighPass, highPassFc, HP_DEFAULT, logGrid, type ResponseModel } from "./biquad";
 import { EqChart, EQ_V_INSET_FRAC, Marker, PHASE_COLOR, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_DEFAULT, SPEC_FFT_MIN, snapFftSize } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
@@ -2553,13 +2554,34 @@ function App() {
     [autoEqBands, activeSlot, i18n.language],
   );
 
-  // The ideal correction the active slot's fit chases (§5.2): the AutoEq curve should
-  // hug it; the gap is the residual the parametric fit couldn't capture. Off for Dry.
+  // The correction to the selected target the active slot's fit chases (§5.2, AutoEq's
+  // equalization curve), drawn level-matched to the applied curve: shifted by the loudness gap
+  // between the two, in the same K-weighted pink-noise model auto-gain uses. Auto-gain already
+  // removes that gap from what is heard, so the chart removes it too and leaves only the shapes
+  // to compare; a mostly subtractive correction otherwise sits well below it. The reference moves,
+  // not the applied curve, so the curve being edited and its drag nodes stay put. Evaluated on the
+  // reference's own points. Held through an isolate audition, whose bandpass is not the
+  // correction.
+  const targetEqShift = useRef(0);
+  const targetEqPoints = useMemo(() => {
+    const ref = result?.reference_curve;
+    if (!result || !ref?.length) return null;
+    if (!isolateAudition) {
+      const freqs = Float64Array.from(ref, (p) => p.f);
+      const applied = composedCurveDb(result.filters, freqs, drawModel, sampleRate ?? undefined);
+      targetEqShift.current = loudnessDb(freqs, applied) - loudnessDb(freqs, ref.map((p) => p.db));
+    }
+    const shift = targetEqShift.current;
+    return ref.map((p) => ({ f: p.f, db: p.db + shift }));
+  }, [result, isolateAudition, drawModel, sampleRate]);
+
+  // The AutoEq curve should hug the target EQ; the gap is the residual the parametric fit
+  // couldn't capture. Off for Dry.
   const chartRefs: RefCurve[] = useMemo(() => {
     if (dryActive) return [];
     const out: RefCurve[] = [];
-    if (result?.reference_curve?.length)
-      out.push({ id: "ideal", points: result.reference_curve, color: REF_COLOR, label: tr("chart.idealEq"), defaultHidden: true });
+    if (targetEqPoints)
+      out.push({ id: "ideal", points: targetEqPoints, color: REF_COLOR, label: tr("chart.targetEq"), hint: tr("chart.targetEqHint"), defaultHidden: true });
     // Target + raw measurement — nerd overlays, off by default (share the dBr reference).
     if (targetCurve?.length)
       out.push({ id: "target", points: targetCurve, color: TARGET_COLOR, label: tr("chart.target"), defaultHidden: true });
@@ -2567,7 +2589,7 @@ function App() {
       out.push({ id: "raw", points: rawCurve, color: RAW_COLOR, label: tr("chart.raw"), defaultHidden: true });
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result, dryActive, rawCurve, targetCurve, i18n.language]);
+  }, [targetEqPoints, dryActive, rawCurve, targetCurve, i18n.language]);
 
   // Phase of the applied filter chain, on the secondary axis — a nerd overlay, off by default.
   const chartPhase: PhaseCurve | undefined = useMemo(

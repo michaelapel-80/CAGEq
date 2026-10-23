@@ -69,7 +69,8 @@
   },
 
   "chart": {
-    "idealEq": "Ideal-EQ",
+    "targetEq": "Ziel-EQ",
+    "targetEqHint": "Die Korrektur, die die Messung auf das gewählte Ziel bringt (die von AutoEq, bevor sie mit Bändern angenähert wird). Pegelangeglichen an die angewandte Kurve, so wie Auto-Gain das Gehörte angleicht, damit nur die Form verglichen wird.",
     "target": "Ziel",
     "raw": "Roh",
     "phase": "Phase",

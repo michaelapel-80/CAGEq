@@ -44,6 +44,24 @@ function kWeightRawDb(f: number): number {
   return 10 * Math.log10(mag2);
 }
 
+/** How much louder (dB, positive = louder) a curve makes pink-noise-like music: the same
+ *  K-weighted pink-noise energy model §4.1's auto-gain uses (`cageq-peq-solver`'s
+ *  `loudness_target_db`, which returns the negation of this). `freqs` ascending; each point's
+ *  pink-noise bin energy is its bin width over f (the numpy-style gradient, one-sided at the
+ *  ends), so the result does not depend on how the grid is spaced. */
+export function loudnessDb(freqs: ArrayLike<number>, curveDb: ArrayLike<number>): number {
+  const n = freqs.length;
+  let dry = 0;
+  let wet = 0;
+  for (let i = 0; i < n; i++) {
+    const width = i === 0 ? freqs[1] - freqs[0] : i === n - 1 ? freqs[n - 1] - freqs[n - 2] : (freqs[i + 1] - freqs[i - 1]) / 2;
+    const w = (width / freqs[i]) * biquadMag2(KW_S1_B, KW_S1_A, freqs[i]) * biquadMag2(KW_S2_B, KW_S2_A, freqs[i]);
+    dry += w;
+    wet += w * 10 ** (curveDb[i] / 10);
+  }
+  return 10 * Math.log10(wet / dry);
+}
+
 // Anchors the curve to 0 dB at 1 kHz, computed once — the same reference point the RTA tilt
 // already preserves a tone's true level at, so a 1 kHz tone reads identically in every tilt mode.
 const KW_REF_1K_DB = kWeightRawDb(1000);

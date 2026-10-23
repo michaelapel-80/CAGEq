@@ -69,7 +69,8 @@
   },
 
   "chart": {
-    "idealEq": "Ideal EQ",
+    "targetEq": "Target EQ",
+    "targetEqHint": "The correction that takes the measurement to the selected target (AutoEq's, before fitting it with bands). Level-matched to the applied curve, the way auto-gain matches what you hear, so only the shapes differ.",
     "target": "Target",
     "raw": "Raw",
     "phase": "Phase",
