@@ -47,17 +47,24 @@ const DIVISIONS = 10;
 // to sit at 120 because low cutoffs stopped triggering at all: the filtered waveform shrinks, and
 // any near-DC content then held it clear of the zero level. The AC-coupled level (scopeTrigger.ts)
 // removed that, so it now triggers reliably down to the knob's 20 Hz minimum.
-const DEFAULTS: Params = { trailTau: 0.06, tail: 6, glow: 0.40, beam: 3.0, bloom: 0.3, haze: 0.6, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 60, mode: "mix" }; // 5 ms/div × 10 = 50 ms
+//
+// trailTau/tail/glow: the Fast preset's values. The steady trigger leaves no smear for a trail to
+// hide, so an instant, unsmeared trace is the better first view; the former defaults live on as
+// the Smooth preset.
+const DEFAULTS: Params = { trailTau: 0.02, tail: 1, glow: 0.20, beam: 3.0, bloom: 0.3, haze: 0.6, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 60, mode: "mix" }; // 5 ms/div × 10 = 50 ms
 // Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
 // reasoning (shared verbatim: the Trail/Glow orthogonality fix keeps *steady-state* brightness
 // independent of trailTau in theory, but live tuning showed glow still needs its own adjustment
 // per preset). Here, "distribution" mainly pays off in free-run mode on dense/non-periodic
 // material, where a long window overlays many cycles into a waveform-density cloud rather than one
 // blurred average trace. Numbers below are a starting point for live tuning, not the final word.
-const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" | "glow">> = {
+// In button order, shortest persistence first.
+const PRESETS = {
   fast: { trailTau: 0.02, tail: 1, glow: 0.20 },
+  smooth: { trailTau: 0.06, tail: 6, glow: 0.40 },
   distribution: { trailTau: 0.8, tail: 40, glow: 0.8 },
-};
+} satisfies Record<string, Pick<Params, "trailTau" | "tail" | "glow">>;
+const PRESET_LABELS: Record<keyof typeof PRESETS, string> = { fast: "scope.presetFast", smooth: "scope.presetSmooth", distribution: "scope.presetDistribution" };
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
 const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler than the lane centrelines
@@ -691,31 +698,18 @@ export function TimeScope() {
               />
               <b>{msPerDiv < 1 ? msPerDiv.toFixed(1) : msPerDiv}</b>
             </label>
-            <div className="vs-tune-row vs-tune-check" title={t("scope.presetHint")}>
+            <div className="vs-tune-row vs-tune-check" title={t("scope.presetHintTime")}>
               <span className="vs-tune-label">{t("scope.preset")}</span>
               <div className="pl-toggle vs-tune-seg">
-                <button
-                  type="button"
-                  className={
-                    params.trailTau === PRESETS.fast.trailTau && params.tail === PRESETS.fast.tail && params.glow === PRESETS.fast.glow ? "on" : ""
-                  }
-                  onClick={() => setParams((prev) => ({ ...prev, ...PRESETS.fast }))}
-                >
-                  {t("scope.presetFast")}
-                </button>
-                <button
-                  type="button"
-                  className={
-                    params.trailTau === PRESETS.distribution.trailTau &&
-                    params.tail === PRESETS.distribution.tail &&
-                    params.glow === PRESETS.distribution.glow
-                      ? "on"
-                      : ""
-                  }
-                  onClick={() => setParams((prev) => ({ ...prev, ...PRESETS.distribution }))}
-                >
-                  {t("scope.presetDistribution")}
-                </button>
+                {(Object.keys(PRESETS) as (keyof typeof PRESETS)[]).map((key) => {
+                  const pr = PRESETS[key];
+                  const on = params.trailTau === pr.trailTau && params.tail === pr.tail && params.glow === pr.glow;
+                  return (
+                    <button key={key} type="button" className={on ? "on" : ""} onClick={() => setParams((prev) => ({ ...prev, ...pr }))}>
+                      {t(PRESET_LABELS[key])}
+                    </button>
+                  );
+                })}
                 {savedDefault && (
                   <button
                     type="button"
