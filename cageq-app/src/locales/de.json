@@ -327,6 +327,10 @@
     "nosignal": "Der Loopback hat fast nichts aufgenommen, es gibt also nichts zu vergleichen – das Ausgabegerät wurde vermutlich deaktiviert oder entfernt. Prüfe, ob es aktiv ist, und versuche es erneut. (Lautstärke/Stummschaltung des Geräts beeinflussen diesen Test nicht; nur das Stummschalten von CAGEq selbst im Windows-Lautstärkemixer würde es.)",
     "inconclusiveTitle": "Messung nicht möglich",
     "inconclusive": "Deine aktuelle Korrektur ist zu flach für einen zuverlässigen Test. Wähle eine Kopfhörer-Korrektur mit mehr Form (Slot A oder B) und versuche es erneut.",
+    "engine_no_channelTitle": "✕ Die CAGEq-Engine läuft auf diesem Gerät nicht",
+    "engine_no_channel": "Das Testsignal lief über {{device}}, aber die CAGEq-Engine wurde dafür nie gestartet: Windows hat sie für diesen Ausgang nicht geladen, deine Korrektur wird also nicht angewendet.\n\nDas passiert am häufigsten bei Bluetooth-Kopfhörern, die als mehrere Geräte erscheinen (etwa ein eigenes Freisprech-Gerät). Prüfe, ob {{device}} das Gerät ist, über das du tatsächlich hörst, und hänge die Engine dann über die Engine-Schaltfläche oben erneut an.",
+    "engine_stalledTitle": "✕ Die CAGEq-Engine verarbeitet den Ton dieses Geräts nicht",
+    "engine_stalled": "Die CAGEq-Engine ist für {{device}} geladen, verarbeitet das Testsignal aber nicht, deine Korrektur wird also nicht angewendet. Möglicherweise belegt eine andere App das Gerät im exklusiven Modus, oder der Ton läuft über ein anderes Gerät. Schließe andere Audio-Apps, prüfe, ob {{device}} das Gerät ist, über das du hörst, und versuche es erneut.",
     "deviceColor": "⚠ Das Dry-Signal ist nicht flach (±{{db}} dB) – das Ausgabegerät wendet offenbar eigene Verarbeitung an (Audioverbesserungen, Raumklang, ein fester EQ). Deaktiviere diese für eine wahrheitsgemäße Korrektur und A/B."
   },
 

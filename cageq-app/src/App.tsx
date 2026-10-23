@@ -464,7 +464,14 @@ type SelfTestVerdict =
   | { kind: "fail" }
   | { kind: "mismatch"; r: number; deviceColorDb?: number }
   | { kind: "nosignal" }
-  | { kind: "inconclusive" };
+  | { kind: "inconclusive" }
+  // CAGEq's own engine is the active backend, our own test signal is playing through the device,
+  // and yet its control channel is missing ("no_channel": Windows never loaded the engine for this
+  // output) or its frame counter isn't advancing ("stalled"). Decided before the spectra are
+  // compared at all: the loopback would otherwise report either nothing applied, or, on devices
+  // with processing of their own (common on Bluetooth headphones), something unrelated shaping
+  // the output, both less clear than the engine's own state.
+  | { kind: "engine"; channel: "no_channel" | "stalled" };
 // Residual RMS of `y` after removing its best-fit line vs `x` — i.e. how much the curve deviates
 // from a straight (tilted) line. Used to judge Dry-pink flatness: a broadband tilt/gain is allowed
 // (source slope, device volume), but spectral shaping (peaks/dips/roll-off) shows up in the residual.
@@ -1768,6 +1775,22 @@ function App() {
       await invoke("start_test_signal", { device: deviceId || null });
       // 1) measure the current correction, 2) bypass to Dry and measure the reference, 3) restore.
       const corrected = await capture(500, 1500); // fade-in + settle, then capture
+      // With CAGEq's own engine active, the test signal has been playing through the device for
+      // two seconds by now, so the engine must have a live channel with an advancing frame
+      // counter. Each read samples the counter for ~80 ms; a few tries ride out a single
+      // unlucky window. `live_channel` is null whenever Equalizer APO is the backend.
+      const endpoint = selectedDevice?.eqapo_pattern ?? null;
+      if (endpoint !== null) {
+        let channel: string | null = null;
+        for (let i = 0; i < 3 && channel !== "processing"; i++) {
+          channel = (await invoke<ApoSetupStatus>("apo_setup_status", { endpoint })).live_channel;
+          if (channel === null) break;
+        }
+        if (channel === "no_channel" || channel === "stalled") {
+          setSelfTest({ phase: "done", verdict: { kind: "engine", channel } });
+          return;
+        }
+      }
       if (corrected.length < 3) {
         // Loopback produced nothing (device disabled/removed) — don't bother toggling Dry.
         setSelfTest({ phase: "done", verdict: { kind: "nosignal" } });
@@ -2756,12 +2779,15 @@ function App() {
                         ? "mismatchTitle"
                         : v.kind === "nosignal"
                           ? "nosignalTitle"
-                          : "inconclusiveTitle";
-                const color = v.kind === "pass" ? "#16a34a" : v.kind === "fail" ? "#c0392b" : "#b8860b";
+                          : v.kind === "engine"
+                            ? `engine_${v.channel}Title`
+                            : "inconclusiveTitle";
+                const textKey = v.kind === "engine" ? `engine_${v.channel}` : v.kind;
+                const color = v.kind === "pass" ? "#16a34a" : v.kind === "fail" || v.kind === "engine" ? "#c0392b" : "#b8860b";
                 return (
                   <>
                     <p style={{ marginTop: 0, color, fontWeight: 600 }}>{tr(`selfTest.${titleKey}`)}</p>
-                    <p style={{ fontSize: "0.9em", whiteSpace: "pre-line" }}>{tr(`selfTest.${v.kind}`, { r: pct })}</p>
+                    <p style={{ fontSize: "0.9em", whiteSpace: "pre-line" }}>{tr(`selfTest.${textKey}`, { r: pct, device: selectedDevice?.name ?? "" })}</p>
                     {(v.kind === "pass" || v.kind === "mismatch") && (v.deviceColorDb ?? 0) > DEVICE_COLOR_DB && (
                       <p style={{ fontSize: "0.85em", color: "#b8860b", marginTop: "-0.3em" }}>
                         {tr("selfTest.deviceColor", { db: (v.deviceColorDb ?? 0).toFixed(1) })}
