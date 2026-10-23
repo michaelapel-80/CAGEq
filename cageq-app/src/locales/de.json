@@ -191,6 +191,8 @@
     "trigFilter": "Trigger-Filter",
     "trigFilterHint": "Tiefpass-Grenzfrequenz vor der Trigger-Flankenerkennung, damit der Trigger die grobe Signalform erfasst statt bei schnellen Anteilen zu flattern",
     "saveDefault": "Als Standard speichern",
+    "deleteDefault": "Standard löschen",
+    "deleteDefaultHint": "Den gespeicherten Standard (das Preset „Gespeichert“) löschen. Jederzeit wieder speicherbar.",
     "reset": "Reset"
   },
 

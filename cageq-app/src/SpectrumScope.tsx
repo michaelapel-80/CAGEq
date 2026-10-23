@@ -428,7 +428,7 @@ export function SpectrumScope({
   const cursorElRef = useRef<HTMLDivElement | null>(null);
   const cursorHzRef = useRef<HTMLSpanElement | null>(null);
   const cursorDbRef = useRef<HTMLSpanElement | null>(null);
-  const { params, setParams, saveAsDefault, resetToFactory, savedDefault } = useTunableParams("cageq-spectrum-params", DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-spectrum-params", DEFAULTS);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -967,8 +967,15 @@ export function SpectrumScope({
           <div className="vs-tuning">
             <div className="vs-tune-head">
               <span className="vs-tune-title">{t("scope.tune")}</span>
-              <button type="button" className="vs-tune-reset" onClick={saveAsDefault}>
-                {t("scope.saveDefault")}
+              {/* While the Saved preset is showing, saving again would change nothing: the button
+                  offers to delete it instead (see useTunableParams). */}
+              <button
+                type="button"
+                className="vs-tune-reset"
+                title={atSavedDefault ? t("scope.deleteDefaultHint") : undefined}
+                onClick={atSavedDefault ? clearSavedDefault : saveAsDefault}
+              >
+                {t(atSavedDefault ? "scope.deleteDefault" : "scope.saveDefault")}
               </button>
               <button type="button" className="vs-tune-reset" onClick={resetToFactory}>
                 {t("scope.reset")}
@@ -1005,7 +1012,7 @@ export function SpectrumScope({
                 {savedDefault && (
                   <button
                     type="button"
-                    className={JSON.stringify(params) === JSON.stringify(savedDefault) ? "on" : ""}
+                    className={atSavedDefault ? "on" : ""}
                     title={t("scope.presetSavedHint")}
                     onClick={() => setParams(savedDefault)}
                   >

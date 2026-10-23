@@ -31,7 +31,9 @@ function readStored<T extends object>(key: string, defaults: T): T | null {
  *
  * `resetToFactory` clears the *last-used* slot and returns `params` to the hard-coded `defaults` —
  * it does NOT touch the saved default, which is now a persistent preset in its own right, same as
- * any other curated preset, not something Reset should discard.
+ * any other curated preset, not something Reset should discard. `clearSavedDefault` is the one way
+ * to drop it; the views offer it on their "Save as default" button while `atSavedDefault` (saving
+ * again would change nothing), so it needs no control of its own.
  */
 export function useTunableParams<T extends object>(storageKey: string, defaults: T) {
   const lastKey = `${storageKey}-last`;
@@ -61,5 +63,17 @@ export function useTunableParams<T extends object>(storageKey: string, defaults:
     setParams(defaults);
   };
 
-  return { params, setParams, saveAsDefault, resetToFactory, savedDefault };
+  const clearSavedDefault = () => {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      // Same rationale as the effect above.
+    }
+    setSavedDefault(null);
+  };
+
+  /** The current params are the saved default (its preset button is the highlighted one). */
+  const atSavedDefault = savedDefault !== null && JSON.stringify(params) === JSON.stringify(savedDefault);
+
+  return { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault };
 }

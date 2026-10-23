@@ -191,6 +191,8 @@
     "trigFilter": "Trig filter",
     "trigFilterHint": "Low-pass cutoff applied before trigger edge detection, so the trigger locks onto the waveform's broad shape instead of jittering on fast content",
     "saveDefault": "Save as default",
+    "deleteDefault": "Delete default",
+    "deleteDefaultHint": "Delete your saved default (the Saved preset). Save again any time.",
     "reset": "Reset"
   },
 
