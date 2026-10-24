@@ -205,7 +205,8 @@
     "loadedDirtyTitle": "Slot {{slot}}: “{{name}}” {{ver}} — edited since loading (unsaved)",
     "dirtyAria": "edited since loading",
     "shortcuts": "A / S / D switch slots, W toggles the loudness mode — even without looking at the screen.",
-    "finalWarning": "⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched — a louder slot can just sound \"better\". Press <0>W</0> for Comparison to A/B fairly."
+    "finalWarning": "⚠ Final volume: slots aren't loudness-matched. <0>W</0> switches to Comparison.",
+    "finalWarningHint": "⚠ Final volume: each slot plays at its own max volume, so A/B/Dry aren't loudness-matched — a louder slot can just sound \"better\". Press W for Comparison to A/B fairly."
   },
 
 
@@ -346,8 +347,10 @@
     "finalSub": "clipping safe",
     "basePregain": "Base pre-gain",
     "ispHeadroom": "True-peak headroom",
-    "comparisonDesc": "Every curve ends up equally loud, so A/B comparisons judge timbre, not level.",
-    "finalDesc": "Maximum volume, less a small true-peak buffer — base pre-gain and loudness match are disabled. A sample stream at 0 dBFS can still peak louder than that between samples on some DACs (inter-sample peaks); the buffer above guards against it.",
+    "comparisonDesc": "All slots equally loud, so A/B judges timbre, not level.",
+    "comparisonDescHint": "Each slot's preamp is set so its curve plays as loud as the uncorrected signal (estimated from K-weighted pink noise, a stand-in for music's average spectrum), all lowered by the base pre-gain. Switching A/B/Dry then changes timbre, not level.",
+    "finalDesc": "Maximum volume, minus a small true-peak buffer.",
+    "finalDescHint": "Maximum volume, less a small true-peak buffer — base pre-gain and loudness match are disabled. A sample stream at 0 dBFS can still peak louder than that between samples on some DACs (inter-sample peaks); the buffer above guards against it.",
     "confirmToggle": "Confirm before switching to Final volume"
   },
 

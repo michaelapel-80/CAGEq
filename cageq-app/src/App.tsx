@@ -3567,7 +3567,7 @@ function App() {
               </div>
               <p style={{ fontSize: "0.75em", opacity: 0.6, margin: "0.5em 0 0" }}>{tr("compare.shortcuts")}</p>
               {loudness?.mode === "FinalVolume" && (slotInputs.A !== null || slotInputs.B !== null) && (
-                <p style={{ color: "#b8860b", fontSize: "0.78em", margin: "0.4em 0 0" }}>
+                <p style={{ color: "#b8860b", fontSize: "0.78em", margin: "0.4em 0 0" }} title={tr("compare.finalWarningHint")}>
                   <Trans i18nKey="compare.finalWarning" components={[<kbd />]} />
                 </p>
               )}
@@ -3613,7 +3613,13 @@ function App() {
                 />
                 dB
               </label>
-              <p style={{ fontSize: "0.75em", opacity: 0.7, margin: "0.5em 0 0" }}>
+              {/* One short line per mode; the full explanation is the tooltip. This panel says what the
+                  mode does, the Compare panel's warning what it means for A/B, so neither repeats
+                  the other. */}
+              <p
+                style={{ fontSize: "0.75em", opacity: 0.7, margin: "0.5em 0 0" }}
+                title={loudness.mode === "Comparison" ? tr("loudness.comparisonDescHint") : tr("loudness.finalDescHint")}
+              >
                 {loudness.mode === "Comparison" ? tr("loudness.comparisonDesc") : tr("loudness.finalDesc")}
               </p>
               <label style={{ fontSize: "0.75em", opacity: 0.8, display: "flex", alignItems: "center", gap: "0.4em", marginTop: "0.5em" }}>
