@@ -20,13 +20,16 @@ the target machine needs **no Python** — the app never spawns one.
      ("needs setup") until something is attached; click it and step through the setup panel —
      three elevated steps the first time (register, open the gate, then attach the device;
      each is its own UAC prompt), just one more Attach prompt per additional device after that.
+     No reboot: the setup restarts Windows' audio service itself, which interrupts playback
+     machine-wide for a moment.
    * **Equalizer APO** — if you already have it, or want its other features too. Install it,
-     run its Configurator (`DeviceSelector.exe`), tick the output device, and reboot; CAGEq
-     detects and drives it automatically once it's there.
+     run its Configurator (`DeviceSelector.exe`) and tick the output device; it restarts the
+     audio service the same way, so no reboot either. CAGEq detects and drives it automatically
+     once it's there.
 3. Pick a headphone + measurement, a target, and **Apply** — audio changes.
 
 That's it. First launch fetches the ~6800-headphone AutoEq index once (~9 s, needs
-internet); measurement CSVs are fetched on demand and cached under `%TEMP%\cageq-cache`.
+internet); measurement CSVs are fetched on demand and cached under `%LOCALAPPDATA%\CAGEq\cache`.
 With neither engine attached yet, CAGEq still launches normally (it points Equalizer APO's
 backend at a harmless scratch folder rather than erroring) and simply waits for setup.
 
@@ -35,9 +38,8 @@ changing playback there directly — set `CAGEQ_CONFIG_DIR=<folder>` to write to
 folder instead (there's no in-app indicator of this; check the folder itself to confirm).
 This override is specific to the Equalizer APO path; CAGEq's own engine always keeps its
 per-endpoint configuration under the fixed `%ProgramData%\CAGEq\apo` (not redirectable —
-`audiodg` needs to read it as
-LocalService, the same constraint the DLL's own install location is under, see "CAGEq's own
-APO" below). Launching CAGEq twice focuses the existing window (single instance).
+`audiodg` needs to read it as LocalService, the same constraint the DLL's own install location
+is under, see "CAGEq's own APO" below). Launching CAGEq twice focuses the existing window (single instance).
 
 ## For maintainers (building the installer)
 
@@ -66,7 +68,7 @@ cd ..
 # 2. Build the installer
 cd cageq-app
 npm run tauri build -- --bundles nsis
-#   -> src-tauri\target\release\bundle\nsis\CAGEq_<version>_x64-setup.exe  (~39 MB)
+#   -> src-tauri\target\release\bundle\nsis\CAGEq_<version>_x64-setup.exe  (~4 MB)
 ```
 
 Step 2 will **refuse to run** (`beforeBuildCommand` → `scripts\check-apo-staleness.ps1 -Block`) if
@@ -125,7 +127,7 @@ zero actual behaviour change. The trade-off: bumping `APO_VERSION` by hand in `c
 lib.rs` is now a **real release step**, not automatic — forgetting it means a genuine APO change
 ships without the update prompt ever firing. Bump it for anything a user should actually be
 prompted to update for (DSP math, the config format, `control::CONTROL_VERSION`, ramp timing);
-don't for anything else. This is exactly why step 3 above refuses to build with a stale staged
+don't for anything else. This is exactly why step 2 above refuses to build with a stale staged
 DLL: shipping an update whose *bundled* copy is itself stale would make that whole detection
 meaningless.
 
