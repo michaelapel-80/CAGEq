@@ -8,7 +8,37 @@
  * the strongest FFT bin in each span) around the cursor, and takes the frequency from the
  * matching `peak_hz` / `peak_hz_lin`, which the backend refines from the raw FFT. The display
  * bins alone would only place it to within a bin (~550 Hz near 19 kHz on the log axis).
+ *
+ * Only while Shift is held: a cursor that jumps onto every peak it passes is distracting when
+ * you are not reading one. Where it could snap but Shift is up, the cursor label shows a faint
+ * "⇧" — the one hint, and only where it applies.
  */
+
+// Whether Shift is held, for every view in this window: one listener set, read each frame. Mouse
+// events also report it (`noteShift`), which corrects it after a key-up the window missed while
+// another window had focus.
+let shiftHeld = false;
+if (typeof window !== "undefined") {
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Shift") shiftHeld = true;
+  });
+  window.addEventListener("keyup", (e) => {
+    if (e.key === "Shift") shiftHeld = false;
+  });
+  window.addEventListener("blur", () => {
+    shiftHeld = false;
+  });
+}
+
+/** Is a snap asked for right now (Shift held)? */
+export function snapRequested(): boolean {
+  return shiftHeld;
+}
+
+/** Take Shift's state from a mouse event over a spectrum view. */
+export function noteShift(e: { shiftKey: boolean }): void {
+  shiftHeld = e.shiftKey;
+}
 
 /** How far from the cursor a peak may be, as a fraction of the plot width (~10 px on a typical
  *  chart): close enough that the snap reads as "the peak I'm pointing at", not a jump. */

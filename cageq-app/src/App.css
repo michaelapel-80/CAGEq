@@ -1000,6 +1000,11 @@ select:disabled {
 .ss-cursor-db {
   color: rgba(255, 255, 255, 0.55);
 }
+/* Shown only where the cursor could snap to a peak: holding Shift does (peakSnap.ts). Deliberately
+   faint, the feature's only hint. */
+.ss-cursor-hint {
+  color: rgba(255, 255, 255, 0.35);
+}
 /* Corner toolbar (pop-out + tuning gear): dim until hovered/open, so the scope stays the focus. */
 .vs-tools {
   position: absolute;

@@ -8,7 +8,7 @@ import { TiltGlyph } from "./TiltGlyph";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
-import { fmtSnappedHz, snapBin } from "./peakSnap";
+import { fmtSnappedHz, noteShift, snapBin, snapRequested } from "./peakSnap";
 
 /**
  * §5.2 interactive diagram.
@@ -457,6 +457,7 @@ export function EqChart({
   const cursorElRef = useRef<HTMLDivElement | null>(null);
   const cursorHzRef = useRef<HTMLSpanElement | null>(null);
   const cursorDbRef = useRef<HTMLSpanElement | null>(null);
+  const cursorHintRef = useRef<HTMLSpanElement | null>(null); // the faint "⇧": Shift would snap here
   const { params: specParams, setParams: setSpecParams, saveAsDefault: saveSpecDefault, resetToFactory: resetSpecFactory } = useTunableParams(
     "cageq-eqchart-spec-params",
     SPEC_DEFAULTS,
@@ -929,8 +930,9 @@ export function EqChart({
         let vx = hoverFrac * W;
         let hz = Math.exp(lnMin + ((vx - PAD.l) / (W - PAD.l - PAD.r)) * lnSpan);
         let dbText: string | null = null;
-        // Near a real peak the cursor snaps to it (peakSnap.ts): the line moves onto the peak and
-        // the readout shows its refined frequency and true level. The snap decision reads the
+        // Near a real peak, with Shift held, the cursor snaps to it (peakSnap.ts): the line moves
+        // onto the peak and the readout shows its refined frequency and true level; without Shift
+        // the label only hints that it could. The snap decision reads the
         // uncorrected per-bin peaks; the undistort correction is a smooth EQ curve and cannot
         // move a local maximum within the few bins searched.
         const snap =
@@ -940,7 +942,9 @@ export function EqChart({
                 clamp(((Math.log(hz) - Math.log(spectrum.f_min)) / (Math.log(spectrum.f_max) - Math.log(spectrum.f_min))) * (spectrum.peak_db.length - 1), 0, spectrum.peak_db.length - 1),
               )
             : null;
-        if (spectrum && snap !== null && spectrum.peak_hz[snap] > 0) {
+        const snappable = !!spectrum && snap !== null && spectrum.peak_hz[snap] > 0;
+        const snapped = snappable && snapRequested();
+        if (spectrum && snap !== null && snapped) {
           hz = spectrum.peak_hz[snap];
           vx = PAD.l + ((Math.log(hz) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
           const corrDb =
@@ -983,7 +987,8 @@ export function EqChart({
           dbText = `${(raw - corrDb).toFixed(1)} dB`;
         }
         cursorShown = true;
-        if (cursorHzRef.current) cursorHzRef.current.textContent = snap !== null ? fmtSnappedHz(hz) : fmtCursorHz(hz);
+        if (cursorHzRef.current) cursorHzRef.current.textContent = snapped ? fmtSnappedHz(hz) : fmtCursorHz(hz);
+        if (cursorHintRef.current) cursorHintRef.current.style.display = snappable && !snapped ? "" : "none";
         if (cursorDbRef.current) cursorDbRef.current.textContent = dbText;
         if (cursorElRef.current) {
           // A CSS percentage of the *plot rect*, not of the whole box — matches `vx`'s own PAD.l
@@ -1098,6 +1103,7 @@ export function EqChart({
       onMouseMove={(e) => {
         const r = svgRef.current!.getBoundingClientRect();
         hoverRef.current = clamp((e.clientX - r.left) / r.width, 0, 1);
+        noteShift(e);
       }}
       onMouseLeave={() => {
         hoverRef.current = null;
@@ -1390,6 +1396,9 @@ export function EqChart({
       <div className="ss-cursor" ref={cursorElRef} aria-hidden="true">
         <span ref={cursorHzRef} className="ss-cursor-hz" />
         <span ref={cursorDbRef} className="ss-cursor-db" />
+        <span ref={cursorHintRef} className="ss-cursor-hint" style={{ display: "none" }}>
+          ⇧
+        </span>
       </div>
 
       {/* Spectrum-backdrop tuning — only when there's a backdrop to tune (see SpecParams' doc
