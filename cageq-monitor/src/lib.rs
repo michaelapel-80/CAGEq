@@ -82,6 +82,13 @@ pub struct SpectrumUpdate {
     /// hover cursor) — as a curve it would be a poor density estimator (biased high, noisy) for
     /// broadband material, which is exactly why it's a second field and not a `db` replacement.
     pub peak_db: Vec<f32>,
+    /// One-to-one with `peak_db`: the frequency (Hz) of the linear FFT bin `peak_db` took its
+    /// level from, refined to sub-bin precision the same way `find_peaks` refines its peaks
+    /// (`interpolate_peak`). The display bins are far coarser than the FFT at high frequency
+    /// (240 log bins span ~550 Hz each near 19 kHz), so this is what lets the hover cursor snap to
+    /// a quiet line the peak finder never reports and still read its frequency to about a hertz.
+    /// 0 where the span holds no power at all.
+    pub peak_hz: Vec<f32>,
     /// `db`, but *before* the density-normalization fix (`gaussian_power`'s own doc, "A FOURTH
     /// correction") — the same Gaussian-weighted *sum* that function computes on the way to its
     /// own density average (`acc`, its second return value), calibrated with its own constant
@@ -119,6 +126,8 @@ pub struct SpectrumUpdate {
     /// SpectrumScope (either) can each just read whichever fields they want.
     pub db_lin: Vec<f32>,
     pub peak_db_lin: Vec<f32>,
+    /// `peak_hz`'s counterpart for `peak_db_lin`.
+    pub peak_hz_lin: Vec<f32>,
     /// `db_lin`'s counterpart to `db_raw` — see that field's own doc.
     pub db_lin_raw: Vec<f32>,
     /// `false` when the endpoint produced no audio this window (same silence test as
@@ -425,7 +434,7 @@ mod windows_impl {
     /// silence gate — this floor only bounds `db`/`peak_db`'s numeric value, and is set deliberately
     /// far below the visible range so the hover/peak readout can report a genuine sub-floor
     /// measurement (e.g. `peak_db`'s undiluted per-bin reading, which correctly scales with the
-    /// real analysis window via FFT processing gain for incoherent content — see `max_power`'s
+    /// real analysis window via FFT processing gain for incoherent content — see `max_power_at`'s
     /// doc) instead of being clamped to a number that looks like a limit but isn't one.
     const SPEC_FLOOR: f32 = -210.0;
 
@@ -1038,10 +1047,32 @@ mod windows_impl {
     /// here isn't about a smooth *shape*: this only ever gets read at a single reported frequency
     /// (a peak, the cursor), so there's no adjacent-bin sweep to jump between and nothing for a
     /// hard edge to visibly break.
-    fn max_power(power: &[f32], lo: f32, hi: f32) -> f32 {
+    ///
+    /// Also returns the index of the linear bin it came from (the first, on a tie), for
+    /// `SpectrumUpdate::peak_hz`.
+    fn max_power_at(power: &[f32], lo: f32, hi: f32) -> (f32, usize) {
         let lo_i = lo.max(0.0).floor() as usize;
         let hi_i = (hi.max(0.0).ceil() as usize).min(power.len().saturating_sub(1));
-        power[lo_i..=hi_i].iter().copied().fold(0.0f32, f32::max)
+        let mut best = (0.0f32, lo_i);
+        for (i, &p) in power.iter().enumerate().take(hi_i + 1).skip(lo_i) {
+            if p > best.0 {
+                best = (p, i);
+            }
+        }
+        best
+    }
+
+    /// Sub-bin frequency (Hz) of a maximum at linear bin `i`: [`interpolate_peak`] on the three
+    /// bins around it, in dB — the same refinement `find_peaks` applies to its peaks.
+    fn refined_hz(power: &[f32], i: usize, bin_hz: f32) -> f32 {
+        let n = power.len();
+        if i == 0 || i + 1 >= n {
+            return bin_hz * i as f32;
+        }
+        let db = |p: f32| if p > 0.0 { 10.0 * p.log10() } else { -400.0 };
+        let v = [db(power[i - 1]), db(power[i]), db(power[i + 1])];
+        let (ri, _) = interpolate_peak(&v, 1, 3);
+        bin_hz * (i as f32 - 1.0 + ri)
     }
 
     fn to_db(linear: f32) -> f32 {
@@ -1521,10 +1552,18 @@ mod windows_impl {
         /// (`Spectrum::new`'s `ranges` vs `ranges_lin`); this half doesn't know or care which.
         /// Returns `(db, db_raw, peak_db)` — see `SpectrumUpdate::db_raw`'s own doc for what it is
         /// and why it's worth a second field alongside `db`.
-        fn reduce(avg_power: &[f32], power_scale: f32, raw_power_scale: f32, ranges: &[(f32, f32)]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        /// One set of display bins: `(db, db_raw, peak_db, peak_hz)`.
+        fn reduce(
+            avg_power: &[f32],
+            power_scale: f32,
+            raw_power_scale: f32,
+            bin_hz: f32,
+            ranges: &[(f32, f32)],
+        ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
             let mut db = Vec::with_capacity(ranges.len());
             let mut db_raw = Vec::with_capacity(ranges.len());
             let mut peak_db = Vec::with_capacity(ranges.len());
+            let mut peak_hz = Vec::with_capacity(ranges.len());
             for &(lo, hi) in ranges {
                 // Gaussian-weighted integral of linear power across the bin's own span, not
                 // the single loudest sample in it — see `gaussian_power`'s doc for the full case
@@ -1557,23 +1596,24 @@ mod windows_impl {
 
                 // Same span, but the true (undiluted) level — see `peak_db`'s own doc on
                 // `SpectrumUpdate` for why this is a second reduction rather than reusing `power`.
-                let pk = max_power(avg_power, lo, hi);
+                let (pk, pk_i) = max_power_at(avg_power, lo, hi);
                 let pk_cur = if pk > 0.0 {
                     (10.0 * (pk * power_scale).log10()).max(SPEC_FLOOR)
                 } else {
                     SPEC_FLOOR
                 };
                 peak_db.push(round_to(pk_cur, 1));
+                peak_hz.push(if pk > 0.0 { round_to(refined_hz(avg_power, pk_i, bin_hz), 1) } else { 0.0 });
             }
-            (db, db_raw, peak_db)
+            (db, db_raw, peak_db, peak_hz)
         }
 
         /// Collapse the averaged power onto both the log and linear display bins (dB).
         fn snapshot(&mut self, signal: bool) -> SpectrumUpdate {
-            let (db, db_raw, peak_db) =
-                Self::reduce(&self.avg_power, self.power_scale, self.raw_power_scale, &self.ranges);
-            let (db_lin, db_lin_raw, peak_db_lin) =
-                Self::reduce(&self.avg_power, self.power_scale, self.raw_power_scale, &self.ranges_lin);
+            let (db, db_raw, peak_db, peak_hz) =
+                Self::reduce(&self.avg_power, self.power_scale, self.raw_power_scale, self.bin_hz, &self.ranges);
+            let (db_lin, db_lin_raw, peak_db_lin, peak_hz_lin) =
+                Self::reduce(&self.avg_power, self.power_scale, self.raw_power_scale, self.bin_hz, &self.ranges_lin);
             let hires = self.hires_peaks.load(Ordering::Relaxed);
             let peaks = find_peaks(
                 &self.avg_power,
@@ -1586,9 +1626,11 @@ mod windows_impl {
             SpectrumUpdate {
                 db,
                 peak_db,
+                peak_hz,
                 db_raw,
                 db_lin,
                 peak_db_lin,
+                peak_hz_lin,
                 db_lin_raw,
                 signal,
                 f_min: SPEC_F_MIN,
@@ -2299,7 +2341,7 @@ mod windows_impl {
         /// The reason `peak_db` exists at all: `db`'s density-normalized reduction genuinely
         /// dilutes an isolated tone at HF (the accepted ~19dB droop — see `gaussian_power`'s doc,
         /// and `decimation_spike.rs`'s `production_formula_tone_and_pink_noise_behavior` for the
-        /// measured curve). A full-scale 12kHz tone is well up that droop; `max_power`'s job is to
+        /// measured curve). A full-scale 12kHz tone is well up that droop; `max_power_at`'s job is to
         /// still report it at ~0dBFS despite `db` reporting it well below that at the same bin.
         #[test]
         fn peak_db_recovers_a_full_scale_tone_that_db_droops() {
@@ -2350,6 +2392,43 @@ mod windows_impl {
                 update.peak_db[peak_i],
                 update.db[peak_i]
             );
+        }
+
+        /// `peak_hz` reads a quiet high tone's frequency to within a hertz, although the display bin
+        /// it falls in spans hundreds: the job the hover cursor's peak snap relies on. A -70 dBFS
+        /// tone at 18.8 kHz, off any FFT bin centre, on both the log and the linear axis.
+        #[test]
+        fn peak_hz_reads_a_quiet_high_tone_to_within_a_hertz() {
+            let rate = 48_000u32;
+            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
+            let freq = 18_812.3f64;
+            let amp = 10f64.powf(-70.0 / 20.0);
+            let step = 2.0 * std::f64::consts::PI * freq / rate as f64;
+            let mut phase = 0.0f64;
+            let mut buf = vec![0.0f32; 4096];
+            for _ in 0..(rate as usize * 2 / buf.len()) {
+                for s in buf.iter_mut() {
+                    *s = (amp * phase.sin()) as f32;
+                    phase += step;
+                }
+                spec.push(&buf);
+            }
+            let update = spec.snapshot(true);
+            for (levels, hz, axis) in [(&update.peak_db, &update.peak_hz, "log"), (&update.peak_db_lin, &update.peak_hz_lin, "linear")] {
+                let i = levels
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .map(|(i, _)| i)
+                    .unwrap();
+                assert!(
+                    (hz[i] as f64 - freq).abs() < 1.0,
+                    "{axis}: peak_hz {} Hz for a {freq} Hz tone (bin {i}, {} dB)",
+                    hz[i],
+                    levels[i]
+                );
+                assert!((levels[i] + 70.0).abs() < 1.5, "{axis}: level {} dB for a -70 dB tone", levels[i]);
+            }
         }
 
         /// The actual claim behind moving Tilt server-side (see `SpectrumUpdate::db_raw`'s own

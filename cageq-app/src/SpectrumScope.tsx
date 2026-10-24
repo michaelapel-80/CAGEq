@@ -12,6 +12,7 @@ import { traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
 import { FftSizeRow, type SpectrumData } from "./EqChart";
 import type { ScopeEq } from "./Vectorscope";
+import { fmtSnappedHz, snapBin } from "./peakSnap";
 
 /** Live-tunable render parameters — same rationale as Vectorscope/TimeScope's panels. `trailTau`
  *  is a genuine phosphor decay time constant, and `tail` the multiplier applied to it for faint
@@ -829,7 +830,22 @@ export function SpectrumScope({
       const hoverFrac = hoverRef.current;
       if (hoverFrac !== null) {
         cursorShown = true;
-        const x = hoverFrac * W;
+        let xFrac = hoverFrac;
+        let hz = p.linear
+          ? F_MIN + hoverFrac * (F_MAX - F_MIN)
+          : Math.exp(Math.log(F_MIN) + hoverFrac * (Math.log(F_MAX) - Math.log(F_MIN)));
+        let dbText = PEAK_PLACEHOLDER_DB;
+        // Near a real peak the cursor snaps to it (peakSnap.ts): the line moves onto the peak and
+        // the readout shows its refined frequency and true level, from the same undistorted
+        // per-bin peaks (`pScratch`) the plain reading below uses.
+        const peakHz = s ? (p.linear ? s.peak_hz_lin : s.peak_hz) : undefined;
+        const snap = n >= 3 && s && s.signal && peakHz?.length === n ? snapBin(pScratch.subarray(0, n), hoverFrac * (n - 1)) : null;
+        if (snap !== null && peakHz && peakHz[snap] > 0) {
+          hz = peakHz[snap];
+          xFrac = p.linear ? (hz - F_MIN) / (F_MAX - F_MIN) : Math.log(hz / F_MIN) / Math.log(F_MAX / F_MIN);
+          dbText = `${pScratch[snap].toFixed(1)} dB`;
+        }
+        const x = xFrac * W;
         markCtx.strokeStyle = CURSOR_LINE_COLOR;
         markCtx.lineWidth = Math.max(1, H / REF_SIZE);
         markCtx.beginPath();
@@ -837,11 +853,7 @@ export function SpectrumScope({
         markCtx.lineTo(x, plotBot);
         markCtx.stroke();
 
-        const hz = p.linear
-          ? F_MIN + hoverFrac * (F_MAX - F_MIN)
-          : Math.exp(Math.log(F_MIN) + hoverFrac * (Math.log(F_MAX) - Math.log(F_MIN)));
-        let dbText = PEAK_PLACEHOLDER_DB;
-        if (n >= 2 && s && s.signal) {
+        if (snap === null && n >= 2 && s && s.signal) {
           // Linear interpolation between the two bins straddling the cursor — reads the underlying
           // data directly rather than the cosmetically-smoothed spline drawn through it (`traceSmooth`),
           // which is the right choice for a readout: the spline's only job is to look good between
@@ -856,14 +868,14 @@ export function SpectrumScope({
           const t = fi - i0;
           dbText = `${(pScratch[i0] * (1 - t) + pScratch[i1] * t).toFixed(1)} dB`;
         }
-        if (cursorHzRef.current) cursorHzRef.current.textContent = fmtPeakHz(hz);
+        if (cursorHzRef.current) cursorHzRef.current.textContent = snap !== null ? fmtSnappedHz(hz) : fmtPeakHz(hz);
         if (cursorDbRef.current) cursorDbRef.current.textContent = dbText;
         if (cursorElRef.current) {
           // A CSS percentage, not a pixel offset computed from the `width`/`height` React state:
           // this effect mounts once (`[]` deps below) and never re-runs on resize, so a state value
           // closed over here would go stale the first time the box's actual size changed. Percent
           // of the (always current) CSS box needs no such measurement at all.
-          cursorElRef.current.style.left = `${hoverFrac * 100}%`;
+          cursorElRef.current.style.left = `${xFrac * 100}%`;
           cursorElRef.current.style.opacity = "1";
         }
       } else if (cursorShown) {

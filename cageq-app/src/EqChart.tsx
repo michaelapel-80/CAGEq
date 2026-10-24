@@ -8,6 +8,7 @@ import { TiltGlyph } from "./TiltGlyph";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
+import { fmtSnappedHz, snapBin } from "./peakSnap";
 
 /**
  * §5.2 interactive diagram.
@@ -104,6 +105,9 @@ export type SpectrumData = {
   db_lin: number[];
   peak_db_lin: number[];
   db_lin_raw: number[];
+  /** The refined frequency of each bin's `peak_db` / `peak_db_lin` level — see peakSnap.ts. */
+  peak_hz: number[];
+  peak_hz_lin: number[];
   signal: boolean;
   f_min: number;
   f_max: number;
@@ -922,7 +926,29 @@ export function EqChart({
       // currently-correct, but not provably-so) captured closures of `x`/`invX`.
       const hoverFrac = hoverRef.current;
       if (hoverFrac !== null) {
-        const vx = hoverFrac * W;
+        let vx = hoverFrac * W;
+        let hz = Math.exp(lnMin + ((vx - PAD.l) / (W - PAD.l - PAD.r)) * lnSpan);
+        let dbText: string | null = null;
+        // Near a real peak the cursor snaps to it (peakSnap.ts): the line moves onto the peak and
+        // the readout shows its refined frequency and true level. The snap decision reads the
+        // uncorrected per-bin peaks; the undistort correction is a smooth EQ curve and cannot
+        // move a local maximum within the few bins searched.
+        const snap =
+          spectrum && spectrum.signal && spectrum.peak_hz?.length === spectrum.peak_db.length
+            ? snapBin(
+                spectrum.peak_db,
+                clamp(((Math.log(hz) - Math.log(spectrum.f_min)) / (Math.log(spectrum.f_max) - Math.log(spectrum.f_min))) * (spectrum.peak_db.length - 1), 0, spectrum.peak_db.length - 1),
+              )
+            : null;
+        if (spectrum && snap !== null && spectrum.peak_hz[snap] > 0) {
+          hz = spectrum.peak_hz[snap];
+          vx = PAD.l + ((Math.log(hz) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
+          const corrDb =
+            specParams.undistort && eqBands !== undefined
+              ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]), model, sampleRate)[0] : 0) + preampDb
+              : 0;
+          dbText = `${(spectrum.peak_db[snap] - corrDb).toFixed(1)} dB`;
+        }
         strokeCtx.strokeStyle = CURSOR_LINE_COLOR;
         strokeCtx.lineWidth = Math.max(1, H / SPEC_STROKE_REF_H);
         strokeCtx.beginPath();
@@ -930,9 +956,7 @@ export function EqChart({
         strokeCtx.lineTo(vx, H - PAD.b);
         strokeCtx.stroke();
 
-        const hz = Math.exp(lnMin + ((vx - PAD.l) / (W - PAD.l - PAD.r)) * lnSpan);
-        let dbText: string | null = null;
-        if (spectrum && spectrum.db.length >= 2 && spectrum.signal) {
+        if (dbText === null && spectrum && spectrum.db.length >= 2 && spectrum.signal) {
           // Linear interpolation between the two bins straddling the cursor, on the same
           // undo-corrected values the backdrop itself draws — reads the underlying data directly
           // rather than the cosmetically-smoothed spline traced through it, matching SpectrumScope's
@@ -959,7 +983,7 @@ export function EqChart({
           dbText = `${(raw - corrDb).toFixed(1)} dB`;
         }
         cursorShown = true;
-        if (cursorHzRef.current) cursorHzRef.current.textContent = fmtCursorHz(hz);
+        if (cursorHzRef.current) cursorHzRef.current.textContent = snap !== null ? fmtSnappedHz(hz) : fmtCursorHz(hz);
         if (cursorDbRef.current) cursorDbRef.current.textContent = dbText;
         if (cursorElRef.current) {
           // A CSS percentage of the *plot rect*, not of the whole box — matches `vx`'s own PAD.l
