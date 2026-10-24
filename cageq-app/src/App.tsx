@@ -1212,6 +1212,16 @@ function App() {
   // the result carries the model it was realised in, which is what the chart then draws.
   async function toggleResponseModel(matched: boolean) {
     setModelBusy(true);
+    // The core rewrites the slot's correction, which ends an isolate or sweep audition (its
+    // bandpass is written directly, past the slot cache), so the audition ends here too and the
+    // UI says so. Re-sending it afterwards kept it going but left an audible gap. No re-apply of
+    // our own: the core's write is the normal cascade. Solo goes through the slot's own request,
+    // which the core re-fits and writes, so it carries on unaffected.
+    if (isolateRef.current != null || sweepFreqRef.current != null) {
+      isolateRef.current = null;
+      setIsolate(null);
+      sweepFreqRef.current = null;
+    }
     try {
       const update = await invoke<ResponseModelUpdate>("set_response_model", { model: matched ? "AnalogMatched" : "Rbj" });
       setModelState(update.state);
