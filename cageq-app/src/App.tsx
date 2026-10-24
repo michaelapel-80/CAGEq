@@ -1135,13 +1135,28 @@ function App() {
 
   // Persist a loudness change; the backend re-applies the current config so the
   // shown preamp/config updates live (applied is null when nothing is applied yet).
+  // A model or loudness change makes the core rewrite the active slot's correction, which ends an
+  // isolate or sweep audition: its bandpass is written directly, past the slot cache. Called once
+  // such a write has happened, so the UI says the audition is over instead of still showing it.
+  // Re-sending the audition afterwards was tried and left an audible gap. Solo needs nothing: it
+  // goes through the slot's own request, which the core writes again with the change.
+  function endDirectAudition() {
+    if (isolateRef.current == null && sweepFreqRef.current == null) return;
+    isolateRef.current = null;
+    setIsolate(null);
+    sweepFreqRef.current = null; // EqChart's later pointer-up then finds no sweep and does nothing
+  }
+
   async function updateLoudness(next: LoudnessSettings) {
     setLoudness(next); // optimistic
     try {
       setError("");
       const update = await invoke<LoudnessUpdate>("set_loudness", { settings: next });
       setLoudness(update.settings); // clamped/authoritative value from the backend
-      if (update.applied) setResult(update.applied);
+      if (update.applied) {
+        endDirectAudition();
+        setResult(update.applied);
+      }
     } catch (e) {
       setError(String(e));
     }
@@ -1172,7 +1187,10 @@ function App() {
     invoke<LoudnessUpdate>("set_loudness", { settings: next })
       .then((update) => {
         setError("");
-        if (update.applied) setResult(update.applied);
+        if (update.applied) {
+          endDirectAudition();
+          setResult(update.applied);
+        }
       })
       .catch((e) => setError(String(e)));
   }
@@ -1212,20 +1230,11 @@ function App() {
   // the result carries the model it was realised in, which is what the chart then draws.
   async function toggleResponseModel(matched: boolean) {
     setModelBusy(true);
-    // The core rewrites the slot's correction, which ends an isolate or sweep audition (its
-    // bandpass is written directly, past the slot cache), so the audition ends here too and the
-    // UI says so. Re-sending it afterwards kept it going but left an audible gap. No re-apply of
-    // our own: the core's write is the normal cascade. Solo goes through the slot's own request,
-    // which the core re-fits and writes, so it carries on unaffected.
-    if (isolateRef.current != null || sweepFreqRef.current != null) {
-      isolateRef.current = null;
-      setIsolate(null);
-      sweepFreqRef.current = null;
-    }
     try {
       const update = await invoke<ResponseModelUpdate>("set_response_model", { model: matched ? "AnalogMatched" : "Rbj" });
       setModelState(update.state);
       if (update.applied) {
+        endDirectAudition();
         setResult(update.applied);
         await syncSlotFits();
       }
