@@ -17,7 +17,7 @@ mod wav;
 
 /// App state held in Tauri managed state. `Ready` on a successful start; `Failed`
 /// keeps the init error string so commands can report it instead of the app being
-/// silently dead (e.g. if no Python/sidecar is found).
+/// silently dead (e.g. if the EQ backend failed to start).
 ///
 /// (Named before CAGEq had a real *EQ* backend abstraction; the `eq` field below is that
 /// — this enum is the app's own start-up state, not a backend.)
@@ -259,8 +259,8 @@ struct Status {
 /// `headphone: None` means the slot opted out of AutoEq entirely (filter.md §3.4a "flat
 /// start" — a headphone AutoEq has no measurement for, or one bad enough that fitting to
 /// it makes things worse than not fitting at all): `target` is meaningless without a
-/// measurement to compensate, so it's ignored in that case, and the sidecar's own
-/// `flat` flag is sent instead of `headphone`/`target`.
+/// measurement to compensate, so it's ignored in that case, and the fit's own `flat` flag is
+/// sent instead of `headphone`/`target`.
 ///
 /// `async`: the AutoEq fit this runs (`cageq-peq-solver`'s SLSQP pass, ~1-4 s cold) used
 /// to be a blocking wait on the Python sidecar's RPC reply; either way this was always a
@@ -293,7 +293,7 @@ fn apply(
                     inputs.insert("flat".into(), Value::Bool(true));
                 }
             }
-            // §3.4 manual filters stacked on the AutoEq fit; the sidecar combines them
+            // §3.4 manual filters stacked on the AutoEq fit; the core's fit combines them
             // into the curve that drives the loudness/clipping policy.
             if !custom_filters.is_empty() {
                 let cf = serde_json::to_value(&custom_filters).map_err(|e| e.to_string())?;
@@ -593,7 +593,7 @@ fn apply_result(applied: Applied, eq: &Arc<dyn EqBackend>) -> ApplyResult {
     }
 }
 
-/// The AutoEq headphone catalogue (built/cached by the sidecar). Relayed as-is.
+/// The AutoEq headphone catalogue (built and cached by `cageq-catalog`). Relayed as-is.
 #[tauri::command]
 fn list_headphones(state: State<Backend>) -> Result<Value, String> {
     match state.inner() {
@@ -807,8 +807,8 @@ fn apo_setup_run(app: tauri::AppHandle, action: String) -> Result<String, String
         Err(e) => Err(e.to_string()),
     }
 }
-/// Active Windows playback devices to scope the EQ to (§3.0). A local registry read,
-/// not a sidecar call — available even if the DSP failed to start.
+/// Active Windows playback devices to scope the EQ to (§3.0). A local registry read, not a
+/// core call — available even if the EQ backend failed to start.
 #[tauri::command]
 fn list_devices(state: State<Backend>) -> Vec<DeviceDto> {
     list_render_devices()
@@ -1516,8 +1516,8 @@ fn update_settings(edit: impl FnOnce(&mut AppSettings)) {
 ///
 /// The backend was originally chosen once at startup and never revisited — reasonable until
 /// there was a way to change the choice *from inside a running app* (the setup wizard). A
-/// full app restart to pick that up would work too, but nothing about the DSP fitting, the
-/// sidecar process, or the UI's slot/curve state actually depends on which backend is behind
+/// full app restart to pick that up would work too, but nothing about the fitting or the UI's
+/// slot/curve state actually depends on which backend is behind
 /// this trait object, so restarting the whole app to change only that would be throwing away
 /// more than the swap actually touches.
 struct SwitchableBackend(std::sync::Mutex<Arc<dyn EqBackend>>);
@@ -1656,14 +1656,13 @@ fn resolve_config_dir() -> (PathBuf, String) {
     (dev, "dev temp (Equalizer APO not detected)".into())
 }
 
-/// Where the sidecar caches downloaded AutoEq data (the headphone/target catalogue plus every
-/// fetched measurement/target CSV, sidecar_dsp.py's `CAGEQ_CACHE_DIR`). Precedence: an explicit
+/// Where `cageq-catalog` caches downloaded AutoEq data (the headphone/target index plus every
+/// fetched measurement/target CSV); it reads `CAGEQ_CACHE_DIR`. Precedence: an explicit
 /// override (dev/tests) → `%LOCALAPPDATA%\CAGEq\cache` → a dev temp folder off-Windows. Must be a
-/// stable, persistent location — it used to default (inside the sidecar) to the OS temp dir
-/// whenever this env var was unset, which is exactly what always happened, since nothing here
-/// ever set it. Temp is fair game for Storage Sense/disk-cleanup tools to wipe, so a slot the user
-/// had already used — and reasonably expects cached — would silently re-hit GitHub after any such
-/// cleanup. `%LOCALAPPDATA%` is the same kind of per-user, persistent-until-uninstall location the
+/// stable, persistent location — it used to default to the OS temp dir whenever this env var
+/// was unset, which is exactly what always happened, since nothing here ever set it. Temp is
+/// fair game for Storage Sense/disk-cleanup tools to wipe, so a slot the user had already used —
+/// and reasonably expects cached — would silently re-hit GitHub after any such cleanup. `%LOCALAPPDATA%` is the same kind of per-user, persistent-until-uninstall location the
 /// rest of the app data lives in, so caches survive reboots and cleanup sweeps like they should.
 fn resolve_cache_dir() -> PathBuf {
     if let Ok(dir) = env::var("CAGEQ_CACHE_DIR") {
@@ -1675,7 +1674,7 @@ fn resolve_cache_dir() -> PathBuf {
     std::env::temp_dir().join("cageq-cache") // non-Windows dev fallback
 }
 
-/// Export `CAGEQ_CACHE_DIR` for the sidecar child to inherit. `set_var` is `unsafe` (it can race
+/// Export `CAGEQ_CACHE_DIR` for `cageq-catalog` to read. `set_var` is `unsafe` (it can race
 /// another thread's `env::var` read) — sound here because this runs once, synchronously, before
 /// `run()` spawns any thread that might read the environment concurrently.
 fn set_cache_dir_env(dir: &Path) {
