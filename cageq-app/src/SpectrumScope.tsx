@@ -873,7 +873,7 @@ export function SpectrumScope({
           dbText = `${(pScratch[i0] * (1 - t) + pScratch[i1] * t).toFixed(1)} dB`;
         }
         if (cursorHzRef.current) cursorHzRef.current.textContent = snapped ? fmtSnappedHz(hz) : fmtPeakHz(hz);
-        if (cursorHintRef.current) cursorHintRef.current.style.display = snappable && !snapped ? "" : "none";
+        if (cursorHintRef.current) cursorHintRef.current.style.visibility = snappable && !snapped ? "visible" : "hidden"; // space always reserved: the label keeps its width
         if (cursorDbRef.current) cursorDbRef.current.textContent = dbText;
         if (cursorElRef.current) {
           // A CSS percentage, not a pixel offset computed from the `width`/`height` React state:
@@ -969,7 +969,7 @@ export function SpectrumScope({
         <div className="ss-cursor" ref={cursorElRef} aria-hidden="true">
           <span ref={cursorHzRef} className="ss-cursor-hz" />
           <span ref={cursorDbRef} className="ss-cursor-db" />
-          <span ref={cursorHintRef} className="ss-cursor-hint" style={{ display: "none" }}>
+          <span ref={cursorHintRef} className="ss-cursor-hint" style={{ visibility: "hidden" }}>
             ⇧
           </span>
         </div>
