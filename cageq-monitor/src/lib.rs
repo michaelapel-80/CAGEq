@@ -2438,7 +2438,7 @@ mod windows_impl {
         }
 
         /// How exactly `peak_hz` reads a tone, across frequency, window length and noise — the
-        /// basis for the readout's whole-hertz display (peakSnap.ts). The display bins are far
+        /// basis for the readout's tenth-of-a-hertz display (peakSnap.ts). The display bins are far
         /// coarser than the FFT at high frequency (~550 Hz near 19 kHz on the log axis), so the
         /// frequency comes from the raw FFT, refined by `interpolate_peak`. Tones sit off any FFT
         /// bin centre. Run with `--nocapture` for the table.
