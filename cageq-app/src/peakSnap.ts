@@ -70,10 +70,11 @@ export function snapBin(levels: ArrayLike<number>, fi: number): number | null {
   return levels[best] - floor >= MIN_PROMINENCE_DB ? best : null;
 }
 
-/** A snapped peak's frequency for the readout: whole hertz at every frequency, the precision the
- *  backend's refinement actually delivers (to about a hertz, independent of frequency). Above
- *  1 kHz that is three decimals in kHz ("18.812 kHz"); below it plain hertz, since a fraction of a
- *  hertz would claim more than the FFT resolves. An unsnapped cursor keeps its coarser format:
+/** A snapped peak's frequency for the readout: whole hertz at every frequency. The backend's
+ *  refinement measured a few tenths of a hertz at worst, independent of frequency, while the tone
+ *  stands out (cageq-monitor's `peak_hz_accuracy_across_frequency_window_and_noise`), so whole
+ *  hertz never claims more than it delivers. Above 1 kHz that is three decimals in kHz
+ *  ("18.812 kHz"); below it plain hertz. An unsnapped cursor keeps its coarser format:
  *  there the position is only as precise as a pixel (~170 Hz near 19 kHz). */
 export function fmtSnappedHz(hz: number): string {
   return hz >= 1000 ? `${(hz / 1000).toFixed(3)} kHz` : `${Math.round(hz)} Hz`;

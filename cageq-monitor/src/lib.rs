@@ -86,7 +86,9 @@ pub struct SpectrumUpdate {
     /// level from, refined to sub-bin precision the same way `find_peaks` refines its peaks
     /// (`interpolate_peak`). The display bins are far coarser than the FFT at high frequency
     /// (240 log bins span ~550 Hz each near 19 kHz), so this is what lets the hover cursor snap to
-    /// a quiet line the peak finder never reports and still read its frequency to about a hertz.
+    /// a quiet line the peak finder never reports and still read its frequency to a few tenths of
+    /// a hertz at worst, as long as the tone stands out from what surrounds it (measured across
+    /// frequency, window length and noise: `peak_hz_accuracy_across_frequency_window_and_noise`).
     /// 0 where the span holds no power at all.
     pub peak_hz: Vec<f32>,
     /// `db`, but *before* the density-normalization fix (`gaussian_power`'s own doc, "A FOURTH
@@ -2394,40 +2396,95 @@ mod windows_impl {
             );
         }
 
-        /// `peak_hz` reads a quiet high tone's frequency to within a hertz, although the display bin
-        /// it falls in spans hundreds: the job the hover cursor's peak snap relies on. A -70 dBFS
-        /// tone at 18.8 kHz, off any FFT bin centre, on both the log and the linear axis.
-        #[test]
-        fn peak_hz_reads_a_quiet_high_tone_to_within_a_hertz() {
+        /// Feed a -70 dBFS sine at `freq` (plus white noise at `noise_db` dBFS RMS, if any) through
+        /// the analyzer with an `fft_size` window, and return `peak_hz`'s error in Hz on the log
+        /// and the linear axis, read from the display bin a hover cursor at `freq` would snap to.
+        fn peak_hz_error(freq: f64, noise_db: Option<f64>, fft_size: usize) -> (f64, f64) {
             let rate = 48_000u32;
-            let mut spec = Spectrum::new(rate, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
-            let freq = 18_812.3f64;
+            let mut spec = Spectrum::new(rate, fft_size, Arc::new(AtomicBool::new(false)));
             let amp = 10f64.powf(-70.0 / 20.0);
+            // Uniform white noise from a fixed-seed xorshift: RMS of uniform[-1, 1] is 1/sqrt(3).
+            let noise_amp = noise_db.map_or(0.0, |db| 10f64.powf(db / 20.0) * 3f64.sqrt());
+            let mut seed = 0x9E37_79B9u32;
             let step = 2.0 * std::f64::consts::PI * freq / rate as f64;
             let mut phase = 0.0f64;
             let mut buf = vec![0.0f32; 4096];
-            for _ in 0..(rate as usize * 2 / buf.len()) {
+            for _ in 0..(rate as usize * 3 / buf.len()) {
                 for s in buf.iter_mut() {
-                    *s = (amp * phase.sin()) as f32;
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    let noise = (seed as f64 / u32::MAX as f64 * 2.0 - 1.0) * noise_amp;
+                    *s = (amp * phase.sin() + noise) as f32;
                     phase += step;
                 }
                 spec.push(&buf);
             }
-            let update = spec.snapshot(true);
-            for (levels, hz, axis) in [(&update.peak_db, &update.peak_hz, "log"), (&update.peak_db_lin, &update.peak_hz_lin, "linear")] {
-                let i = levels
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                    .map(|(i, _)| i)
-                    .unwrap();
-                assert!(
-                    (hz[i] as f64 - freq).abs() < 1.0,
-                    "{axis}: peak_hz {} Hz for a {freq} Hz tone (bin {i}, {} dB)",
-                    hz[i],
-                    levels[i]
-                );
-                assert!((levels[i] + 70.0).abs() < 1.5, "{axis}: level {} dB for a -70 dB tone", levels[i]);
+            let u = spec.snapshot(true);
+            let read = |levels: &[f32], hz: &[f32], at: f64| -> f64 {
+                let n = levels.len();
+                let lo = (at.floor() as usize).saturating_sub(3);
+                let hi = (at.ceil() as usize + 3).min(n - 1);
+                let best = (lo..=hi).max_by(|&a, &b| levels[a].partial_cmp(&levels[b]).unwrap()).unwrap();
+                (hz[best] as f64 - freq).abs()
+            };
+            let n_log = u.peak_db.len() as f64;
+            let n_lin = u.peak_db_lin.len() as f64;
+            let (f0, f1) = (u.f_min as f64, u.f_max as f64);
+            (
+                read(&u.peak_db, &u.peak_hz, (freq / f0).ln() / (f1 / f0).ln() * (n_log - 1.0)),
+                read(&u.peak_db_lin, &u.peak_hz_lin, (freq - f0) / (f1 - f0) * (n_lin - 1.0)),
+            )
+        }
+
+        /// How exactly `peak_hz` reads a tone, across frequency, window length and noise — the
+        /// basis for the readout's whole-hertz display (peakSnap.ts). The display bins are far
+        /// coarser than the FFT at high frequency (~550 Hz near 19 kHz on the log axis), so the
+        /// frequency comes from the raw FFT, refined by `interpolate_peak`. Tones sit off any FFT
+        /// bin centre. Run with `--nocapture` for the table.
+        ///
+        /// Measured (2026-10-25), error in Hz, log/linear axis alike unless noted:
+        ///
+        /// | window | noise (tone -70 dBFS) | 100 Hz | 1 kHz | 5 kHz | 15.6 kHz | 18.8 kHz |
+        /// |---|---|---|---|---|---|---|
+        /// | 171 ms | none      | 0.03 | <0.05 | <0.05 | <0.05 | <0.05 |
+        /// | 171 ms | -60 dBFS  | 0.13 | 0.10  | 0.10  | <0.05 | <0.05 |
+        /// | 171 ms | -45 dBFS  | 0.53 (linear: 294) | 0.20 | 0.30 | 0.20 | 1215 (linear: 15) |
+        /// | 683 ms | none      | 0.03 | <0.05 | <0.05 | <0.05 | <0.05 |
+        /// | 683 ms | -60 dBFS  | 0.03 | <0.05 | <0.05 | <0.05 | <0.05 |
+        /// | 683 ms | -45 dBFS  | 0.03 | 0.10  | <0.05 | 0.30  | <0.05 |
+        ///
+        /// (<0.05: below `peak_hz`'s own 0.1 Hz rounding.) So while the tone stands out, the
+        /// reading is good to a few tenths of a hertz at worst. The two large errors are not the
+        /// estimate drifting: 25 dB under broadband noise, with the short window, the tone no
+        /// longer stands out within the bins searched, and a noise peak wins. The longer window's
+        /// extra 6 dB of per-bin signal-to-noise brings both back. That case is the documented
+        /// limit and is not asserted.
+        #[test]
+        fn peak_hz_accuracy_across_frequency_window_and_noise() {
+            let freqs = [100.37, 1_003.7, 5_003.7, 15_625.0, 18_812.3];
+            for (fft_size, window) in [(BASE_FFT_SIZE, "171 ms"), (MAX_FFT_SIZE, "683 ms")] {
+                for noise_db in [None, Some(-60.0), Some(-45.0)] {
+                    let label = noise_db.map_or("clean".to_string(), |db| format!("noise {db} dBFS"));
+                    let bound = match (noise_db, fft_size == MAX_FFT_SIZE) {
+                        (None, _) => Some(0.1),
+                        (Some(db), _) if db < -50.0 => Some(0.25),
+                        (_, true) => Some(0.5),
+                        (_, false) => None, // the tone gets lost in the noise: see the doc
+                    };
+                    let mut row = format!("{window:>7} {label:<16}");
+                    for &f in &freqs {
+                        let (log_err, lin_err) = peak_hz_error(f, noise_db, fft_size);
+                        row += &format!(" {f:>9.1}: {log_err:5.2}/{lin_err:5.2}");
+                        if let Some(bound) = bound {
+                            assert!(
+                                log_err < bound && lin_err < bound,
+                                "{window}, {label}, {f} Hz: error {log_err:.2} / {lin_err:.2} Hz (bound {bound})"
+                            );
+                        }
+                    }
+                    println!("{row}");
+                }
             }
         }
 
