@@ -716,10 +716,7 @@ function App() {
   // format display). Null when monitoring isn't running yet. Shown next to the device picker.
   const [sampleRate, setSampleRate] = useState<number | null>(null);
   useEffect(() => spectrumStream.subscribe((s) => (spectrumRef.current = s)), []);
-  // Align the vertical meter bars to the chart's *plot area* (top gridline → X axis) rather than
-  // letting them stretch past it (the chart-wrap also holds the legend). Measured near the return.
   const chartWrapRef = useRef<HTMLDivElement>(null);
-  const [plotBox, setPlotBox] = useState<{ top: number; height: number } | null>(null);
   // `.chart-wrap`'s own height, in real pixels — the single source of truth every chart view
   // (Eq/Impulse/Spectrum/Scope) fills identically via plain `width:100%;height:100%` (App.css).
   // Measured near the return, see that effect's own doc for why this replaced CSS `aspect-ratio`
@@ -727,14 +724,20 @@ function App() {
   const [chartWrapHeight, setChartWrapHeight] = useState<number | null>(null);
   // The combined chart-row + legend area's total rendered height, captured whenever Eq/Impulse
   // (SVG-based) is showing and reused to size Spectrum/Scope's canvas-based views to the exact same
-  // pixel height — see the measuring effect near plotBox's. `.chart-wrap`'s own height is now
+  // pixel height — see its measuring effect below chartWrapHeight's. `.chart-wrap`'s own height is now
   // JS-pinned (chartWrapHeight, above) identically for every view, so this is no longer covering
   // *that* — it's now solely reconciling `.chart-legend-host` below it (a sibling of chart-row, not
   // nested in chart-wrap): Eq's legend is a variable number of toggle chips that can wrap to a
   // second line, while Spectrum/Scope never portal anything into that host at all, so their own
   // natural height there would otherwise differ from Eq's real one and visibly jump on switch.
+  //
+  // Stored as the part *above* the chart's own height (the legend row and its spacing), not as
+  // the absolute total: an absolute measured in Eq went stale when the width changed while
+  // Spectrum/Scope showed (a maximise there), so those views kept the old size until the next
+  // visit to Eq, and the content height, and with it the fit-to-window zoom, changed on switch.
+  // `chartWrapHeight + chartAreaExtra` follows every width change in every view.
   const chartAreaRef = useRef<HTMLDivElement>(null);
-  const [chartAreaHeight, setChartAreaHeight] = useState<number | null>(null);
+  const [chartAreaExtra, setChartAreaExtra] = useState<number | null>(null);
   // The chart legend renders (via portal) into this full-width host *below* the chart-row, so its
   // toggle chips can use the whole width (incl. under the meters) instead of the chart's column —
   // long (localized) labels then have room. State (not a ref) so the portal target triggers a
@@ -875,7 +878,7 @@ function App() {
     fit();
     window.addEventListener("resize", fit);
     return () => window.removeEventListener("resize", fit);
-  }, [loading, hasResult, chartWrapHeight]);
+  }, [loading, hasResult, chartWrapHeight, chartAreaExtra]);
   const [applying, setApplying] = useState(false);
 
   // Fit `inp` into `slot` via the sidecar and record it (cached bands, hydrated flag).
@@ -2405,8 +2408,8 @@ function App() {
   // never from any view's own content, so nothing rendered inside `.chart-wrap` can grow it — by
   // construction, not by convention.
   //
-  // Observes `.chart-wrap` itself, unlike plotBox/chartAreaHeight below (which observe a *child*
-  // `<svg>` that gets swapped out on every chartView change, hence their dependency arrays) — this
+  // Observes `.chart-wrap` itself, unlike chartAreaExtra below (which needs a *child* `<svg>`
+  // that gets swapped out on every chartView change, hence its dependency array) — this
   // box is stable across all four views and only unmounts with `result`, so it doesn't need to
   // re-subscribe on chartView/dryActive/loading. `useLayoutEffect`, not `useEffect`: commits before
   // the browser paints, so there's no visible frame where this hasn't run yet. Not the whole safety
@@ -2430,34 +2433,19 @@ function App() {
     return () => ro.disconnect();
   }, [!!result]);
 
-  // Measure the chart's rendered SVG so the meter bars can match its plot-area Y extent. EqChart's
-  // plot rect is inset top/bottom by EQ_V_INSET_FRAC * height (imported, not a second copy of the
-  // fraction) — this used to hardcode the plot's old fixed-pixel PAD.t/PAD.b (12/24 of a 215-tall
-  // viewBox) directly, which silently went stale the last time EqChart's own PAD changed, since
-  // nothing here depended on it. Deriving the same fraction EqChart actually uses can't drift again.
-  // Measures the SVG rather than `.eq-chart` so it stays right for Impulse too (same viewBox, same
-  // PAD-derived plot rect, no spectrum backdrop). Structurally separate from chartWrapHeight above
-  // (which sizes the box) — this is only ever meaningful relative to EqChart's own dB axis, so it
-  // stays gated to "only while an `<svg>` exists" and frozen at its last value otherwise, same as
-  // chartAreaHeight below.
-  useEffect(() => {
-    const svg = chartWrapRef.current?.querySelector("svg");
-    // The scope view is a canvas (no SVG); keep the last measured box so the meters beside it don't
-    // jump. When there's genuinely no chart (result cleared) the whole row unmounts anyway.
-    if (!svg) return;
-    const measure = () => {
-      const h = svg.getBoundingClientRect().height / appZoom(); // CSS units, see chartWrapHeight
-      const inset = EQ_V_INSET_FRAC * h;
-      setPlotBox(h > 0 ? { top: inset, height: h - 2 * inset } : null);
-    };
-    const ro = new ResizeObserver(measure);
-    ro.observe(svg);
-    measure();
-    return () => ro.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartView, dryActive, loading, !!result]);
+  // Align the vertical meter bars to the chart's *plot area* (top gridline → X axis): EqChart's
+  // plot rect is inset top/bottom by EQ_V_INSET_FRAC of its height (imported, not a second copy of
+  // the fraction). Both the Eq and the Impulse SVG fill `.chart-wrap` at 100% height, so the plot
+  // area follows from `chartWrapHeight` directly. This used to be measured from the SVG, which
+  // exists only in those two views, so Spectrum/Scope kept a frozen value: a window resized while
+  // they showed left the bars at the old height, taller than the chart, stretching the row.
+  const plotBox = useMemo(() => {
+    if (chartWrapHeight === null) return null;
+    const inset = EQ_V_INSET_FRAC * chartWrapHeight;
+    return { top: inset, height: chartWrapHeight - 2 * inset };
+  }, [chartWrapHeight]);
 
-  // Same "measure the real thing, remember it" idea as plotBox above, one level up: capture the
+  // "Measure the real thing, remember it", one level above the chart's own height: capture the
   // combined chart-row + legend area's total height whenever it's SVG-driven, so Spectrum/Scope can
   // be forced to that exact pixel value (below) instead of the panel's total height drifting by
   // however many px the legend's real (possibly multi-line) content differs from a fixed guess.
@@ -2466,8 +2454,12 @@ function App() {
     const el = chartAreaRef.current;
     if (!svg || !el) return;
     const measure = () => {
-      const h = el.getBoundingClientRect().height / appZoom(); // CSS units, see chartWrapHeight
-      if (h > 0) setChartAreaHeight(h);
+      const wrap = chartWrapRef.current;
+      if (!wrap) return;
+      // CSS units, see chartWrapHeight.
+      const h = el.getBoundingClientRect().height / appZoom();
+      const chart = wrap.getBoundingClientRect().height / appZoom();
+      if (h > 0 && chart > 0) setChartAreaExtra(h - chart);
     };
     const ro = new ResizeObserver(measure);
     ro.observe(el);
@@ -3246,10 +3238,17 @@ function App() {
                 <>
                   {/* The Eq/Impulse/Spectrum/Scope view swap lives in the panel header row (above).
                       Phase rides the Eq chart's secondary axis (legend). Forced to
-                      `chartAreaHeight` (measured below) on Spectrum/Scope — its own natural height
+                      the chart's height plus `chartAreaExtra` (measured below) on Spectrum/Scope — its own natural height
                       there (chart-wrap's aspect-ratio + the legend host's own, now-empty, height)
                       won't exactly match Eq/Impulse's real legend height on its own. */}
-                  <div ref={chartAreaRef} style={spectrumView || scopeView ? { height: chartAreaHeight ?? undefined } : undefined}>
+                  <div
+                    ref={chartAreaRef}
+                    style={
+                      (spectrumView || scopeView) && chartWrapHeight !== null && chartAreaExtra !== null
+                        ? { height: chartWrapHeight + chartAreaExtra }
+                        : undefined
+                    }
+                  >
                   <div className="chart-row">
                   <div className="chart-wrap" ref={chartWrapRef} style={{ height: chartWrapHeight ?? undefined }}>
                     {scopeView ? (

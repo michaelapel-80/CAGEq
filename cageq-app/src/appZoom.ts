@@ -24,6 +24,10 @@ const MAX_ZOOM = 1.5;
 const SHORT_VIEWPORT_PX = 900;
 const SHORT_ZOOM = 0.9;
 
+/** CSS pixels the fit leaves free below the content: an exact fit can round a fraction of a pixel
+ *  over and bring up a scroll bar with next to no range. */
+const FIT_SLACK_PX = 2;
+
 /** Fired on `window` after the app's zoom changed. */
 export const APP_ZOOM_EVENT = "cageq-app-zoom";
 
@@ -43,7 +47,7 @@ export function fitAppToWindow(app: HTMLElement): void {
   const vw = document.documentElement.clientWidth - parseFloat(body.marginLeft) - parseFloat(body.marginRight);
   const vh = window.innerHeight - parseFloat(body.marginTop) - parseFloat(body.marginBottom);
   const base = window.innerHeight < SHORT_VIEWPORT_PX ? SHORT_ZOOM : 1;
-  const byWidth = vw / APP_MAX_WIDTH;
+  const byWidth = (vw - FIT_SLACK_PX) / APP_MAX_WIDTH; // the same headroom against snapping, sideways
   let zoom = base;
   if (byWidth > base) {
     // At exactly `byWidth` the layout is the full design width, so its height is the design's
@@ -51,7 +55,17 @@ export function fitAppToWindow(app: HTMLElement): void {
     // so that height stays valid: measure once there, then fit the height too.
     app.style.zoom = String(byWidth);
     const designHeight = app.getBoundingClientRect().height / byWidth;
-    zoom = Math.max(base, Math.min(byWidth, vh / designHeight, MAX_ZOOM));
+    zoom = Math.max(base, Math.min(byWidth, (vh - FIT_SLACK_PX) / designHeight, MAX_ZOOM));
+    // Zoomed layout is not exactly linear: Chromium snaps borders, line boxes and rounded lengths
+    // to device pixels at each zoom, so the height predicted from one zoom can miss the real one at
+    // another by a few pixels (measured 3.6 px at 141%, a scroll bar with 1-2 px of range). So
+    // check the real height and scale down by what is still over; it settles in a step or two.
+    for (let i = 0; i < 4; i++) {
+      app.style.zoom = String(zoom);
+      const h = app.getBoundingClientRect().height;
+      if (h <= vh - FIT_SLACK_PX || zoom <= base) break;
+      zoom = Math.max(base, (zoom * (vh - FIT_SLACK_PX)) / h);
+    }
   }
   app.style.zoom = String(zoom);
   current = zoom;
