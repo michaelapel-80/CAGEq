@@ -3379,138 +3379,140 @@ function App() {
                   </button>
                 </div>
               </div>
-              {dryActive ? (
-                <p className="tg-empty">{tr("bands.dryNotice")}</p>
-              ) : (
-                <>
-                  {/* Stage selector (segmented): the name button picks the stage to edit; the
-                      power icon toggles the whole stage on/off. Active = tinted in the stage colour.
-                      A trailing read-only "AutoEq" segment (no power) shows the automatic fit. */}
-                  <div className="stage-tabs" role="tablist" aria-label={tr("bands.stagesAria")}>
-                    {STAGE_ORDER.map((id) => {
-                      const st = stages[id];
-                      const isActive = id === activeStage && !autoEqView;
-                      const count = st.bands.filter((b) => b.enabled !== false).length;
-                      const color = STAGE_COLOR[id];
-                      return (
+              {/* On Dry the bands stay laid out, just hidden and inert under the notice: the right
+                  column takes its height from this one (App.css, `.app-main > aside`), so a panel
+                  shrunk to the one-line notice collapsed the Presets list along with it. */}
+              <div className="tg-body">
+                {dryActive && <p className="tg-empty tg-dry-notice">{tr("bands.dryNotice")}</p>}
+                <div className={dryActive ? "tg-dry-hidden" : undefined} inert={dryActive}>
+                    {/* Stage selector (segmented): the name button picks the stage to edit; the
+                        power icon toggles the whole stage on/off. Active = tinted in the stage colour.
+                        A trailing read-only "AutoEq" segment (no power) shows the automatic fit. */}
+                    <div className="stage-tabs" role="tablist" aria-label={tr("bands.stagesAria")}>
+                      {STAGE_ORDER.map((id) => {
+                        const st = stages[id];
+                        const isActive = id === activeStage && !autoEqView;
+                        const count = st.bands.filter((b) => b.enabled !== false).length;
+                        const color = STAGE_COLOR[id];
+                        return (
+                          <div
+                            key={id}
+                            className={`stage-seg${isActive ? " active" : ""}${st.enabled ? "" : " off"}`}
+                            style={{ "--stage": color } as CSSProperties}
+                          >
+                            <button
+                              type="button"
+                              role="tab"
+                              aria-selected={isActive}
+                              className="stage-seg-select"
+                              title={stageHint(id)}
+                              onClick={() => {
+                                setActiveStage(id);
+                                setAutoEqView(false);
+                              }}
+                            >
+                              {stageLabel(id)}
+                              {count > 0 && <span className="stage-count">{count}</span>}
+                            </button>
+                            <button
+                              type="button"
+                              className="stage-seg-power"
+                              role="switch"
+                              aria-checked={st.enabled}
+                              title={st.enabled ? tr("stages.disable", { stage: stageLabel(id) }) : tr("stages.enable", { stage: stageLabel(id) })}
+                              aria-label={st.enabled ? tr("stages.disable", { stage: stageLabel(id) }) : tr("stages.enable", { stage: stageLabel(id) })}
+                              onClick={() => toggleStage(id)}
+                            >
+                              <PowerGlyph />
+                            </button>
+                          </div>
+                        );
+                      })}
+                      {autoEqCount > 0 && (
                         <div
-                          key={id}
-                          className={`stage-seg${isActive ? " active" : ""}${st.enabled ? "" : " off"}`}
-                          style={{ "--stage": color } as CSSProperties}
+                          className={`stage-seg stage-seg-ro${autoEqView ? " active" : ""}`}
+                          style={{ "--stage": AUTOEQ_COLOR } as CSSProperties}
                         >
                           <button
                             type="button"
                             role="tab"
-                            aria-selected={isActive}
+                            aria-selected={autoEqView}
                             className="stage-seg-select"
-                            title={stageHint(id)}
-                            onClick={() => {
-                              setActiveStage(id);
-                              setAutoEqView(false);
-                            }}
+                            title={tr("stages.autoeq.hint")}
+                            onClick={() => setAutoEqView(true)}
                           >
-                            {stageLabel(id)}
-                            {count > 0 && <span className="stage-count">{count}</span>}
-                          </button>
-                          <button
-                            type="button"
-                            className="stage-seg-power"
-                            role="switch"
-                            aria-checked={st.enabled}
-                            title={st.enabled ? tr("stages.disable", { stage: stageLabel(id) }) : tr("stages.enable", { stage: stageLabel(id) })}
-                            aria-label={st.enabled ? tr("stages.disable", { stage: stageLabel(id) }) : tr("stages.enable", { stage: stageLabel(id) })}
-                            onClick={() => toggleStage(id)}
-                          >
-                            <PowerGlyph />
+                            {tr("stages.autoeq.label")}
+                            <span className="stage-count">{autoEqCount}</span>
                           </button>
                         </div>
-                      );
-                    })}
-                    {autoEqCount > 0 && (
-                      <div
-                        className={`stage-seg stage-seg-ro${autoEqView ? " active" : ""}`}
-                        style={{ "--stage": AUTOEQ_COLOR } as CSSProperties}
-                      >
-                        <button
-                          type="button"
-                          role="tab"
-                          aria-selected={autoEqView}
-                          className="stage-seg-select"
-                          title={tr("stages.autoeq.hint")}
-                          onClick={() => setAutoEqView(true)}
-                        >
-                          {tr("stages.autoeq.label")}
-                          <span className="stage-count">{autoEqCount}</span>
-                        </button>
+                      )}
+                    </div>
+
+                    {autoEqView ? (
+                      <>
+                        <p className="stage-hint">{tr("stages.autoeq.hint")}</p>
+                        <ToneGrid filters={autoEqBands} readOnly accent={AUTOEQ_COLOR} onInput={() => {}} onCommit={() => {}} onAdd={() => {}} onRemove={() => {}} />
+                        <p className="tg-hint">{tr("bands.autoeqReadonly")}</p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="stage-hint">
+                          {stageHint(activeStage)}
+                          {!stages[activeStage].enabled && <b>{tr("stages.disabledSuffix")}</b>}
+                        </p>
+
+                        <ToneGrid
+                          filters={activeBands}
+                          disabled={dryActive}
+                          accent={STAGE_COLOR[activeStage]}
+                          focusIndex={newBand?.stage === activeStage && newBand.focusGrid ? newBand.idx : null}
+                          focusNonce={newBand?.nonce}
+                          hoverIndex={hoverBand}
+                          onHover={setHoverBand}
+                          soloIndex={solo?.stage === activeStage ? solo.idx : null}
+                          onSolo={toggleSolo}
+                          isolateIndex={isolate?.stage === activeStage ? isolate.idx : null}
+                          onIsolate={toggleIsolate}
+                          onInput={(i, patch) => updateFilter(i, patch, 70)}
+                          onCommit={(i, patch) => updateFilter(i, patch, 0)}
+                          onAdd={addFilter}
+                          allowHighPass={!highPassInSlot}
+                          addDisabled={atMaxBands()}
+                          addDisabledTitle={tr("errors.tooManyBands", { max: MAX_BANDS })}
+                          onRemove={removeFilter}
+                        />
+                        {/* Always rendered (with reserved height) so switching to an empty stage
+                            doesn't shrink the panel; the text just adapts to empty vs populated. */}
+                        <p className="tg-hint">{activeBands.length > 0 ? tr("bands.hint") : tr("bands.emptyHint")}</p>
+                      </>
+                    )}
+                    {/* Reacts to the same `totalBandsUsed` the Add button's own guard uses, but
+                        catches every OTHER way it can grow past MAX_BANDS: a template/preset
+                        stacked onto a slot that already has bands, a second preset loaded into a
+                        different stage, re-enabling a stage that was disabled while over, undo/
+                        redo — none of those go through addFilter's own check. Equalizer APO has
+                        no such cap, so this is a heads-up, not a hard error: only CAGEq's own APO
+                        actually refuses the excess. */}
+                    {showInfrasoundHint && (
+                      <div className="infra-hint" role="note">
+                        <p>{tr("infrasound.hint", { db: infrasoundDb.toFixed(1) })}</p>
+                        <div className="row" style={{ gap: "0.4em" }}>
+                          <button type="button" disabled={dryActive} onClick={addInfrasoundHighPass}>
+                            {tr("infrasound.add")}
+                          </button>
+                          <button type="button" onClick={dismissInfrasoundHint}>
+                            {tr("infrasound.dismiss")}
+                          </button>
+                        </div>
                       </div>
                     )}
-                  </div>
-
-                  {autoEqView ? (
-                    <>
-                      <p className="stage-hint">{tr("stages.autoeq.hint")}</p>
-                      <ToneGrid filters={autoEqBands} readOnly accent={AUTOEQ_COLOR} onInput={() => {}} onCommit={() => {}} onAdd={() => {}} onRemove={() => {}} />
-                      <p className="tg-hint">{tr("bands.autoeqReadonly")}</p>
-                    </>
-                  ) : (
-                    <>
-                      <p className="stage-hint">
-                        {stageHint(activeStage)}
-                        {!stages[activeStage].enabled && <b>{tr("stages.disabledSuffix")}</b>}
+                    {totalBandsUsed > MAX_BANDS && (
+                      <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0.5em 0 0" }}>
+                        {tr("errors.overMaxBands", { count: totalBandsUsed, max: MAX_BANDS })}
                       </p>
-
-                      <ToneGrid
-                        filters={activeBands}
-                        disabled={dryActive}
-                        accent={STAGE_COLOR[activeStage]}
-                        focusIndex={newBand?.stage === activeStage && newBand.focusGrid ? newBand.idx : null}
-                        focusNonce={newBand?.nonce}
-                        hoverIndex={hoverBand}
-                        onHover={setHoverBand}
-                        soloIndex={solo?.stage === activeStage ? solo.idx : null}
-                        onSolo={toggleSolo}
-                        isolateIndex={isolate?.stage === activeStage ? isolate.idx : null}
-                        onIsolate={toggleIsolate}
-                        onInput={(i, patch) => updateFilter(i, patch, 70)}
-                        onCommit={(i, patch) => updateFilter(i, patch, 0)}
-                        onAdd={addFilter}
-                        allowHighPass={!highPassInSlot}
-                        addDisabled={atMaxBands()}
-                        addDisabledTitle={tr("errors.tooManyBands", { max: MAX_BANDS })}
-                        onRemove={removeFilter}
-                      />
-                      {/* Always rendered (with reserved height) so switching to an empty stage
-                          doesn't shrink the panel; the text just adapts to empty vs populated. */}
-                      <p className="tg-hint">{activeBands.length > 0 ? tr("bands.hint") : tr("bands.emptyHint")}</p>
-                    </>
-                  )}
-                  {/* Reacts to the same `totalBandsUsed` the Add button's own guard uses, but
-                      catches every OTHER way it can grow past MAX_BANDS: a template/preset
-                      stacked onto a slot that already has bands, a second preset loaded into a
-                      different stage, re-enabling a stage that was disabled while over, undo/
-                      redo — none of those go through addFilter's own check. Equalizer APO has
-                      no such cap, so this is a heads-up, not a hard error: only CAGEq's own APO
-                      actually refuses the excess. */}
-                  {showInfrasoundHint && (
-                    <div className="infra-hint" role="note">
-                      <p>{tr("infrasound.hint", { db: infrasoundDb.toFixed(1) })}</p>
-                      <div className="row" style={{ gap: "0.4em" }}>
-                        <button type="button" disabled={dryActive} onClick={addInfrasoundHighPass}>
-                          {tr("infrasound.add")}
-                        </button>
-                        <button type="button" onClick={dismissInfrasoundHint}>
-                          {tr("infrasound.dismiss")}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {totalBandsUsed > MAX_BANDS && (
-                    <p style={{ color: "#b8860b", fontSize: "0.85em", margin: "0.5em 0 0" }}>
-                      {tr("errors.overMaxBands", { count: totalBandsUsed, max: MAX_BANDS })}
-                    </p>
-                  )}
-                </>
-              )}
+                    )}
+                </div>
+              </div>
             </div>
           )}
         </section>

@@ -2030,6 +2030,17 @@ select:disabled {
   opacity: 0.7;
   margin: 0.2rem 0 0.5rem;
 }
+/* Dry: the notice sits over the bands, which keep their space but aren't shown (see App.tsx). */
+.tg-body {
+  position: relative;
+}
+.tg-dry-notice {
+  position: absolute;
+  inset: 0 0 auto;
+}
+.tg-dry-hidden {
+  visibility: hidden;
+}
 /* Grid help line — always present with a reserved height so switching between a populated
    and an empty stage (short vs long hint, 1 vs 2 wrapped lines) never shifts the panel. */
 .tg-hint {
