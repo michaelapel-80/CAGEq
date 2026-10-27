@@ -109,7 +109,9 @@ const PEAK_LINE_ALPHA = 0.65;
 // data streams in — never re-filtered from scratch each frame, which would both waste work on the
 // overlapping portion and reset the filter's state every frame, corrupting its settling).
 const RING_CAP = 1 << 17; // ~2.7 s at 48 kHz / ~680 ms at 192 kHz — generous, trivial memory
-const TRIGGER_PRE_FRAC = 0.25; // where the trigger point sits across the display window
+// Where the trigger point sits across the display window, in whole divisions so it lands on a
+// graticule line (it used to be a quarter of the window: 2.5 divisions, between two lines).
+const TRIGGER_PRE_DIVS = 2;
 const TRIGGER_SEARCH_MS = 250; // how far back to look for a qualifying edge before giving up
 // The detector itself (zero-phase low-pass, AC-coupled level, settling) lives in scopeTrigger.ts.
 
@@ -514,7 +516,7 @@ export function TimeScope() {
         // search window itself is bounded fresh every frame.
         const msPerDiv = MS_PER_DIV_STEPS[p.msPerDivIdx] ?? MS_PER_DIV_STEPS[0];
         const windowSamples = Math.max(2, Math.round(rate * ((msPerDiv * DIVISIONS) / 1000)));
-        const preSamples = Math.round(windowSamples * TRIGGER_PRE_FRAC);
+        const preSamples = Math.round((windowSamples * TRIGGER_PRE_DIVS) / DIVISIONS);
         const postSamples = windowSamples - preSamples;
         const ringCount = Math.min(totalWritten, RING_CAP);
         if (ringCount >= windowSamples) {
