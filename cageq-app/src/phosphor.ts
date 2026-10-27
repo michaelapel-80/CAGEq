@@ -71,12 +71,12 @@
  * Two tiers, modelling two different physical things, so each gets its own colour treatment AND
  * its own compositing operator (see `FS_COMPOSITE`'s own doc for the operators) — both whole-frame,
  * not per-primitive, see `commit()`'s own doc for why that specifically matters for a resting spot:
- *   1. **Tight** (`bloomIntensity`, white-valued — see `FS_BRIGHTPASS`): a bright core overloading
+ *   1. **Tight** (`bloomIntensity`, white-valued — see `FS_TIGHT`): a bright core overloading
  *      and washing toward white, the same way a real CRT/camera bloom does (colour-tinted read as
  *      "saturates to the beam's own hue, not white" — reported live, wrong). Bright-pass (keep
- *      only what's above `BLOOM_THRESHOLD`) on a `BLOOM_SCALE`-downscaled copy of the accumulator,
+ *      only what's above `BLOOM_THRESHOLD`) on a quarter-resolution copy of the accumulator,
  *      separable blur, composited in ADDITIVELY — an overload genuinely adds light on top.
- *   2. **Wide** (`bloomWide`, colour-preserving — see `FS_BRIGHTPASS_COLOR`): the beam's own light
+ *   2. **Wide** (`bloomWide`, colour-preserving — see `FS_BRIGHTPASS`): the beam's own light
  *      scattering into the surrounding dark, sampled fresh from the sharp accumulator (not chained
  *      from tier 1's grayscale result). Composited with `max()`, not addition — additive here was
  *      reported live as "brightens dense areas to white blobs" instead of doing what ambient
@@ -98,11 +98,11 @@
  * its own 1:1 exactness), and sampling that straight into a much smaller target is point-sampling,
  * not averaging: it skips most source texels in a perfectly regular pattern, which produced the
  * same grid artefact as the wide tier's own first mistake, just faint enough at low `bloomIntensity`
- * to go unnoticed until it was turned up. The prefilter is one safe (LINEAR, exact-2x) halving that
- * both tiers then reduce further from, themselves already band-limited.
+ * to go unnoticed until it was turned up. The prefilter is one exact 2x2 box-average halving (see
+ * `GLSL_DOWN2`) that both tiers then reduce further from, the same way, in 2x steps.
  *
  * Both tiers together are still only a handful of GL passes, all on small (or, for the wide tier's
- * far stage, tiny) targets, on top of the existing accumulate+blit — see `BLOOM_SCALE`/
+ * far stage, tiny) targets, on top of the existing accumulate+blit — see
  * `BLOOM_WIDE_SIZE`/`BLOOM_FAR_SIZE`'s own docs for the cost reasoning. 8-bit storage for the bloom
  * textures (not half-float): they're soft blurred layers, not the precise accumulator, and don't
  * need the precision or the render-to-half-float capability check.
@@ -174,7 +174,7 @@ export type Phosphor = {
    * canvas always draws its trace at its original, undiminished alpha (whatever precision that had
    * before), and the correction lands in the same lossless float multiply `uDose` already is.
    *
-   * `bloomIntensity` (default 0 = off) adds a soft halo, tight-radius (`BLOOM_SCALE`), around
+   * `bloomIntensity` (default 0 = off) adds a soft halo, tight-radius (quarter resolution), around
    * whatever in the accumulated frame is bright enough to clear `BLOOM_THRESHOLD` — a small extra
    * GL pass, not a different rendering stack (see the module doc's "Bloom" section). `bloomWide`
    * (default 0 = off) is a second, much broader and fainter tier at a fixed small size
@@ -241,10 +241,6 @@ void main(){
 const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
 void main(){ gl_FragColor = texture2D(uTex, vUv); }`;
 
-/** Bloom's small (tight-radius) target as a fraction of the caller's real canvas size — see the
- *  module doc's "Bloom" section for why this is what keeps the extra passes cheap regardless of
- *  tube size. */
-const BLOOM_SCALE = 0.25;
 /** The wide (broad, faint halo) tier's target, in *fixed* pixels, not a fraction of the canvas —
  *  deliberately: the point of this tier is maximum softness/spread, and a fraction of a large
  *  canvas can still be too many pixels wide to read as genuinely broad, where a small fixed size
@@ -301,41 +297,83 @@ const BLOOM_FAR_BLUR_PASSES = 2;
  *  live, not guessed again. */
 const BLOOM_THRESHOLD = 0.2;
 
-// Downsampling copy + threshold in one pass: sampling the full-res accumulator (NEAREST-filtered,
-// deliberately — see its own texture setup) into a smaller target aliases slightly instead of
-// box-filtering, but the blur immediately after erases it, so a second filter mode on the exact
-// accumulator texture isn't worth adding just for this.
+// Every reduction in the bloom chain is an exact box average of the source texels the target texel
+// covers, computed from `gl_FragCoord` rather than left to the sampler: `uFactor` (1 or 2 per axis)
+// texels per axis, each read at its own centre, where NEAREST and LINEAR agree. The sampler gets
+// this wrong in two ways, both part of a beaded, dashed halo along steep flanks (reported live):
+//   * The accumulator is NEAREST (half-float LINEAR filtering is an extension; see its setup), so
+//     a "2x halving" sampled at the shared corner of four texels returns ONE of them, not their
+//     mean: a thin steep line pulses as it drifts across the skipped columns.
+//   * Even LINEAR is only an exact 2x2 mean when the size ratio is exactly 2; at a rounded size it
+//     drifts toward point-sampling across the target.
+// Target sizes are therefore ceil(source / factor), so the ratio is exact; the last texel's
+// missing neighbour clamps to the edge. A target then covers slightly more than the canvas (up to
+// factor - 1 texels), which the composite and the wide tier's final resample correct for by
+// scaling their texture coordinates, so the halos stay registered with the trace.
 //
-// Tight tier only. Collapses to a single brightness value (replicated across RGB) rather than
-// keeping the source's own hue: real bloom/halation at a bright *core* washes out toward white as
-// it saturates, it doesn't just intensify the same colour, and it's what "seems to not saturate to
-// white but full saturation again" was reporting when this thresholded the coloured channels
-// directly. Same `max(r,g,b)` brightness proxy FS_ACCUM's own decay math already uses, for
-// consistency within this file. The wide tier keeps its own hue instead — see FS_BRIGHTPASS_COLOR.
-const FS_BRIGHTPASS = `precision mediump float; varying vec2 vUv;
-uniform sampler2D uTex; uniform float uThreshold;
-void main(){
-  vec3 c = texture2D(uTex, vUv).rgb;
-  float v = max(c.r, max(c.g, c.b));
-  float b = max(v - uThreshold, 0.0);
-  gl_FragColor = vec4(b, b, b, 1.0);
+// Each shader defines `tap()`, what one source texel contributes, before including this.
+// highp: these are texel coordinates of textures thousands of texels wide, beyond mediump.
+const GLSL_DOWN2 = `uniform vec2 uSrcSize, uFactor;
+vec3 down2(sampler2D t){
+  vec2 c = floor(gl_FragCoord.xy) * uFactor + 0.5;
+  vec2 d = uFactor - 1.0;
+  return 0.25 * (tap(t, c / uSrcSize) + tap(t, (c + vec2(d.x, 0.0)) / uSrcSize)
+    + tap(t, (c + vec2(0.0, d.y)) / uSrcSize) + tap(t, (c + d) / uSrcSize));
 }`;
 
-// Wide tier's own bright-pass, sampled fresh from the sharp accumulator rather than chained from
-// the tight tier's (grayscale) result — chaining would inherit that grayscale, and this tier is
-// specifically meant to keep the beam's own colour as it bleeds into the surrounding dark (an
+const GLSL_TAP_PLAIN = `vec3 tap(sampler2D t, vec2 uv){ return texture2D(t, uv).rgb; }`;
+
+// A plain reduction step (the wide tier's chain), no threshold.
+const FS_DOWN2 = `precision highp float;
+uniform sampler2D uTex;
+${GLSL_TAP_PLAIN}
+${GLSL_DOWN2}
+void main(){ gl_FragColor = vec4(down2(uTex), 1.0); }`;
+
+// Bilinear resample with the coordinates scaled by `uUvScale`: the wide chain's last level onto
+// BLOOM_WIDE_SIZE (at most a 2x reduction, which bilinear covers), keeping only the part of the
+// level that maps onto the canvas — see GLSL_DOWN2's doc.
+const FS_RESAMPLE = `precision highp float; varying vec2 vUv;
+uniform sampler2D uTex; uniform vec2 uUvScale;
+void main(){ gl_FragColor = texture2D(uTex, vUv * uUvScale); }`;
+
+// The bright-pass, shared by both tiers: thresholds every accumulator texel on its own, THEN
+// averages them into the half-resolution prefilter. Thresholding after a reduction instead (as
+// this used to) is the other half of the beaded halo: a thin line's average over a block depends
+// on where the line sits within it, the threshold turns that small variation into all or nothing,
+// and a steep line drifting across the block grid lit up in segments. In this order everything
+// after the threshold is linear, so the halo is the same wherever the line falls.
+//
+// Preserves hue by scaling the whole colour down by how much of its own brightness cleared the
+// threshold — the wide tier keeps the beam's own colour as it bleeds into the surrounding dark (an
 // ambient scatter, not a saturating overload — see FS_COMPOSITE's own doc for why that also means
-// a different *compositing* operator, not just a different colour). Preserves hue by scaling the
-// whole colour down by how much of its own brightness cleared the threshold, rather than reading
-// off one brightness number and discarding the channel ratios the way FS_BRIGHTPASS does.
-const FS_BRIGHTPASS_COLOR = `precision mediump float; varying vec2 vUv;
+// a different *compositing* operator, not just a different colour). The tight tier collapses it
+// to white afterwards (FS_TIGHT). Same `max(r,g,b)` brightness proxy FS_ACCUM's own decay math
+// already uses, for consistency within this file.
+const FS_BRIGHTPASS = `precision highp float;
 uniform sampler2D uTex; uniform float uThreshold;
-void main(){
-  vec3 c = texture2D(uTex, vUv).rgb;
+vec3 tap(sampler2D t, vec2 uv){
+  vec3 c = texture2D(t, uv).rgb;
   float v = max(c.r, max(c.g, c.b));
-  float excess = max(v - uThreshold, 0.0);
-  vec3 col = v > 0.0 ? c * (excess / v) : vec3(0.0);
-  gl_FragColor = vec4(col, 1.0);
+  return v > 0.0 ? c * (max(v - uThreshold, 0.0) / v) : vec3(0.0);
+}
+${GLSL_DOWN2}
+void main(){ gl_FragColor = vec4(down2(uTex), 1.0); }`;
+
+// Tight tier's reduction off the (already thresholded) prefilter. Collapses to a single brightness
+// value (replicated across RGB) rather than keeping the source's own hue: real bloom/halation at a
+// bright *core* washes out toward white as it saturates, it doesn't just intensify the same
+// colour, and it's what "seems to not saturate to white but full saturation again" was reporting
+// when this kept the coloured channels. For a single hue, the brightest channel of the hue-scaled
+// excess is exactly the excess itself.
+const FS_TIGHT = `precision highp float;
+uniform sampler2D uTex;
+${GLSL_TAP_PLAIN}
+${GLSL_DOWN2}
+void main(){
+  vec3 c = down2(uTex);
+  float b = max(c.r, max(c.g, c.b));
+  gl_FragColor = vec4(b, b, b, 1.0);
 }`;
 
 // Separable 5-tap approx-Gaussian (weights sum to 1): run once with a horizontal uOffset, once
@@ -356,10 +394,10 @@ void main(){
 // Replaces the plain FS_BLIT present pass when bloom is on. The two tiers are deliberately
 // composited by different operators, not just different textures — they model different physical
 // things:
-//   * Tight (`uBloom`, white-valued — see FS_BRIGHTPASS): a bright core overloading and washing
+//   * Tight (`uBloom`, white-valued — see FS_TIGHT): a bright core overloading and washing
 //     toward white. ADDITIVE, same as FS_ACCUM's own stacking, because that overload genuinely
 //     adds light on top of what's already there.
-//   * Wide (`uBloomWide`, colour-preserving — see FS_BRIGHTPASS_COLOR): the beam's own light
+//   * Wide (`uBloomWide`, colour-preserving — see FS_BRIGHTPASS): the beam's own light
 //     scattering into the surrounding dark. Reported live that additive here "brightens dense
 //     areas to white blobs" instead of doing what ambient scatter actually does — lift the FLOOR
 //     of the faint space around a bright feature, without pushing the feature's own already-bright
@@ -372,9 +410,10 @@ void main(){
 // sharp texture's own alpha through unchanged — bloom is extra light, not extra coverage.
 const FS_COMPOSITE = `precision highp float; varying vec2 vUv;
 uniform sampler2D uSharp, uBloom, uBloomWide; uniform float uIntensity, uIntensityWide;
+uniform vec2 uBloomUv; // the canvas's share of the tight texture — see GLSL_DOWN2's doc
 void main(){
   vec4 sharpC = texture2D(uSharp, vUv);
-  vec3 withTight = min(sharpC.rgb + uIntensity * texture2D(uBloom, vUv).rgb, 1.0);
+  vec3 withTight = min(sharpC.rgb + uIntensity * texture2D(uBloom, vUv * uBloomUv).rgb, 1.0);
   vec3 result = max(withTight, uIntensityWide * texture2D(uBloomWide, vUv).rgb);
   gl_FragColor = vec4(result, sharpC.a);
 }`;
@@ -529,13 +568,18 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   // ping-pong targets — compiled/allocated lazily on first use, not up front, so a caller that
   // never passes bloomIntensity/bloomWide (EqChart and Meter don't; Vectorscope, TimeScope and
   // SpectrumScope do) pays nothing extra at all, not even the small textures.
+  // A program reading through GLSL_DOWN2, with its two extra uniforms.
+  type Down2Prog = { prog: WebGLProgram; uSrcSize: WebGLUniformLocation | null; uFactor: WebGLUniformLocation | null };
   let bloomProg: {
-    brightPass: WebGLProgram; uThreshold: WebGLUniformLocation | null; uBPTex: WebGLUniformLocation | null;
-    brightPassColor: WebGLProgram; uThresholdColor: WebGLUniformLocation | null; uBPColorTex: WebGLUniformLocation | null;
+    down2: Down2Prog; uDown2Tex: WebGLUniformLocation | null;
+    resample: WebGLProgram; uResampleTex: WebGLUniformLocation | null; uUvScale: WebGLUniformLocation | null;
+    brightPass: Down2Prog; uThreshold: WebGLUniformLocation | null; uBPTex: WebGLUniformLocation | null;
+    tight: Down2Prog; uTightTex: WebGLUniformLocation | null;
     blur: WebGLProgram; uOffset: WebGLUniformLocation | null; uBlurTex: WebGLUniformLocation | null;
     composite: WebGLProgram;
     uSharp: WebGLUniformLocation | null; uBloom: WebGLUniformLocation | null; uBloomWide: WebGLUniformLocation | null;
     uIntensity: WebGLUniformLocation | null; uIntensityWide: WebGLUniformLocation | null;
+    uBloomUv: WebGLUniformLocation | null;
   } | null = null;
   type BloomTarget = { tex: WebGLTexture; fbo: WebGLFramebuffer };
   type BloomPair = [BloomTarget, BloomTarget];
@@ -543,6 +587,11 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   let bloomWideTex: BloomPair | null = null; // wide tier — fixed BLOOM_WIDE_SIZE, allocated once
   let bloomFarTex: BloomPair | null = null; // wide tier's further downsample — fixed BLOOM_FAR_SIZE
   let bloomPrefilterTex: BloomTarget | null = null; // see its own doc at the point of use
+  // The wide tier's reduction chain from the prefilter down towards BLOOM_WIDE_SIZE — see its own
+  // doc at the point of use. Rebuilt with the prefilter. `fx`/`fy` is the reduction from the
+  // previous level (the prefilter, for the first), `sx`/`sy` the canvas pixels one texel covers.
+  type ChainLevel = { t: BloomTarget; w: number; h: number; fx: number; fy: number; sx: number; sy: number };
+  let wideChain: ChainLevel[] = [];
   let bloomW = 0;
   let bloomH = 0;
   let prefilterW = 0;
@@ -580,21 +629,37 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   // own resize logic. The wide tier never depends on the caller's size at all (see
   // BLOOM_WIDE_SIZE's own doc), so it's allocated once and left alone.
   const ensureBloom = (canvasW: number, canvasH: number): boolean => {
-    const w = Math.max(1, Math.round(canvasW * BLOOM_SCALE));
-    const h = Math.max(1, Math.round(canvasH * BLOOM_SCALE));
+    // Half the caller's actual canvas — see its own doc at the point of use (in commit()) for why
+    // every bright-pass reads this instead of the accumulator directly — and the tight tier half
+    // of that again. Rounded up, see GLSL_DOWN2's doc.
+    const pw = Math.ceil(canvasW / 2);
+    const ph = Math.ceil(canvasH / 2);
+    const w = Math.ceil(pw / 2);
+    const h = Math.ceil(ph / 2);
     if (!bloomProg) {
+      const down2 = link(gl, FS_DOWN2);
+      const resample = link(gl, FS_RESAMPLE);
       const brightPass = link(gl, FS_BRIGHTPASS);
-      const brightPassColor = link(gl, FS_BRIGHTPASS_COLOR);
+      const tight = link(gl, FS_TIGHT);
       const blur = link(gl, FS_BLUR);
       const composite = link(gl, FS_COMPOSITE);
-      if (!brightPass || !brightPassColor || !blur || !composite) return false;
+      if (!down2 || !resample || !brightPass || !tight || !blur || !composite) return false;
+      const d2 = (prog: WebGLProgram): Down2Prog => ({
+        prog,
+        uSrcSize: gl.getUniformLocation(prog, "uSrcSize"),
+        uFactor: gl.getUniformLocation(prog, "uFactor"),
+      });
       bloomProg = {
-        brightPass,
+        down2: d2(down2),
+        uDown2Tex: gl.getUniformLocation(down2, "uTex"),
+        resample,
+        uResampleTex: gl.getUniformLocation(resample, "uTex"),
+        uUvScale: gl.getUniformLocation(resample, "uUvScale"),
+        brightPass: d2(brightPass),
         uThreshold: gl.getUniformLocation(brightPass, "uThreshold"),
         uBPTex: gl.getUniformLocation(brightPass, "uTex"),
-        brightPassColor,
-        uThresholdColor: gl.getUniformLocation(brightPassColor, "uThreshold"),
-        uBPColorTex: gl.getUniformLocation(brightPassColor, "uTex"),
+        tight: d2(tight),
+        uTightTex: gl.getUniformLocation(tight, "uTex"),
         blur,
         uOffset: gl.getUniformLocation(blur, "uOffset"),
         uBlurTex: gl.getUniformLocation(blur, "uTex"),
@@ -604,6 +669,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         uBloomWide: gl.getUniformLocation(composite, "uBloomWide"),
         uIntensity: gl.getUniformLocation(composite, "uIntensity"),
         uIntensityWide: gl.getUniformLocation(composite, "uIntensityWide"),
+        uBloomUv: gl.getUniformLocation(composite, "uBloomUv"),
       };
     }
     if (!bloomTex || bloomW !== w || bloomH !== h) {
@@ -626,10 +692,6 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       bloomFarTex = mkBloomPair(BLOOM_FAR_SIZE, BLOOM_FAR_SIZE);
       if (!bloomFarTex) return false;
     }
-    // Half the caller's actual canvas — see its own doc at the point of use (in commit()) for why
-    // every bright-pass reads this instead of the accumulator directly.
-    const pw = Math.max(1, Math.round(canvasW / 2));
-    const ph = Math.max(1, Math.round(canvasH / 2));
     if (!bloomPrefilterTex || prefilterW !== pw || prefilterH !== ph) {
       if (bloomPrefilterTex) {
         gl.deleteTexture(bloomPrefilterTex.tex);
@@ -639,6 +701,29 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       if (!bloomPrefilterTex) return false;
       prefilterW = pw;
       prefilterH = ph;
+      for (const c of wideChain) {
+        gl.deleteTexture(c.t.tex);
+        gl.deleteFramebuffer(c.t.fbo);
+      }
+      wideChain = [];
+      // Halve each dimension while it is still more than twice BLOOM_WIDE_SIZE, so the last level
+      // is within 2x of the wide target and the final bilinear resample is safe too. Always at
+      // least one level (1:1 on an axis that is already small enough), so the resample has one.
+      let cw = pw;
+      let ch = ph;
+      let sx = 2;
+      let sy = 2;
+      do {
+        const fx = cw > 2 * BLOOM_WIDE_SIZE ? 2 : 1;
+        const fy = ch > 2 * BLOOM_WIDE_SIZE ? 2 : 1;
+        cw = Math.ceil(cw / fx);
+        ch = Math.ceil(ch / fy);
+        sx *= fx;
+        sy *= fy;
+        const t = mkBloomTex(cw, ch);
+        if (!t) return false;
+        wideChain.push({ t, w: cw, h: ch, fx, fy, sx, sy });
+      } while (cw > 2 * BLOOM_WIDE_SIZE || ch > 2 * BLOOM_WIDE_SIZE);
     }
     return true;
   };
@@ -686,19 +771,23 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         const [fa, fb] = bloomFarTex;
         const pf = bloomPrefilterTex;
 
-        // Prefilter: a *safe* (LINEAR, half-resolution) copy of the sharp accumulator, which both
-        // tiers' bright-passes read instead of `ping[dst].tex` directly. That texture is NEAREST
-        // (deliberately, for the accumulator's own exactness — see its setup), and sampling it at
-        // a large reduction (tight: 4x via BLOOM_SCALE; wide: similar) is point-sampling, not
-        // averaging — it skips most source texels in a perfectly regular pattern, which is exactly
-        // what produced a visible grid at high bloom intensity (the same under-sampling family as
-        // the wide tier's earlier one, just faint enough at low intensity to go unnoticed until
-        // reported live). A single, safe 2x LINEAR halving here — exact for an even-sized target,
-        // since bilinear correctly averages precisely the 4 source texels a 2x reduction maps each
-        // destination texel to — band-limits the content once, before either tier's own further
-        // (safe, LINEAR-sourced) reduction.
-        gl.useProgram(blit);
-        gl.uniform1i(uTex, 0);
+        // Bind `p`, point it at a `srcW`x`srcH` source reduced by `fx`/`fy` — see GLSL_DOWN2.
+        const useDown2 = (p: Down2Prog, srcW: number, srcH: number, fx: number, fy: number) => {
+          gl.useProgram(p.prog);
+          gl.uniform2f(p.uSrcSize, srcW, srcH);
+          gl.uniform2f(p.uFactor, fx, fy);
+        };
+
+        // Prefilter: the bright-pass at full resolution, box-averaged to half (see FS_BRIGHTPASS for
+        // why in that order), which both tiers reduce further from instead of reading `ping[dst].tex`
+        // directly. Sampling the accumulator straight into a much smaller target is point-sampling,
+        // not averaging — it skips most source texels in a perfectly regular pattern, which is
+        // exactly what produced a visible grid at high bloom intensity. Each step from here on is an
+        // exact 2x2 average (see GLSL_DOWN2), so every texel of the accumulator contributes to both
+        // tiers.
+        useDown2(bloomProg.brightPass, W, H, 2, 2);
+        gl.uniform1f(bloomProg.uThreshold, BLOOM_THRESHOLD);
+        gl.uniform1i(bloomProg.uBPTex, 0);
         gl.bindFramebuffer(gl.FRAMEBUFFER, pf.fbo);
         gl.viewport(0, 0, prefilterW, prefilterH);
         gl.activeTexture(gl.TEXTURE0);
@@ -707,16 +796,14 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
 
         gl.bindFramebuffer(gl.FRAMEBUFFER, a.fbo);
         gl.viewport(0, 0, bloomW, bloomH);
-        gl.useProgram(bloomProg.brightPass);
-        gl.uniform1f(bloomProg.uThreshold, BLOOM_THRESHOLD);
-        gl.uniform1i(bloomProg.uBPTex, 0);
-        gl.activeTexture(gl.TEXTURE0);
+        useDown2(bloomProg.tight, prefilterW, prefilterH, 2, 2);
+        gl.uniform1i(bloomProg.uTightTex, 0);
         gl.bindTexture(gl.TEXTURE_2D, pf.tex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         // Separable blur, ping-ponging the two small targets (a -> b horizontally, b -> a
         // vertically) — cheap because the targets are small, not because the kernel is. `a` ends
-        // up holding the tight tier's finished result, already white-valued (see FS_BRIGHTPASS).
+        // up holding the tight tier's finished result, already white-valued (see FS_TIGHT).
         gl.useProgram(bloomProg.blur);
         gl.uniform1i(bloomProg.uBlurTex, 0);
         gl.bindFramebuffer(gl.FRAMEBUFFER, b.fbo);
@@ -729,16 +816,31 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         gl.bindTexture(gl.TEXTURE_2D, b.tex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-        // Wide tier: its own bright-pass, also off the safe prefilter (NOT the sharp accumulator
-        // directly — same aliasing reasoning as the tight tier above; NOT chained from `a` either,
-        // which is already grayscale — see FS_BRIGHTPASS_COLOR's own doc for why this tier needs
-        // its own colour-preserving pass instead).
-        gl.useProgram(bloomProg.brightPassColor);
-        gl.uniform1f(bloomProg.uThresholdColor, BLOOM_THRESHOLD);
-        gl.uniform1i(bloomProg.uBPColorTex, 0);
+        // Wide tier: off the prefilter too (NOT chained from `a`, which is already grayscale — this
+        // tier keeps the beam's colour, see FS_BRIGHTPASS).
+        //
+        // Reduced in 2x steps (`wideChain`), not in one jump onto the fixed BLOOM_WIDE_SIZE: that
+        // was a 7x reduction at an ordinary tube size and ~13x on a maximised window, sampled
+        // bilinearly, which averages only 2x2 texels per sample and skipped the rest in a regular
+        // pattern growing with the canvas. The last level (within 2x of the target) is resampled
+        // onto it.
+        for (let i = 0; i < wideChain.length; i++) {
+          const from = i > 0 ? wideChain[i - 1] : { t: pf, w: prefilterW, h: prefilterH };
+          const to = wideChain[i];
+          useDown2(bloomProg.down2, from.w, from.h, to.fx, to.fy);
+          gl.uniform1i(bloomProg.uDown2Tex, 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, to.t.fbo);
+          gl.viewport(0, 0, to.w, to.h);
+          gl.bindTexture(gl.TEXTURE_2D, from.t.tex);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+        const last = wideChain[wideChain.length - 1];
+        gl.useProgram(bloomProg.resample);
+        gl.uniform1i(bloomProg.uResampleTex, 0);
+        gl.uniform2f(bloomProg.uUvScale, W / (last.w * last.sx), H / (last.h * last.sy));
         gl.bindFramebuffer(gl.FRAMEBUFFER, wa.fbo);
         gl.viewport(0, 0, BLOOM_WIDE_SIZE, BLOOM_WIDE_SIZE);
-        gl.bindTexture(gl.TEXTURE_2D, pf.tex);
+        gl.bindTexture(gl.TEXTURE_2D, last.t.tex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
         // BLOOM_WIDE_BLUR_PASSES horizontal+vertical pairs, ping-ponging wa/wb — small, safe
@@ -762,9 +864,9 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
 
         // Far tier: a genuine minification of the wide tier's result into BLOOM_FAR_SIZE — this,
         // not a wider blur on the same-size texture, is where the real reach comes from (see that
-        // constant's own doc). LINEAR filtering on `wa` means this downsample is itself a
-        // bilinear box-average over many source texels per destination one, which band-limits the
-        // content as a side effect rather than skipping over it.
+        // constant's own doc). A 4x bilinear reduction samples only part of `wa`, which is safe
+        // here only because the blur above has already band-limited it to well below this
+        // stage's resolution.
         gl.useProgram(blit);
         gl.uniform1i(uTex, 0);
         gl.bindFramebuffer(gl.FRAMEBUFFER, fa.fbo);
@@ -795,6 +897,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         gl.useProgram(bloomProg.composite);
         gl.uniform1f(bloomProg.uIntensity, bloomIntensity);
         gl.uniform1f(bloomProg.uIntensityWide, bloomWide);
+        gl.uniform2f(bloomProg.uBloomUv, W / (4 * bloomW), H / (4 * bloomH));
         gl.uniform1i(bloomProg.uSharp, 0);
         gl.uniform1i(bloomProg.uBloom, 1);
         gl.uniform1i(bloomProg.uBloomWide, 2);
@@ -844,9 +947,15 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         gl.deleteTexture(bloomPrefilterTex.tex);
         gl.deleteFramebuffer(bloomPrefilterTex.fbo);
       }
+      for (const c of wideChain) {
+        gl.deleteTexture(c.t.tex);
+        gl.deleteFramebuffer(c.t.fbo);
+      }
       if (bloomProg) {
-        gl.deleteProgram(bloomProg.brightPass);
-        gl.deleteProgram(bloomProg.brightPassColor);
+        gl.deleteProgram(bloomProg.down2.prog);
+        gl.deleteProgram(bloomProg.resample);
+        gl.deleteProgram(bloomProg.brightPass.prog);
+        gl.deleteProgram(bloomProg.tight.prog);
         gl.deleteProgram(bloomProg.blur);
         gl.deleteProgram(bloomProg.composite);
       }
