@@ -7,6 +7,7 @@ import { detectorSample, findRisingEdge, triggerDetector, type TriggerDetector }
 import { scopeStream } from "./streams";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { useTunableParams } from "./useTunableParams";
+import { APP_ZOOM_EVENT } from "./appZoom";
 import type { ScopeData, ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters (see Vectorscope's identical rationale — a live panel beats a
@@ -249,8 +250,13 @@ export function TimeScope() {
     };
     const ro = new ResizeObserver(measure);
     ro.observe(el);
+    // Also on a zoom change, which resizes the box on screen without firing the observer (appZoom.ts).
+    window.addEventListener(APP_ZOOM_EVENT, measure);
     measure();
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      window.removeEventListener(APP_ZOOM_EVENT, measure);
+    };
   }, []);
   const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
   const resW = Math.round(width * dpr);

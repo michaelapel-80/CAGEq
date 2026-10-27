@@ -12,6 +12,7 @@ import { traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
 import { FftSizeRow, type SpectrumData } from "./EqChart";
 import type { ScopeEq } from "./Vectorscope";
+import { APP_ZOOM_EVENT } from "./appZoom";
 import { fmtSnappedHz, noteShift, snapBin, snapRequested } from "./peakSnap";
 
 /** Live-tunable render parameters — same rationale as Vectorscope/TimeScope's panels. `trailTau`
@@ -456,8 +457,13 @@ export function SpectrumScope({
     };
     const ro = new ResizeObserver(measure);
     ro.observe(el);
+    // Also on a zoom change, which resizes the box on screen without firing the observer (appZoom.ts).
+    window.addEventListener(APP_ZOOM_EVENT, measure);
     measure();
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      window.removeEventListener(APP_ZOOM_EVENT, measure);
+    };
   }, []);
   const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
   const resW = Math.round(width * dpr);

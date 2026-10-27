@@ -5,6 +5,7 @@ import { meterStream, scopeStream, type MeterData } from "./streams";
 import type { ScopeData } from "./Vectorscope";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { useTunableParams } from "./useTunableParams";
+import { APP_ZOOM_EVENT } from "./appZoom";
 
 /**
  * §5.3c post-EQ output meter, laid out vertically to sit beside the chart (no vertical growth, so
@@ -207,12 +208,18 @@ export function Meter({
     const el = levelBarRef.current;
     if (!el) return;
     const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
-    const ro = new ResizeObserver(() => {
+    const measure = () => {
       const r = el.getBoundingClientRect();
       setBeamSize({ w: Math.max(1, Math.round(r.width * dpr)), h: Math.max(1, Math.round(r.height * dpr)) });
-    });
+    };
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
-    return () => ro.disconnect();
+    // Also on a zoom change, which resizes the box on screen without firing the observer (appZoom.ts).
+    window.addEventListener(APP_ZOOM_EVENT, measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener(APP_ZOOM_EVENT, measure);
+    };
   }, []);
 
   // Latest raw scope payload, written by the listener below and read by the beam's rAF loop — a

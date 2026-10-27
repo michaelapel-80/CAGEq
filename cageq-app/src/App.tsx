@@ -10,6 +10,7 @@ import { loudnessDb } from "./kWeighting";
 import { Band, composedCurveDb, expandHighPass, highPassFc, HP_DEFAULT, logGrid, type ResponseModel } from "./biquad";
 import { EqChart, EQ_V_INSET_FRAC, Marker, PHASE_COLOR, PhaseCurve, RefCurve, Series, SpectrumData, SPEC_FFT_DEFAULT, SPEC_FFT_MIN, snapFftSize } from "./EqChart";
 import { ImpulseChart } from "./NerdCharts";
+import { appZoom, fitAppToWindow } from "./appZoom";
 import { ToneGrid } from "./ToneGrid";
 import { ScrubNumber } from "./ScrubNumber";
 import { Meter } from "./Meter";
@@ -860,6 +861,21 @@ function App() {
   const [restored, setRestored] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  // Fit-to-window scaling (appZoom.ts): on every window resize, and again when the layout's height
+  // changes for good — once loading ends, once there's a correction to draw, and once the chart's
+  // height (`chartWrapHeight`, React state, so a render behind a width change) has caught up with
+  // the layout width the fit measured at. Stable: at the design width it stops changing. Not on
+  // every content change: a notice appearing would otherwise rescale the whole app under the pointer.
+  const appRef = useRef<HTMLElement | null>(null);
+  const hasResult = result !== null;
+  useLayoutEffect(() => {
+    const app = appRef.current;
+    if (!app) return;
+    const fit = () => fitAppToWindow(app);
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [loading, hasResult, chartWrapHeight]);
   const [applying, setApplying] = useState(false);
 
   // Fit `inp` into `slot` via the sidecar and record it (cached bands, hydrated flag).
@@ -2402,8 +2418,10 @@ function App() {
   useLayoutEffect(() => {
     const el = chartWrapRef.current;
     if (!el) return;
+    // On-screen width back to `.app`'s own units (appZoom.ts): the height is set as a CSS length.
+    // A zoom change alone leaves the layout width, and so this, unchanged.
     const measure = () => {
-      const w = el.getBoundingClientRect().width;
+      const w = el.getBoundingClientRect().width / appZoom();
       setChartWrapHeight(w > 0 ? w * (215 / 720) : null);
     };
     const ro = new ResizeObserver(measure);
@@ -2428,7 +2446,7 @@ function App() {
     // jump. When there's genuinely no chart (result cleared) the whole row unmounts anyway.
     if (!svg) return;
     const measure = () => {
-      const h = svg.getBoundingClientRect().height;
+      const h = svg.getBoundingClientRect().height / appZoom(); // CSS units, see chartWrapHeight
       const inset = EQ_V_INSET_FRAC * h;
       setPlotBox(h > 0 ? { top: inset, height: h - 2 * inset } : null);
     };
@@ -2448,7 +2466,7 @@ function App() {
     const el = chartAreaRef.current;
     if (!svg || !el) return;
     const measure = () => {
-      const h = el.getBoundingClientRect().height;
+      const h = el.getBoundingClientRect().height / appZoom(); // CSS units, see chartWrapHeight
       if (h > 0) setChartAreaHeight(h);
     };
     const ro = new ResizeObserver(measure);
@@ -2658,7 +2676,7 @@ function App() {
   })();
 
   return (
-    <main className="app">
+    <main className="app" ref={appRef}>
       {pendingFinal && (
         <div
           onClick={() => setPendingFinal(null)}
