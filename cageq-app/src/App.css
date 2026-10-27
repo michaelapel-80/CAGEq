@@ -607,8 +607,13 @@ select:disabled {
 .meter-bars {
   flex: 1 1 auto;
   display: flex;
-  gap: 0.4rem;
+  gap: 0.35rem;
   min-height: 40px;
+  /* Centres the bars between the chart and the panel edge: the .chart-row gap alone left them much
+     closer to the chart than to the edge on their right (the column's padding plus the panel's).
+     Also keeps each bar at ~31px now that the scale strip is narrower. Only the bars move: the
+     readout below (.meter-read, positioned in .meter-col) keeps the column's full width. */
+  margin-left: 10px;
 }
 .vbar-group {
   flex: 1 1 0;
@@ -617,10 +622,13 @@ select:disabled {
   gap: 0.15rem;
 }
 /* Shared scale strip between the two bars: 10 dB labels aligned to the tick lines. Same column
-   layout as a vbar-group (track + caption) so its track lines up with the bars. */
+   layout as a vbar-group (track + caption) so its track lines up with the bars. Only as wide as its
+   widest label ("-40" at 0.5rem is ~13px): wider left the labels floating in empty space, further
+   from the bars (~11-15px) than the bars are from the chart (the .chart-row gap, 9.6px). With
+   this and .meter-bars' 0.35rem gap they sit ~7px from the bars, close enough to read as theirs. */
 .vbar-scale {
   flex: 0 0 auto;
-  width: 22px;
+  width: 15px;
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
