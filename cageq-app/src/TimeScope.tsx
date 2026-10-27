@@ -7,7 +7,7 @@ import { detectorSample, findRisingEdge, triggerDetector, type TriggerDetector }
 import { scopeStream } from "./streams";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { useTunableParams } from "./useTunableParams";
-import { APP_ZOOM_EVENT } from "./appZoom";
+import { APP_ZOOM_EVENT, appZoom } from "./appZoom";
 import type { ScopeData, ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters (see Vectorscope's identical rationale — a live panel beats a
@@ -587,7 +587,11 @@ export function TimeScope() {
           for (let i = 1; i < dispN; i++) path.lineTo((i / (dispN - 1)) * W, cy - valueAt(i, lane) * amp);
         }
         ctx.globalCompositeOperation = "lighter";
-        ctx.lineWidth = Math.max(0.6, p.beam * (H / REF_SIZE));
+        // Against the height *before* the app's zoom, not the zoomed one: a larger window scales the
+        // whole app up (appZoom.ts) and with it the tube, but a real beam's spot doesn't grow with
+        // the screen, and scaled along it read as too thick on a maximised window. So the beam
+        // keeps the on-screen width it has at the design size.
+        ctx.lineWidth = Math.max(0.6, p.beam * (H / appZoom() / REF_SIZE));
         ctx.lineJoin = "round";
         ctx.lineCap = "round";
         ctx.strokeStyle = `rgba(${ar},${ag},${ab},${p.glow})`;
