@@ -274,6 +274,17 @@ select:disabled {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The left column alone sets the row height. Without this, the right column's fixed panels
+     plus the list's minimum could add up to more than the left column (a short band list, say)
+     and push the row, and the Presets panel with it, past the filter bands. Size containment
+     makes the aside count as empty for sizing; it is then stretched to the left column's height
+     and scrolls in the rare case its fixed panels alone don't fit. */
+  contain: size;
+  overflow-y: auto;
+  /* Not auto: with overflow-y set, an unset overflow-x computes to auto, and a hover ring or
+     focus outline poking past the edge would add a horizontal scrollbar. */
+  overflow-x: hidden;
+  scrollbar-width: thin;
 }
 .app-main > aside > .panel:last-child {
   flex: 1 1 auto;
@@ -293,7 +304,12 @@ select:disabled {
   .app-main {
     grid-template-columns: minmax(0, 1fr);
   }
-  /* Stacked (narrow) layout: don't let the Presets panel stretch to fill the viewport. */
+  /* Stacked (narrow) layout: the aside sits below the main column and sizes by its own content
+     again, and the Presets panel doesn't stretch to fill the viewport. */
+  .app-main > aside {
+    contain: none;
+    overflow: visible;
+  }
   .app-main > aside > .panel:last-child,
   .app-main > aside > .panel:last-child > .pl-scroll:last-child {
     flex: 0 1 auto;
