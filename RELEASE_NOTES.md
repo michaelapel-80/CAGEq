@@ -1,8 +1,9 @@
 A sharper, more honest spectrum view.
 
-- **Fixed:** on a large or maximised window, peaks in the upper part of the spectrum looked
-  misshapen. The curve is now drawn from four times as many points, so it shows its real shape;
-  the levels it reads are unchanged.
+- **Improved:** the spectrum now resolves peaks in its upper part clearly at any window size,
+  including closely spaced harmonics that used to blur into noise. The curve is drawn from four
+  times as many points, so it shows its real shape; the levels it reads are unchanged. This also
+  applies to the spectrum behind the EQ chart.
 - **Changed:** anything quieter than the bottom of the spectrum's level range now drops off the
   plot instead of lying flat along it, where it read as a real flat section.
 - **New:** the bottom of that range is adjustable — Floor in the spectrum's settings (−150 to
