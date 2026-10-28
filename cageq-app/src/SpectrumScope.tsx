@@ -707,7 +707,12 @@ export function SpectrumScope({
         for (let i = 0; i < n; i++) {
           vScratch[i] = (corr ? srcDb[i] - corr[i] : srcDb[i]) + (kw ? kw[i] : 0);
           pScratch[i] = corr ? srcPeakDb[i] - corr[i] : srcPeakDb[i];
-          const frac = Math.max(0, Math.min(1, (vScratch[i] - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
+          // Not clamped at the bottom of the range: content below it continues past the plot's
+          // bottom edge and off the canvas, where clamping drew it as a flat line along the
+          // floor that read as a real (flat) part of the spectrum. Bounded at half a range below,
+          // well off the canvas, so a near-silent bin (the backend floor is -210 dB) doesn't send
+          // the spline miles away.
+          const frac = Math.max(-0.5, Math.min(1, (vScratch[i] - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
           // Bin index maps straight to pixel X in both axis modes — bins are already
           // uniformly spaced along whichever axis is active (log or linear); only the
           // bin-to-Hz mapping used elsewhere (peak crosses, the hover cursor, the grid) differs.
