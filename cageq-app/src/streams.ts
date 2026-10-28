@@ -60,8 +60,9 @@ function startHeartbeat() {
 
 /**
  * A visible stream silent for this long is presumed wedged and re-registered. The backend emits
- * every stream at ~60 Hz whenever the monitor runs (silence included — `signal: false`), so a
- * multi-second gap while visible is never normal traffic.
+ * every stream at least ~25 Hz whenever the monitor runs (silence included — `signal: false`;
+ * the spectrum only when it changed, once per FFT hop), so a multi-second gap while visible is
+ * never normal traffic.
  */
 const STALL_MS = 3000;
 let visibleSince = performance.now();

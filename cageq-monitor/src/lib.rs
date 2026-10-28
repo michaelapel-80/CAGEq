@@ -419,14 +419,32 @@ mod windows_impl {
     /// (87.5% Med, 93.75% High): that buys update cadence/latency, not extra statistical averaging —
     /// successive windows there are highly correlated.
     const FFT_OVERLAP_DIV: usize = 4;
-    /// Number of log-frequency display bins spanning [SPEC_F_MIN, SPEC_F_MAX].
+    /// Number of log-frequency display bins spanning [SPEC_F_MIN, SPEC_F_MAX] — the display's
+    /// *analysis* resolution (~1/24 octave): each bin's span, and with it its Gaussian's width (see
+    /// `gaussian_power`), is 1/(N_LOG_BINS - 1) of the range. Not the number of values sent, which
+    /// is `N_LOG_POINTS` — see `DISPLAY_OVERSAMPLE`.
     const N_LOG_BINS: usize = 240;
     /// Number of *linear*-frequency display bins spanning the same [SPEC_F_MIN, SPEC_F_MAX] range
     /// — `SpectrumUpdate::db_lin`/`peak_db_lin`, for SpectrumScope's optional linear-axis mode
     /// (constant-Hz spacing, unlike `N_LOG_BINS`'s constant-*percentage* spacing — better for
     /// reading a harmonic series as the evenly-spaced comb it actually is). Matches `N_LOG_BINS`
-    /// for a first cut; purely a display-resolution knob, independently tunable later.
+    /// for a first cut; purely a display-resolution knob, independently tunable later. Like
+    /// `N_LOG_BINS`, the analysis resolution, not the number of values sent (`N_LIN_POINTS`).
     const N_LIN_BINS: usize = 240;
+    /// Display points per bin spacing: the same bin-wide Gaussians, evaluated at this many times
+    /// as many centres. Each bin's Gaussian is only ~0.6 bin spacings wide (`GAUSSIAN_WIDTH_MULT`
+    /// × half a bin), so one value per bin samples the smoothed spectrum too coarsely to show its
+    /// shape: a tone's lobe at the top was 3-4 points, and the drawn spline invented the shape
+    /// between them — misshapen lobes, glaring on a maximised window, ~10 device px per bin.
+    /// Oversampling draws the real shape of the same curve; every reading (levels, lobe widths,
+    /// `db_raw`'s band power, `peak_db`) stays what it was at one point per bin. Narrower bins
+    /// instead would have changed all of those (tones +3 dB at the top, `db_raw` -3 dB, rougher
+    /// noise).
+    const DISPLAY_OVERSAMPLE: usize = 4;
+    /// Values per log-axis update: `N_LOG_BINS`' grid, `DISPLAY_OVERSAMPLE` times as dense.
+    const N_LOG_POINTS: usize = (N_LOG_BINS - 1) * DISPLAY_OVERSAMPLE + 1;
+    /// Values per linear-axis update, likewise.
+    const N_LIN_POINTS: usize = (N_LIN_BINS - 1) * DISPLAY_OVERSAMPLE + 1;
     const SPEC_F_MIN: f32 = 20.0;
     const SPEC_F_MAX: f32 = 20_000.0;
     /// dB floor for empty/silent spectrum bins — just a `log(0)`/finite-number guard, not a claim
@@ -516,9 +534,13 @@ mod windows_impl {
     /// still felt ok"). The hop is now the same ~43 ms at every tier (see `fft_hop`), so this
     /// constant smooths identically across tiers and that steppiness is gone at its source.
     const SPEC_TAU_SECS: f32 = 0.02;
-    /// Spectrum emit cadence — 60 fps, matching the level meter. The FFT is heavier than the
-    /// meter but the fold + emit is cheap enough that the full rate reads noticeably smoother.
+    /// Spectrum emit tick — 60 fps, matching the level meter, so a finished hop goes out within
+    /// 16 ms. An update is only sent when there's something new, though (`Spectrum::take_fresh`):
+    /// while audio plays that's once per hop, ~23/s.
     const SPECTRUM_INTERVAL: Duration = Duration::from_millis(16);
+    /// While silent the idle decay changes the spectrum on every tick; updates are held to about
+    /// the hop cadence there too, rather than a full-size payload 60 times a second for a fade.
+    const SPECTRUM_IDLE_INTERVAL: Duration = Duration::from_millis(40);
     /// Power multiplier applied per emit while genuinely silent (endpoint idle) — fades the stored
     /// spectrum toward the floor instead of freezing it lit (≈35 dB/s at the 16 ms cadence).
     const SPEC_IDLE_DECAY: f32 = 0.88;
@@ -1005,26 +1027,28 @@ mod windows_impl {
     /// reading matters more than a perfectly flat tone sweep — `db_raw` (using this function's
     /// `acc` return) is what routes around it for whoever wants that instead.
     ///
-    /// Returns `(density, raw)` — `acc/wsum` (the density this function exists for) and `acc`
-    /// itself (the pre-normalization weighted sum, `db_raw`'s own input).
-    fn gaussian_power(power: &[f32], lo: f32, hi: f32) -> (f32, f32) {
+    /// The weights depend only on the span, never on the audio, so this builds them once (for a
+    /// spectrum of `len` linear bins) and [`GaussianPower::apply`] reuses them for every update —
+    /// an `exp` per tap per update otherwise, the bulk of the reduction's cost. `apply` returns
+    /// `(density, raw)` — `acc/wsum` (the density this function exists for) and `acc` itself (the
+    /// pre-normalization weighted sum, `db_raw`'s own input).
+    fn gaussian_power(len: usize, lo: f32, hi: f32) -> GaussianPower {
         let lo = lo.max(0.0);
-        let hi = hi.min(power.len().saturating_sub(1) as f32);
+        let hi = hi.min(len.saturating_sub(1) as f32);
         let center = (lo + hi) / 2.0;
         let half_width = ((hi - lo) / 2.0) * GAUSSIAN_WIDTH_MULT;
         let sigma = half_width.max(GAUSSIAN_FLOOR_SIGMA_BINS);
         let radius = (sigma * 4.0).ceil() as i32;
         let c = center.round() as i32;
         let lo_i = (c - radius).max(0) as usize;
-        let hi_i = ((c + radius) as usize).min(power.len().saturating_sub(1));
-        let mut acc = 0.0f32;
-        let mut wsum = 0.0f32;
-        for (i, &p) in power.iter().enumerate().take(hi_i + 1).skip(lo_i) {
-            let d = i as f32 - center;
-            let w = (-0.5 * (d / sigma).powi(2)).exp();
-            acc += p * w;
-            wsum += w;
-        }
+        let hi_i = ((c + radius) as usize).min(len.saturating_sub(1));
+        let weights: Vec<f32> = (lo_i..=hi_i)
+            .map(|i| {
+                let d = i as f32 - center;
+                (-0.5 * (d / sigma).powi(2)).exp()
+            })
+            .collect();
+        let wsum: f32 = weights.iter().sum();
         if wsum > 0.0 {
             // `raw` is `acc` scaled by `half_width / sigma` — 1.0 wherever the kernel is exactly
             // the bin's own width-matched one (everything above the `GAUSSIAN_FLOOR_SIGMA_BINS`
@@ -1037,9 +1061,29 @@ mod windows_impl {
             // kernel of the bin's own width would have summed, i.e. the band power the display bin
             // actually spans. (`density` above needs no such correction — dividing by `wsum`
             // already normalizes the kernel's width away.)
-            (acc / wsum, acc * (half_width / sigma))
+            GaussianPower { lo_i, weights, density_scale: 1.0 / wsum, raw_scale: half_width / sigma }
         } else {
-            (0.0, 0.0)
+            GaussianPower { lo_i, weights: Vec::new(), density_scale: 0.0, raw_scale: 0.0 }
+        }
+    }
+
+    /// One display point's precomputed [`gaussian_power`] weights.
+    struct GaussianPower {
+        lo_i: usize,
+        weights: Vec<f32>,
+        density_scale: f32, // 1 / the weights' sum
+        raw_scale: f32,     // half_width / sigma — see the comment where `gaussian_power` sets it
+    }
+
+    impl GaussianPower {
+        /// `(density, raw)` of `power` — see [`gaussian_power`].
+        fn apply(&self, power: &[f32]) -> (f32, f32) {
+            let acc: f32 = power[self.lo_i..self.lo_i + self.weights.len()]
+                .iter()
+                .zip(&self.weights)
+                .map(|(p, w)| p * w)
+                .sum();
+            (acc * self.density_scale, acc * self.raw_scale)
         }
     }
 
@@ -1298,8 +1342,8 @@ mod windows_impl {
         window: Vec<f32>,          // Hann window, len analysis_size — the real samples only
         accum: VecDeque<f32>,      // mono sample accumulator
         avg_power: Vec<f32>,       // smoothed linear power per (padded, interpolated) FFT bin
-        ranges: Vec<(f32, f32)>, // per log bin: exact (fractional) linear-bin span — see `gaussian_power`
-        ranges_lin: Vec<(f32, f32)>, // per linear-axis bin: same, constant-Hz spacing instead
+        ranges: Vec<DisplayPoint>, // per log-axis point — see `DisplayPoint`
+        ranges_lin: Vec<DisplayPoint>, // per linear-axis point: same, constant-Hz spacing instead
         smoothing: f32,            // power-average coefficient per hop
         power_scale: f32,          // |X|² -> normalized power so a full-scale sine reads ~0 dBFS
         raw_power_scale: f32,      // db_raw's own calibration constant — see its own doc, and
@@ -1314,6 +1358,16 @@ mod windows_impl {
         hires_peaks: Arc<AtomicBool>,   // live-toggleable; picks PEAK_MIN_SEPARATION_OCTAVES(_HIGH_RES)
                                         // and PEAK_MAX_RANGE_DB(_HIGH_RES) at snapshot time — a
                                         // separate choice from the window size (see `start`'s doc)
+        fresh: bool,               // avg_power changed since the last `take_fresh` — see its doc
+    }
+
+    /// One display point: the exact (fractional) linear-bin span of the display bin centred on it
+    /// — a whole bin wide even though points sit `DISPLAY_OVERSAMPLE` to a bin — and that span's
+    /// precomputed Gaussian (see `gaussian_power`).
+    struct DisplayPoint {
+        lo: f32,
+        hi: f32,
+        gauss: GaussianPower,
     }
 
     /// The window-dependent half of `Spectrum::new`'s computation — everything that depends on
@@ -1427,30 +1481,36 @@ mod windows_impl {
 
             let n_lin = padded_size / 2 + 1;
             let bin_hz = rate as f32 / padded_size as f32;
+            let point = |lo: f32, hi: f32| {
+                let lo = lo.max(0.0);
+                let hi = hi.min((n_lin - 1) as f32);
+                DisplayPoint { lo, hi, gauss: gaussian_power(n_lin, lo, hi) }
+            };
+            // The bin spacing (`ratio`) sets each span's width; the points sit DISPLAY_OVERSAMPLE
+            // times as densely (`step`). Exact (fractional) linear-bin boundaries, deliberately NOT
+            // rounded to integers — `gaussian_power` derives each bin's Gaussian centre and width
+            // directly from these, so an integer-rounded boundary would just reintroduce the same
+            // "bin count jumps as the true fractional width crosses an integer" artifact the
+            // Gaussian exists to avoid (see that function's doc).
             let ratio = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_BINS as f32 - 1.0));
             let half = ratio.sqrt();
-            // Exact (fractional) linear-bin boundaries, deliberately NOT rounded to integers —
-            // `gaussian_power` (below) derives each bin's Gaussian centre and width directly from
-            // these, so an integer-rounded boundary would just reintroduce the same "bin count
-            // jumps as the true fractional width crosses an integer" artifact the Gaussian exists
-            // to avoid (see that function's doc).
-            let mut ranges = Vec::with_capacity(N_LOG_BINS);
-            for i in 0..N_LOG_BINS {
-                let fc = SPEC_F_MIN * ratio.powi(i as i32);
-                let lo = ((fc / half) / bin_hz).max(0.0);
-                let hi = ((fc * half) / bin_hz).min((n_lin - 1) as f32);
-                ranges.push((lo, hi));
-            }
-            // Same idea, constant-Hz width instead of constant-percentage: each bin owns the
-            // half-width window around its own evenly-spaced centre.
+            let step = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_POINTS as f32 - 1.0));
+            let ranges: Vec<DisplayPoint> = (0..N_LOG_POINTS)
+                .map(|i| {
+                    let fc = SPEC_F_MIN * step.powi(i as i32);
+                    point((fc / half) / bin_hz, (fc * half) / bin_hz)
+                })
+                .collect();
+            // Same idea, constant-Hz width instead of constant-percentage: each point owns the
+            // bin-wide window around its own evenly-spaced centre.
             let lin_bin_width = (SPEC_F_MAX - SPEC_F_MIN) / (N_LIN_BINS as f32 - 1.0);
-            let mut ranges_lin = Vec::with_capacity(N_LIN_BINS);
-            for i in 0..N_LIN_BINS {
-                let fc = SPEC_F_MIN + lin_bin_width * i as f32;
-                let lo = ((fc - lin_bin_width / 2.0) / bin_hz).max(0.0);
-                let hi = ((fc + lin_bin_width / 2.0) / bin_hz).min((n_lin - 1) as f32);
-                ranges_lin.push((lo, hi));
-            }
+            let lin_step = (SPEC_F_MAX - SPEC_F_MIN) / (N_LIN_POINTS as f32 - 1.0);
+            let ranges_lin: Vec<DisplayPoint> = (0..N_LIN_POINTS)
+                .map(|i| {
+                    let fc = SPEC_F_MIN + lin_step * i as f32;
+                    point((fc - lin_bin_width / 2.0) / bin_hz, (fc + lin_bin_width / 2.0) / bin_hz)
+                })
+                .collect();
 
             Spectrum {
                 fft,
@@ -1472,6 +1532,7 @@ mod windows_impl {
                 bin_hz,
                 harmonic_fold,
                 hires_peaks: Arc::new(AtomicBool::new(false)),
+                fresh: false,
             }
         }
 
@@ -1531,6 +1592,7 @@ mod windows_impl {
                     for (avg, c) in self.avg_power.iter_mut().zip(self.out_buf.iter()) {
                         *avg += a * (c.norm_sqr() - *avg);
                     }
+                    self.fresh = true;
                 }
                 // One bulk removal instead of `fft_hop` individual `pop_front` calls — same net
                 // effect (each call's own bookkeeping — wraparound index math, capacity checks —
@@ -1541,12 +1603,22 @@ mod windows_impl {
             }
         }
 
-        /// Fade the stored power toward the floor — called on an emit with no fresh audio, so the
+        /// Fade the stored power toward the floor — called on an emit tick with no fresh audio, so the
         /// spectrum decays during silence instead of freezing at its last values.
         fn decay_idle(&mut self) {
             for p in self.avg_power.iter_mut() {
                 *p *= SPEC_IDLE_DECAY;
             }
+            self.fresh = true;
+        }
+
+        /// Whether `avg_power` changed since the last call — a hop finished, or it decayed. The
+        /// emit tick (`SPECTRUM_INTERVAL`) runs ~2.6x as often as hops land, and an update with
+        /// nothing new is the same values serialized, sent and parsed again: at
+        /// `DISPLAY_OVERSAMPLE` points that's real JSON and garbage-collection load in the webview
+        /// for nothing.
+        fn take_fresh(&mut self) -> bool {
+            std::mem::take(&mut self.fresh)
         }
 
         /// Collapse `avg_power` onto `ranges` (dB) — shared by both the log and linear axis
@@ -1560,20 +1632,20 @@ mod windows_impl {
             power_scale: f32,
             raw_power_scale: f32,
             bin_hz: f32,
-            ranges: &[(f32, f32)],
+            ranges: &[DisplayPoint],
         ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
             let mut db = Vec::with_capacity(ranges.len());
             let mut db_raw = Vec::with_capacity(ranges.len());
             let mut peak_db = Vec::with_capacity(ranges.len());
             let mut peak_hz = Vec::with_capacity(ranges.len());
-            for &(lo, hi) in ranges {
+            for &DisplayPoint { lo, hi, ref gauss } in ranges {
                 // Gaussian-weighted integral of linear power across the bin's own span, not
                 // the single loudest sample in it — see `gaussian_power`'s doc for the full case
                 // history (this replaced `.fold(max)`, then a rectangular/boxcar sum, in that
                 // order; both are in git history if the reasoning against either is ever needed
                 // again). Verified against synthetic ground truth before landing here — see
                 // `cageq-monitor/tests/decimation_spike.rs`, kept.
-                let (power, raw_power) = gaussian_power(avg_power, lo, hi);
+                let (power, raw_power) = gauss.apply(avg_power);
                 let cur = if power > 0.0 {
                     (10.0 * (power * power_scale).log10()).max(SPEC_FLOOR)
                 } else {
@@ -1933,6 +2005,8 @@ mod windows_impl {
         let mut intensity = vec![0.0f32; N_BINS]; // phosphor histogram brightness per segment
         let mut last_tick = Instant::now();
         let mut last_spectrum = Instant::now();
+        let mut last_spectrum_emit = Instant::now();
+        let mut last_spectrum_signal = false;
         let mut last_scope = Instant::now();
         let mut last_signal = Instant::now();
 
@@ -2087,7 +2161,12 @@ mod windows_impl {
                 if !signal {
                     spectrum.decay_idle();
                 }
-                on_spectrum(spectrum.snapshot(signal));
+                let due = signal || last_spectrum_emit.elapsed() >= SPECTRUM_IDLE_INTERVAL;
+                if signal != last_spectrum_signal || (due && spectrum.take_fresh()) {
+                    on_spectrum(spectrum.snapshot(signal));
+                    last_spectrum_emit = Instant::now();
+                    last_spectrum_signal = signal;
+                }
                 last_spectrum = Instant::now();
             }
 
@@ -2318,8 +2397,9 @@ mod windows_impl {
 
             // Monotonically non-increasing moving outward from the peak, checked over a window
             // wide enough to cover the sidelobe-null region a boxcar/max reduction showed
-            // artifacts in (±20 bins was comfortably past it in the original diagnosis).
-            let window = 20usize;
+            // artifacts in (±20 bins was comfortably past it in the original diagnosis; points
+            // are DISPLAY_OVERSAMPLE to a bin).
+            let window = 20 * DISPLAY_OVERSAMPLE;
             let mut prev = update.db[peak_i];
             for i in (peak_i.saturating_sub(window)..peak_i).rev() {
                 assert!(
@@ -2571,13 +2651,13 @@ mod windows_impl {
         #[test]
         fn db_raw_reads_pink_noise_flat_down_to_the_low_end() {
             let rate = 48_000u32;
-            let ratio = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_BINS as f32 - 1.0));
-            let idx = |f: f32| ((f / SPEC_F_MIN).ln() / ratio.ln()).round() as usize;
+            let step = (SPEC_F_MAX / SPEC_F_MIN).powf(1.0 / (N_LOG_POINTS as f32 - 1.0));
+            let idx = |f: f32| ((f / SPEC_F_MIN).ln() / step.ln()).round() as usize;
             for tier in [BASE_FFT_SIZE, MAX_FFT_SIZE] {
                 let mut spec = Spectrum::new(rate, tier, Arc::new(AtomicBool::new(false)));
                 let mut noise = crate::signal::PinkNoise::new();
                 let mut buf = vec![0.0f32; 4096];
-                let mut sum_raw = vec![0.0f32; N_LOG_BINS];
+                let mut sum_raw = vec![0.0f32; N_LOG_POINTS];
                 let mut frames = 0;
                 for k in 0..(rate as usize * 30 / 4096) {
                     for s in buf.iter_mut() {
@@ -2645,15 +2725,19 @@ mod windows_impl {
             };
             let db_slope = slope(&update.db);
             let raw_slope = slope(&update.db_raw);
-            assert!(db_slope < -0.05, "expected db to show a real declining tilt, got slope {db_slope:.4} dB/bin");
+            // -3 dB/octave is ~-0.125 dB per bin (24 to the octave), DISPLAY_OVERSAMPLE points each.
+            assert!(
+                db_slope < -0.05 / DISPLAY_OVERSAMPLE as f32,
+                "expected db to show a real declining tilt, got slope {db_slope:.4} dB/point"
+            );
             // A generous fraction, not near-zero: pink noise is genuine random noise, so the
             // regression itself carries sampling scatter on top of whatever systematic tilt
             // remains — this only needs to show db_raw's tilt is clearly, substantially smaller,
             // not that it's a perfect zero.
             assert!(
                 raw_slope.abs() < db_slope.abs() * 0.5,
-                "db_raw's tilt should be substantially smaller than db's — db slope {db_slope:.4} dB/bin, \
-                 db_raw slope {raw_slope:.4} dB/bin"
+                "db_raw's tilt should be substantially smaller than db's — db slope {db_slope:.4} dB/point, \
+                 db_raw slope {raw_slope:.4} dB/point"
             );
         }
     }
