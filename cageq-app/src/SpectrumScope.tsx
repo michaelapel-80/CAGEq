@@ -41,6 +41,8 @@ type Params = {
   glow: number;
   bloom: number;
   haze: number;
+  /** Bottom of the display range, dBFS (the top is SPEC_TOP_DB). */
+  floor: number;
   undistort: boolean;
   linear: boolean;
   // Lives in `Params`/`useTunableParams` — deliberately manual-save, same as every other control in
@@ -50,7 +52,7 @@ type Params = {
   // "rta": most people want this on and are the ones actually reading real levels off the curve.
   tilt: TiltMode;
 };
-const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, undistort: true, linear: false, tilt: "rta" };
+const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, floor: -90, undistort: true, linear: false, tilt: "rta" };
 // Curated Trail/Tail/Glow combinations. The Trail/Glow orthogonality fix below (`TAU_REF/trailTau`
 // in doseMult) keeps *steady-state* brightness independent of trailTau in theory, but live tuning
 // of "distribution" showed glow still needs its own adjustment to get the actual density read
@@ -154,7 +156,6 @@ const STROKE_SMOOTH_TAU = 0.03;
 // Same fixed dBFS scale as EqChart's spectrum backdrop (§5.4) — consistent reading between the
 // Eq pane's backdrop and this standalone analyzer.
 const SPEC_TOP_DB = 0;
-const SPEC_DYN = 90;
 const F_MIN = 20;
 const F_MAX = 20000;
 // The classic 1-2-5 sequence — same set EqChart's own `GRID_HZ` uses, so the two charts' grids
@@ -509,8 +510,9 @@ export function SpectrumScope({
     ctx.strokeStyle = `rgba(${ar},${ag},${ab},${GRID_ALPHA})`;
     ctx.lineWidth = Math.max(1, H / REF_SIZE);
     ctx.beginPath();
-    for (const db of [0, -20, -40, -60, -80]) {
-      const y = plotBot - ((db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN) * (plotBot - plotTop);
+    const dyn = SPEC_TOP_DB - params.floor;
+    for (let db = SPEC_TOP_DB; db > params.floor; db -= 20) {
+      const y = plotBot - ((db - params.floor) / dyn) * (plotBot - plotTop);
       ctx.moveTo(0, y);
       ctx.lineTo(W, y);
     }
@@ -536,7 +538,7 @@ export function SpectrumScope({
       ctx.textAlign = hz === F_MIN ? "left" : hz === F_MAX ? "right" : "center";
       ctx.fillText(hz >= 1000 ? `${hz / 1000}k` : `${hz}`, x, H - 2);
     }
-  }, [resW, resH, params.linear]);
+  }, [resW, resH, params.linear, params.floor]);
 
   // The main trace + its phosphor trail. This frame's line is drawn into a scratch 2D canvas and
   // handed to the shared half-float accumulator (phosphor.ts), which owns the decay and the
@@ -712,7 +714,7 @@ export function SpectrumScope({
           // floor that read as a real (flat) part of the spectrum. Bounded at half a range below,
           // well off the canvas, so a near-silent bin (the backend floor is -210 dB) doesn't send
           // the spline miles away.
-          const frac = Math.max(-0.5, Math.min(1, (vScratch[i] - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
+          const frac = Math.max(-0.5, Math.min(1, (vScratch[i] - p.floor) / (SPEC_TOP_DB - p.floor)));
           // Bin index maps straight to pixel X in both axis modes — bins are already
           // uniformly spaced along whichever axis is active (log or linear); only the
           // bin-to-Hz mapping used elsewhere (peak crosses, the hover cursor, the grid) differs.
@@ -767,7 +769,7 @@ export function SpectrumScope({
           const r = Math.max(3, H * 0.018); // cross arm length
           markCtx.beginPath();
           for (const pk of peaks) {
-            const frac = Math.max(0, Math.min(1, (pk.db - (SPEC_TOP_DB - SPEC_DYN)) / SPEC_DYN));
+            const frac = Math.max(0, Math.min(1, (pk.db - p.floor) / (SPEC_TOP_DB - p.floor)));
             const x = hzToFrac(pk.hz) * W;
             const y = plotBot - frac * (plotBot - plotTop);
             markCtx.moveTo(x - r, y);
@@ -924,13 +926,14 @@ export function SpectrumScope({
   };
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "tail" | "glow" | "bloom" | "haze";
+  type NumKey = "trailTau" | "tail" | "glow" | "bloom" | "haze" | "floor";
   const CONTROLS: { key: NumKey; label: string; hint: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 2.0, step: 0.01 },
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.02, max: 1, step: 0.02 },
     { key: "bloom", label: t("scope.bloom"), hint: t("scope.bloomHint"), min: 0, max: 2, step: 0.05 },
     { key: "haze", label: t("scope.haze"), hint: t("scope.hazeHint"), min: 0, max: 4, step: 0.05 },
+    { key: "floor", label: t("scope.floor"), hint: t("scope.floorHint"), min: -150, max: -30, step: 5 },
   ];
 
   return (

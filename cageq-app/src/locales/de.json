@@ -160,6 +160,8 @@
     "bloomHint": "Eng begrenzte Glühintensität um die Spur",
     "haze": "Schleier",
     "hazeHint": "Breite, schwache Glühintensität um die Spur",
+    "floor": "Untergrenze",
+    "floorHint": "Untere Grenze des Pegelbereichs (dBFS); alles Leisere fällt aus dem Bild",
     "rotate": "Drehen",
     "rotateHint": "Aus: rohe X-Y-Darstellung — Mono erscheint als 45°-Diagonale, die Ausrichtung, für die Oszilloskop-Musik komponiert wird. An: gedreht, sodass Mono senkrecht erscheint, Gegenphase waagerecht.",
     "undistort": "Entzerren",

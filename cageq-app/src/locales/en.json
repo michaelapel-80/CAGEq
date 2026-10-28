@@ -160,6 +160,8 @@
     "bloomHint": "Tight-radius glow intensity around the trace",
     "haze": "Haze",
     "hazeHint": "Broad, faint glow intensity around the trace",
+    "floor": "Floor",
+    "floorHint": "Bottom of the level range (dBFS); anything quieter drops off the plot",
     "rotate": "Rotate",
     "rotateHint": "Off: raw X-Y — mono reads as a 45° diagonal, the orientation oscilloscope-music is authored for. On: rotated so mono reads vertical, anti-phase horizontal.",
     "undistort": "Undistort",
