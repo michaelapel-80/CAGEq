@@ -1,13 +1,10 @@
-The app now fills large windows, plus a few smaller fixes.
+A sharper, more honest spectrum view.
 
-- **New:** on a window larger than the layout, the whole app scales up to fill it instead of
-  leaving empty space around it (up to 150%). Maximising no longer brings up a scroll bar, and
-  every view keeps the same height.
-- **Changed:** a Shift-snapped spectrum peak now shows its frequency to a tenth of a hertz.
-- **Fixed:** the bloom glow on the spectrum and scopes no longer breaks up into beads along
-  steep lines, which was most visible on a maximised window.
-- **Fixed:** the oscilloscope's beam no longer gets thicker when the app scales up.
-- **Fixed:** the oscilloscope's trigger point now sits on a graticule line.
-- **Fixed:** the preset panel no longer grows taller than the filter bands, and the level meter
-  bars are spaced more evenly against their scale.
+- **Fixed:** on a large or maximised window, peaks in the upper part of the spectrum looked
+  misshapen. The curve is now drawn from four times as many points, so it shows its real shape;
+  the levels it reads are unchanged.
+- **Changed:** anything quieter than the bottom of the spectrum's level range now drops off the
+  plot instead of lying flat along it, where it read as a real flat section.
+- **New:** the bottom of that range is adjustable — Floor in the spectrum's settings (−150 to
+  −30 dBFS; the default stays at −90).
 - All changes are in the app itself; no engine update needed.
