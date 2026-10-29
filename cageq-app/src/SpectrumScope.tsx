@@ -13,7 +13,7 @@ import { useTunableParams } from "./useTunableParams";
 import { FftSizeRow, type SpectrumData } from "./EqChart";
 import type { ScopeEq } from "./Vectorscope";
 import { APP_ZOOM_EVENT } from "./appZoom";
-import { fmtSnappedHz, noteShift, snapBin, snapRequested } from "./peakSnap";
+import { fmtSnappedHz, noteShift, snapBin, snapRequested, snapSpan, SNAP_SPAN_COLOR } from "./peakSnap";
 
 /** Live-tunable render parameters — same rationale as Vectorscope/TimeScope's panels. `trailTau`
  *  is a genuine phosphor decay time constant, and `tail` the multiplier applied to it for faint
@@ -888,6 +888,13 @@ export function SpectrumScope({
           hz = peakHz[snap];
           xFrac = p.linear ? (hz - F_MIN) / (F_MAX - F_MIN) : Math.log(hz / F_MIN) / Math.log(F_MAX / F_MIN);
           dbText = `${pScratch[snap].toFixed(1)} dB`;
+        }
+        if (snapRequested() && n >= 3) {
+          // Where the snap looks (`snapSpan`): around the pointer, not the snapped line, so it
+          // shows why a peak just outside it isn't taken.
+          const [lo, hi] = snapSpan(n, hoverFrac * (n - 1));
+          markCtx.fillStyle = SNAP_SPAN_COLOR;
+          markCtx.fillRect((lo / (n - 1)) * W, plotTop, ((hi - lo) / (n - 1)) * W, plotBot - plotTop);
         }
         const x = xFrac * W;
         markCtx.strokeStyle = CURSOR_LINE_COLOR;

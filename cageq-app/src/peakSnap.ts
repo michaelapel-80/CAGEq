@@ -56,9 +56,7 @@ const MIN_PROMINENCE_DB = 3;
 export function snapBin(levels: ArrayLike<number>, fi: number): number | null {
   const n = levels.length;
   if (n < 3) return null;
-  const half = Math.max(1, Math.round(SNAP_FRAC * (n - 1)));
-  const lo = Math.max(0, Math.floor(fi) - half);
-  const hi = Math.min(n - 1, Math.ceil(fi) + half);
+  const [lo, hi] = snapSpan(n, fi);
   let best = lo;
   let floor = levels[lo];
   for (let i = lo; i <= hi; i++) {
@@ -69,6 +67,17 @@ export function snapBin(levels: ArrayLike<number>, fi: number): number | null {
   if (!(levels[best] > levels[best - 1] && levels[best] >= levels[best + 1])) return null;
   return levels[best] - floor >= MIN_PROMINENCE_DB ? best : null;
 }
+
+/** The bins `snapBin` searches for a cursor at fractional bin index `fi` of `n`: `[lo, hi]`,
+ *  inclusive. Also what the views draw, faintly, while Shift is held, so the reach of the snap
+ *  can be seen. */
+export function snapSpan(n: number, fi: number): [number, number] {
+  const half = Math.max(1, Math.round(SNAP_FRAC * (n - 1)));
+  return [Math.max(0, Math.floor(fi) - half), Math.min(n - 1, Math.ceil(fi) + half)];
+}
+
+/** Fill for that search window: the cursor line's colour, barely there. */
+export const SNAP_SPAN_COLOR = "rgba(230,240,255,0.07)";
 
 /** A snapped peak's frequency for the readout: a tenth of a hertz at every frequency, the
  *  backend's own rounding of `peak_hz`. Measured (cageq-monitor's

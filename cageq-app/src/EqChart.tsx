@@ -8,7 +8,7 @@ import { TiltGlyph } from "./TiltGlyph";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
 import { traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
-import { fmtSnappedHz, noteShift, snapBin, snapRequested } from "./peakSnap";
+import { fmtSnappedHz, noteShift, snapBin, snapRequested, snapSpan, SNAP_SPAN_COLOR } from "./peakSnap";
 
 /**
  * Interactive diagram.
@@ -956,6 +956,19 @@ export function EqChart({
               ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]), model, sampleRate)[0] : 0) + preampDb
               : 0;
           dbText = `${(spectrum.peak_db[snap] - corrDb).toFixed(1)} dB`;
+        }
+        if (spectrum && snapRequested() && spectrum.peak_db.length >= 3) {
+          // Where the snap looks (`snapSpan`): around the pointer, not the snapped line, so it
+          // shows why a peak just outside it isn't taken. Bin `i` sits at the spectrum's own log
+          // spacing, placed on this chart's axis.
+          const n = spectrum.peak_db.length;
+          const lnF0 = Math.log(spectrum.f_min);
+          const lnF1 = Math.log(spectrum.f_max);
+          const pointerHz = Math.exp(lnMin + ((hoverFrac * W - PAD.l) / (W - PAD.l - PAD.r)) * lnSpan);
+          const [lo, hi] = snapSpan(n, clamp(((Math.log(pointerHz) - lnF0) / (lnF1 - lnF0)) * (n - 1), 0, n - 1));
+          const binX = (i: number) => PAD.l + ((lnF0 + (i / (n - 1)) * (lnF1 - lnF0) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
+          strokeCtx.fillStyle = SNAP_SPAN_COLOR;
+          strokeCtx.fillRect(binX(lo), PAD.t, binX(hi) - binX(lo), H - PAD.b - PAD.t);
         }
         strokeCtx.strokeStyle = CURSOR_LINE_COLOR;
         strokeCtx.lineWidth = Math.max(1, H / SPEC_STROKE_REF_H);
