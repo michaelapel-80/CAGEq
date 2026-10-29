@@ -1,5 +1,5 @@
 /**
- * Biquad response maths for the §5.2 chart, the undistort inverse filters and every other
+ * Biquad response maths for the chart, the undistort inverse filters and every other
  * client-side curve.
  *
  * **Coefficients come from `cageq-biquad`, compiled to WebAssembly** (`cageq-biquad-wasm`,
@@ -13,7 +13,7 @@
  * RBJ over a warping-corrected correction without anyone noticing.
  *
  * Computing this client-side is what makes dragging instant — no IPC round-trip per
- * frame (filter.md §5.2 performance rule: a drag recomputes only the additive curve).
+ * frame (performance rule: a drag recomputes only the additive curve).
  * {@link initBiquad} must have resolved before any of it runs (`main.tsx` awaits it before
  * rendering).
  */

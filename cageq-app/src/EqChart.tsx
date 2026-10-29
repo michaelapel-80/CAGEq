@@ -11,7 +11,7 @@ import { useTunableParams } from "./useTunableParams";
 import { fmtSnappedHz, noteShift, snapBin, snapRequested } from "./peakSnap";
 
 /**
- * §5.2 interactive diagram.
+ * Interactive diagram.
  *
  * Log frequency axis (20 Hz – 20 kHz, constant ratio per octave, the audio-standard
  * view) against dB. Curves are computed client-side from band lists with AutoEq's
@@ -36,7 +36,7 @@ export type Series = {
   defaultHidden?: boolean;
   /** Still drawn (and still clipped to whatever range results), but its values don't count toward
    *  the Y auto-range — for a curve whose *shape* is meaningful but whose *magnitude* isn't
-   *  representative of "the applied filter": §5.2 isolate substitutes a bandpass with deep
+   *  representative of "the applied filter": isolate substitutes a bandpass with deep
    *  attenuation outside the audition band for exactly this series' bands, and letting that drive
    *  the scale blows the axis out to reflect the audition, not the actual correction, at exactly
    *  the moment a user is most likely to glance at the chart without re-reading the axis. */
@@ -83,7 +83,7 @@ export const PHASE_COLOR = "#f59e0b";
  *  gentle fade-away is the intended look here). The capture is the post-EQ output; the chart draws
  *  the **pre-filter** (source) view by removing the applied filter response per bin (see
  *  `eqBands`), so it reads against the EQ curve as "what's coming in" rather than the
- *  already-corrected output (§5.3c). `peak_db` is one-to-one with `db`, but reports the true
+ *  already-corrected output. `peak_db` is one-to-one with `db`, but reports the true
  *  linear-FFT level (max within the bin's span) instead of `db`'s Gaussian-weighted density
  *  average — the shape to draw vs. the number to read off a peak or the cursor, see
  *  SpectrumScope.tsx's `pScratch` for why the two disagree on purpose. `peaks` is separate again:
@@ -114,7 +114,7 @@ export type SpectrumData = {
   peaks: { hz: number; db: number }[];
 };
 
-/** Draggable band handles: X = centre frequency, Y = gain, wheel = Q (§5.2). A high-pass has no
+/** Draggable band handles: X = centre frequency, Y = gain, wheel = Q. A high-pass has no
  *  gain or Q: X only, and the wheel steps its slope. */
 export type Nodes = {
   bands: Band[];
@@ -399,7 +399,7 @@ export function EqChart({
   /** The applied filter cascade (AutoEq fit + custom). Its magnitude response is removed from
    *  the post-EQ capture per bin so the backdrop shows the **pre-filter** source spectrum. */
   eqBands?: Band[];
-  /** The §4.1 loudness-match preamp (dB) applied alongside `eqBands` — also removed from the
+  /** The loudness-match preamp (dB) applied alongside `eqBands` — also removed from the
    *  backdrop, same as Vectorscope/TimeScope's undistort, so it reconstructs the actual *input*
    *  signal rather than just undoing the filter shape and leaving the preamp's level offset in.
    *  Applies even when `eqBands` is empty (Dry still carries this gain). */
@@ -423,7 +423,7 @@ export function EqChart({
   legendHost?: HTMLElement | null;
   /** "Frequency finder" — hold the middle mouse button anywhere on the chart to audition a
    *  temporary, high-Q bandpass swept live to the cursor's frequency (by ear, without needing an
-   *  existing band the way §5.2's isolate/solo do), releasing reverts to the normal cascade.
+   *  existing band the way isolate/solo do), releasing reverts to the normal cascade.
    *  Called repeatedly with the current frequency (once on press, then again on every move while
    *  held) — the caller (App.tsx) owns the actual audio side-effect and start/end distinction, the
    *  same way `nodes.onChange` owns what a node drag actually does; this component only reports
@@ -1303,7 +1303,7 @@ export function EqChart({
       )}
       </g>
 
-      {/* draggable band handles (§5.2): X = fc, Y = gain, wheel = Q. Hidden entirely when
+      {/* draggable band handles: X = fc, Y = gain, wheel = Q. Hidden entirely when
           disabled (e.g. Dry active) — stale handles from the last slot shouldn't linger. */}
       {nodes && !nodes.disabled && nodes.bands.map((b, i) => {
         // A high-pass has no gain: its node sits on its own corner, -3 dB at Fc for every slope.

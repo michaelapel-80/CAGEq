@@ -75,12 +75,12 @@ fn real_dsp_fits_parametric_filters() {
     assert!((2000.0..4500.0).contains(&fc), "cut should sit near the 3 kHz bump, got {fc}");
 
     // The curve-derived quantities the Rust core composes the preamp from
-    // (filter.md §4.1/§4.2) are present and finite; the core owns the preamp itself.
+    // are present and finite; the core owns the preamp itself.
     let g_target = reply["g_target_db"].as_f64().expect("g_target_db");
     let g_max_peak = reply["g_max_peak_db"].as_f64().expect("g_max_peak_db");
     assert!(g_target.is_finite() && g_max_peak.is_finite());
 
-    // §5.2 reference curve: a compact, finite, log-ordered (f, db) sampling of the ideal
+    // Reference curve: a compact, finite, log-ordered (f, db) sampling of the ideal
     // correction. For this cut-dominated bump the target near 3 kHz should be a cut.
     let reference = reply["reference_curve"].as_array().expect("reference_curve");
     assert!((100..=200).contains(&reference.len()), "expected a subsampled curve, got {}", reference.len());
@@ -130,7 +130,7 @@ fn real_dsp_appends_custom_filters() {
     });
     assert!(has_custom, "custom +10 dB peak should be present: {filters:?}");
 
-    // ...and the combined curve peak reflects its boost, so §4.2 clipping protection
+    // ...and the combined curve peak reflects its boost, so clipping protection
     // accounts for it (this measurement is otherwise a cut, peak near 0).
     assert!(
         reply["g_max_peak_db"].as_f64().unwrap() >= 8.0,
@@ -170,7 +170,7 @@ fn real_dsp_flat_skips_autoeq_fit() {
     assert!((filters[0]["freq_hz"].as_f64().unwrap() - 1000.0).abs() < 1.0);
     assert!((filters[0]["gain_db"].as_f64().unwrap() - 5.0).abs() < 0.1);
 
-    // No AutoEq baseline to chase — the §5.2 reference curve is empty rather than some
+    // No AutoEq baseline to chase — the reference curve is empty rather than some
     // fetched/fitted curve.
     assert_eq!(reply["reference_curve"].as_array().unwrap().len(), 0);
 
@@ -180,7 +180,7 @@ fn real_dsp_flat_skips_autoeq_fit() {
     assert!((reply["g_max_peak_db"].as_f64().unwrap() - 5.0).abs() < 0.1, "peak should be the custom filter's own +5 dB");
 }
 
-/// Regression guard for the pink-noise Jacobian bug (§4.1).
+/// Regression guard for the pink-noise Jacobian bug.
 ///
 /// A *uniform* gain can't catch a mis-weighted loudness integral — it factors out of
 /// the weighting entirely, which is why "broadband +6 → −6" passed while the weighting
@@ -242,7 +242,7 @@ fn real_dsp_lists_the_autoeq_catalogue() {
     }
 }
 
-/// §8 mobile export: `fit_export_eq` fits a low band count directly to a *given* curve
+/// Mobile export: `fit_export_eq` fits a low band count directly to a *given* curve
 /// (a slot's own full cascade) rather than inverting a measurement the way `calculate_filters`
 /// does — so this is a MATCH fit (reproduce the input's sign/shape), not a correction fit.
 #[test]
@@ -296,7 +296,7 @@ fn real_dsp_fits_export_eq_to_full_cascade() {
     assert_eq!(reply["filters"], reply2["filters"], "identical request should hit the export fit cache");
 }
 
-/// §8 mobile export: `fit_fixed_band_eq` — AutoEq's own standard 10-/31-band graphic EQ, fixed
+/// Mobile export: `fit_fixed_band_eq` — AutoEq's own standard 10-/31-band graphic EQ, fixed
 /// ISO-standard Fc/Q (`autoeq.constants.PEQ_CONFIGS`), only gain optimized.
 #[test]
 fn real_dsp_fits_fixed_band_eq_to_full_cascade() {

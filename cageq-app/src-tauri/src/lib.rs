@@ -24,7 +24,7 @@ mod wav;
 enum Backend {
     Ready {
         core: Core,
-        /// The EQ backend the core drives (filter.md §5.3c). Held here as well so
+        /// The EQ backend the core drives. Held here as well so
         /// backend-scoped commands — the foreign-config trio, the applied-config preview
         /// — can reach it without going through `Core`, which has no business proxying
         /// them. Same `Arc` the core holds.
@@ -40,7 +40,7 @@ enum Backend {
     Failed(String),
 }
 
-/// Holds the running §5.3c loopback monitor so start/stop commands can replace or end it.
+/// Holds the running loopback monitor so start/stop commands can replace or end it.
 /// Capture is Windows-only (`cageq_monitor::Monitor::start` errors elsewhere).
 ///
 /// Keyed by a caller-chosen session token so a stale `stop_monitor` can't kill a newer session.
@@ -51,7 +51,7 @@ enum Backend {
 #[derive(Default)]
 struct MonitorState(std::sync::Mutex<Option<(String, cageq_monitor::Monitor)>>);
 
-/// Holds whatever test signal is currently playing — the §5.4 self-test's pink noise, or the
+/// Holds whatever test signal is currently playing — the self-test's pink noise, or the
 /// tone-generator window's output (`start_test_generator`, any waveform) — so start/stop can
 /// replace or end it. One slot on purpose: only one thing should ever be rendering to an output
 /// at once, so starting either kind stops whatever the other left playing.
@@ -64,7 +64,7 @@ struct TestSignalState(std::sync::Mutex<Option<cageq_monitor::TestSignal>>);
 #[derive(Default)]
 struct ScopeViewers(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
-/// Live toggle for the spectrum analyzer's harmonic folding (§5.2-adjacent — the "Fold" checkbox
+/// Live toggle for the spectrum analyzer's harmonic folding (the "Fold" checkbox
 /// in `SpectrumScope`). Shared into the monitor exactly like `ScopeViewers`, so it survives
 /// monitor restarts (device changes) and — the whole point of an atomic here rather than
 /// a `start_monitor` parameter — flips without restarting anything, set by
@@ -102,7 +102,7 @@ impl Default for SpecFftSizeState {
 #[derive(Default)]
 struct LufsResetState(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
-/// §5.3c data plane: per-stream `Channel` subscribers. These streams used to ride `app.emit`,
+/// Data plane: per-stream `Channel` subscribers. These streams used to ride `app.emit`,
 /// but Tauri delivers each backend→frontend *event* by evaluating a script in the webview — at
 /// this app's sustained ~120 events/s (meter + spectrum at 60 fps each) that churned memory in
 /// WebView2 at ~100 MiB/min, faster than its GC kept up (the "out of memory" crash class).
@@ -226,15 +226,15 @@ struct ApplyResult {
     cageq_path: String,
     /// The exact text written to cageq.txt — the end-to-end proof for the UI.
     cageq_text: String,
-    /// Composed final preamp (§4.0/§4.2): base pre-gain + §4.1 loudness match, capped.
+    /// Composed final preamp: base pre-gain + loudness match, capped.
     preamp_db: f64,
-    /// §4.2 emergency ceiling bound the level instead of the §4.1 loudness match.
+    /// Emergency ceiling bound the level instead of the loudness match.
     clipping_warning: bool,
-    /// The bands written (AutoEq fit + custom filters) — the §5.2 chart draws these.
+    /// The bands written (AutoEq fit + custom filters) — the chart draws these.
     filters: Vec<Filter>,
-    /// §5.2 chart reference: the ideal correction the AutoEq fit targets (empty for Dry).
+    /// Chart reference: the ideal correction the AutoEq fit targets (empty for Dry).
     reference_curve: Vec<CurvePoint>,
-    /// §4.1 loudness target + §4.2 curve peak — so the UI can compute the pre-gain
+    /// Loudness target + curve peak — so the UI can compute the pre-gain
     /// that gives the loudness match headroom when the clipping ceiling binds.
     g_target_db: f64,
     g_max_peak_db: f64,
@@ -245,7 +245,7 @@ struct ApplyResult {
 
 #[derive(serde::Serialize)]
 struct Status {
-    /// §3.0 startup verdict: FirstRun / ResumeTrusted / SafeStateStillActive / ExternallyModified.
+    /// Startup verdict: FirstRun / ResumeTrusted / SafeStateStillActive / ExternallyModified.
     startup: String,
     config_dir: String,
     /// How config_dir was resolved: the detected EqAPO dir, an override, or dev temp.
@@ -256,7 +256,7 @@ struct Status {
 /// `target` into comparison `slot` (A or B), write cageq.txt through cageq-core, and
 /// return the hash plus the file content actually written.
 ///
-/// `headphone: None` means the slot opted out of AutoEq entirely (filter.md §3.4a "flat
+/// `headphone: None` means the slot opted out of AutoEq entirely ("flat
 /// start" — a headphone AutoEq has no measurement for, or one bad enough that fitting to
 /// it makes things worse than not fitting at all): `target` is meaningless without a
 /// measurement to compensate, so it's ignored in that case, and the fit's own `flat` flag is
@@ -293,7 +293,7 @@ fn apply(
                     inputs.insert("flat".into(), Value::Bool(true));
                 }
             }
-            // §3.4 manual filters stacked on the AutoEq fit; the core's fit combines them
+            // Manual filters stacked on the AutoEq fit; the core's fit combines them
             // into the curve that drives the loudness/clipping policy.
             if !custom_filters.is_empty() {
                 let cf = serde_json::to_value(&custom_filters).map_err(|e| e.to_string())?;
@@ -316,21 +316,21 @@ fn get_selection() -> Selection {
     load_settings().selection
 }
 
-/// The §3.5 resume blob (active slot, device, per-slot inputs) saved last session, or
+/// The resume blob (active slot, device, per-slot inputs) saved last session, or
 /// `null` on a clean install. The frontend owns its shape; we return it verbatim.
 #[tauri::command]
 fn get_resume() -> Option<Value> {
     load_settings().resume
 }
 
-/// Persist the §3.5 resume blob. Called by the frontend whenever the editable session
+/// Persist the resume blob. Called by the frontend whenever the editable session
 /// state changes, so the next launch can restore and re-apply it.
 #[tauri::command]
 fn set_resume(resume: Value) {
     update_settings(|s| s.resume = Some(resume));
 }
 
-/// The §3.5 preset library (saved session presets + filter templates) from a previous
+/// The preset library (saved session presets + filter templates) from a previous
 /// run, or `null` on a clean install. Like the resume blob, an opaque UI-owned shape the
 /// backend stores and returns verbatim.
 #[tauri::command]
@@ -338,7 +338,7 @@ fn get_library() -> Option<Value> {
     load_settings().library
 }
 
-/// Persist the §3.5 preset library. Called by the frontend whenever the user saves or
+/// Persist the preset library. Called by the frontend whenever the user saves or
 /// deletes a preset / filter template.
 #[tauri::command]
 fn set_library(library: Value) {
@@ -454,7 +454,7 @@ fn safe_file_name(name: &str) -> String {
         .to_string()
 }
 
-/// Seed a slot with a fit **persisted from a previous session** (§3.5), no sidecar call.
+/// Seed a slot with a fit **persisted from a previous session**, no sidecar call.
 /// The launch-from-cache path: the frontend saved each slot's last composed bands + curve
 /// quantities, so startup can restore the exact EQ without waiting on the ~1–2 s cold fit.
 /// Seeds the cache only (no write, no activation) — the caller seeds both slots, then
@@ -481,8 +481,8 @@ fn seed_slot(
     }
 }
 
-/// Warm `fit.rs`'s AutoEq fit cache for `headphone`/`target` (§5.2 cache) in the
-/// background, so the first tone edit after a launch-from-cache seed (§3.5) is instant
+/// Warm `fit.rs`'s AutoEq fit cache for `headphone`/`target` in the
+/// background, so the first tone edit after a launch-from-cache seed is instant
 /// rather than paying the cold fit. Fire-and-forget: the result is discarded (populating
 /// the cache is the whole point). No write and no slot change, so it can never race with
 /// a user edit. `device` is no longer needed here — the fit cache isn't keyed on it (see
@@ -500,7 +500,7 @@ fn warm_fit(device: String, headphone: String, target: Option<String>, state: St
 }
 
 /// Switch the active comparison slot (A/B/Dry) and write its cached config — instant,
-/// no re-fit (filter.md §5.2). Returns the newly-written config for the UI.
+/// no re-fit. Returns the newly-written config for the UI.
 #[tauri::command]
 fn activate_slot(slot: Slot, state: State<Backend>) -> Result<ApplyResult, String> {
     match state.inner() {
@@ -513,7 +513,7 @@ fn activate_slot(slot: Slot, state: State<Backend>) -> Result<ApplyResult, Strin
 }
 
 /// What slots A and B hold right now (`null` for an empty one), without writing anything — so
-/// the frontend can refresh its launch cache (§3.5) after the core re-fitted *every* slot on
+/// the frontend can refresh its launch cache after the core re-fitted *every* slot on
 /// its own (a model change or backend swap), when a write only reported the active one.
 #[derive(serde::Serialize)]
 struct SlotFits {
@@ -531,7 +531,7 @@ fn slot_fits(state: State<Backend>) -> Result<SlotFits, String> {
     }
 }
 
-/// §5.2 isolate: write a bandpass-only config for the active slot (audition one band's region).
+/// Isolate: write a bandpass-only config for the active slot (audition one band's region).
 /// Transient — the frontend re-applies the real correction to clear it.
 #[tauri::command]
 fn isolate(freq_hz: f64, q: f64, state: State<Backend>) -> Result<ApplyResult, String> {
@@ -545,7 +545,7 @@ fn isolate(freq_hz: f64, q: f64, state: State<Backend>) -> Result<ApplyResult, S
 }
 
 /// Copy slot `from` onto slot `to` (A/B) and make `to` active — a starting point for
-/// a variant (filter.md §5.2). Returns the newly-written config.
+/// a variant. Returns the newly-written config.
 #[tauri::command]
 fn copy_slot(from: Slot, to: Slot, state: State<Backend>) -> Result<ApplyResult, String> {
     match state.inner() {
@@ -572,7 +572,7 @@ fn set_device(device: String, state: State<Backend>) -> Result<(), String> {
 
 /// Build the UI-facing result from an [`Applied`], reading the applied config back out of
 /// the backend (for EqAPO, the exact cageq.txt that was written — the end-to-end proof).
-/// Shared by every write path. Persists the hash so the next startup's §3.0 integrity
+/// Shared by every write path. Persists the hash so the next startup's integrity
 /// check has something to compare against.
 fn apply_result(applied: Applied, eq: &Arc<dyn EqBackend>) -> ApplyResult {
     update_settings(|s| s.last_hash = Some(applied.hash.clone()));
@@ -630,7 +630,7 @@ struct DeviceDto {
 }
 
 
-// --- APO setup (filter.md §5.3c) ------------------------------------------
+// --- APO setup ------------------------------------------
 
 
 /// The elevated setup helper, as bundled in the app's resources.
@@ -807,7 +807,7 @@ fn apo_setup_run(app: tauri::AppHandle, action: String) -> Result<String, String
         Err(e) => Err(e.to_string()),
     }
 }
-/// Active Windows playback devices to scope the EQ to (§3.0). A local registry read, not a
+/// Active Windows playback devices to scope the EQ to. A local registry read, not a
 /// core call — available even if the EQ backend failed to start.
 #[tauri::command]
 fn list_devices(state: State<Backend>) -> Vec<DeviceDto> {
@@ -864,7 +864,7 @@ fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
     }
 }
 
-/// §5.3c: start post-EQ loudness monitoring on `device` (the selected endpoint's id, or `None`
+/// Start post-EQ loudness monitoring on `device` (the selected endpoint's id, or `None`
 /// for the default render endpoint). Opens WASAPI loopback and streams `MeterUpdate`s (and the
 /// spectrum/scope streams) to every channel registered via `subscribe_*` — see [`StreamSubs`] for
 /// why channels, not events. Replaces any monitor already running (e.g. after a device change).
@@ -999,7 +999,7 @@ fn set_scope_viewer(active: bool, scope_viewers: State<ScopeViewers>) {
     }
 }
 
-/// §5.3c: stop loopback monitoring `session` (idempotent — no-op if nothing is running, or if a
+/// Stop loopback monitoring `session` (idempotent — no-op if nothing is running, or if a
 /// newer session has already replaced it; see [`MonitorState`]).
 #[tauri::command]
 fn stop_monitor(session: String, state: State<MonitorState>) -> Result<(), String> {
@@ -1136,7 +1136,7 @@ fn stop_test_signal(state: State<TestSignalState>) -> Result<(), String> {
 /// Open the modern Windows Sound settings for the selected output, so the user can change its
 /// playback format (sample rate / bit depth). CAGEq only *reads* the format (via the loopback's
 /// mix rate) — the device-format property is read-only per Microsoft, so we point at the native
-/// tool rather than reimplement it (filter.md §8). When the selected device is the Windows
+/// tool rather than reimplement it. When the selected device is the Windows
 /// default, jump straight to its properties page (format dropdown); otherwise open the general
 /// device list (there's no documented deep-link to a specific non-default device).
 #[tauri::command]
@@ -1177,7 +1177,7 @@ fn open_uri(_uri: &str) -> Result<(), String> {
 }
 
 /// The raw headphone measurement + target curves (centered, shared dBr reference) for the
-/// §5.2 nerd overlays. Measurement/target-only, so it's fetched on its own rather than
+/// nerd overlays. Measurement/target-only, so it's fetched on its own rather than
 /// threaded through the apply/slot pipeline. Relayed as-is (`{ raw_curve, target_curve }`).
 #[tauri::command]
 fn measurement_curves(headphone: String, target: Option<String>, state: State<Backend>) -> Result<Value, String> {
@@ -1190,7 +1190,7 @@ fn measurement_curves(headphone: String, target: Option<String>, state: State<Ba
     }
 }
 
-/// §8 mobile export: a second, independent AutoEq PEQ pass that fits `band_count` filters
+/// Mobile export: a second, independent AutoEq PEQ pass that fits `band_count` filters
 /// directly to the *combined response* of `filters` (a slot's own full cascade — fit + content
 /// + tone, the same `Band[]` `ApplyResult::filters` already carries), not to a headphone
 /// measurement. Relayed as-is (`{filters, preamp_db}`) — see `fit_export_eq`'s own Python
@@ -1278,7 +1278,7 @@ fn set_response_model(model: ResponseModel, state: State<Backend>) -> Result<Res
     }
 }
 
-/// The current §4.0 loudness settings (base pre-gain + mode).
+/// The current loudness settings (base pre-gain + mode).
 #[tauri::command]
 fn get_loudness(state: State<Backend>) -> Result<LoudnessSettings, String> {
     match state.inner() {
@@ -1296,7 +1296,7 @@ struct LoudnessUpdate {
     applied: Option<ApplyResult>,
 }
 
-/// Set the §4.0 loudness settings (base pre-gain, §4.2-ISP headroom, and the
+/// Set the loudness settings (base pre-gain, true-peak headroom, and the
 /// Comparison/FinalVolume mode), persist them, and re-apply the current config so the change
 /// takes effect immediately. Both dB fields are clamped to attenuation only (−40..0 dB): a
 /// positive value would be a boost, which the safety model must never allow.
@@ -1318,7 +1318,7 @@ fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<Lou
             let settings = LoudnessSettings { base_pregain_db: base, isp_headroom_db: isp_headroom, mode: settings.mode };
             update_settings(|s| s.loudness = settings); // persist without wiping the selection
             // update_loudness sets the settings and pushes them live — ramping a volume
-            // increase (§7.5), or writing directly for a decrease. Blocks for the ramp.
+            // increase, or writing directly for a decrease. Blocks for the ramp.
             let applied = core.update_loudness(settings).and_then(|r| r.ok()).map(|a| apply_result(a, eq));
             Ok(LoudnessUpdate { settings, applied })
         }
@@ -1326,7 +1326,7 @@ fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<Lou
 }
 
 /// Preview the dB the preamp would change if `settings` were applied to the active
-/// config (positive = louder) — for the §7.5 confirm dialog. `None` if nothing active.
+/// config (positive = louder) — for the confirm dialog. `None` if nothing active.
 #[tauri::command]
 fn preview_loudness(settings: LoudnessSettings, state: State<Backend>) -> Option<f64> {
     match state.inner() {
@@ -1335,13 +1335,13 @@ fn preview_loudness(settings: LoudnessSettings, state: State<Backend>) -> Option
     }
 }
 
-/// Whether the §7.5 "switching to Final volume" confirmation is enabled.
+/// Whether the "switching to Final volume" confirmation is enabled.
 #[tauri::command]
 fn get_confirm_final_volume() -> bool {
     load_settings().confirm_final_volume
 }
 
-/// Enable/disable the §7.5 confirmation ("don't ask again" clears it; a UI checkbox
+/// Enable/disable the confirmation ("don't ask again" clears it; a UI checkbox
 /// re-enables it).
 #[tauri::command]
 fn set_confirm_final_volume(enabled: bool) {
@@ -1379,7 +1379,7 @@ fn status(state: State<Backend>) -> Status {
     }
 }
 
-// --- persisted settings (§3.5, minimal) -----------------------------------
+// --- persisted settings (minimal) -----------------------------------
 
 /// The app's persisted settings. A struct (not a bare value) so it can grow without
 /// invalidating older files; `#[serde(default)]` fills in anything a prior version
@@ -1391,21 +1391,21 @@ struct AppSettings {
     /// Last-used headphone/target, restored into the pickers on the next launch.
     #[serde(default)]
     selection: Selection,
-    /// Content hash of the last cageq.txt CAGEq wrote (§3.0). Compared on the next
+    /// Content hash of the last cageq.txt CAGEq wrote. Compared on the next
     /// startup to tell "unchanged" from "safe-state still active" / "externally edited".
     #[serde(default)]
     last_hash: Option<String>,
-    /// §7.5 point 1: confirm before switching to Finale Lautstärke (the volume jump).
+    /// Confirm before switching to Finale Lautstärke (the volume jump).
     /// Defaults on; the dialog's "don't ask again" clears it, a UI checkbox re-enables.
     #[serde(default = "default_true")]
     confirm_final_volume: bool,
-    /// §3.5 resume state — the last editable session (active slot, device, per-slot
+    /// Resume state — the last editable session (active slot, device, per-slot
     /// inputs) so the app restores and re-applies on the next launch. An opaque,
     /// UI-owned JSON blob (shape defined by the frontend): the backend only persists and
     /// returns it, so adding a field there never needs a Rust change.
     #[serde(default)]
     resume: Option<Value>,
-    /// §3.5 preset library — the user's saved session presets and filter templates. Same
+    /// Preset library — the user's saved session presets and filter templates. Same
     /// opaque UI-owned-blob treatment as `resume` (persist + return verbatim).
     #[serde(default)]
     library: Option<Value>,
@@ -1492,7 +1492,7 @@ fn save_settings_to(path: &Path, s: &AppSettings) -> std::io::Result<()> {
 /// frequently-fired `set_resume()`) could both read the same on-disk snapshot and each write
 /// back only their own edit — whichever finishes last silently clobbers the other's. Losing
 /// `last_hash` in particular is the worst case: it feeds directly into the next launch's
-/// startup-integrity verdict (§3.0).
+/// startup-integrity verdict.
 static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Update one field of the persisted settings without clobbering the others
@@ -1581,7 +1581,7 @@ fn choose_backend(config_dir: &Path) -> Arc<dyn EqBackend> {
     }
 }
 
-/// Keep the live backend in sync with reality (filter.md §5.3c). What setup *should* have
+/// Keep the live backend in sync with reality. What setup *should* have
 /// chosen can change without this process hearing about it directly — the in-app wizard runs
 /// the elevated helper as a separate process, and the standalone cageq-apo-setup.exe can be
 /// run outside the app entirely. Rather than have either of those somehow notify a running
@@ -1617,7 +1617,7 @@ fn build_backend() -> Backend {
     set_cache_dir_env(&resolve_cache_dir());
     let settings = load_settings();
     let _ = std::fs::create_dir_all(&config_dir);
-    // The single place a backend is chosen (filter.md §5.3c) — wrapped so setup can change
+    // The single place a backend is chosen — wrapped so setup can change
     // that choice later without restarting (see `SwitchableBackend`).
     let switch = Arc::new(SwitchableBackend::new(choose_backend(&config_dir)));
     let eq: Arc<dyn EqBackend> = switch.clone();
@@ -1626,7 +1626,7 @@ fn build_backend() -> Backend {
     let reported_dir = eq.location();
     match Core::start(Arc::clone(&eq), settings.last_hash.as_deref()) {
         Ok(core) => {
-            core.set_loudness(settings.loudness); // restore §4.0 settings
+            core.set_loudness(settings.loudness); // restore settings
             core.set_response_model(settings.response_model); // and the filter-model preference
             Backend::Ready {
                 core,
@@ -1642,7 +1642,7 @@ fn build_backend() -> Backend {
 
 /// Resolve where cageq.txt is written, plus a human label of how it was found (for
 /// the UI). Precedence: an explicit `CAGEQ_CONFIG_DIR` override (dev/tests) → the
-/// detected Equalizer APO config dir (§3.0, the real target that affects audio) → a
+/// detected Equalizer APO config dir (the real target that affects audio) → a
 /// dev temp folder, so the app still runs on a machine without EqAPO installed.
 fn resolve_config_dir() -> (PathBuf, String) {
     if let Ok(dir) = env::var("CAGEQ_CONFIG_DIR") {
@@ -1686,7 +1686,7 @@ fn set_cache_dir_env(dir: &Path) {
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
-    // §2: enforce a single instance so two CAGEq processes never race on cageq.txt.
+    // Enforce a single instance so two CAGEq processes never race on cageq.txt.
     // Must be registered first (plugin docs). A second launch focuses the existing
     // window instead of starting a rival writer, then exits.
     #[cfg(desktop)]
@@ -1881,7 +1881,7 @@ mod tests {
         text.lines().find(|l| l.starts_with("Preamp:")).expect("a Preamp line").to_string()
     }
 
-    /// Changing the §4.0 loudness settings and re-applying updates the written preamp
+    /// Changing the loudness settings and re-applying updates the written preamp
     /// live: FinalVolume (max clipping-free, -G_max_peak) differs from Comparison
     /// (base pre-gain + loudness match) for a non-flat curve.
     #[test]

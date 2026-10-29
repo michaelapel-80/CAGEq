@@ -55,7 +55,7 @@ def handle(method, params):
             "preamp_db": -6.5,
             # Canned bands plus any `custom_filters` the caller passed, mirroring the
             # real engine's append behaviour. That lets tests build genuinely different
-            # curves (needed to exercise the §5.3a tonal morph) without a DSP install.
+            # curves (needed to exercise the tonal morph) without a DSP install.
             "filters": [
                 {"kind": "LowShelf", "freq_hz": 105.0, "gain_db": 3.0, "q": 0.7},
                 {"kind": "Peaking", "freq_hz": 2500.0, "gain_db": -2.4, "q": 1.4},

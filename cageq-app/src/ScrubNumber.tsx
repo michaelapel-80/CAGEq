@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 /**
  * A numeric value that is **scrubbable, typeable, and arrow-steppable** — the control
- * the §5.2 grid uses for Fc and Q (custom_filter_editor_ux memory: drag-the-value, not a
+ * the grid uses for Fc and Q (custom_filter_editor_ux memory: drag-the-value, not a
  * knob; fully keyboard-usable):
  *
  *   • **drag** left/right on the value to scrub it (multiplicative for Fc/Q, additive for
@@ -13,7 +13,7 @@ import { useTranslation } from "react-i18next";
  *   • **Tab** into it lands in the same type-in-place mode, value selected — focus by keyboard
  *     has no click to tell it apart, and a focused field that swallows typing is a dead end;
  *   • **↑/↓** step it (multiplicatively where `mode==="mult"`, so a fixed % feels equal at
- *     every frequency — the §5.2 log-step rule), so it's fully usable from the keyboard.
+ *     every frequency — the log-step rule), so it's fully usable from the keyboard.
  *
  * Scrubbing and stepping emit `onInput` live (every scrub frame / arrow press, so the chart
  * and audio track the gesture), then `onCommit` once at the end (drag release, or leaving the

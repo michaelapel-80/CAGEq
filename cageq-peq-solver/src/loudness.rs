@@ -1,6 +1,6 @@
-//! Port of `sidecar_dsp.py`'s `loudness_target_db`/`_k_weight_power` (filter.md §4.1) —
+//! Port of `sidecar_dsp.py`'s `loudness_target_db`/`_k_weight_power` —
 //! the K-weighted pink-noise loudness-compensation formula, plus the plain positive
-//! peak (§4.2's clipping ceiling input) — the two curve-derived quantities
+//! peak (the clipping ceiling's input) — the two curve-derived quantities
 //! `calculate_filters`'s reply carries alongside the fitted filters
 //! (`cageq-core/src/lib.rs`'s `CalcResult`).
 //!
@@ -58,7 +58,7 @@ fn gradient(f: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// `loudness_target_db` (`sidecar_dsp.py:234-253`): the §4.1 relative loudness
+/// `loudness_target_db` (`sidecar_dsp.py:234-253`): the relative loudness
 /// compensation for an EQ curve `g_eq_db` (dB) on grid `f` — a K-weighted pink-noise
 /// energy model of how much the curve raises perceived loudness, negated so applying
 /// it is level-neutral versus dry. Not an absolute LUFS measurement; a per-curve
@@ -78,7 +78,7 @@ pub fn loudness_target_db(f: &[f64], g_eq_db: &[f64], fs: f64) -> f64 {
 }
 
 /// `float(np.max(combined))` (`sidecar_dsp.py:479`) — the composed curve's positive
-/// peak, the §4.2 clipping-ceiling input.
+/// peak, the clipping-ceiling input.
 pub fn curve_peak_db(curve: &[f64]) -> f64 {
     curve.iter().copied().fold(f64::MIN, f64::max)
 }

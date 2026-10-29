@@ -1,6 +1,6 @@
-//! Perceptual curve morphing for tonal transitions (filter.md §5.3a).
+//! Perceptual curve morphing for tonal transitions.
 //!
-//! Equalizer APO's native 10 ms crossfade (§5.3) structurally rules out a *click*,
+//! Equalizer APO's native 10 ms crossfade structurally rules out a *click*,
 //! but it is far too fast for a large tonal jump — swapping two very different curves
 //! (a bass-boost preset for a treble-boost one, or slot A for slot B) is audible as a
 //! harsh lurch. This module supplies the two pieces needed to slew such a change over
@@ -11,12 +11,12 @@
 //!
 //! ## Why this distance metric
 //!
-//! The §7.5 pre-gain ramp slews a **scalar** (the preamp); a tonal morph slews a
+//! The pre-gain ramp slews a **scalar** (the preamp); a tonal morph slews a
 //! **vector** (the whole curve). For the two to be one mechanism rather than two
 //! unrelated ones, the curve norm must collapse back to `|Δpreamp|` when the change
 //! happens to be a uniform shift. A **weighted mean** does exactly that — a constant
 //! passes straight through it — so this uses the K-weighted, bandwidth-corrected RMS
-//! of `Δ(f) = curve_b(f) - curve_a(f)`, reusing the very same weighting the §4.1
+//! of `Δ(f) = curve_b(f) - curve_a(f)`, reusing the very same weighting the
 //! loudness match is built on (`w_k` for audibility, `Δf/f` for the pink/per-octave
 //! Jacobian — see the sidecar's `loudness_target_db` and the bug note there).
 //!
@@ -73,7 +73,7 @@ fn grid() -> &'static Grid {
         // Bin energy of pink noise: density (1/f) times bin width. On this log grid the
         // width is proportional to f, so the 1/f cancels and every bin carries equal
         // energy — but deriving it from the actual spacing keeps the metric correct if
-        // the grid ever changes (the §4.1 Jacobian lesson, applied up front).
+        // the grid ever changes (the Jacobian lesson, applied up front).
         let w: Vec<f64> = f
             .iter()
             .enumerate()
@@ -136,14 +136,14 @@ pub(crate) fn curve_db_on(bands: &[Filter], freqs: &[f64], model: ResponseModel)
     total
 }
 
-/// The curve's positive peak — the §4.2 clipping ceiling input for an intermediate
+/// The curve's positive peak — the clipping ceiling input for an intermediate
 /// frame, computed exactly rather than interpolated (the union curve can briefly peak
 /// above *both* endpoints, so guessing here would risk clipping mid-morph).
 pub(crate) fn curve_peak_db(curve: &[f64]) -> f64 {
     curve.iter().copied().fold(0.0_f64, f64::max)
 }
 
-/// §4.1 loudness compensation for an already-evaluated curve — the same K-weighted
+/// Loudness compensation for an already-evaluated curve — the same K-weighted
 /// pink-noise energy model the sidecar uses, so intermediate frames stay level-matched
 /// and a morph doesn't swell in the middle.
 pub(crate) fn loudness_target_db(curve: &[f64]) -> f64 {
@@ -244,7 +244,7 @@ mod tests {
     }
 
     /// The property the whole design rests on: for a *uniform* curve shift the metric
-    /// must collapse to the plain dB difference, so the tonal morph and the §7.5 preamp
+    /// must collapse to the plain dB difference, so the tonal morph and the preamp
     /// ramp are one mechanism at different dimensionality rather than two constants.
     /// A very wide, very low-Q shelf pair is the closest thing to a broadband offset we
     /// can build out of real bands.
@@ -376,7 +376,7 @@ mod tests {
     }
 
     /// Loudness of a flat curve is exactly level-neutral, and a broadband boost is
-    /// compensated one-for-one (the §4.1 invariants, re-checked on this grid).
+    /// compensated one-for-one (the invariants, re-checked on this grid).
     #[test]
     fn loudness_model_is_level_neutral_and_linear() {
         let g = grid();

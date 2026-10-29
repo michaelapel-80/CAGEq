@@ -100,7 +100,7 @@ function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number, sampleR
     const curve = composedCurveDb(undistortable(eq.filters), bf, eq.model, sampleRate);
     for (let i = 0; i < n; i++) arr[i] = curve[i] + eq.preampDb;
   } else {
-    arr.fill(eq.preampDb); // Dry: no filters, still undo the §4.1 loudness-match preamp
+    arr.fill(eq.preampDb); // Dry: no filters, still undo the loudness-match preamp
   }
   return arr;
 }
@@ -153,7 +153,7 @@ const GRID_ALPHA = 0.22;
 // has), and 0.05 read as visibly laggy here — 0.03 is barely above the backend's own SPEC_TAU_SECS
 // (0.02) smoothing, just enough to fix the stepping without adding a perceptible extra delay.
 const STROKE_SMOOTH_TAU = 0.03;
-// Same fixed dBFS scale as EqChart's spectrum backdrop (§5.4) — consistent reading between the
+// Same fixed dBFS scale as EqChart's spectrum backdrop — consistent reading between the
 // Eq pane's backdrop and this standalone analyzer.
 const SPEC_TOP_DB = 0;
 const F_MIN = 20;
@@ -300,7 +300,7 @@ function trackPeaks(
 }
 
 /**
- * §5.4 CRT-styled spectrum analyzer — the "Spectrum" chart view's own instrument (named "Monitor"
+ * CRT-styled spectrum analyzer — the "Spectrum" chart view's own instrument (named "Monitor"
  * until it earned a dedicated identity of its own — see the naming note on `chartView`'s
  * declaration in App.tsx), replacing the earlier approach of reusing `EqChart` with every curve/
  * marker/node stripped. That worked but looked like an EQ chart with nothing on it; this is a
@@ -311,7 +311,7 @@ function trackPeaks(
  * here is owned by the shared accumulator in phosphor.ts, as the scopes' are). The Eq pane
  * (`EqChart`, curves + its own spectrum backdrop) is untouched — this only replaces Spectrum.
  *
- * A connected spline through the backend's log-frequency bins (§5.4 `SpectrumUpdate`), not filled
+ * A connected spline through the backend's log-frequency bins (`SpectrumUpdate`), not filled
  * bars — an earlier bar-graph version read as flat/clean rather than CRT-like; the additively
  * accumulating trail is what gives the CRT feel. Briefly a plain polyline instead (see
  * `hermiteTangent`'s doc) while the backend's reduction had a real bug a spline's tangent math

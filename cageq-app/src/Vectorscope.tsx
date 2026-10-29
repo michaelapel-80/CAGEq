@@ -139,7 +139,7 @@ function parseHex(hex: string): [number, number, number] {
 }
 
 /**
- * §5.3c stereo vectorscope (X-Y goniometer) — the loopback's left channel against its right, drawn
+ * Stereo vectorscope (X-Y goniometer) — the loopback's left channel against its right, drawn
  * as a **connected beam trace** (consecutive samples joined, like a CRT beam) with phosphor
  * persistence: fade-then-draw on rAF turns motion into a glowing, decaying figure. Continuous lines
  * (not decimated dots) are what render oscilloscope-music Lissajous shapes. Purely a monitor.
@@ -396,7 +396,7 @@ export function Vectorscope({
       }
       const iv = invRef.current;
       // Undistort still runs with an empty cascade when there's a preamp to undo — e.g. Dry, which
-      // has no EQ but carries the §4.1 loudness-match gain; without this its excursion wouldn't
+      // has no EQ but carries the loudness-match gain; without this its excursion wouldn't
       // match A/B (whose preamp the inverse also removes) — or while fading out a departing
       // cascade that had either.
       const undistort = iv !== null && (iv.to.coeffs.length > 0 || iv.to.gain !== 1 || iv.from !== null);

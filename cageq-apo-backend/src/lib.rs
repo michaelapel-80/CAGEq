@@ -1,4 +1,4 @@
-//! The [`EqBackend`] implementation that drives **CAGEq's own APO** (filter.md §5.3c) — the
+//! The [`EqBackend`] implementation that drives **CAGEq's own APO** — the
 //! app-side half of the thing `cageq-apo/` is the audio-side half of.
 //!
 //! ## Two paths, deliberately
@@ -43,7 +43,7 @@ const CAGEQ_APO_CLSID: &str = "{530052E1-2CD4-400A-AC2B-0D19273AD5B7}";
 ///
 /// A comment, so the APO's parser skips it — the format already ignores `#` lines, and this
 /// deliberately does not become a directive the audio side has to understand. It exists only
-/// for the §3.0 startup-integrity check.
+/// for the startup-integrity check.
 const HASH_PREFIX: &str = "# cageq-hash=";
 
 #[derive(Debug, thiserror::Error)]
@@ -86,7 +86,7 @@ const WRITE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500
 /// Applies filters through CAGEq's own APO. Holds the directory corrections live in;
 /// everything else is derived from an endpoint id.
 ///
-/// `slots`: per-endpoint live-push slot assignment (§5.3c "identity-matched ramps") — see
+/// `slots`: per-endpoint live-push slot assignment ("identity-matched ramps") — see
 /// [`SlotAssignment`]'s own doc for what it's for. `Mutex`, not `RefCell`: [`EqBackend::apply`]
 /// takes `&self`, so this is the interior mutability that needs, and the app already shares one
 /// `CageqApoBackend` behind an `Arc` rather than cloning it — nothing actually needed `Clone`,
@@ -190,7 +190,7 @@ impl CageqApoBackend {
     /// Every endpoint [`EqBackend::write_safe_state`] must cover — broader than
     /// [`Self::effective_endpoint_ids`]: it also includes every endpoint `push_live` has *ever*
     /// live-pushed to this session (`self.slots`'s keys), even one whose very first correction
-    /// was a §5.2 isolate audition and so was never written or queued at all (isolate is
+    /// was an isolate audition and so was never written or queued at all (isolate is
     /// live-only by design — see `is_isolate_filters`'s own doc). Audio can be live on that
     /// endpoint, running the boosted narrow bandpass isolate pushes, with nothing in
     /// `effective_endpoint_ids` to show for it; a safe-state write landing at that exact moment
@@ -205,7 +205,7 @@ impl CageqApoBackend {
 
     /// Hash of everything currently applied, across every endpoint.
     ///
-    /// One hash for many files, because settings.json remembers exactly one per §3.0. Built
+    /// One hash for many files, because settings.json remembers exactly one for the startup check. Built
     /// from filename *and* content so that adding, removing or renaming a device's correction
     /// all register as a change — content alone would miss a file being deleted when another
     /// identical one exists.
@@ -244,9 +244,9 @@ impl CageqApoBackend {
     /// Write one endpoint's correction, and push it live if the APO is running there.
     /// Write one endpoint's correction, and push it live if the APO is running there.
     ///
-    /// **Except for the §5.2 isolate audition, which is live-only — never written to disk, not
+    /// **Except for the isolate audition, which is live-only — never written to disk, not
     /// even queued.** It is transient monitoring state, not "the correction": persisting it
-    /// would leave the *audition* as what §3.0's startup check resumes into next launch if
+    /// would leave the *audition* as what the startup check resumes into next launch if
     /// CAGEq crashed mid-drag, not the real correction underneath it.
     fn apply_one(&self, cfg: &DeviceConfig) -> Result<(), ApoBackendError> {
         let id = config::normalize_endpoint_id(&cfg.device)
@@ -297,7 +297,7 @@ impl CageqApoBackend {
     /// however slow the eventual disk write turns out to be.
     ///
     /// **What this does not weaken.** `applied_hash`/`effective_endpoint_ids` read `pending`
-    /// directly, so nothing that depends on "what was just applied" (§3.0's resume hash, the
+    /// directly, so nothing that depends on "what was just applied" (the startup check's resume hash, the
     /// safe-state writer covering every live endpoint) can observe a gap just because the
     /// physical write hasn't happened yet — see both their own docs. The one real trade-off is
     /// an abrupt process kill inside the debounce window losing the last unsettled edit; a
@@ -372,7 +372,7 @@ impl CageqApoBackend {
             return Err(ApoBackendError::NoSampleRate(endpoint_id.to_string()));
         };
 
-        // §5.2 isolate is the one place `cfg.bands` is always exactly one `Bandpass` — see
+        // Isolate is the one place `cfg.bands` is always exactly one `Bandpass` — see
         // `is_isolate_audition`'s own doc. A push that *crosses* that boundary (starting or
         // ending an isolate audition) is a wholesale replacement of the correction, which
         // `Cascade::start_ramp` cannot do safely: it pairs `start[i]`/`target[i]` purely by
@@ -472,7 +472,7 @@ impl EqBackend for CageqApoBackend {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             // No reload to collide with: coefficients are pushed into a running filter, so
-            // there is no minimum spacing to respect (§5.3a's MIN_WRITE_SPACING evaporates).
+            // there is no minimum spacing to respect (MIN_WRITE_SPACING evaporates).
             min_write_spacing: std::time::Duration::ZERO,
             // The APO ramps coefficients in place with filter state carried, paced to the size
             // of the change (`ramp_ms_for` in dsp.rs, not the fixed 8 ms this comment used to
@@ -507,7 +507,7 @@ impl EqBackend for CageqApoBackend {
         // has to be as close to infallible as possible. `endpoints_needing_safe_state`, not
         // `config_files`, so neither an endpoint whose very first correction is still sitting
         // in `pending` (never yet reached disk — see `queue_write`) nor one whose *only* live
-        // push ever was a §5.2 isolate audition (deliberately never written or queued at all —
+        // push ever was an isolate audition (deliberately never written or queued at all —
         // see `is_isolate_filters`'s own doc, and that method's own doc) is missed just because
         // neither has a file yet; a fail-safe can arrive at any moment, including
         // immediately after a live edit or mid-isolate-drag.
@@ -545,7 +545,7 @@ impl EqBackend for CageqApoBackend {
         if expected_hash == Some(actual.as_str()) {
             return Ok(StartupDecision::ResumeTrusted);
         }
-        // Every configured endpoint silenced means the §7.2 shutdown was active at exit.
+        // Every configured endpoint silenced means the shutdown was active at exit.
         // Checked by *content* rather than by a remembered hash, because the safe-state
         // writer deliberately does not update settings.json's resume hash — there would be
         // nothing to resume to if it did.
@@ -588,7 +588,7 @@ impl EqBackend for CageqApoBackend {
 // Free helpers — pure where possible, so the decisions are testable without a filesystem.
 // ---------------------------------------------------------------------------
 
-/// CAGEq's safe state (§7.1/7.2): effective silence, no filters.
+/// CAGEq's safe state: effective silence, no filters.
 ///
 /// −120 dB rather than "no correction", because the neutral state of this APO is a
 /// *passthrough* — full-volume audio. A safe state that removed the correction would make a
@@ -648,7 +648,7 @@ pub enum PushOutcome {
     Refused,
 }
 
-/// Is `filters` the §5.2 isolate audition — a bandpass-only substitute for the real correction,
+/// Is `filters` the isolate audition — a bandpass-only substitute for the real correction,
 /// used to hear one filter's region in isolation? Always bandpass sections only (the core's
 /// `isolate_filters` cascade); anything else (an ordinary correction, a shelf/peaking band alone,
 /// a bandpass alongside other bands) is not. Works over
@@ -682,7 +682,7 @@ fn kind_code(kind: FilterKind) -> u8 {
     }
 }
 
-/// Is `bands` the §5.2 isolate audition — a bandpass-only substitute for the real correction,
+/// Is `bands` the isolate audition — a bandpass-only substitute for the real correction,
 /// used to hear one filter's region in isolation? Always bandpass sections only (the core's
 /// `isolate_filters` cascade); anything else (an ordinary correction, a shelf/peaking band alone,
 /// a bandpass alongside other bands) is not.
@@ -742,7 +742,7 @@ const MAX_REUSE_Q_RATIO: f64 = 4.0;
 /// on `Fc`, and [`MAX_REUSE_Q_RATIO`] on `Q`. The kind check matters even when Fc and Q both look
 /// close: a shelf and a peaking/bandpass band don't share a response *shape*, so interpolating
 /// their raw coefficients is meaningless regardless of how near their numbers land — this is
-/// exactly what let the §5.2 isolate sweep's narrow bandpass (always `Bandpass`, fixed `Q` — see
+/// exactly what let the isolate sweep's narrow bandpass (always `Bandpass`, fixed `Q` — see
 /// `SWEEP_Q` in `App.tsx`) reuse an existing shelf's freed slot whenever the sweep passed within
 /// an octave of the shelf's own `Fc`, ramping straight from a shelf into a bandpass.
 fn slot_reusable(old: &Option<(u8, i64, i64)>, band: &Band) -> bool {
@@ -787,7 +787,7 @@ fn slot_reusable(old: &Option<(u8, i64, i64)>, band: &Band) -> bool {
 /// `start_ramp` already does for a correction that merely gets shorter — this only extends
 /// where in the array that can happen, from "the tail" to "anywhere". (`Cascade` itself needed
 /// no changes for *this* — reordering upstream is enough. Its later `start_crossfade` addition,
-/// for the §5.2 isolate boundary specifically, is a separate mechanism `push_live` reaches for
+/// for the isolate boundary specifically, is a separate mechanism `push_live` reaches for
 /// on top of this reordering, not a change to it.)
 ///
 /// A freed slot isn't fair game for just *any* new band, either — see [`slot_reusable`]. So a
@@ -801,11 +801,11 @@ struct SlotAssignment {
     /// inherit its in-flight ramp (see [`slot_reusable`]). `None` only for a slot that has
     /// never held a band at all.
     slots: Vec<Option<(u8, i64, i64)>>,
-    /// Whether the *previous* push to this endpoint was the §5.2 isolate audition (`cfg.bands`
+    /// Whether the *previous* push to this endpoint was the isolate audition (`cfg.bands`
     /// was bandpass sections only) — `push_live` compares this against the current push to
     /// decide whether the boundary is being crossed (crossfade) or not (plain ramp, as ever).
     was_isolate: bool,
-    /// The first slot of the block holding the §5.2 isolate audition's sections as of the
+    /// The first slot of the block holding the isolate audition's sections as of the
     /// *previous* push, if any — see [`Self::assign_isolate`]'s own doc for why this needs to be
     /// tracked explicitly rather than left to the generic search in [`Self::assign`].
     isolate_slot: Option<usize>,
@@ -835,7 +835,7 @@ impl SlotAssignment {
         self.slots = layout;
     }
 
-    /// Reorders `bands` into slot order — the §5.2 isolate audition (bandpass sections only) is
+    /// Reorders `bands` into slot order — the isolate audition (bandpass sections only) is
     /// handled separately by [`Self::assign_isolate`]; this is the general path
     /// for everything else. A band whose identity matches a previous slot stays in that exact
     /// slot. Everything else (genuinely new, or a duplicate identity beyond the first match —
@@ -895,7 +895,7 @@ impl SlotAssignment {
         out
     }
 
-    /// The §5.2 isolate half of [`Self::assign`], kept separate because isolate's invariant is
+    /// The isolate half of [`Self::assign`], kept separate because isolate's invariant is
     /// different from an ordinary correction's: there is always at most **one** live isolate
     /// audition, a contiguous block of bandpass sections, and a later push must always retarget
     /// the *same* block the previous one landed in (if every slot in it is still
@@ -1246,7 +1246,7 @@ mod tests {
         assert_eq!(parsed.preamp_db, -120.0, "safe state must silence, not neutralise");
     }
 
-    /// The bug this guards: an endpoint whose very *first* live push was a §5.2 isolate
+    /// The bug this guards: an endpoint whose very *first* live push was an isolate
     /// audition never enters `pending` at all (isolate is deliberately live-only — see
     /// `is_isolate_filters`'s own doc) and has no file either, so `effective_endpoint_ids`
     /// alone would never see it — even though audio is genuinely running the boosted narrow
@@ -1361,7 +1361,7 @@ mod tests {
 
     /// The bug this guards: every isolate drag tick used to pay a synchronous file write
     /// before the live push even started, serialized behind the app's own one-write-at-a-time
-    /// gate — compounding into multi-second lag on a fast drag. The §5.2 isolate audition
+    /// gate — compounding into multi-second lag on a fast drag. The isolate audition
     /// (always exactly one `Bandpass`, see `FilterKind::Bandpass`'s own doc) must never touch
     /// the config file at all, live channel or not.
     #[test]
@@ -1416,7 +1416,7 @@ mod tests {
         assert!(backend.apply(&[device("not-a-guid", 0.0)]).is_err());
     }
 
-    /// §3.0 startup integrity, across all four verdicts.
+    /// Startup integrity, across all four verdicts.
     #[test]
     fn startup_decisions_reflect_what_is_actually_applied() {
         let (backend, _dir) = temp_backend("startup");
@@ -1470,7 +1470,7 @@ mod tests {
     /// `Cascade::process`'s dual-bank mix at all (`process_count2 == 0` is the same condition
     /// that gates it off) — a crossfade-routed safe-state push would silently do *nothing* to
     /// the running audio, exactly when the fail-safe's live push most needs to land. Reproduced
-    /// directly: an endpoint whose last live push was a §5.2 isolate audition
+    /// directly: an endpoint whose last live push was an isolate audition
     /// (`was_isolate == true`) crosses the isolate boundary on the very next push — which,
     /// without `allow_crossfade: false`, would be the safe-state push itself.
     #[test]
@@ -1508,7 +1508,7 @@ mod tests {
         assert_eq!(snap.band_count, 0, "the safe state itself must still be exactly zero bands");
     }
 
-    /// End-to-end through the real wire: entering and leaving the §5.2 isolate audition must
+    /// End-to-end through the real wire: entering and leaving the isolate audition must
     /// cross the wire as a crossfade; a continuation of the same drag (same slot, nearby
     /// frequency) and an ordinary edit must not. (What a continuation's ramp actually *does*
     /// with its timing — truncating to the `RAMP_MS` floor instead of chasing the
@@ -2005,7 +2005,7 @@ mod tests {
         assert_eq!(fourth[1].unwrap().freq_hz, 900.0, "close enough to mid's old 1 kHz to reuse slot 1");
     }
 
-    /// The bug report this test guards against: the §5.2 isolate sweep's bandpass (always
+    /// The bug report this test guards against: the isolate sweep's bandpass (always
     /// `Bandpass`, `Q` fixed at `SWEEP_Q`) passing within an octave of an existing shelf's `Fc`
     /// must NOT reuse that shelf's freed slot — a shelf and a bandpass don't share a response
     /// shape, so `Cascade::start_ramp` interpolating one's raw coefficients into the other's is

@@ -1,17 +1,17 @@
 //! Orchestrator — the "Rust Core" that ties the building blocks into one flow
-//! (filter.md §2, the Rust Core layer):
+//! (the Rust Core layer):
 //!
 //!   * turns a user request into filters by driving [`cageq_peq_solver`]/
 //!     [`cageq_catalog`] directly (`fit.rs`/`export.rs`/`catalog.rs`), then applies
 //!     them through the [`EqBackend`],
-//!   * holds the A/B/Dry comparison slots (§5.2): each fit is cached, so switching
-//!     which one is active is a pure re-apply (no re-fit) — the loudness match (§4.1)
+//!   * holds the A/B/Dry comparison slots: each fit is cached, so switching
+//!     which one is active is a pure re-apply (no re-fit) — the loudness match
 //!     keeps them level-matched so switching compares timbre, not level,
-//!   * runs the §3.0 startup-integrity check.
+//!   * runs the startup-integrity check.
 //!
-//! The fit carries the fitted filters plus two curve-derived quantities (§4.1
-//! loudness target, §4.2 curve peak); the core composes the final preamp from them
-//! and the user's §4.0 base pre-gain, then builds a [`DeviceConfig`]. The fit reports
+//! The fit carries the fitted filters plus two curve-derived quantities (the
+//! loudness target, curve peak); the core composes the final preamp from them
+//! and the user's base pre-gain, then builds a [`DeviceConfig`]. The fit reports
 //! physics; the core owns the preamp/clipping policy.
 //!
 //! ## No sidecar
@@ -27,7 +27,7 @@
 //!
 //! ## Backends
 //! Nothing here knows how filters actually reach the audio pipeline — that is
-//! [`EqBackend`]'s job (filter.md §5.3c). CAGEq ships two: Equalizer APO (rewrite a
+//! [`EqBackend`]'s job. CAGEq ships two: Equalizer APO (rewrite a
 //! config file, its directory watcher reloads) and, in progress, its own in-process APO
 //! (push coefficients over shared memory). They differ enough that the core adapts to
 //! [`Capabilities`] rather than assuming one model — most visibly in how fast it may
@@ -88,20 +88,20 @@ pub struct Applied {
     pub hash: String,
     /// Device the config was written for (echoed by the DSP).
     pub device: String,
-    /// The composed final `Preamp:` value written (filter.md §4.0/§4.2).
+    /// The composed final `Preamp:` value written.
     pub preamp_db: f64,
-    /// True when the §4.2 emergency clipping ceiling bound the level instead of the
-    /// §4.1 loudness match — surfaced to the UI as the §5.1 per-slot clipping warning.
+    /// True when the emergency clipping ceiling bound the level instead of the
+    /// loudness match — surfaced to the UI as the per-slot clipping warning.
     pub clipping_warning: bool,
-    /// The bands actually written (AutoEq fit + custom filters), so the §5.2 chart can
+    /// The bands actually written (AutoEq fit + custom filters), so the chart can
     /// draw the composed curve without re-parsing cageq.txt.
     pub filters: Vec<Filter>,
-    /// §5.2 chart reference: the ideal correction the AutoEq fit targets (empty for Dry
+    /// Chart reference: the ideal correction the AutoEq fit targets (empty for Dry
     /// and for the stub). Not part of the written config — a UI overlay only.
     pub reference_curve: Vec<CurvePoint>,
-    /// §4.1 loudness compensation this curve wants, and §4.2 curve peak — the two
+    /// Loudness compensation this curve wants, and curve peak — the two
     /// quantities the preamp is composed from. Surfaced so the UI can compute the
-    /// base pre-gain needed to give the loudness match headroom (the §4.2 clipping
+    /// base pre-gain needed to give the loudness match headroom (the clipping
     /// "add headroom" action) without re-deriving them.
     pub g_target_db: f64,
     pub g_max_peak_db: f64,
@@ -124,12 +124,12 @@ pub struct SlotFit {
     pub model: ResponseModel,
 }
 
-/// filter.md §4.0 default base pre-gain (user headroom), in dB. A conservative,
-/// always-applied reserve so the §4.1 loudness match stays the binding term for
-/// typical curves and the §4.2 ceiling only trips on genuinely extreme ones.
+/// Default base pre-gain (user headroom), in dB. A conservative,
+/// always-applied reserve so the loudness match stays the binding term for
+/// typical curves and the ceiling only trips on genuinely extreme ones.
 pub const DEFAULT_BASE_PREGAIN_DB: f64 = -9.0;
 
-/// filter.md §4.2-ISP default true-peak headroom for [`LoudnessMode::FinalVolume`], in dB.
+/// Default true-peak headroom for [`LoudnessMode::FinalVolume`], in dB.
 /// A sample stream sitting exactly at 0 dBFS can still reconstruct, on a real DAC, to an
 /// analog waveform that peaks *above* 0 dBFS between samples — the "inter-sample peak" a
 /// sample-peak-only "never clip" claim doesn't cover (`cageq-monitor`'s `testtone --isp`
@@ -141,13 +141,13 @@ pub const DEFAULT_BASE_PREGAIN_DB: f64 = -9.0;
 /// to share a magnitude just because they share a UI slot (see [`LoudnessSettings`]'s own doc).
 pub const DEFAULT_ISP_HEADROOM_DB: f64 = -1.0;
 
-/// filter.md §4.0 loudness mode — the "Vergleichsmodus ↔ Finale Lautstärke" toggle.
+/// Loudness mode — the "Vergleichsmodus ↔ Finale Lautstärke" toggle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoudnessMode {
-    /// A/B-fair: base pre-gain + §4.1 loudness match, capped by the §4.2 ceiling.
+    /// A/B-fair: base pre-gain + loudness match, capped by the ceiling.
     /// Every curve ends up equally loud so comparisons judge timbre, not level.
     Comparison,
-    /// Maximum clipping-free level, less a small §4.2-ISP true-peak buffer
+    /// Maximum clipping-free level, less a small true-peak buffer
     /// (`isp_headroom_db`): sample peak sits at `isp_headroom_db` dBFS rather than exactly 0,
     /// since a sample stream at 0 dBFS can still reconstruct to an analog peak above it
     /// between samples. No A/B comfort buffer, no loudness match. Loudest safe playback for
@@ -155,7 +155,7 @@ pub enum LoudnessMode {
     FinalVolume,
 }
 
-/// filter.md §4.0 user loudness settings: the base pre-gain and which mode is active.
+/// User loudness settings: the base pre-gain and which mode is active.
 ///
 /// `base_pregain_db` and `isp_headroom_db` are two independent numbers that happen to share
 /// one UI slider slot (only one is ever editable at a time, gated by `mode`) rather than one
@@ -170,9 +170,9 @@ pub enum LoudnessMode {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoudnessSettings {
-    /// §4.0 base pre-gain (user headroom), in dB. Applies in [`LoudnessMode::Comparison`].
+    /// Base pre-gain (user headroom), in dB. Applies in [`LoudnessMode::Comparison`].
     pub base_pregain_db: f64,
-    /// §4.2-ISP true-peak headroom, in dB (≤ 0). Applies in [`LoudnessMode::FinalVolume`].
+    /// True-peak headroom, in dB (≤ 0). Applies in [`LoudnessMode::FinalVolume`].
     pub isp_headroom_db: f64,
     pub mode: LoudnessMode,
 }
@@ -187,9 +187,9 @@ impl Default for LoudnessSettings {
     }
 }
 
-/// A comparison slot (filter.md §5.2). `A`/`B` are editable configurations you can
+/// A comparison slot. `A`/`B` are editable configurations you can
 /// A/B by ear; `Dry` is the fixed no-correction reference. Exactly one is active and
-/// written to cageq.txt at a time; the loudness match (§4.1) keeps all three at equal
+/// written to cageq.txt at a time; the loudness match keeps all three at equal
 /// loudness so switching compares timbre, not level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Slot {
@@ -200,13 +200,13 @@ pub enum Slot {
 
 /// The composed dB response of `bands` on `freqs`, via the core's biquad model
 /// (`morph.rs`, the copy that lets a slot switch draw curves without the sidecar). This
-/// is the same math the tonal-morph metric (§5.3a) runs on; exposed so a cross-language
+/// is the same math the tonal-morph metric runs on; exposed so a cross-language
 /// test can pin it against the reference AutoEq implementation in the Python sidecar.
 pub fn filter_curve_db(bands: &[Filter], freqs: &[f64]) -> Vec<f64> {
     morph::curve_db_on(bands, freqs, ResponseModel::Rbj)
 }
 
-/// How many identical bandpass sections the §5.2 isolate audition cascades.
+/// How many identical bandpass sections the isolate audition cascades.
 ///
 /// One 2nd-order bandpass falls off at only 6 dB/oct whatever its Q: at the frequency finder's
 /// Q 8 it is ~22 dB down an octave away and ~48 dB five octaves away, while the bass under a
@@ -214,7 +214,7 @@ pub fn filter_curve_db(bands: &[Filter], freqs: &[f64]) -> Vec<f64> {
 /// audibly. Four sections fall at 24 dB/oct: ~58 dB down an octave away at the same bandwidth.
 pub const ISOLATE_SECTIONS: usize = 4;
 
-/// The §5.2 isolate audition at `freq_hz`: [`ISOLATE_SECTIONS`] identical bandpass sections
+/// The isolate audition at `freq_hz`: [`ISOLATE_SECTIONS`] identical bandpass sections
 /// whose cascade has the -3 dB bandwidth a single section of quality `q` would have, so `q`
 /// keeps meaning what the caller asked for (a band's own Q, or the frequency finder's).
 ///
@@ -258,7 +258,7 @@ pub(crate) fn biquad_band(f: &Filter) -> cageq_biquad::Band {
     cageq_biquad::Band { kind, freq_hz: f.freq_hz, gain_db: f.gain_db, q: f.q }
 }
 
-/// A point on a UI reference curve (filter.md §5.2): frequency in Hz, level in dB.
+/// A point on a UI reference curve: frequency in Hz, level in dB.
 /// Passes straight from the DSP to the chart; never written to EqAPO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurvePoint {
@@ -274,14 +274,14 @@ pub struct CurvePoint {
 struct CalcResult {
     device: String,
     filters: Vec<Filter>,
-    /// §4.1 K-weighted loudness compensation for this curve. Defaults to 0 (a
+    /// K-weighted loudness compensation for this curve. Defaults to 0 (a
     /// level-neutral offset) so the dependency-free stub still composes.
     #[serde(default)]
     g_target_db: f64,
-    /// The composed EQ curve's positive peak, for the §4.2 clipping ceiling.
+    /// The composed EQ curve's positive peak, for the clipping ceiling.
     #[serde(default)]
     g_max_peak_db: f64,
-    /// §5.2 chart: the ideal correction curve the AutoEq fit chases (target minus
+    /// Chart: the ideal correction curve the AutoEq fit chases (target minus
     /// measured, gain-limited), independent of custom filters. Empty from the stub.
     #[serde(default)]
     reference_curve: Vec<CurvePoint>,
@@ -291,32 +291,32 @@ struct CalcResult {
     model: ResponseModel,
     /// The request this was fitted from, so the core can re-fit it on its own when the
     /// effective model changes (the user toggles it, or the backend swaps mid-session).
-    /// `None` for fits restored from the launch cache (§3.5), synthesised Dry, and isolate.
+    /// `None` for fits restored from the launch cache, synthesised Dry, and isolate.
     #[serde(skip)]
     request: Option<CalcRequest>,
 }
 
-/// The composed preamp for one curve (filter.md §4.0 + §4.2).
+/// The composed preamp for one curve: base pre-gain, loudness match, clipping ceiling.
 struct Preamp {
     /// Final `Preamp:` value written to cageq.txt.
     db: f64,
-    /// True when the §4.2 ceiling bound the level instead of the §4.1 loudness match.
+    /// True when the ceiling bound the level instead of the loudness match.
     clipping_warning: bool,
 }
 
 /// Compose the final preamp from the curve quantities and the user's loudness
-/// settings (filter.md §4.0 + §4.2).
+/// settings (base pre-gain, clipping ceiling).
 ///
-/// [`LoudnessMode::FinalVolume`]: maximum clipping-free level, less a small §4.2-ISP buffer —
+/// [`LoudnessMode::FinalVolume`]: maximum clipping-free level, less a small true-peak buffer —
 /// `Preamp = -G_max_peak + isp_headroom_db` (`isp_headroom_db` ≤ 0, so this only ever lowers
 /// the level) — no A/B comfort buffer, no loudness match; the ceiling can't be "overridden"
 /// so there's nothing to warn about.
 ///
 /// [`LoudnessMode::Comparison`]:
 /// ```text
-///   G_max_allowed = -G_max_peak - base_pregain_db   (§4.2, buffer-aware)
-///   relative      = min(G_target, G_max_allowed)     (§4.2)
-///   Preamp_final  = base_pregain_db + relative        (§4.0)
+///   G_max_allowed = -G_max_peak - base_pregain_db   (buffer-aware)
+///   relative      = min(G_target, G_max_allowed)
+///   Preamp_final  = base_pregain_db + relative
 /// ```
 /// When the ceiling binds (`G_max_allowed < G_target`) `base_pregain_db` cancels and
 /// `Preamp_final == -G_max_peak` — the comfort buffer is spent to stay just below
@@ -398,12 +398,12 @@ pub(crate) fn validate_filters(filters: &[Filter]) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// §7.5 maximum volume-increase rate for the "Finale Lautstärke" transition. The
+/// Maximum volume-increase rate for the "Finale Lautstärke" transition. The
 /// suggested-default first assumption (a common auto-gain-ramp figure); a bigger jump
 /// takes proportionally longer instead of a sudden, possibly hazardous leap.
 const RAMP_RATE_DB_PER_SEC: f64 = 6.0;
 /// One ramp step. ≥15 ms so EqAPO's native 10 ms crossfade smooths each step and the
-/// consecutive-write debounce (§5.3) is respected.
+/// consecutive-write debounce is respected.
 const RAMP_STEP: Duration = Duration::from_millis(25);
 
 // The old `MIN_WRITE_SPACING` constant lived here as a hard-coded 15 ms, which was a
@@ -414,16 +414,16 @@ const RAMP_STEP: Duration = Duration::from_millis(25);
 // editing (tone drags, auto-apply) would otherwise fire writes far faster than any
 // backend's limit.
 
-/// §5.3a tonal-morph rate. Deliberately *not* §7.5's 6 dB/s: that figure is a
+/// Tonal-morph rate. Deliberately *not* Final volume's 6 dB/s ramp: that figure is a
 /// hearing-protection envelope on absolute level, whereas a morph is level-neutral by
-/// construction (the §4.1 match holds loudness across it) and only has to avoid
+/// construction (the match holds loudness across it) and only has to avoid
 /// abruptness. Different purpose, different constant.
 const TONE_MORPH_RATE_DB_PER_SEC: f64 = 40.0;
 
 /// Hard ceiling on a morph, whatever the distance. This is the constraint people
 /// forget: timbral auditory memory is short, so a slow morph destroys the A/B
 /// comparison it was meant to smooth — by the time B arrives you no longer hold A.
-/// At §7.5's 6 dB/s a bass↔treble preset swap would take ~830 ms and an extreme pair
+/// At Final volume's 6 dB/s a bass↔treble preset swap would take ~830 ms and an extreme pair
 /// over 2 s; capping here keeps every transition inside the window where both curves
 /// can still be held at once.
 const TONE_MORPH_MAX: Duration = Duration::from_millis(300);
@@ -432,7 +432,7 @@ const TONE_MORPH_MAX: Duration = Duration::from_millis(300);
 // Core
 // ---------------------------------------------------------------------------
 
-/// The three comparison slots (filter.md §5.2). `A`/`B` cache a computed fit so
+/// The three comparison slots. `A`/`B` cache a computed fit so
 /// switching to one is a pure re-write; `Dry` is synthesised as "no filters" for the
 /// shared output `device`. `active` is what's currently written to cageq.txt.
 struct SlotStore {
@@ -497,7 +497,7 @@ impl SlotStore {
 
 /// State shared with the reconciler thread.
 struct Inner {
-    /// Where filters actually get applied (filter.md §5.3c). The core is written against
+    /// Where filters actually get applied. The core is written against
     /// the trait, never a concrete backend, so the same orchestration drives Equalizer
     /// APO's file-reload model and CAGEq's own in-process APO — see
     /// [`cageq_backend::Capabilities`] for the differences it has to adapt to.
@@ -505,19 +505,19 @@ struct Inner {
     /// Serialises a calc+write so two callers never interleave their writes to the
     /// backend.
     apply_lock: Mutex<()>,
-    /// The A/B/Dry comparison slots and which is active (filter.md §5.2).
+    /// The A/B/Dry comparison slots and which is active.
     slots: Mutex<SlotStore>,
     applied_count: AtomicU32,
     /// When the last write happened, for the backend's own write-spacing rule
     /// ([`cageq_backend::Capabilities::min_write_spacing`]).
     last_write: Mutex<Instant>,
     startup: StartupDecision,
-    /// §4.0 loudness settings (base pre-gain + mode) applied to every composed preamp.
+    /// Loudness settings (base pre-gain + mode) applied to every composed preamp.
     loudness: Mutex<LoudnessSettings>,
     /// The user's [`ResponseModel`] *preference*. What is applied is [`effective_model`]:
     /// this, gated by the backend's `Capabilities::analog_matched`.
     model_pref: Mutex<ResponseModel>,
-    /// What was last written to cageq.txt — the true *starting* curve for a §5.3a
+    /// What was last written to cageq.txt — the true *starting* curve for a tonal
     /// morph. Taken from here rather than from the previously-active slot so that a
     /// morph interrupted half-way resumes from the curve actually on disk, not from
     /// wherever the abandoned transition began.
@@ -526,7 +526,7 @@ struct Inner {
     /// real on-disk state (hash included) without writing again.
     last_applied: Mutex<Option<Applied>>,
     /// Bumped by every action that initiates a write. An in-flight morph that sees this
-    /// change knows a newer intention has superseded it and stops writing (§5.3a).
+    /// change knows a newer intention has superseded it and stops writing.
     morph_gen: AtomicU32,
     /// The AutoEq-only portion of a fit (`fit.rs`), cached the same way
     /// `sidecar_dsp.py`'s own `_FIT_CACHE` was: keyed on measurement/target/max_gain/
@@ -534,7 +534,7 @@ struct Inner {
     /// (the common interactive case) reuses the cached SLSQP result instead of paying
     /// its ~1-4 s cost again.
     fit_cache: Mutex<fit::FitCache>,
-    /// §8 mobile-export cache (`export.rs`) — independent of `fit_cache` (keyed on the
+    /// Mobile-export cache (`export.rs`) — independent of `fit_cache` (keyed on the
     /// slot's own composed filters, not a measurement/target selection).
     export_cache: Mutex<export::ExportCache>,
 }
@@ -550,7 +550,7 @@ impl Core {
     /// remembered for the applied state, or `None` on a clean install — it drives the
     /// startup-integrity verdict ([`Core::startup_decision`]).
     pub fn start(backend: Arc<dyn EqBackend>, expected_hash: Option<&str>) -> Result<Self, CoreError> {
-        // §3.0: is what we remember still what's actually applied?
+        // Startup check: is what we remember still what's actually applied?
         let startup = backend.startup_decision(expected_hash)?;
 
         let min_write_spacing = backend.capabilities().min_write_spacing;
@@ -591,8 +591,8 @@ impl Core {
         self.apply_to_slot(Slot::A, request)
     }
 
-    /// Pre-populate `fit.rs`'s AutoEq-only fit cache for `headphone`/`target` (§5.2
-    /// cache), so the first tone edit after a launch-from-cache seed (§3.5) is instant
+    /// Pre-populate `fit.rs`'s AutoEq-only fit cache for `headphone`/`target` (the fit
+    /// cache), so the first tone edit after a launch-from-cache seed is instant
     /// rather than paying the cold ~1–4 s fit. Fire-and-forget by design: the result is
     /// discarded (populating the cache is the whole point — a fetch/fit error here just
     /// means the next real edit pays the cost it would have anyway), and this writes
@@ -610,7 +610,7 @@ impl Core {
         let _ = fit::compute(&self.inner.fit_cache, &request, effective_model(&self.inner));
     }
 
-    /// §8 mobile export: a second, independent AutoEq PEQ pass fitting `band_count`
+    /// Mobile export: a second, independent AutoEq PEQ pass fitting `band_count`
     /// filters (>= 3) directly to `filters`' own composed curve — see `export.rs`'s
     /// module doc. Returns `(filters, preamp_db)`, the same shape the sidecar's
     /// `fit_export_eq` did.
@@ -634,13 +634,13 @@ impl Core {
     }
 
     /// Raw headphone measurement + (if given) target curve, both centred the same way
-    /// for the §5.2 nerd overlays — UI-only, never written to EqAPO. Returns
+    /// for the nerd overlays — UI-only, never written to EqAPO. Returns
     /// `(raw_curve, target_curve)`; `target_curve` is empty when `target` is `None`.
     pub fn measurement_curves(&self, headphone: &str, target: Option<&str>) -> Result<(Vec<CurvePoint>, Vec<CurvePoint>), CoreError> {
         catalog::measurement_curves(headphone, target)
     }
 
-    /// Load a **pre-computed** fit (persisted from a previous session, §3.5) into `slot`
+    /// Load a **pre-computed** fit (persisted from a previous session) into `slot`
     /// *without* calling the sidecar. This is the launch-from-cache path: the frontend
     /// saved the last fit's composed bands + the two curve quantities, so at startup the
     /// app can restore the exact EQ it had — writing cageq.txt immediately via
@@ -699,8 +699,8 @@ impl Core {
         morph_to_active(&self.inner, ticket)
     }
 
-    /// Copy slot `from`'s cached fit into slot `to` and make `to` active (filter.md
-    /// §5.2 — a starting point for a variant). Both must be A or B; errors with
+    /// Copy slot `from`'s cached fit into slot `to` and make `to` active (a
+    /// starting point for a variant). Both must be A or B; errors with
     /// [`CoreError::EmptySlot`] if `from` has nothing to copy. Writing `to` reproduces
     /// `from`'s config exactly, so there's no audible change until `to` is edited.
     pub fn copy_slot(&self, from: Slot, to: Slot) -> Result<Applied, CoreError> {
@@ -721,10 +721,10 @@ impl Core {
         morph_to_active(&self.inner, ticket)
     }
 
-    /// §5.2 isolate: write a **bandpass-only** config for the active slot — audition one band's
+    /// Isolate: write a **bandpass-only** config for the active slot — audition one band's
     /// region with every other filter off. The bandpass is [`isolate_filters`]' cascade, so its
     /// skirts are steep enough to keep loud content an octave or more away out of the audition.
-    /// Base pre-gain only (no §4.1 loudness match: a bandpass discards most of the energy, so a
+    /// Base pre-gain only (no loudness match: a bandpass discards most of the energy, so a
     /// match would just chase it). Writes directly and does *not* touch the slot cache, so a
     /// subsequent `activate_slot`/`apply` restores the real correction with no extra bookkeeping.
     /// Errors if the active slot has no device to scope to.
@@ -751,7 +751,7 @@ impl Core {
     }
 
     /// What slot A or B holds right now, without writing anything (`None` for an empty slot and
-    /// for Dry). For the app's launch cache (§3.5): the core re-fits *every* slot on its own when
+    /// for Dry). For the app's launch cache: the core re-fits *every* slot on its own when
     /// the effective model changes ([`Core::update_response_model`], or a backend swap followed
     /// by any write), and a write only reports the active one — so the app reads the others back
     /// here rather than persisting fits made for a model no longer in effect.
@@ -775,7 +775,7 @@ impl Core {
         self.inner.slots.lock().unwrap().active
     }
 
-    /// Set the shared output device every slot is scoped to (§3.0). Lets Dry be written
+    /// Set the shared output device every slot is scoped to. Lets Dry be written
     /// before any fit exists.
     ///
     /// **Also restamps A/B's already-cached fits, not just the shared field.** A cached
@@ -805,12 +805,12 @@ impl Core {
         self.inner.applied_count.load(Ordering::SeqCst)
     }
 
-    /// The §4.0 loudness settings (base pre-gain + mode) currently in effect.
+    /// The loudness settings (base pre-gain + mode) currently in effect.
     pub fn loudness(&self) -> LoudnessSettings {
         *self.inner.loudness.lock().unwrap()
     }
 
-    /// Set the §4.0 loudness settings. Takes effect on the next apply (see
+    /// Set the loudness settings. Takes effect on the next apply (see
     /// [`Core::reapply`] to push the change onto the currently-applied config) and on
     /// any post-recovery re-apply; does not rewrite the current config on its own.
     pub fn set_loudness(&self, settings: LoudnessSettings) {
@@ -871,11 +871,11 @@ impl Core {
         self.reapply()
     }
 
-    /// Change the §4.0 loudness settings and push them onto the active config. Only the
-    /// deliberate switch **into** Final volume (§7.5 — deactivating the base pre-gain buffer,
+    /// Change the loudness settings and push them onto the active config. Only the
+    /// deliberate switch **into** Final volume (deactivating the base pre-gain buffer,
     /// a large jump) is ramped in at [`RAMP_RATE_DB_PER_SEC`], blocking for the ramp duration
     /// (~`Δ/6` s); everything else — including interactive base-pre-gain edits (which stay in
-    /// Comparison mode, bounded by the §4.1 loudness match / §4.2 ceiling) and any decrease — is
+    /// Comparison mode, bounded by the loudness match / ceiling) and any decrease — is
     /// applied directly so the field stays responsive. `None` if nothing is active yet.
     pub fn update_loudness(&self, settings: LoudnessSettings) -> Option<Result<Applied, CoreError>> {
         let prev = {
@@ -894,13 +894,13 @@ impl Core {
         let start = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &prev).db;
         let target = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &settings).db;
 
-        // A level change supersedes any in-flight tonal morph (§5.3a) — the two would
+        // A level change supersedes any in-flight tonal morph — the two would
         // otherwise fight over the preamp.
         claim_write(&self.inner);
 
-        // Ramp only the deliberate, confirm-gated switch *into* Final volume (§7.5 — deactivating
+        // Ramp only the deliberate, confirm-gated switch *into* Final volume (deactivating
         // the base pre-gain buffer, a large jump). A base-pre-gain adjustment stays in Comparison
-        // mode (where the field lives) and is bounded by the §4.1 loudness match / §4.2 ceiling, so
+        // mode (where the field lives) and is bounded by the loudness match / ceiling, so
         // it writes directly — a multi-second blocking ramp per interactive step made the field
         // stall the UI. A decrease or no-change also writes directly (never a hazard).
         let entering_final = settings.mode == LoudnessMode::FinalVolume && prev.mode != LoudnessMode::FinalVolume;
@@ -913,7 +913,7 @@ impl Core {
     }
 
     /// Preview the preamp change (new − current, dB) that switching to `settings` would
-    /// cause for the active config, without writing anything — for the §7.5 confirm
+    /// cause for the active config, without writing anything — for the confirm
     /// dialog. Positive = louder. `None` if nothing is active.
     pub fn preview_preamp_delta(&self, settings: LoudnessSettings) -> Option<f64> {
         let cur = *self.inner.loudness.lock().unwrap();
@@ -1017,7 +1017,7 @@ fn refresh_slots(inner: &Inner) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Take a ticket for a new write intention (§5.3a). Any morph still running against an
+/// Take a ticket for a new write intention. Any morph still running against an
 /// older ticket will notice and stand down at its next frame.
 fn claim_write(inner: &Inner) -> u32 {
     inner.morph_gen.fetch_add(1, Ordering::SeqCst) + 1
@@ -1061,7 +1061,7 @@ fn write_effective(
             // loudness/peak quantities (and the chart) describe.
             model: effective.model,
         };
-    space_out_write(inner); // §5.3: honour whatever cadence this backend can take
+    space_out_write(inner); // Honour whatever cadence this backend can take
     let hash = match inner.backend.apply(std::slice::from_ref(&device_config)) {
         Ok(hash) => hash,
         Err(e) => {
@@ -1086,7 +1086,7 @@ fn write_effective(
         g_max_peak_db: effective.g_max_peak_db,
         model: effective.model,
     };
-    // Remember what landed: the curve is the next morph's start point (§5.3a), the
+    // Remember what landed: the curve is the next morph's start point, the
     // Applied is what a superseded morph reports.
     *inner.last_written.lock().unwrap() = Some(effective);
     *inner.last_applied.lock().unwrap() = Some(applied.clone());
@@ -1098,13 +1098,13 @@ fn write_effective(
 fn write_active_locked(inner: &Inner) -> Result<Applied, CoreError> {
     let effective = current_effective(inner)?;
     // Compose the final preamp here (policy), from the curve quantities the DSP
-    // reported (physics): §4.0 base pre-gain + §4.1 loudness match, capped by §4.2.
+    // reported (physics): base pre-gain + loudness match, capped by the clipping ceiling.
     let loudness = *inner.loudness.lock().unwrap();
     let preamp = compose_preamp(effective.g_target_db, effective.g_max_peak_db, &loudness);
     write_effective(inner, effective, preamp.db, preamp.clipping_warning)
 }
 
-/// How many intermediate frames a change of `distance_db` deserves (§5.3a). Zero means
+/// How many intermediate frames a change of `distance_db` deserves. Zero means
 /// "just write it" — EqAPO's own 10 ms crossfade already covers changes that small,
 /// which is every ordinary node drag.
 fn morph_frames(distance_db: f64) -> usize {
@@ -1113,7 +1113,7 @@ fn morph_frames(distance_db: f64) -> usize {
     frames.saturating_sub(1) // the final, exact write is the last frame
 }
 
-/// §5.3a: slew from the curve currently on disk to the active slot's, instead of
+/// Tonal morph: slew from the curve currently on disk to the active slot's, instead of
 /// swapping it in one write. Takes the caller's `ticket`: if a newer intention
 /// arrives mid-morph this abandons quietly and reports the last state it wrote, so the
 /// newer caller can pick up from the *interpolated* curve rather than a stale endpoint.
@@ -1143,7 +1143,7 @@ fn morph_to_active(inner: &Inner, ticket: u32) -> Result<Applied, CoreError> {
     // filter state carried) must NOT be fed intermediate frames: it would be re-targeted
     // mid-ramp on every one, and the result would be worse than the single write it can
     // interpolate from itself. Emulating a morph out of many spaced writes is purely a
-    // workaround for EqAPO's fixed, cold ~10 ms crossfade (§5.3a).
+    // workaround for EqAPO's fixed, cold ~10 ms crossfade.
     let emulate_morph = can_morph && !inner.backend.capabilities().owns_transitions;
     let frames =
         if emulate_morph { morph_frames(morph::tonal_distance_db(&from.filters, &to.filters, to.model)) } else { 0 };
@@ -1199,7 +1199,7 @@ fn last_applied(inner: &Inner) -> Result<Applied, CoreError> {
     applied.ok_or_else(|| CoreError::EmptySlot(inner.slots.lock().unwrap().active))
 }
 
-/// §7.5 controlled preamp increase: step from `start` up to the composed target at
+/// Controlled preamp increase: step from `start` up to the composed target at
 /// [`RAMP_RATE_DB_PER_SEC`], one write per [`RAMP_STEP`] (EqAPO crossfades each). Holds
 /// `apply_lock` for the whole ramp so no other write interleaves.
 fn ramp_preamp(inner: &Inner, start: f64, target: f64) -> Result<Applied, CoreError> {
@@ -1272,7 +1272,7 @@ mod tests {
 
     #[test]
     fn extreme_peak_the_ceiling_binds_and_base_pregain_cancels() {
-        // Stacked custom filters: peak +25. The §4.2 ceiling takes over and the
+        // Stacked custom filters: peak +25. The ceiling takes over and the
         // comfort buffer is spent — Preamp_final collapses to exactly -G_max_peak.
         let p = compose_preamp(-6.0, 25.0, &comparison(DEFAULT_BASE_PREGAIN_DB));
         approx(p.db, -25.0); // == -G_max_peak, independent of base_pregain

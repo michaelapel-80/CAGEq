@@ -66,7 +66,7 @@ const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 /// corrupt or hostile file cannot ask for enough gain to be a hearing or speaker hazard.
 const MAX_ABS_GAIN_DB: f64 = 40.0;
 /// Preamp bounds, dB. Asymmetric on purpose: attenuation is harmless, gain is not, and
-/// CAGEq's own preamp is negative in normal operation (§4.1 loudness matching).
+/// CAGEq's own preamp is negative in normal operation (loudness matching).
 const MIN_PREAMP_DB: f64 = -120.0;
 const MAX_PREAMP_DB: f64 = 12.0;
 /// Q bounds. Very high Q makes a biquad numerically fragile at low centre frequencies;

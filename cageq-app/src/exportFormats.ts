@@ -1,5 +1,5 @@
 /**
- * §8 mobile export: text a phone EQ app can import (or a user can type in by hand), following
+ * Mobile export: text a phone EQ app can import (or a user can type in by hand), following
  * the AutoEq website's own formats.
  *
  * - **Parametric** (`fit_export_eq`, a backend solve): a Peaking/LowShelf/HighShelf `Band[]` in

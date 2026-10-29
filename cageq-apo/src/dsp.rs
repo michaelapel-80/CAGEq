@@ -44,7 +44,7 @@ pub enum FilterKind {
     Peaking,
     LowShelf,
     HighShelf,
-    /// RBJ band-pass at unity peak; `gain_db` is ignored (the §5.2 isolate audition).
+    /// RBJ band-pass at unity peak; `gain_db` is ignored (the isolate audition).
     Bandpass,
     /// One RBJ second-order high-pass section; `gain_db` is ignored. Steeper slopes arrive as
     /// several of these (see `cageq_backend::FilterType::HighPass`).
@@ -86,14 +86,13 @@ const GUARD_POINTS: usize = 64;
 
 /// Absolute ceiling on the cascade's **combined** response, in dB, preamp included.
 ///
-/// A hazard limit, not a policy one — CAGEq's own §4.2 headroom logic is far stricter. It
+/// A hazard limit, not a policy one — CAGEq's own headroom logic is far stricter. It
 /// exists because coefficients can arrive from a config file or a control channel written by
 /// a process we do not trust, and "loud enough to hurt" is a property of the whole chain, not
 /// of any single filter: three stable, individually reasonable bands can still stack.
 const MAX_TOTAL_GAIN_DB: f64 = 20.0;
 
-/// How long coefficients take to travel to a new value, in milliseconds (filter.md §5.3c,
-/// stage C4).
+/// How long coefficients take to travel to a new value, in milliseconds (stage C4).
 ///
 /// Carrying delay-register state across a coefficient change removes most of a retune's
 /// artefact but not all of it: the same state through *different* coefficients yields a
@@ -299,7 +298,7 @@ pub fn coefficients_in(band: &Band, sample_rate: f64, model: ResponseModel) -> C
 
 /// One biquad's Direct-Form-I delay registers, for one channel.
 ///
-/// These two pairs are the entire reason CAGEq is building its own APO (filter.md §5.3c):
+/// These two pairs are the entire reason CAGEq is building its own APO:
 /// Equalizer APO zeroes them on every config reload, and that cold start is the audible
 /// "bloom" that undermines A/B comparison. Here they simply persist across coefficient
 /// changes — state-carry by construction, with nothing to remember to do.
@@ -407,7 +406,7 @@ pub struct Cascade {
     dry_from: f64,
     dry_to: f64,
     /// Linear gain on the dry path. **Not unity**: CAGEq compares in loudness-matched mode,
-    /// so the Dry slot still carries the base pre-gain (§4.0) — that level match is what makes
+    /// so the Dry slot still carries the base pre-gain — that level match is what makes
     /// the A/B unbiased, and dropping it here would reintroduce exactly the loudness bias the
     /// comparison exists to avoid. It is simply a correction with no filters.
     dry_preamp: f64,
@@ -420,7 +419,7 @@ pub struct Cascade {
     grid: Vec<GridPoint>,
 
     // --- Secondary bank: a second, independently-running cascade used only while
-    // `start_crossfade` is fading one whole correction into an unrelated one (§5.2 isolate
+    // `start_crossfade` is fading one whole correction into an unrelated one (isolate
     // on/off) — see that method's own doc for why this exists instead of just ramping
     // `coeffs`. Idle (`process_count2 == 0`) the rest of the time, so it costs nothing extra
     // per sample outside of a crossfade.
@@ -761,7 +760,7 @@ impl Cascade {
     }
 
     /// Fade the **entire signal path** over to `target`, for a transition that replaces the
-    /// whole correction with something conceptually unrelated (§5.2 isolate on and off) —
+    /// whole correction with something conceptually unrelated (isolate on and off) —
     /// crossfading two independently-valid signals rather than coefficient-ramping through
     /// every intermediate filter shape between them.
     ///
@@ -796,7 +795,7 @@ impl Cascade {
     /// mechanism exists to avoid. An earlier version queued a mid-fade retarget instead, landing
     /// the in-flight fade on its old target first and only then starting a fresh one toward the
     /// newest — correctness-over-responsiveness, and the wrong tradeoff for a control channel: a
-    /// fast, repeated §5.2 isolate drag could still reproduce the reported sweep-and-lurch
+    /// fast, repeated isolate drag could still reproduce the reported sweep-and-lurch
     /// artefact, because the *response* to the newest request was being delayed behind one that
     /// was already stale. The channel's contract is real-time response over how smooth any one
     /// still-in-flight transition looks — see [`Cascade::start_ramp`]'s own doc, which makes the
@@ -1306,7 +1305,7 @@ impl Cascade {
                 // actually in flight — `process_count2 == 0` the rest of the time, so this is
                 // one cheap branch, not a second cascade's worth of multiply-adds, in the
                 // common case. It deliberately bypasses `dry_mix` entirely: nothing reaches
-                // this bank except a §5.2 isolate on/off, which the app never triggers while
+                // this bank except an isolate on/off, which the app never triggers while
                 // Dry is active (see `onFreqSweep`'s own guard).
                 output[i] = if self.process_count2 > 0 {
                     let mut x2 = raw * self.preamp2;
@@ -1759,7 +1758,7 @@ mod tests {
             .collect()
     }
 
-    /// **The reason this APO exists** (filter.md §5.3c). Retuning a band keeps its delay
+    /// **The reason this APO exists**. Retuning a band keeps its delay
     /// registers, so the output continues smoothly; Equalizer APO zeroes them on every config
     /// reload, and that cold start is the audible "bloom" that wrecks A/B comparison.
     ///
@@ -1877,7 +1876,7 @@ mod tests {
     ///
     /// This was a real click, and the likely one behind "switching to dry is very audible":
     /// the preamp used to be assigned instantly while only the coefficients ramped. Switching
-    /// slots changes the composed preamp (§4.1 loudness match + §4.2 headroom), and on a
+    /// slots changes the composed preamp (loudness match + headroom), and on a
     /// correction with real boosts that difference is easily 10 dB — an instant 10 dB gain
     /// step is a loud click regardless of what the filters do.
     ///
@@ -2379,7 +2378,7 @@ mod tests {
     #[test]
     fn fading_to_and_from_dry_beats_switching_instantly() {
         const WINDOW: usize = 960;
-        const BASE_PREGAIN_DB: f64 = -6.0; // §4.0, carried by both slots
+        const BASE_PREGAIN_DB: f64 = -6.0; // the base pre-gain, carried by both slots
         const WET_PREAMP_DB: f64 = -9.0;   // base + loudness match + headroom
 
         let wet: Vec<Coeffs> =
@@ -2935,7 +2934,7 @@ mod tests {
         ]
     }
 
-    /// **The measurement the whole project rests on** (filter.md §5.3c), done numerically
+    /// **The measurement the whole project rests on**, done numerically
     /// rather than by ear — and measuring the artefact people actually hear.
     ///
     /// A 50 Hz sine through a realistic multi-band correction, one band retuned mid-stream
@@ -3045,7 +3044,7 @@ mod tests {
     }
 
     /// The real-world 21-band correction (a low-shelf stack plus a broad low-Q cut around
-    /// 105–167 Hz, among others) captured live from a §5.2 isolate press over the low shelf.
+    /// 105–167 Hz, among others) captured live from an isolate press over the low shelf.
     /// The regression this guards: `apply_coeffs` (plain coefficient ramp) drives this exact
     /// drop-to-a-single-bandpass transition to +22 dB above *both* endpoints at 172 Hz, purely
     /// from several individually-clean per-band fades sharing one ramp clock (verified: no
@@ -3595,7 +3594,7 @@ mod tests {
     }
 
     /// The actual tick sequence and inter-tick timing captured live from a reported
-    /// "sweep and lurch" §5.2 isolate drag (the `[isolate-debug]` log), replayed frame-by-frame
+    /// "sweep and lurch" isolate drag (the `[isolate-debug]` log), replayed frame-by-frame
     /// at 48 kHz exactly as real audio would see it.
     ///
     /// (elapsed_ms_since_previous_tick, freq_hz) from `t=875306` (first isolate tick) through

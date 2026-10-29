@@ -91,7 +91,7 @@ fn slots_switch_by_rewrite_without_refitting() {
     assert!(matches!(fresh.activate_slot(Slot::B), Err(CoreError::EmptySlot(Slot::B))));
 }
 
-/// filter.md §3.5 launch-from-cache: a fit persisted from a previous session is seeded
+/// Launch-from-cache: a fit persisted from a previous session is seeded
 /// into a slot and written immediately by activating it — so startup restores the
 /// exact EQ without paying the ~1–2 s cold fit. The seed alone must not write; the
 /// activate must, composing the preamp from the seeded curve quantities.
@@ -120,7 +120,7 @@ fn seeded_slot_writes_without_a_fit() {
     assert_eq!(applied.filters.len(), 2);
     assert_eq!(applied.g_target_db, -3.5);
     assert_eq!(applied.g_max_peak_db, 4.0);
-    // Preamp composed from the seeded quantities (§4.0/§4.2, default base pre-gain):
+    // Preamp composed from the seeded quantities (default base pre-gain):
     // Comparison mode, base=-9, G_max_allowed=-4-(-9)=5 >= G_target=-3.5 → Preamp=base+G_target.
     assert!((applied.preamp_db - (DEFAULT_BASE_PREGAIN_DB + -3.5)).abs() < 1e-9, "{}", applied.preamp_db);
     assert!(!applied.clipping_warning);
@@ -139,7 +139,7 @@ fn seeded_slot_writes_without_a_fit() {
     ));
 }
 
-/// filter.md §5.3a: a big tonal jump is slewed over several writes instead of landing
+/// Tonal morph: a big tonal jump is slewed over several writes instead of landing
 /// in one, while a small one still goes straight out (EqAPO's own 10 ms crossfade
 /// already covers those, and slewing every node drag would feel laggy).
 #[test]
@@ -213,7 +213,7 @@ fn a_non_positive_q_custom_filter_is_rejected_not_applied_as_nan() {
     assert_eq!(core.applied_count(), before, "a rejected filter set must never reach the backend");
 }
 
-/// Same guard, via §5.2 isolate's directly-supplied `q`.
+/// Same guard, via isolate's directly-supplied `q`.
 #[test]
 fn isolate_with_a_non_positive_q_is_rejected() {
     let tmp = TempDir::new("bad-q-isolate");
@@ -295,7 +295,7 @@ fn base_pregain_edit_in_comparison_is_direct_not_ramped() {
     let after_apply = core.applied_count();
 
     // Raising the base pre-gain a lot (-12 -> 0, +12 dB louder) but *staying in Comparison* is
-    // interactive editing, not the §7.5 Final-volume switch — it must write directly (one write),
+    // interactive editing, not the Final-volume switch — it must write directly (one write),
     // not ramp over ~2 s of blocking writes (which stalled the UI while holding the arrow).
     core.update_loudness(LoudnessSettings { base_pregain_db: 0.0, ..Default::default() })
         .expect("something active")
@@ -322,7 +322,7 @@ fn apply_calculates_and_writes_config() {
     let cageq = tmp.cageq();
     assert!(cageq.contains("Device: USB DAC"), "{cageq}");
     assert!(cageq.contains("Filter 1: ON LSC Fc 105 Hz Gain 3.0 dB Q 0.70"), "{cageq}");
-    // The core composes the preamp itself (§4.0/§4.2) from the curve's own loudness/peak;
+    // The core composes the preamp itself from the curve's own loudness/peak;
     // the exact composed value for a specific curve is `compose_preamp`'s own unit tests'
     // job (`tests` module in lib.rs) — this just checks a real (non-default, non-zero)
     // preamp came out and the ceiling didn't trip on a curve nowhere near it.

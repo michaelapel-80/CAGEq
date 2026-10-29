@@ -1,4 +1,4 @@
-//! Post-EQ loudness monitoring via WASAPI render-endpoint loopback (§5.3c).
+//! Post-EQ loudness monitoring via WASAPI render-endpoint loopback.
 //!
 //! Independent of the custom-APO work: loopback taps the mix at the render endpoint, which is
 //! already *after* EqualizerAPO in the pipeline — so it's the post-EQ signal, exactly what
@@ -53,7 +53,7 @@ pub struct MeterUpdate {
     pub bins: Vec<f32>,
     /// The endpoint's real, uncapped shared-mode mix sample rate (Hz) — i.e. Windows' configured
     /// playback rate for this device. `0` while the session is (re)opening. The UI surfaces it
-    /// next to the device picker (filter.md §8, read-only format display) for its original
+    /// next to the device picker (read-only format display) for its original
     /// purpose: matching the *device's* configured rate to the source material's own rate to
     /// avoid Windows resampling. Deliberately NOT `run_session`'s own (possibly lower —
     /// `CAPTURE_RATE_CAP`) internal analysis rate: that's what the loopback capture and every
@@ -181,7 +181,7 @@ pub use stub::{Monitor, TestSignal};
 /// The Windows default render endpoint's WASAPI id (`{0.0.0.00000000}.{guid}`), or `None` off
 /// Windows / on failure. Used to choose the right `ms-settings:` deep-link: the app's device id
 /// (the registry GUID) is the suffix of this, so a `contains` match tells whether the selected
-/// device *is* the default (filter.md §8). Runs the COM query on its own thread so it doesn't
+/// device *is* the default. Runs the COM query on its own thread so it doesn't
 /// disturb the caller's apartment.
 #[cfg(windows)]
 pub fn default_render_id() -> Option<String> {

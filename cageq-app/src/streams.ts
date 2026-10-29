@@ -3,7 +3,7 @@ import type { SpectrumData } from "./EqChart";
 import type { ScopeData } from "./Vectorscope";
 
 /**
- * §5.3c data plane, frontend side. The meter/spectrum/scope streams used to arrive as Tauri
+ * Data plane, frontend side. The meter/spectrum/scope streams used to arrive as Tauri
  * *events* (`listen("monitor")` etc.), but Tauri delivers each backend→frontend event by
  * evaluating a script in the webview — at this app's sustained ~120 events/s that churned
  * WebView2's memory at ~100 MiB/min, faster than its GC kept up (the "out of memory" crash

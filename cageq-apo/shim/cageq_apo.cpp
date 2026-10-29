@@ -1,5 +1,5 @@
 /*
-    CAGEq's own APO — the C++ shim (filter.md §5.3c).
+    CAGEq's own APO — the C++ shim.
 
     This file exists for exactly one reason: an APO must survive audiodg's load handshake,
     and the thing that reliably does is `CBaseAudioProcessingObject` from the Windows SDK

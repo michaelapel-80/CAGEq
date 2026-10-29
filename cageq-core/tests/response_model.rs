@@ -180,7 +180,7 @@ fn a_backend_swap_refits_every_slot_for_the_new_effective_model() {
     }
 }
 
-/// A slot restored from the launch cache (§3.5) has no request to re-fit from. Its bands are
+/// A slot restored from the launch cache has no request to re-fit from. Its bands are
 /// kept, but its curve quantities are recomputed for the model now in effect, so the preamp
 /// is composed for what actually plays.
 #[test]

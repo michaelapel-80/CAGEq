@@ -5,7 +5,7 @@ import { fcHue, logNorm } from "./fcColor";
 import { ScrubNumber } from "./ScrubNumber";
 
 /**
- * §5.2 tone-band editor — the keyboard-first, graphic-EQ-style grid (stage 3).
+ * Tone-band editor — the keyboard-first, graphic-EQ-style grid.
  *
  * Each band is a **vertical column** (kind icon · gain fader · Fc · Q · remove), several
  * side by side like a graphic EQ, sorted left→right by centre frequency. Replaces the
@@ -59,11 +59,11 @@ export type ToneGridProps = {
   hoverIndex?: number | null;
   /** Reports the band the pointer is over so the chart can echo the highlight; null on leave. */
   onHover?: (index: number | null) => void;
-  /** §5.2 solo: storage index of the soloed band (only it is heard within the stage), or null. */
+  /** Solo: storage index of the soloed band (only it is heard within the stage), or null. */
   soloIndex?: number | null;
   /** Toggle solo for a band (its storage index). Absent → no solo affordance. */
   onSolo?: (index: number) => void;
-  /** §5.2 isolate: storage index of the band whose region is bandpassed (peaking only), or null. */
+  /** Isolate: storage index of the band whose region is bandpassed (peaking only), or null. */
   isolateIndex?: number | null;
   /** Toggle isolate for a band (its storage index). Shown only for peaking bands. */
   onIsolate?: (index: number) => void;

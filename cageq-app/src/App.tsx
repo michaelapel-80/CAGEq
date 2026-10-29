@@ -32,10 +32,10 @@ type ApplyResult = {
   cageq_text: string;
   preamp_db: number;
   clipping_warning: boolean;
-  filters: Band[]; // bands written (AutoEq fit + custom) — drawn by the §5.2 chart
-  reference_curve: { f: number; db: number }[]; // §5.2 ideal-correction overlay (empty for Dry)
-  g_target_db: number; // §4.1 loudness target the curve wants
-  g_max_peak_db: number; // §4.2 composed-curve peak
+  filters: Band[]; // bands written (AutoEq fit + custom) — drawn by the chart
+  reference_curve: { f: number; db: number }[]; // ideal-correction overlay (empty for Dry)
+  g_target_db: number; // loudness target the curve wants
+  g_max_peak_db: number; // composed-curve peak
   model: ResponseModel; // the *effective* model `filters` are realised in — what every curve must be drawn in
 };
 // The filter-model toggle's state (`get_response_model` / `set_response_model`): the user's
@@ -64,19 +64,19 @@ type LoudnessMode = "Comparison" | "FinalVolume";
 type LoudnessSettings = { base_pregain_db: number; isp_headroom_db: number; mode: LoudnessMode };
 type LoudnessUpdate = { settings: LoudnessSettings; applied: ApplyResult | null };
 type SlotName = "A" | "B" | "Dry";
-// Mirrors biquad's FilterKind. "Bandpass" only ever appears in the §5.2 isolate *result* (drawn on
+// Mirrors biquad's FilterKind. "Bandpass" only ever appears in the isolate *result* (drawn on
 // the chart), never as an editable band — the grid cycles Peaking/LowShelf/HighShelf/Tilt.
 type FilterKind = "Peaking" | "LowShelf" | "HighShelf" | "Bandpass" | "Tilt" | "HighPass";
 // `slope` (dB/oct): a HighPass band only. See biquad.ts's `Band`.
 type CustomFilter = { kind: FilterKind; freq_hz: number; gain_db: number; q: number; slope?: number; fixed?: boolean; enabled?: boolean; macro?: string };
-// §3.4 custom EQ is split into three per-slot **stages** — organizational groups of bands
+// Custom EQ is split into three per-slot **stages** — organizational groups of bands
 // that all sum into the one biquad cascade (EqAPO flattens everything; the Rust core still
 // receives a single combined list, so it's unchanged). Each stage toggles on/off as a whole.
 // The fixed Bass/Treble/Air macros live in `tone`.
 type StageId = "fit" | "content" | "tone";
 type Stage = { enabled: boolean; bands: CustomFilter[] };
 type Stages = { fit: Stage; content: Stage; tone: Stage };
-// `flat: true` means the slot opted out of AutoEq's fit entirely (§3.4a "flat start") —
+// `flat: true` means the slot opted out of AutoEq's fit entirely ("flat start") —
 // no measurement, no optimizer, the Fit/Content/Tone stages are the whole correction.
 // `measurementPath`/`targetPath` are left whatever they last were (not cleared) so
 // toggling back to AutoEq restores the picker instead of losing the pick.
@@ -84,13 +84,13 @@ type Stages = { fit: Stage; content: Stage; tone: Stage };
 type SlotInputs = { model: string; measurementPath: string; targetPath: string; flat: boolean; stages: Stages; infrasoundAck?: boolean };
 type Selection = { headphone: string | null; target: string | null };
 // A slot's last computed fit, persisted so launch can write cageq.txt immediately without
-// waiting on the ~1–2 s cold AutoEq fit (§3.5 launch-from-cache). Exactly the fields the
+// waiting on the ~1–2 s cold AutoEq fit (launch-from-cache). Exactly the fields the
 // core needs to seed a slot and compose the preamp: the composed bands + the two curve
 // quantities (+ the chart reference). The fit is deterministic in its inputs, so the
 // cached bands equal a fresh fit's; a background re-fit reconciles/​warms the sidecar.
 // `model`: what the fit was computed in — absent in blobs saved before the model existed (RBJ).
 type PersistedFit = { device: string; filters: Band[]; g_target_db: number; g_max_peak_db: number; reference_curve: { f: number; db: number }[]; model?: ResponseModel };
-// §3.5 resume blob (UI-owned shape; the backend stores/returns it verbatim).
+// Resume blob (UI-owned shape; the backend stores/returns it verbatim).
 type Resume = {
   activeSlot: SlotName;
   deviceId: string;
@@ -100,13 +100,13 @@ type Resume = {
   slotPreset?: { A: LoadedRef | null; B: LoadedRef | null }; // which preset each slot was loaded from
 };
 
-// §3.4 tone layer — three always-present **fixed** grid bands (0 dB by default,
+// Tone layer — three always-present **fixed** grid bands (0 dB by default,
 // non-removable, type locked), the classic warmth/brightness/air triad. They replace the
 // old separate macro sliders; everything else is a normal, removable band.
 //   • Bass   — LowShelf 105 Hz  (AutoEq's own constant): warmth / body.
 //   • Treble — HighShelf 4 kHz: brightness / presence. Deliberately NOT AutoEq's 10 kHz
 //     ("air") shelf — 10 kHz is barely a loudness event; 4 kHz sits at the K-weighting
-//     peak, so it's the impactful control and the §4.1 match responds to it.
+//     peak, so it's the impactful control and the match responds to it.
 //   • Air    — HighShelf 12 kHz: the subtle top-octave sparkle the 4 kHz Treble gives up.
 //     Splitting it off lets Treble stay impactful without reaching into the harsh
 //     presence region, and gives "air" back as its own taste control.
@@ -134,7 +134,7 @@ function ensureMacros(cf: CustomFilter[]): CustomFilter[] {
   ];
 }
 
-// --- §3.4 stages -----------------------------------------------------------
+// --- Stages -----------------------------------------------------------
 // Three fixed, well-named stages (deliberately not user-definable — arbitrary stages lose
 // the semantic grouping that's their whole point, and EqAPO sums them anyway). Order is
 // display-only; the summed response is order-independent.
@@ -195,7 +195,7 @@ const presetSig = (model: string, measurementPath: string, targetPath: string, f
 type LoadedRef = { id: string; name: string; at?: number | "head"; sig: string };
 
 /** The custom bands actually written: every enabled stage's enabled bands, in stage order —
- *  what rides to the sidecar (appended to the AutoEq fit) and drives the §4.1/§4.2 policy. */
+ *  what rides to the sidecar (appended to the AutoEq fit) and drives the policy. */
 /** A high-pass band leaves here as its second-order sections (`expandHighPass`): the backend, the
  *  applied filter list it hands back, and so `totalBandsUsed` all count sections, which is what
  *  CAGEq's own APO actually runs. */
@@ -226,14 +226,14 @@ const MAX_BANDS = 64;
  *  typical AutoEq bass shelf on an open-back (+4-6 dB carried down to DC) is caught. */
 const INFRASOUND_HINT_DB = 3;
 
-// §3.4a "flat start": a synthetic option folded into the header's measurement `<select>`
+// "flat start": a synthetic option folded into the header's measurement `<select>`
 // rather than a separate control, so it's selectable regardless of what's in (or not in) the
 // Headphone box — including an unmatched or empty model, exactly the case it exists for. Never
 // sent anywhere as a real measurement path; the select's own onChange translates it to/from the
 // `flat` boolean that actually crosses to the backend (see `writeFit`).
 const FLAT_MEASUREMENT = "__flat__";
 
-/** §5.2 solo: which band, in which stage, is soloed (hear only it, within its stage). */
+/** Solo: which band, in which stage, is soloed (hear only it, within its stage). */
 type Solo = { stage: StageId; idx: number };
 // The Q of EqChart's middle-mouse "frequency finder" sweep's bandpass — "relatively high" per the
 // feature's own ask, narrow enough to isolate a single resonance while sweeping without being
@@ -241,7 +241,7 @@ type Solo = { stage: StageId; idx: number };
 const SWEEP_Q = 8;
 /** Apply a solo to a stage set for the *applied* cascade only — never mutates the stored bands.
  *  Forces the soloed band's stage on and every other band in that stage off; other stages are
- *  untouched. The §4.1 loudness match then recomputes the preamp for the reduced cascade (auto-gain). */
+ *  untouched. The loudness match then recomputes the preamp for the reduced cascade (auto-gain). */
 function soloStages(stages: Stages, solo: Solo | null): Stages {
   if (!solo) return stages;
   const st = stages[solo.stage];
@@ -262,7 +262,7 @@ function migrateInputs(inp: Partial<SlotInputs> & { customFilters?: CustomFilter
     model: inp.model ?? "",
     measurementPath: inp.measurementPath ?? "",
     targetPath: inp.targetPath ?? "",
-    flat: inp.flat ?? false, // pre-§3.4a blobs predate "flat start" — always AutoEq-origin
+    flat: inp.flat ?? false, // older blobs predate "flat start" — always AutoEq-origin
     stages,
     infrasoundAck: inp.infrasoundAck,
   };
@@ -289,7 +289,7 @@ function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyP
     model: p.model,
     measurementPath: p.measurementPath,
     targetPath: p.targetPath,
-    flat: p.flat ?? false, // pre-§3.4a presets predate "flat start" — always AutoEq-origin
+    flat: p.flat ?? false, // older presets predate "flat start" — always AutoEq-origin
     stages: p.stages ? normalizeStages(p.stages) : normalizeStages({ tone: { enabled: true, bands: p.customFilters ?? defaultTone() } }),
     infrasoundAck: p.infrasoundAck,
     versions: (p.versions ?? []).map((v) => ({
@@ -305,7 +305,7 @@ function normalizeLibrary(lib: { templates?: LegacyTemplate[]; presets?: LegacyP
   return { presets, templates };
 }
 
-// §3.5 preset export/import: the whole library (session presets with their versions, plus the
+// Preset export/import: the whole library (session presets with their versions, plus the
 // user's filter templates) in one file, to move it to another machine or take it along for a
 // demo. The library's own shape, tagged so an import can tell a CAGEq preset file from any
 // other JSON and refuse one written by a newer, incompatible CAGEq.
@@ -378,7 +378,7 @@ const TONE_PRESETS: { name: string; key: string; bass: number; treble: number; a
 // name → i18n label key, for translating the curated templates' display names.
 const TONE_PRESET_KEY: Record<string, string> = Object.fromEntries(TONE_PRESETS.map((p) => [p.name, p.key]));
 
-// §3.5 preset library. Two kinds, deliberately different in scope (filter.md §5.2):
+// Preset library. Two kinds, deliberately different in scope:
 //   • FilterTemplate — one **stage's** bands; loading drops them into that stage only.
 //   • UserPreset     — a full setup (measurement + target + all stages); loading replaces all.
 // Both persist in settings.json's opaque `library` blob (get_library/set_library), the
@@ -389,7 +389,7 @@ type PresetState = { model: string; measurementPath: string; targetPath: string;
 // A past state of a preset, kept when the user explicitly saves a new version. `at` = timestamp.
 type PresetVersion = PresetState & { at: number };
 // A UserPreset is its *current* state plus a linear history of explicitly-saved previous versions
-// (§3.5 versioning). Newest archived version is last. Loading a version drops it into the active
+// (versioning). Newest archived version is last. Loading a version drops it into the active
 // slot like a preset — the built-in level-matched A/B does the actual comparison.
 type UserPreset = { id: string; name: string; versions?: PresetVersion[] } & PresetState;
 type Library = { presets: UserPreset[]; templates: FilterTemplate[] };
@@ -439,7 +439,7 @@ const PowerGlyph = () => (
 
 // oratory1990 is the common reference measurement — default to it when a model has it.
 const measurementRank = (h: Headphone) => (h.source === "oratory1990" ? 0 : 1);
-// Slot A = goldenrod, Slot B = blue, Dry = neutral (filter.md §5.2 accent colours).
+// Slot A = goldenrod, Slot B = blue, Dry = neutral.
 const SLOT_COLOR: Record<SlotName, string> = { A: "#daa520", B: "#3b82f6", Dry: "#9ca3af" };
 const SLOT_ORDER: SlotName[] = ["A", "B", "Dry"]; // A-S-D keyboard order
 // Distinct from the slot colours (A gold, B blue, Dry grey) and the ref purple: Fit cyan,
@@ -452,7 +452,7 @@ const REF_COLOR = "#a855f7"; // AutoEq's ideal-correction reference (target the 
 const RAW_COLOR = "#94a3b8"; // the raw headphone measurement (nerd overlay)
 const TARGET_COLOR = "#7dd3fc"; // the target curve — pale blue, à la AutoEq (nerd overlay)
 
-// §5.4 self-test verdict — **delta method**. We measure the loopback with the correction applied and
+// Self-test verdict — **delta method**. We measure the loopback with the correction applied and
 // again with it bypassed (Dry), and compare their *difference*: delta = corrected − dry. That delta
 // is the EQ's own transfer function, because everything common to both captures — the pink source's
 // imperfect flatness, any foreign config.txt filters, fixed system coloration — cancels exactly. So
@@ -460,7 +460,7 @@ const TARGET_COLOR = "#7dd3fc"; // the target curve — pale blue, à la AutoEq 
 type SelfTestVerdict =
   // `deviceColorDb` (on pass/mismatch, where a real Dry capture exists) is how far the Dry pink
   // noise deviates from flat — the device's *own* processing, which the delta method cancels. See
-  // §5.4 dry-flatness below.
+  // dry-flatness below.
   | { kind: "pass"; r: number; deviceColorDb?: number }
   | { kind: "fail" }
   | { kind: "mismatch"; r: number; deviceColorDb?: number }
@@ -545,7 +545,7 @@ function selfTestVerdict(corrected: SpectrumData[], dry: SpectrumData[], bands: 
   }
   const stdD = Math.sqrt(sDD / n); // how much the measured EQ effect actually varies (dB RMS)
   const stdC = Math.sqrt(sCC / n); // how much the correction predicts
-  // §5.4 dry-flatness: the generated pink reads flat in the log spectrum, so a *transparent* device
+  // Dry-flatness: the generated pink reads flat in the log spectrum, so a *transparent* device
   // returns a flat Dry capture. Its deviation from flat (residual after a linear fit, so a tilt or
   // broadband gain doesn't count) is the device's own processing — the thing the delta method
   // cancels and can't see. Surfaced as an advisory alongside the EQ verdict.
@@ -636,11 +636,11 @@ function App() {
   const [query, setQuery] = useState(""); // headphone-model search / selected model name
   const [measurementPath, setMeasurementPath] = useState(""); // chosen measurement (source) path
   const [targetPath, setTargetPath] = useState("");
-  // §3.4a "flat start": skip AutoEq's fit entirely for the active slot. `measurementPath`/
+  // "flat start": skip AutoEq's fit entirely for the active slot. `measurementPath`/
   // `targetPath` are left as whatever they were so toggling back to AutoEq restores the pick.
   const [flat, setFlat] = useState(false);
   const [infrasoundAck, setInfrasoundAck] = useState(false); // see SlotInputs.infrasoundAck
-  const [stages, setStages] = useState<Stages>(defaultStages()); // §3.4 the three per-slot filter stages
+  const [stages, setStages] = useState<Stages>(defaultStages()); // the three per-slot filter stages
   const [activeStage, setActiveStage] = useState<StageId>("fit"); // which stage the grid/chart edits (restored from resume)
   // Read-only "AutoEq fit" tab in the band section: shows the automatic parametric fit (not one
   // of the editable stages). A view flag, not a StageId, so `stages[activeStage]` stays valid and
@@ -712,7 +712,7 @@ function App() {
   // itself via its own rAF loop (same pattern as Vectorscope's `scopeRef`), so arrival never
   // touches React at all.
   const spectrumRef = useRef<SpectrumData | null>(null);
-  // The selected output's live mix sample rate (Hz), reported by the loopback monitor (§8 read-only
+  // The selected output's live mix sample rate (Hz), reported by the loopback monitor (read-only
   // format display). Null when monitoring isn't running yet. Shown next to the device picker.
   const [sampleRate, setSampleRate] = useState<number | null>(null);
   useEffect(() => spectrumStream.subscribe((s) => (spectrumRef.current = s)), []);
@@ -760,7 +760,7 @@ function App() {
   // name used to be "monitor", left over from when it was literally EqChart with every curve
   // stripped — it's a dedicated CRT-style analyzer now, not a stripped-down chart):
   //   eq       — magnitude curves + spectrum backdrop (the default, editable)
-  //   impulse  — impulse-response decay (§5.2)
+  //   impulse  — impulse-response decay
   //   spectrum — clean live FFT spectrum analyzer, no filter curves
   //   scope    — stereo vectorscope (X-Y goniometer) + time-domain trace of the live loopback
   const [chartView, setChartView] = useState<"eq" | "impulse" | "spectrum" | "scope">("eq");
@@ -776,10 +776,10 @@ function App() {
   // the core's effective model before anything has been applied. Never the bare preference.
   const drawModel: ResponseModel = result?.model ?? modelState?.effective ?? "Rbj";
   const [loudness, setLoudness] = useState<LoudnessSettings | null>(null);
-  const [confirmFinalVolume, setConfirmFinalVolume] = useState(true); // §7.5 point 1
+  const [confirmFinalVolume, setConfirmFinalVolume] = useState(true); // ask before switching into Final volume
   const [pendingFinal, setPendingFinal] = useState<{ next: LoudnessSettings; jump: number } | null>(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
-  // §3.5 preset library + the inline save form and a generic confirm dialog (reused for
+  // Preset library + the inline save form and a generic confirm dialog (reused for
   // the "overwrite existing?" prompt, mirroring the destructive-slot-action confirm).
   const [library, setLibrary] = useState<Library>({ presets: [], templates: [] });
   const [saveForm, setSaveForm] = useState<{ kind: "preset" | "template"; name: string; error: boolean } | null>(null);
@@ -796,20 +796,20 @@ function App() {
     const t = window.setTimeout(() => setLibraryNote(null), libraryNote.error ? 9000 : 6000);
     return () => window.clearTimeout(t);
   }, [libraryNote]);
-  const [exportOpen, setExportOpen] = useState(false); // §8 mobile-export dialog open for the active slot
+  const [exportOpen, setExportOpen] = useState(false); // mobile-export dialog open for the active slot
   const [confirmBox, setConfirmBox] = useState<{ message: string; confirmLabel: string; onConfirm: () => void } | null>(null);
-  const [selfTest, setSelfTest] = useState<SelfTestState | null>(null); // §5.4 output self-test
-  // §5.2 solo: hear only one band within its stage (transient — never edits stored bands). A ref
+  const [selfTest, setSelfTest] = useState<SelfTestState | null>(null); // output self-test
+  // Solo: hear only one band within its stage (transient — never edits stored bands). A ref
   // mirror lets writeFit read the live value, and it auto-clears on any edit / slot / stage change.
   const [solo, setSolo] = useState<Solo | null>(null);
   const soloRef = useRef<Solo | null>(null);
   soloRef.current = solo;
-  // §5.2 isolate: audition one (peaking) band's region — a bandpass, everything else off. A separate
+  // Isolate: audition one (peaking) band's region — a bandpass, everything else off. A separate
   // apply path (the `isolate` command writes a bandpass-only config); mutually exclusive with solo.
   const [isolate, setIsolate] = useState<Solo | null>(null);
   const isolateRef = useRef<Solo | null>(null);
   isolateRef.current = isolate;
-  // §5.2 frequency finder: EqChart's middle-mouse sweep — the same bandpass-audition idea as
+  // Frequency finder: EqChart's middle-mouse sweep — the same bandpass-audition idea as
   // isolate, but for an ad-hoc frequency under the cursor instead of an existing band, so there's
   // no `Solo{stage,idx}` to key off. No `useState` mirror (unlike solo/isolate above): nothing in
   // the UI reacts to sweep being active — no band row to highlight, since there's no band — it only
@@ -853,7 +853,7 @@ function App() {
   // the attribution — and any unsaved-edit dirty state — survives a restart. `ver` is the tag.
   const [slotPreset, setSlotPreset] = useState<Record<"A" | "B", LoadedRef | null>>({ A: null, B: null });
   // Last computed fit per editable slot, persisted into the resume blob so the next launch
-  // writes EQ immediately from cache instead of waiting on the cold sidecar fit (§3.5).
+  // writes EQ immediately from cache instead of waiting on the cold sidecar fit.
   const [slotFits, setSlotFits] = useState<Record<"A" | "B", PersistedFit | null>>({ A: null, B: null });
   // Which editable slots have a fit cached in the backend *this session*. After a
   // restart-restore the frontend has each slot's inputs but the backend cache is empty,
@@ -884,23 +884,23 @@ function App() {
   // Fit `inp` into `slot` via the sidecar and record it (cached bands, hydrated flag).
   // The single place a slot is (re)fitted; callers set `result` from the return value.
   async function writeFit(slot: "A" | "B", inp: SlotInputs, dev: AudioDevice): Promise<ApplyResult> {
-    // §5.2 solo: while a band is soloed, the *applied* cascade is the soloed view (auto-gain via the
-    // §4.1 match), but we still store the real `inp` — solo is a monitoring state, not an edit.
+    // Solo: while a band is soloed, the *applied* cascade is the soloed view (auto-gain via the
+    // match), but we still store the real `inp` — solo is a monitoring state, not an edit.
     const soloing = soloRef.current != null;
     const applied = await invoke<ApplyResult>("apply", {
       device: dev.eqapo_pattern, // the EqAPO-matchable device pattern, not the headphone
-      // §3.4a flat start: no measurement to fit, so no target either — a target is
+      // Flat start: no measurement to fit, so no target either — a target is
       // meaningless without a measurement to compensate against.
       headphone: inp.flat ? null : inp.measurementPath,
       target: inp.flat ? null : inp.targetPath || null,
       slot,
-      // Every enabled stage's enabled bands, summed into one list (§3.4). Bypassed bands and
+      // Every enabled stage's enabled bands, summed into one list. Bypassed bands and
       // disabled stages stay in the UI but are excluded from what's written.
       customFilters: appliedBands(soloStages(inp.stages, soloRef.current)),
     });
     setSlotInputs((prev) => ({ ...prev, [slot]: inp }));
     setHydrated((prev) => ({ ...prev, [slot]: true }));
-    // Remember the composed fit so the next launch can restore this slot from cache (§3.5) — but not
+    // Remember the composed fit so the next launch can restore this slot from cache — but not
     // the soloed cascade; keep the real cached fit so a solo can't leak into the persisted slot.
     if (!soloing)
       setSlotFits((prev) => ({
@@ -921,7 +921,7 @@ function App() {
     // Headphone/target catalogue: a round trip to the sidecar (`core.request_with_deadline` on
     // the Rust side), so even a warm on-disk index still waits on the sidecar's own numpy/scipy/
     // autoeq import time before answering at all. Kicked off immediately but deliberately NOT
-    // awaited inline below — nothing on the resume-from-cache fast path (§3.5: seed_slot/
+    // awaited inline below — nothing on the resume-from-cache fast path (seed_slot/
     // activate_slot, both explicitly sidecar-free) actually needs it, so blocking `loading` on it
     // meant a returning user with a cached correction stared at a spinner for the sidecar's own
     // startup cost for no reason EqChart cared about. Populated in the background whenever it
@@ -954,7 +954,7 @@ function App() {
         // Prefer a device EqAPO is actually installed on, so the default selection works.
         const initial = dev.find((d) => d.eqapo_enabled) ?? dev[0];
 
-        // §3.5 resume: restore the last session and re-apply the active slot, so the app
+        // Resume: restore the last session and re-apply the active slot, so the app
         // matches reality on launch without a manual "Apply". Falls back to the older
         // selection-only restore when there's no resume blob (clean install / first run
         // after the feature landed).
@@ -976,7 +976,7 @@ function App() {
         if (resume?.slotPreset) setSlotPreset({ A: resume.slotPreset.A ?? null, B: resume.slotPreset.B ?? null });
         if (resume?.activeStage) setActiveStage(resume.activeStage); // else stays "fit"
 
-        // §3.5 launch-from-cache: seed each slot's persisted fit into the backend so both
+        // Launch-from-cache: seed each slot's persisted fit into the backend so both
         // slots are hydrated (A/B switching is instant) and the active one can be written
         // *immediately*, skipping the ~1–2 s cold AutoEq fit. Falls back to a fresh fit
         // below when a slot has no cached fit (older resume blob / first run after update).
@@ -1073,7 +1073,7 @@ function App() {
     })();
   }, []);
 
-  // §3.5: persist the resume blob whenever the editable session changes (debounced).
+  // Persist the resume blob whenever the editable session changes (debounced).
   // Gated on `restored` so the initial defaults don't clobber the saved session first.
   useEffect(() => {
     if (!restored) return;
@@ -1082,7 +1082,7 @@ function App() {
         activeSlot,
         deviceId,
         slots: { A: slotInputs.A, B: slotInputs.B },
-        fits: { A: slotFits.A, B: slotFits.B }, // §3.5: persist the fits for launch-from-cache
+        fits: { A: slotFits.A, B: slotFits.B }, // persist the fits for launch-from-cache
         activeStage,
         slotPreset: { A: slotPreset.A, B: slotPreset.B }, // which preset each slot was loaded from
       };
@@ -1091,7 +1091,7 @@ function App() {
     return () => window.clearTimeout(id);
   }, [restored, activeSlot, deviceId, slotInputs, slotFits, activeStage, slotPreset]);
 
-  // §3.5: persist the preset library (saved presets + filter templates) on change, same
+  // Persist the preset library (saved presets + filter templates) on change, same
   // debounce + `restored` gate as the resume blob.
   useEffect(() => {
     if (!restored) return;
@@ -1123,7 +1123,7 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
-  // §5.2 measurement nerd overlays: fetch the raw + target curves when the measurement or
+  // Measurement nerd overlays: fetch the raw + target curves when the measurement or
   // target changes (they share the dBr reference). Cleared on Dry / no measurement / flat
   // start — a flat slot has no measurement to chart, so this would just be a doomed RPC.
   useEffect(() => {
@@ -1214,7 +1214,7 @@ function App() {
       .catch((e) => setError(String(e)));
   }
 
-  // Route mode/pre-gain changes; gate a switch to Final volume behind the §7.5 confirm
+  // Route mode/pre-gain changes; gate a switch to Final volume behind the confirm
   // dialog, but only when it's actually a volume increase and the confirm is enabled.
   async function requestLoudness(next: LoudnessSettings) {
     const goingFinal = next.mode === "FinalVolume" && loudness?.mode !== "FinalVolume";
@@ -1264,7 +1264,7 @@ function App() {
     }
   }
 
-  // Pull both slots' fits back from the core into the launch cache (§3.5). A model change (toggle
+  // Pull both slots' fits back from the core into the launch cache. A model change (toggle
   // or backend swap) re-fits *every* slot in the core, but a write reports only the active one —
   // so without this the other slot would be persisted with the previous model's bands, and
   // restored as those bands realised in the new model (a fit restored from cache is never
@@ -1284,8 +1284,8 @@ function App() {
     await invoke("set_confirm_final_volume", { enabled });
   }
 
-  // §4.2 clipping "add headroom": the base pre-gain that just clears the ceiling is
-  // `-g_target - g_max_peak` (below that, the §4.1 loudness match binds again); round
+  // Clipping "add headroom": the base pre-gain that just clears the ceiling is
+  // `-g_target - g_max_peak` (below that, the loudness match binds again); round
   // down to the nearest 3 dB for a bit of margin, clamped to the input's -40..0 range.
   const headroomPregain =
     result && loudness ? Math.max(-40, Math.floor((-result.g_target_db - result.g_max_peak_db) / 3) * 3) : null;
@@ -1362,7 +1362,7 @@ function App() {
     }
   }
 
-  // §5.2 isolate write: a bandpass-only config at the band's current Fc/Q. In-flight-guarded like
+  // Isolate write: a bandpass-only config at the band's current Fc/Q. In-flight-guarded like
   // apply() so it shares the coalescing throttle below — the backend reads the isolated device from
   // the slot cache, so no headphone/target args are needed.
   async function applyIsolate(freqHz: number, q: number) {
@@ -1379,7 +1379,7 @@ function App() {
   // --- live tone editing -----------------------------------------------------
   // Tone changes auto-apply so they're audible immediately. A coalescing throttle
   // keeps a drag streaming updates (rather than only firing when you let go) without
-  // flooding IPC; the Core separately enforces the §5.3 >=15 ms write spacing.
+  // flooding IPC; the Core separately enforces the >=15 ms write spacing.
   const inFlight = useRef(false);
   const applyTimer = useRef<number | null>(null);
   const autoApplyRef = useRef<() => void>(() => {});
@@ -1418,7 +1418,7 @@ function App() {
     }, delay);
   }
 
-  // §5.2 solo — toggle "hear only this band" for the active stage. Setting `solo` re-applies the
+  // Solo — toggle "hear only this band" for the active stage. Setting `solo` re-applies the
   // soloed cascade; toggling off re-applies the normal one. Only on A/B (Dry isn't editable).
   const toggleSolo = (idx: number) => {
     if (dryActive) return;
@@ -1430,7 +1430,7 @@ function App() {
     setSolo(next);
     requestApply(0);
   };
-  // §5.2 isolate — toggle a bandpass audition of one band's region (peaking bands only; a bandpass
+  // Isolate — toggle a bandpass audition of one band's region (peaking bands only; a bandpass
   // is meaningless for a shelf). Writes a bandpass-only config via the `isolate` command; toggling
   // off (or any auto-clear) re-applies the normal cascade. Mutually exclusive with solo.
   const toggleIsolate = (idx: number) => {
@@ -1752,7 +1752,7 @@ function App() {
     }
   }
 
-  // §8: jump to the modern Windows Sound settings for the selected output so the user can change
+  // Jump to the modern Windows Sound settings for the selected output so the user can change
   // its playback format there (CAGEq only reads the sample rate, never sets the format). The
   // backend picks the right deep-link (default device → its properties page, else the device list).
   const openOutputSettings = () => {
@@ -1767,7 +1767,7 @@ function App() {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   };
 
-  // §5.4 output self-test: play pink noise (through EqAPO) and check the loopback spectrum's shape
+  // Output self-test: play pink noise (through EqAPO) and check the loopback spectrum's shape
   // matches the applied correction — proving the EQ actually reaches the output. Runs entirely off
   // the current correction (no config change); the backend only plays the signal.
   async function runSelfTest() {
@@ -1854,7 +1854,7 @@ function App() {
     }
   }
 
-  // §3.4 tone editing — every change auto-applies (throttled). Edits target the *active
+  // Tone editing — every change auto-applies (throttled). Edits target the *active
   // stage's* band list (the grid + chart nodes show only that stage); indices are into it.
   const setStageBands = (stage: StageId, updater: (bands: CustomFilter[]) => CustomFilter[]) =>
     setStages((st) => ({ ...st, [stage]: { ...st[stage], bands: updater(st[stage].bands) } }));
@@ -1961,7 +1961,7 @@ function App() {
     const t = window.setTimeout(() => setNewBand(null), 1500);
     return () => window.clearTimeout(t);
   }, [newBand]);
-  // Enable/disable a whole stage — a big tonal jump the §5.3a morph smooths.
+  // Enable/disable a whole stage — a big tonal jump the morph smooths.
   const toggleStage = (id: StageId) => {
     captureBaseline();
     dropAudition(); // enabling/disabling a stage changes the cascade — exit any solo/isolate
@@ -1969,7 +1969,7 @@ function App() {
     requestApply(0);
     commitHistory();
   };
-  // --- §3.5 preset library: load / save / delete -----------------------------
+  // --- Preset library: load / save / delete -----------------------------
   // Loading always targets the *active* slot (disabled on Dry). A filter template drops its
   // bands into *its* stage (and switches to that tab); a full preset replaces measurement +
   // target + all stages.
@@ -2101,7 +2101,7 @@ function App() {
     setActiveSlotLoaded(p.id, p.name);
   };
 
-  // §3.5 preset versioning — explicit only. "Save version" archives the preset's *current stored*
+  // Preset versioning — explicit only. "Save version" archives the preset's *current stored*
   // state into its history and advances the preset to the current editor state, so refining →
   // save-version keeps the prior state to A/B against. Capped; nothing is captured automatically.
   const MAX_VERSIONS = 10;
@@ -2177,7 +2177,7 @@ function App() {
         setLibrary((lib) => ({ ...lib, templates: upsert(lib.templates, { id: t.id, name: t.name, stage: t.stage, bands: stages[t.stage].bands }) })),
     });
 
-  // §3.5 preset export/import (see `libraryFileText`). The file dialogs and the file I/O are the
+  // Preset export/import (see `libraryFileText`). The file dialogs and the file I/O are the
   // backend's; this side only builds and merges the library. A short confirmation line in the
   // presets panel reports what happened, since a save dialog closing says nothing on its own.
   const exportLibrary = async () => {
@@ -2241,7 +2241,7 @@ function App() {
   };
 
   // A/S/D switch slots, W toggles loudness mode — but not while typing in a field
-  // (§5.2 blind-comparison shortcuts).
+  // (blind-comparison shortcuts).
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const el = document.activeElement as HTMLElement | null;
@@ -2317,7 +2317,7 @@ function App() {
     void invoke("set_apo_nudge_dismissed").catch(() => {});
   };
 
-  // "Your build is stale" banner — filter.md §5.3c's dll_current, surfaced here rather than
+  // "Your build is stale" banner — the engine setup's dll_current, surfaced here rather than
   // left to the trigger's tooltip: a colour-coded button that still looks perfectly settled
   // (orange, `engineReason === "apo"`) is not where anyone goes looking for a warning. Only
   // shown while CAGEq's own engine is actually the one running (a registered-but-inactive stale
@@ -2329,7 +2329,7 @@ function App() {
   const dismissApoStale = () => {
     setApoStaleDismissed(true); // session-only — see the state's own doc for why this isn't persisted
   };
-  // Whether `result.filters` currently IS the §5.2 isolate bandpass audition, rather than the
+  // Whether `result.filters` currently IS the isolate bandpass audition, rather than the
   // real applied correction — see `excludeFromScale` below and `FilterKind`'s doc (Bandpass only
   // ever appears here). Shared by every place that would otherwise try to *invert* the cascade.
   const isolateAudition = !dryActive && (result?.filters.some((b) => b.kind === "Bandpass") ?? false);
@@ -2337,7 +2337,7 @@ function App() {
   // Broadcast the active EQ cascade to any scope view (inline or the detached window) so its
   // inverse-filter ("undistort") mode can recover the pre-EQ image. Dry → no filters (already
   // pristine). Emitted on change, and replayed on request when a scope window mounts and asks.
-  // Dry has no EQ to invert, but it DOES carry a preamp (the §4.1 loudness match in Comparison
+  // Dry has no EQ to invert, but it DOES carry a preamp (the loudness match in Comparison
   // mode), so undistort must undo it too — else Dry's scope excursion wouldn't match A/B's.
   //
   // Isolate is treated the same as Dry here — filters withheld, preamp still passed — and for a
@@ -2558,7 +2558,7 @@ function App() {
     return m > 0 ? Math.max(6, Math.ceil(m + 1)) : undefined;
   }, [loudness?.mode, slotFits, sampleRate]);
 
-  // §5.2 chart: only the *active* slot's total (drawing every slot at once crowded the
+  // Chart: only the *active* slot's total (drawing every slot at once crowded the
   // legend once the per-stage lines were added — the A/B comparison is primarily by ear).
   // Plus a line per enabled stage — the active stage prominent (it carries the drag nodes),
   // the others muted context. Stable ids so legend toggles survive switching slots/stages.
@@ -2570,7 +2570,7 @@ function App() {
         bands: result.filters,
         color: SLOT_COLOR[activeSlot],
         label: slotLabel(activeSlot),
-        // Whenever `result.filters` IS the §5.2 isolate bandpass audition (deep attenuation
+        // Whenever `result.filters` IS the isolate bandpass audition (deep attenuation
         // outside the audited band), it shouldn't drive the Y auto-range — that would blow the
         // axis out to the audition's scale rather than the applied filter's, misrepresenting it
         // at a glance. The stage line for the band's own stage (drawn below, unaffected by
@@ -2611,7 +2611,7 @@ function App() {
     [autoEqBands, activeSlot, i18n.language],
   );
 
-  // The correction to the selected target the active slot's fit chases (§5.2, AutoEq's
+  // The correction to the selected target the active slot's fit chases (AutoEq's
   // equalization curve), drawn level-matched to the applied curve: shifted by the loudness gap
   // between the two, in the same K-weighted pink-noise model auto-gain uses. Auto-gain already
   // removes that gap from what is heard, so the chart removes it too and leaves only the shapes
@@ -2655,7 +2655,7 @@ function App() {
     [result, dryActive, i18n.language],
   );
 
-  // Startup banner (§5.1) — the verdicts only matter until the user applies something
+  // Startup banner — the verdicts only matter until the user applies something
   // (they describe the state at launch). No watchdog/sidecar states any more: nothing
   // to recover from or retry, since the app doesn't spawn a sidecar at all.
   const banner = (() => {
@@ -2912,7 +2912,7 @@ function App() {
         </div>
       )}
 
-      {/* ---- header: the "set once per session" inputs (§5.1) ---- */}
+      {/* ---- header: the "set once per session" inputs ---- */}
       <header className="app-header">
         {/* Wordmark: headphone-band-over-EQ-bars glyph (currentColor so it tracks the theme) +
             "Eq" set lighter/dimmer so the EQ part reads as its own token — no gap, no colour. */}
@@ -2954,7 +2954,7 @@ function App() {
                       </option>
                     ))}
                   </select>
-                  {/* Setup for CAGEq's own audio engine (filter.md §5.3c) — a small trigger
+                  {/* Setup for CAGEq's own audio engine — a small trigger
                       next to the device it's scoped to, opening a pop-up rather than sitting
                       inline as a permanent panel. The Windows Sound settings deep-link lives
                       inside that same dialog now too: the resampler turned out clean and most
@@ -2997,7 +2997,7 @@ function App() {
                 ))}
               </datalist>
               <label htmlFor="measurement-select" style={{ fontSize: "0.85em", opacity: 0.75 }}>{tr("header.measurement")}</label>
-              {/* §3.4a "flat start" folded in as the select's own first option — see
+              {/* "flat start" folded in as the select's own first option — see
                   FLAT_MEASUREMENT's doc — rather than a separate control, so it costs no extra
                   header width and stays reachable whatever the Headphone box currently holds. */}
               <select
@@ -3126,7 +3126,7 @@ function App() {
       )}
 
       {/* Only waits on the sidecar at all when there's no cached fit to resume from (first
-          launch, or a headphone/target never fit before) — the §3.5 resume-from-cache path
+          launch, or a headphone/target never fit before) — the resume-from-cache path
           (seed_slot/activate_slot) is local-only, so a returning user's own last correction no
           longer sits behind the Python DSP sidecar's cold-start cost (numpy/scipy read cold from
           disk after a reboot — a couple of seconds; the OS file cache makes repeat launches fast
@@ -3336,7 +3336,7 @@ function App() {
                       </p>
                     )}
                   </div>
-                    {/* §5.3c post-EQ meters beside the chart (loopback, post-EQ) — always on. */}
+                    {/* Post-EQ meters beside the chart (loopback, post-EQ) — always on. */}
                     <div className="meter-col">
                       <Meter deviceId={deviceId} plotBox={plotBox} onSampleRate={setSampleRate} />
                     </div>
@@ -3351,7 +3351,7 @@ function App() {
             </div>
           )}
 
-          {/* ---- filter bands: per-stage keyboard-first graphic-EQ grid (§5.2 stage 3) ---- */}
+          {/* ---- filter bands: per-stage keyboard-first graphic-EQ grid ---- */}
           {!loading && (
             <div className="panel" style={{ opacity: dryActive ? 0.5 : 1 }}>
               <div className="tg-panel-head">

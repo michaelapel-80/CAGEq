@@ -15,7 +15,7 @@ Speaks the same line-delimited JSON-RPC 2.0 as sidecar_stub.py. Methods:
                   calls now: FR-prep/equalize/the SLSQP fit/loudness all moved to Rust
                   (`cageq-peq-solver`), leaving only the measurement/target database
                   fetch+cache here (it isn't bundled — see below)
-  measurement_curves {headphone, target?} -> raw measurement + target curves for the §5.2
+  measurement_curves {headphone, target?} -> raw measurement + target curves for the
                   nerd overlays (see its own docstring)
   filter_response {filters, freqs, fs?} -> combined dB response of `filters` on `freqs`;
                   test-support only, cross-checks the Rust/TS biquad copies (see its own docstring)
@@ -213,7 +213,7 @@ def list_targets(refresh=False):
     return targets
 
 
-# --- loudness (filter.md §4.1) --------------------------------------------
+# --- loudness --------------------------------------------
 
 # ITU-R BS.1770-4 K-weighting, as a cascade of two biquads specified at 48 kHz:
 #   stage 1 — "head" high-shelf (+~4 dB above ~1.5 kHz),
@@ -239,7 +239,7 @@ def _k_weight_power(f, fs=48000.0):
 
 
 def loudness_target_db(f, g_eq_db):
-    """§4.1 relative loudness compensation G_target for an EQ curve `g_eq_db` on the
+    """Relative loudness compensation G_target for an EQ curve `g_eq_db` on the
     log grid `f`. A K-weighted pink-noise energy model: how much the curve raises the
     perceived loudness of pink noise, negated so applying it is level-neutral vs. dry.
 
@@ -291,10 +291,10 @@ def _peq_filter(cls, f, fs, fc, gain, q):
 
 
 def _custom_filters(params, f, fs):
-    """Parse the user's custom filters (filter.md §3.4) into EqAPO-shaped dicts plus
+    """Parse the user's custom filters into EqAPO-shaped dicts plus
     their combined response in dB on grid `f`. Each is an AutoEq PEQ filter (same
     biquad model as the fit), so it composes additively with the AutoEq bands; the
-    combined curve then drives the §4.1 loudness match and §4.2 clipping ceiling.
+    combined curve then drives the loudness match and clipping ceiling.
 
     `Tilt` has no AutoEq PEQ class of its own — pivots the spectrum around `freq_hz`,
     realised the same way every other consumer does (`cageq_backend::expand_tilts` /
@@ -332,7 +332,7 @@ def _custom_filters(params, f, fs):
 # The AutoEq fit is the expensive step (SciPy optimisation, ~1-2 s). It depends only
 # on the measurement + target + fit params — NOT on custom filters — so we cache it by
 # those inputs. Changing only custom filters (add/edit/remove) then reuses the cached
-# fit and just recombines (filter.md §5.2 performance rule). In-process dict; the
+# fit and just recombines (performance rule). In-process dict; the
 # sidecar handles requests one at a time, so no locking is needed.
 _FIT_CACHE = {}
 _FIT_CACHE_MAX = 32
@@ -353,7 +353,7 @@ def _fit_key(params):
 
 
 def _subsample_curve(f, db, n=140):
-    """A compact [{f, db}, ...] sampling of a dense curve for the UI chart (§5.2). The
+    """A compact [{f, db}, ...] sampling of a dense curve for the UI chart. The
     grid is already log-spaced, so picking evenly-spaced indices keeps it log-even; ~140
     points is smooth at chart width while keeping the JSON-RPC message small."""
     m = len(f)
@@ -379,7 +379,7 @@ def _autoeq_fit(params):
     headphone AutoEq has no measurement for, or one bad enough that fitting to it makes
     things worse than not fitting at all. Returns empty AutoEq bands on AutoEq's own
     standard grid with a zero response, so `calculate_filters`/`filter_response` and the
-    §5.2 chart machinery downstream need no changes: the user's custom filters become
+    chart machinery downstream need no changes: the user's custom filters become
     the entire correction."""
     key = _fit_key(params)
     cached = _FIT_CACHE.get(key)
@@ -403,7 +403,7 @@ def _autoeq_fit(params):
     fr.smoothen()
     fr.equalize(max_gain=float(params.get("max_gain", 6.0)))
 
-    # The ideal correction curve the parametric fit targets (§5.2 chart reference): the
+    # The ideal correction curve the parametric fit targets (the chart's reference curve): the
     # gain-limited inverse of the smoothed deviation from target. The fitted bands should
     # hug it; the visible gap is the residual the 10-band parametric couldn't capture.
     reference_curve = _subsample_curve(fr.frequency, fr.equalization)
@@ -440,7 +440,7 @@ def filter_response(params):
     cross-language check can pin the Rust (`morph.rs`) and TypeScript (`biquad.ts`)
     copies of the biquad math against this reference implementation — three copies exist
     (a slot switch must draw curves without the sidecar), and silent divergence between
-    them would make the chart, the fit and the tonal-morph disagree (§5.2/§5.3a)."""
+    them would make the chart, the fit and the tonal-morph disagree."""
     fs = int(params.get("fs", 48000))
     f = np.array(params["freqs"], dtype=float)
     _, curve = _custom_filters({"custom_filters": params.get("filters") or []}, f, fs)
@@ -448,7 +448,7 @@ def filter_response(params):
 
 
 def measurement_curves(params):
-    """Raw headphone measurement + target curve for the §5.2 nerd overlays, both on AutoEq's
+    """Raw headphone measurement + target curve for the nerd overlays, both on AutoEq's
     log grid and **centered the same way** so they share one relative-dB (dBr) reference —
     like the AutoEq site's graph (raw vs target). Raw is *before* target compensation (the
     headphone's own FR shape); target is the named AutoEq target (empty ⇒ flat 0). UI-only,
@@ -471,17 +471,17 @@ def calculate_filters(params):
     # cached; no re-fit on custom-filter changes
     autoeq_filters, f, autoeq_curve, reference_curve = _autoeq_fit(params)
 
-    # Append the user's custom filters (§3.4) and combine their response with the
+    # Append the user's custom filters and combine their response with the
     # AutoEq curve; the *combined* curve drives the level policy.
     custom, custom_curve = _custom_filters(params, f, int(params.get("fs", 48000)))
     filters = autoeq_filters + custom  # new list — never mutate the cached fit
     combined = autoeq_curve + custom_curve
 
     # We report the two curve-derived quantities the Rust core needs to compose the
-    # final preamp (filter.md §4.0/§4.2); the DSP does not own the user's base pre-gain
+    # final preamp; the DSP does not own the user's base pre-gain
     # or clipping policy:
-    #   g_target_db   — §4.1 K-weighted loudness compensation for this curve,
-    #   g_max_peak_db — the composed EQ curve's positive peak, for the §4.2 ceiling.
+    #   g_target_db   — K-weighted loudness compensation for this curve,
+    #   g_max_peak_db — the composed EQ curve's positive peak, for the ceiling.
     g_target = loudness_target_db(f, combined)
     g_max_peak = float(np.max(combined))
     return {
@@ -489,7 +489,7 @@ def calculate_filters(params):
         "filters": filters,
         "g_target_db": round(g_target, 2),
         "g_max_peak_db": round(g_max_peak, 2),
-        # §5.2 chart: the ideal correction the fit chases (independent of custom filters,
+        # Chart: the ideal correction the fit chases (independent of custom filters,
         # so it rides along with the cached fit). Never written to EqAPO.
         "reference_curve": reference_curve,
     }
@@ -529,7 +529,7 @@ def fetch_raw_curves(params):
     }
 
 
-# --- mobile export (§8) ----------------------------------------------------
+# --- mobile export ----------------------------------------------------
 
 # A second, independent fit cache from `_FIT_CACHE` above — keyed on the *composed* filters
 # list + band_count + fs, not on a headphone/target selection, so a custom-filter edit (which
@@ -567,7 +567,7 @@ def fit_export_eq(params):
 
     `preamp_db` is `-max(achieved curve) - 0.2 dB` headroom, mirroring AutoEq's own
     `write_eqapo_parametric_eq`'s preamp line — a self-contained "don't clip on the destination
-    device" value. Deliberately NOT `calculate_filters`' `g_target_db` (the desktop's §4.1
+    device" value. Deliberately NOT `calculate_filters`' `g_target_db` (the desktop's
     loudness-matched preamp): that's calibrated for A/B-ing against Dry, which doesn't exist on
     the destination device.
 

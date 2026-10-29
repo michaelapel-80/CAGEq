@@ -4,10 +4,10 @@
 #   * cageq-sidecar       — manages the Python DSP sidecar over stdio
 # and since grown to cover the rest of `members` below too:
 #   * cageq-apo           — CAGEq's own real-time APO (the audiodg-loaded COM object): DSP,
-#                           filter state and the control-channel protocol (filter.md §5.3c)
+#                           filter state and the control-channel protocol
 #   * cageq-apo-backend   — the EqBackend impl that drives cageq-apo from the app side
-#   * cageq-core          — orchestrator tying the fit, the catalogue and EqBackend into one flow (§2)
-#   * cageq-monitor       — post-EQ loudness/spectrum monitoring via WASAPI loopback (§5.3c)
+#   * cageq-core          — orchestrator tying the fit, the catalogue and EqBackend into one flow
+#   * cageq-monitor       — post-EQ loudness/spectrum monitoring via WASAPI loopback
 #   * cageq-biquad        — biquad design math: analog ground truth, RBJ, warping-corrected
 #                           candidates (dependency-free leaf)
 #   * cageq-biquad-wasm   — cageq-biquad compiled to WebAssembly for the frontend
@@ -16,8 +16,8 @@
 # DeviceConfig).
 #
 # `cageq-backend` exists because CAGEq is moving off Equalizer APO onto its own APO
-# (filter.md §5.3c) while keeping the EqAPO path working permanently — so the
-# orchestrator talks to a trait, not to a file writer. See that crate's own docs.
+# while keeping the EqAPO path working permanently — so the orchestrator talks to a
+# trait, not to a file writer. See that crate's own docs.
 [workspace]
 resolver = "3"
 members = [

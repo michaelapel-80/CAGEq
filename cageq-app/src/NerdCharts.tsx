@@ -5,7 +5,7 @@ import { Band, FS, impulseResponse, type ResponseModel } from "./biquad";
 import { EQ_V_INSET_FRAC } from "./EqChart";
 
 /**
- * §5.2 impulse-response view — the applied filter chain's decay, shown *in place of* the
+ * Impulse-response view — the applied filter chain's decay, shown *in place of* the
  * magnitude chart (a view swap, not an extra strip, so it costs no vertical space). Pure
  * client-side biquad maths (biquad.ts).
  *

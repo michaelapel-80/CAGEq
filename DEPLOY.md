@@ -14,7 +14,7 @@ the target machine needs **no Python** — the app never spawns one.
    code-signed (no certificate), so Windows SmartScreen will show an "unknown publisher"
    warning the first time — "More info" → "Run anyway" to proceed.
 2. Launch CAGEq and pick your output device. CAGEq needs an audio engine attached to that
-   device before **Apply** does anything audible (filter.md §5.3c) — **installing Equalizer
+   device before **Apply** does anything audible — **installing Equalizer
    APO is no longer required**, there are two options:
    * **CAGEq's own engine** — no separate install. The header's **Engine** button reads red
      ("needs setup") until something is attached; click it and step through the setup panel —
@@ -88,7 +88,7 @@ development — `cageq-core`'s `tests/*_vs_sidecar.rs` and `cageq-peq-solver`/`c
 comparison tests validate the Rust port against it — but it's dev-only tooling, never bundled
 into the installer and never spawned by the shipped app.
 
-## CAGEq's own APO (filter.md §5.3c)
+## CAGEq's own APO
 
 `build-apo.ps1` stages two files into `src-tauri\apo\`, bundled as a Tauri resource and
 therefore installed together:

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * Setup for CAGEq's own APO (filter.md §5.3c) — a small header trigger plus a pop-up dialog,
+ * Setup for CAGEq's own APO — a small header trigger plus a pop-up dialog,
  * not an inline panel.
  *
  * It used to sit inline next to the device picker, permanently, even once everything was set

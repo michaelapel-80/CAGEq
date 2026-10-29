@@ -8,7 +8,7 @@ import { useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT } from "./appZoom";
 
 /**
- * §5.3c post-EQ output meter, laid out vertically to sit beside the chart (no vertical growth, so
+ * Post-EQ output meter, laid out vertically to sit beside the chart (no vertical growth, so
  * it can be on by default). Subscribes to the backend's `monitor` events (WASAPI loopback on the
  * selected render endpoint — already post-EQ) and shows two bars:
  *   • Level (dBFS): a WebGL phosphor beam (see below) + peak (amber) and true-RMS (neutral) marks.

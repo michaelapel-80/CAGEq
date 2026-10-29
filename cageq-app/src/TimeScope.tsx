@@ -11,7 +11,7 @@ import { APP_ZOOM_EVENT, appZoom } from "./appZoom";
 import type { ScopeData, ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters (see Vectorscope's identical rationale — a live panel beats a
- *  recompile). `undistort` shares Vectorscope's meaning and machinery: it undoes the §4.1/§4.2
+ *  recompile). `undistort` shares Vectorscope's meaning and machinery: it undoes the loudness-match
  *  preamp *and* inverse-filters the applied EQ, recovering the pre-EQ level and shape rather than
  *  just amplifying the post-EQ trace — a manual gain knob would need re-tuning every time the
  *  preamp changes (a different headphone/target/slot), this tracks it automatically. `msPerDivIdx`
@@ -188,7 +188,7 @@ function parseHex(hex: string): [number, number, number] {
 }
 
 /**
- * §5.3d time-domain scope (v2, with triggering — see filter.md discussion): the loopback's L/R
+ * Time-domain scope (v2, with triggering): the loopback's L/R
  * channels plotted against time, stacked in two lanes (L on top, R on bottom), each with its own
  * zero-centreline, phosphor-style persistence. `trigger` off (default) is free-running — a fixed
  * span (ms/div × DIVISIONS) of the most recent samples, redrawn each `scope` event; on non-periodic material
@@ -204,7 +204,7 @@ function parseHex(hex: string): [number, number, number] {
  * music) material; broadband, transient-heavy passages may still drift between frames.
  *
  * Deliberately does *not* auto-flag clipping (a v1 threshold highlight was tried and dropped): the
- * §4.2 headroom pre-gain already keeps normal operation away from true digital clipping, streaming
+ * headroom pre-gain already keeps normal operation away from true digital clipping, streaming
  * loudness normalization mostly erases what "hot" means by the time a listener hears it, and a
  * fixed |sample| threshold can't tell real clipping from a squarish kick transient sitting near
  * full-scale — a false-positive machine, not a useful indicator. Eyeballing flat-topping yourself
@@ -467,7 +467,7 @@ export function TimeScope() {
         }
         const iv = invRef.current;
         // Runs with an empty cascade too when there's just a preamp to undo (e.g. Dry, which
-        // carries the §4.1 loudness-match gain but no EQ) — pure gain recovery, no filtering —
+        // carries the loudness-match gain but no EQ) — pure gain recovery, no filtering —
         // or while fading out a departing cascade that had either.
         const undistort = iv !== null && (iv.to.coeffs.length > 0 || iv.to.gain !== 1 || iv.from !== null);
         if (outLBuf.length < n) {

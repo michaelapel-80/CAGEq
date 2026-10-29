@@ -1,4 +1,4 @@
-# §5.3c post-EQ monitoring: WASAPI render-endpoint loopback capture + BS.1770 loudness metering.
+# Post-EQ monitoring: WASAPI render-endpoint loopback capture + BS.1770 loudness metering.
 # Independent of the custom-APO work (loopback taps the already-post-EQ mix at the endpoint).
 # Real capture is Windows-only (wasapi); the crate still compiles elsewhere as a no-op stub so
 # the workspace stays cross-platform, matching the rest of the codebase (e.g. list_render_devices).

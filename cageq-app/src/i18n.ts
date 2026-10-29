@@ -9,7 +9,7 @@ import de from "./locales/de.json";
  * `locales/`, import it, and add it to `resources` + {@link LANGS}.
  *
  * Numbers/units (dB, Hz, Q) stay in engineering dot notation across every locale by design —
- * only words are translated (see filter.md; keeps ScrubNumber parsing locale-independent).
+ * only words are translated (keeps ScrubNumber parsing locale-independent).
  */
 export const LANGS = [
   { code: "en", label: "English" },

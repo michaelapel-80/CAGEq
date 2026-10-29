@@ -1,4 +1,4 @@
-//! Replaces the sidecar's `fit_export_eq` RPC (filter.md §8, mobile export) — a
+//! Replaces the sidecar's `fit_export_eq` RPC (mobile export) — a
 //! *second*, independent AutoEq PEQ pass that fits directly to a
 //! slot's own composed curve (`filters`, the same `Band[]` `Applied::filters` already
 //! carries), not to a headphone measurement the way `fit.rs`'s main path does.
@@ -104,7 +104,7 @@ pub(crate) type ExportCache = BoundedCache<ExportKey, FitResult>;
 fn preamp_db(achieved_curve: &[f64]) -> f64 {
     // `-max(achieved) - 0.2 dB` headroom (`sidecar_dsp.py:605`), mirroring AutoEq's own
     // `write_eqapo_parametric_eq` preamp line — self-contained ("don't clip on the
-    // destination device"), deliberately not the desktop's §4.1 loudness-matched value.
+    // destination device"), deliberately not the desktop's loudness-matched value.
     let peak = achieved_curve.iter().copied().fold(f64::MIN, f64::max);
     ((-peak - 0.2) * 100.0).round() / 100.0
 }

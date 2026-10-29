@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Ground-truth fixtures for `cageq-peq-solver::loudness` against the live sidecar's
-own `loudness_target_db`/`_k_weight_power` (filter.md §4.1) — imported directly as a
+own `loudness_target_db`/`_k_weight_power` — imported directly as a
 module (no JSON-RPC round trip needed; these aren't exposed as their own RPC method).
 
 Run with the sidecar's own venv:

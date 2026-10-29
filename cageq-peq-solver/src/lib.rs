@@ -16,7 +16,7 @@
 //!
 //! ## A fourth copy of the biquad math, on purpose
 //! CAGEq already carries three copies of AutoEq's biquad response model — `peq.py`
-//! itself, `biquad.ts` (the §5.2 chart), and `cageq_core::morph` (the tonal-morph
+//! itself, `biquad.ts` (the chart), and `cageq_core::morph` (the tonal-morph
 //! metric, `cageq-core/src/morph.rs`) — each with its own reason to exist rather than
 //! share code (see `morph.rs`'s module doc and `cageq-core/tests/biquad_crosscheck.rs`).
 //! This crate is a fourth: `cageq_core::morph`'s copy is `pub(crate)` to `cageq-core`

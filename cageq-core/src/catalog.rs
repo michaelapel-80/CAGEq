@@ -1,7 +1,7 @@
 //! Replaces the sidecar's `list_headphones`/`list_targets`/`measurement_curves` RPCs —
 //! thin wrappers over [`cageq_catalog`]'s index build and curve fetch, plus (for
 //! `measurement_curves`) the same interpolate/center/subsample sequence `fit.rs`'s main
-//! path already uses, just applied to a raw measurement/target for the §5.2 nerd
+//! path already uses, just applied to a raw measurement/target for the nerd
 //! overlays rather than feeding an optimizer.
 
 pub use cageq_catalog::index::{HeadphoneEntry, TargetEntry};

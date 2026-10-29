@@ -1,7 +1,7 @@
 //! Cross-language guard for the three copies of the biquad response model.
 //!
-//! The curve maths lives in three places on purpose (filter.md §5.3a): AutoEq's
-//! `peq.py` (the fit, the reference), `biquad.ts` (the §5.2 chart), and `morph.rs` (the
+//! The curve maths lives in three places on purpose: AutoEq's
+//! `peq.py` (the fit, the reference), `biquad.ts` (the chart), and `morph.rs` (the
 //! tonal-morph metric, which must run without the sidecar — a slot switch can't call
 //! Python, and if the sidecar is unhealthy there's nothing to call). Three copies means
 //! three things can silently disagree about what's being written and drawn.

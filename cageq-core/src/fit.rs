@@ -256,7 +256,7 @@ fn run_autoeq_fit(
 
 /// The whole replacement for `calculate_filters`: fit (or reuse) the AutoEq portion,
 /// combine with the user's custom filters (validated up front, same checks
-/// `sidecar_dsp.py`'s `_custom_filters` raises on), and derive the §4.1/§4.2
+/// `sidecar_dsp.py`'s `_custom_filters` raises on), and derive the
 /// loudness/peak quantities from the combined curve — matching
 /// `sidecar_dsp.py::calculate_filters` field for field.
 ///
@@ -293,10 +293,10 @@ pub(crate) fn compute(cache: &std::sync::Mutex<FitCache>, request: &CalcRequest,
     })
 }
 
-/// The §4.1/§4.2 curve quantities of an already-known band set in `model`, on the standard
+/// The curve quantities of an already-known band set in `model`, on the standard
 /// grid and rounded exactly as [`compute`] rounds them. For a slot whose model changed but
 /// that cannot be re-fitted because the core never saw its request (a fit restored from the
-/// launch cache, §3.5): its bands stay as they were until the next edit re-fits them, but the
+/// launch cache): its bands stay as they were until the next edit re-fits them, but the
 /// preamp is at least composed for the curve those bands now actually produce.
 pub(crate) fn curve_quantities(filters: &[Filter], model: ResponseModel) -> (f64, f64) {
     let f = cageq_peq_solver::grid::standard_grid();

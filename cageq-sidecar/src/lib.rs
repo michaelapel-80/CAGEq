@@ -1,5 +1,5 @@
 //! Python sidecar transport — the Rust core's client for the DSP engine
-//! (filter.md §2, "IPC-Transport": persistent child process, line-delimited
+//! ("IPC-Transport": persistent child process, line-delimited
 //! JSON-RPC on stdin/stdout, no network port).
 //!
 //! What this crate owns:
@@ -11,7 +11,7 @@
 //! What it deliberately does NOT own:
 //!   * timeouts / liveness. If the sidecar hangs, `call` blocks. Deciding "it has
 //!     been too long, kill it and fall to the safe state" is the fail-safe
-//!     watchdog's job (§7.1) — a separate process, precisely so it can act even
+//!     watchdog's job — a separate process, precisely so it can act even
 //!     if this one is stuck. Keeping the transport timeout-free keeps the two
 //!     concerns from bleeding into each other.
 //!   * the real DSP. We talk to `python/sidecar_stub.py`, a stand-in that speaks

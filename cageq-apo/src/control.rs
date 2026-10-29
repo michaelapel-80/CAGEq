@@ -151,7 +151,7 @@ pub struct ControlBlock {
     /// alongside `preamp_db`/`band_count`/`coeffs` — not a separate atomic like the outbound
     /// fields above, since it is part of the same payload the writer publishes atomically.
     ///
-    /// Set by `cageq-apo-backend::push_live` exactly when a push crosses the §5.2 isolate
+    /// Set by `cageq-apo-backend::push_live` exactly when a push crosses the isolate
     /// boundary (a single `Bandpass`-only band list starting or ending) — see its own doc for
     /// why a plain ramp is unsafe there: several bands independently fading toward
     /// `PASSTHROUGH` on one shared clock can sum into a real spike, measured directly at over

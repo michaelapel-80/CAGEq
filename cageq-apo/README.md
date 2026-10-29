@@ -1,6 +1,6 @@
 # cageq-apo — CAGEq's own Audio Processing Object
 
-Replaces the Equalizer APO runtime dependency (filter.md §5.3c). A COM DLL loaded into
+Replaces the Equalizer APO runtime dependency. A COM DLL loaded into
 `audiodg.exe`, implementing only the subset CAGEq actually uses: four RBJ biquad types
 plus a preamp, driven by a live control channel instead of EqAPO's file-reload model.
 

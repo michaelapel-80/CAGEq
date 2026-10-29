@@ -1,6 +1,6 @@
 /**
  * ITU-R BS.1770-4 K-weighting — a direct TS port of `sidecar_dsp.py`'s `_KW_S1_B/A`, `_KW_S2_B/A`,
- * `_k_weight_power` (the same coefficients §4.1's loudness match already uses there, specified at
+ * `_k_weight_power` (the same coefficients the loudness match already uses there, specified at
  * a fixed 48 kHz reference — a simplification that loudness match already accepts, and harmless
  * here too: the curve's only real features sit at ~38 Hz and ~1.5 kHz, both well away from where
  * bilinear-transform frequency warping at another sample rate would actually matter).
@@ -45,7 +45,7 @@ function kWeightRawDb(f: number): number {
 }
 
 /** How much louder (dB, positive = louder) a curve makes pink-noise-like music: the same
- *  K-weighted pink-noise energy model §4.1's auto-gain uses (`cageq-peq-solver`'s
+ *  K-weighted pink-noise energy model the loudness match uses (`cageq-peq-solver`'s
  *  `loudness_target_db`, which returns the negation of this). `freqs` ascending; each point's
  *  pink-noise bin energy is its bin width over f (the numpy-style gradient, one-sided at the
  *  ends), so the result does not depend on how the grid is spaced. */
@@ -77,7 +77,7 @@ export function kWeightingDb(f: number): number {
  *  "rta": the conventional analyzer reading (`db_raw`/`db_lin_raw`) instead. "kweighted": the RTA
  *  baseline plus {@link kWeightingDb} layered on top — a real, standards-derived perceptual-
  *  loudness tilt instead of an arbitrary dB/octave slope (à la FabFilter Pro-Q's default 4.5
- *  dB/oct Tilt), reusing the exact curve the project's own §4.1 loudness match already trusts. */
+ *  dB/oct Tilt), reusing the exact curve the project's own loudness match already trusts. */
 export type TiltMode = "off" | "rta" | "kweighted";
 
 /** A saved tilt setting predates the three-mode version (was a plain boolean) — both views'

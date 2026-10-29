@@ -16,9 +16,8 @@ cageq-app/src-tauri/apo/
 
 # Internal architecture/decision log (ADD) — working doc for the maintainer, not meant for a
 # public repo. Kept on disk, deliberately untracked; its own history was scrubbed from this
-# repo (see the commit removing it from tracking). The ~99 "filter.md §X.Y" references left in
-# code comments are breadcrumbs to this file for local development, not links a public reader
-# needs to follow.
+# repo (see the commit removing it from tracking). The code and docs no longer reference its
+# sections, so nothing in the repo depends on it.
 /filter.md
 
 # Intermediate license reports scripts/gen_third_party_licenses.py merges into

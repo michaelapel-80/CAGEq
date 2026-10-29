@@ -1,8 +1,7 @@
 //! **The Equalizer APO backend** — [`EqApoBackend`], an implementation of
-//! `cageq_backend::EqBackend` over EqAPO's two-file `Include` architecture
-//! (filter.md §3.0/§7.4).
+//! `cageq_backend::EqBackend` over EqAPO's two-file `Include` architecture.
 //!
-//! Since CAGEq gained a second backend (its own APO — filter.md §5.3c), this crate is no
+//! Since CAGEq gained a second backend (its own APO), this crate is no
 //! longer "the config writer" but "one of two ways to apply filters". The neutral domain
 //! types it speaks (`Filter`, `DeviceConfig`, `AudioDevice`, `StartupDecision`) live in
 //! `cageq-backend` and are re-exported below for convenience; everything EqAPO-specific
@@ -41,7 +40,7 @@
 //!   * preserving a foreign config.txt block's exact CRLF style (we emit LF; only
 //!     ever relevant to the one Include block, since cageq.txt is fully ours)
 //!   * non-UTF-8 (legacy ANSI) config.txt: we support UTF-8 only and fail loudly
-//!     with WriteError::NotUtf8 rather than transcode (a scope decision, §7.4)
+//!     with WriteError::NotUtf8 rather than transcode (a scope decision)
 //!
 //! Add to Cargo.toml:  sha2 = "0.10"  thiserror = "2"
 
@@ -100,13 +99,13 @@ pub enum WriteError {
     NoParentDir,
     /// config.txt exists but isn't valid UTF-8 — almost always a legacy ANSI
     /// file. EqAPO tolerates it via a per-line CP_ACP fallback (FilterEngine.cpp),
-    /// but CAGEq supports UTF-8 only and fails loudly here rather than transcode
-    /// (§7.4). The fix for the user is to re-save config.txt as UTF-8.
+    /// but CAGEq supports UTF-8 only and fails loudly here rather than transcode.
+    /// The fix for the user is to re-save config.txt as UTF-8.
     #[error("config.txt is not valid UTF-8 (CAGEq requires UTF-8; re-save it as UTF-8)")]
     NotUtf8,
 }
 
-/// What cageq.txt currently says — consumed at startup (§3.0) to decide whether
+/// What cageq.txt currently says — consumed at startup to decide whether
 /// settings.json's remembered resume state is still trustworthy.
 #[derive(Debug)]
 pub enum BlockState {
@@ -135,12 +134,12 @@ use cageq_backend::EQAPO_APO_CLSIDS;
 /// EqAPO does not reset its crossfade progress counter when a reload lands while a
 /// transition is still running (FilterEngine.cpp:258-261) — the in-flight counter gets
 /// applied to the new curve, audible as a jump. So consecutive writes must be spaced at
-/// least this far apart (filter.md §5.3). Declared as a capability rather than enforced
+/// least this far apart. Declared as a capability rather than enforced
 /// here: it's the *orchestrator* that paces writes, and the other backend has no such wall.
 const EQAPO_MIN_WRITE_SPACING: Duration = Duration::from_millis(15);
 
 /// Is Equalizer APO's APO attached to this endpoint, i.e. will it actually process audio
-/// there (§3.0)? A `Device:`-scoped config for an endpoint this returns `false` for is
+/// there? A `Device:`-scoped config for an endpoint this returns `false` for is
 /// inert — the UI warns and points at EqAPO's DeviceSelector instead of applying something
 /// that silently does nothing.
 ///
@@ -188,7 +187,7 @@ impl EqBackend for EqApoBackend {
         Capabilities {
             min_write_spacing: EQAPO_MIN_WRITE_SPACING,
             // EqAPO's only transition is a fixed ~10 ms crossfade from a *cold* cascade,
-            // so a longer, smoother tonal move (§5.3a) has to be built by the core out of
+            // so a longer, smoother tonal move has to be built by the core out of
             // many spaced writes. Nothing this backend can do about that from outside.
             owns_transitions: false,
             // config.txt is shared with EqAPO itself and any other tool writing to it.
@@ -257,7 +256,7 @@ impl EqBackend for EqApoBackend {
 /// Apply `configs` to Equalizer APO: ensure config.txt includes cageq.txt, then
 /// (atomically) write cageq.txt with the given per-device blocks. `config_dir` is
 /// EqAPO's config directory (where config.txt lives). Returns cageq.txt's content
-/// hash — persist it in settings.json for the next-startup integrity check (§3.0).
+/// hash — persist it in settings.json for the next-startup integrity check.
 ///
 /// The `ensure_include` step is a cheap no-op after the first run (it only rewrites
 /// config.txt when the Include block is missing/wrong), so the steady-state cost of
@@ -384,7 +383,7 @@ fn enable_foreign(text: &str) -> Option<String> {
     Some(out)
 }
 
-/// Atomically write CAGEq's hardcoded safe-state (§7.1/7.2) to cageq.txt, using the
+/// Atomically write CAGEq's hardcoded safe-state to cageq.txt, using the
 /// same header+body format as a normal write so [`read_cageq_state`] +
 /// [`decide_startup`] recognise it as [`StartupDecision::SafeStateStillActive`].
 pub fn write_safe_state(cageq_path: &Path) -> Result<(), WriteError> {
@@ -392,7 +391,7 @@ pub fn write_safe_state(cageq_path: &Path) -> Result<(), WriteError> {
     atomic_write(cageq_path, text.as_bytes())
 }
 
-/// Read cageq.txt's integrity state for the startup check (§3.0).
+/// Read cageq.txt's integrity state for the startup check.
 pub fn read_cageq_state(cageq_path: &Path) -> Result<BlockState, WriteError> {
     match fs::read_to_string(cageq_path) {
         Ok(s) => Ok(cageq_state_from_text(&s)),
@@ -403,8 +402,8 @@ pub fn read_cageq_state(cageq_path: &Path) -> Result<BlockState, WriteError> {
 }
 
 /// Decide, from cageq.txt's on-disk state and the hash CAGEq recorded in
-/// settings.json, how much of the remembered resume state to trust at startup
-/// (§3.0). Pure — no I/O — so the whole decision table is unit-testable.
+/// settings.json, how much of the remembered resume state to trust at startup.
+/// Pure — no I/O — so the whole decision table is unit-testable.
 ///
 /// `state` comes from [`read_cageq_state`]; `expected_hash` is the device's
 /// `last_written_hash` from settings.json, or `None` if there's no record yet.
@@ -431,8 +430,8 @@ pub fn decide_startup(state: &BlockState, expected_hash: Option<&str>) -> Startu
     }
 }
 
-/// CAGEq's hardcoded safe-state cageq.txt body (§7.2): effective silence on all
-/// devices. Written on a fail-safe (§7.1) and recognised by the
+/// CAGEq's hardcoded safe-state cageq.txt body: effective silence on all
+/// devices. Written on a fail-safe and recognised by the
 /// startup check. One canonical definition so the writer and the detector can't
 /// drift apart.
 ///
@@ -447,11 +446,11 @@ pub fn safe_state_body() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// EqAPO config-directory detection (§3.0)
+// EqAPO config-directory detection
 // ---------------------------------------------------------------------------
 
 /// Locate Equalizer APO's config directory — where `config.txt` lives and where
-/// cageq.txt must be written for EqAPO to load it (§3.0).
+/// cageq.txt must be written for EqAPO to load it.
 ///
 /// EqAPO records its paths under `HKLM\SOFTWARE\EqualizerAPO` at install time. We
 /// read `ConfigPath` directly (the installer writes the resolved config dir there,
@@ -509,7 +508,7 @@ fn render_device_block(cfg: &DeviceConfig) -> String {
     // combined response (a biquad cascade is commutative), but AutoEq returns its
     // peaking filters in optimiser-convergence order, which reads as an arbitrary
     // jumble in the file. Sorting makes the preview stable and readable — and later
-    // merges custom filters (§3.4) into the same low->high list.
+    // merges custom filters into the same low->high list.
     let expanded = cageq_backend::expand_tilts(&cfg.filters);
     let mut filters: Vec<&Filter> = expanded.iter().collect();
     filters.sort_by(|a, b| a.freq_hz.total_cmp(&b.freq_hz));
@@ -565,7 +564,7 @@ fn cageq_state_from_text(text: &str) -> BlockState {
     }
 }
 
-/// Short content fingerprint (§3.0). SHA-256 (not the std `DefaultHasher`) is
+/// Short content fingerprint. SHA-256 (not the std `DefaultHasher`) is
 /// deliberate: this value is written to disk and re-read by a possibly newer build
 /// after an app update, so the algorithm must be stable across builds/platforms —
 /// `DefaultHasher`'s is not. Only 4 bytes (8 hex chars) are kept: a change
@@ -655,7 +654,7 @@ fn read_utf8_or_empty(path: &Path) -> Result<String, WriteError> {
     }
 }
 
-/// Write `bytes` to `target` atomically (§7.4): to a sibling temp file, then
+/// Write `bytes` to `target` atomically: to a sibling temp file, then
 /// `fs::rename` over the target. On Windows that is MoveFileExW with replace
 /// semantics — atomic on one volume, which is why the temp must be a sibling. The
 /// rename into EqAPO's config dir also fires its directory watcher, triggering the
@@ -712,7 +711,7 @@ const WRITE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
 /// holding a previous temp can't collide with the next one.
 static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// A temp path next to the target so the rename stays on one volume. PID (§2's
+/// A temp path next to the target so the rename stays on one volume. PID (the app's
 /// single-instance lock precludes a second concurrent writer) + a monotonic counter for a
 /// unique name per write. TODO: a crash between write and rename can leave a stale
 /// `.cageq-tmp-*`; a real impl would sweep these on startup.
@@ -866,7 +865,7 @@ mod tests {
         assert!(WriteError::from(io).source().is_some());
     }
 
-    // ---- startup decision table (§3.0) ----
+    // ---- startup decision table ----
 
     fn present(actual: &str) -> BlockState {
         BlockState::Present { stored_hash: Some(actual.to_string()), actual_hash: actual.to_string() }
@@ -930,7 +929,7 @@ mod tests {
         // These three are the whole reason the backend seam exists — if any flips, the
         // orchestrator would silently start pacing writes or transitions wrongly.
         let caps = EqApoBackend::new(std::env::temp_dir()).capabilities();
-        assert_eq!(caps.min_write_spacing, EQAPO_MIN_WRITE_SPACING, "§5.3 reload spacing");
+        assert_eq!(caps.min_write_spacing, EQAPO_MIN_WRITE_SPACING, "reload spacing");
         assert!(!caps.owns_transitions, "EqAPO's crossfade is cold + fixed-length; the core morphs");
         assert!(caps.manages_foreign_config, "config.txt is shared with other tools");
     }

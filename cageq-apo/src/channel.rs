@@ -257,7 +257,7 @@ impl ControlChannel {
     /// `crossfade` — see [`crate::control::ControlBlock::crossfade`]'s doc — tells the reading
     /// side to apply this update via [`crate::dsp::Cascade::start_crossfade`] instead of a
     /// plain coefficient ramp; the writer (`cageq-apo-backend::push_live`) sets it exactly for
-    /// a §5.2 isolate boundary crossing.
+    /// an isolate boundary crossing.
     ///
     /// Returns `false` without publishing if the set would be refused on the reading side
     /// (see [`crate::control::publish`]), so a writer bug surfaces here rather than as an

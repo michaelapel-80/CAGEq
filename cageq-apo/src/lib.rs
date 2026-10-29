@@ -1,7 +1,7 @@
 //! CAGEq's own APO — the **Rust half**: everything that is not COM plumbing.
 //!
 //! ## Why this crate is split from a C++ shim
-//! filter.md §5.3c moves CAGEq off Equalizer APO onto its own APO, so it owns the filter
+//! CAGEq moves off Equalizer APO onto its own APO, so it owns the filter
 //! lifecycle (state-carrying coefficient updates, arbitrary-length transitions, a live
 //! control channel) instead of driving EqAPO's file-reload model from outside.
 //!
@@ -205,7 +205,7 @@ impl CageqApo {
 
         if let control::ReadOutcome::Updated(seq) = control::try_read(block, &mut self.snapshot) {
             let snap = self.snapshot;
-            // `snap.crossfade` — see `control::ControlBlock::crossfade`'s doc — routes a §5.2
+            // `snap.crossfade` — see `control::ControlBlock::crossfade`'s doc — routes an
             // isolate boundary crossing through `start_crossfade` instead of the plain ramp:
             // several bands independently fading toward `PASSTHROUGH` on one shared clock can
             // sum into a real spike (measured, on a real correction, at +22 dB above both
@@ -306,7 +306,7 @@ pub extern "C" fn cageq_apo_create(channels: u32, sample_rate: f32) -> *mut c_vo
 ///
 /// **Filter state is deliberately preserved**, which is the entire point of this APO: a
 /// retuned band inherits its predecessor's delay registers, so a live edit produces a small
-/// decaying discontinuity rather than Equalizer APO's cold-start bloom (filter.md §5.3c).
+/// decaying discontinuity rather than Equalizer APO's cold-start bloom.
 ///
 /// Computes coefficients (trig, per band), so it is not free. Call it from the
 /// configuration path, not from inside the audio callback.

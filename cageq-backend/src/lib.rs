@@ -4,7 +4,7 @@
 //!
 //! ## Why this crate exists
 //! CAGEq shipped against Equalizer APO, reached through one file writer
-//! (`cageq-config-writer`). It is moving to its **own APO** (filter.md §5.3c) to drop
+//! (`cageq-config-writer`). It is moving to its **own APO** to drop
 //! that runtime dependency, but must keep working on EqAPO throughout — for the
 //! transition period and permanently, for users who already run it. So the orchestrator
 //! (`cageq-core`) talks to [`EqBackend`] instead of to a file writer, and the two
@@ -13,7 +13,7 @@
 //! | | Equalizer APO | CAGEq's own APO |
 //! |---|---|---|
 //! | transport | rewrite `cageq.txt`, EqAPO's directory watcher reloads | push coefficients into shared memory |
-//! | write cadence | ≥15 ms apart, or a reload lands mid-crossfade (§5.3) | no such wall — no reload to collide with |
+//! | write cadence | ≥15 ms apart, or a reload lands mid-crossfade | no such wall — no reload to collide with |
 //! | transitions | fixed ~10 ms native crossfade, from a **cold** cascade | owned in-engine, state carried by construction |
 //! | safe state | write a −120 dB `cageq.txt` | control flag, plus the APO self-bypassing on a stale heartbeat |
 //! | foreign config | `config.txt` can carry other tools' directives | no shared config file to collide over |
@@ -49,7 +49,7 @@ pub enum FilterType {
     Peaking,
     LowShelf,
     HighShelf,
-    /// No gain (unity-peak); used only by the §5.2 "isolate" audition.
+    /// No gain (unity-peak); used only by the "isolate" audition.
     Bandpass,
     /// Pivots the spectrum around `freq_hz`: cut below, boost above (or vice versa for a
     /// negative `gain_db`), `gain_db` the *total* span between the two asymptotes. Not a
@@ -132,7 +132,7 @@ pub struct DeviceConfig {
     pub model: ResponseModel,
 }
 
-/// A Windows audio playback (render) endpoint the user can scope the EQ to (§3.0).
+/// A Windows audio playback (render) endpoint the user can scope the EQ to.
 ///
 /// Deliberately carries no "is a backend attached here" flag: that is a question *about
 /// a backend*, answered by [`EqBackend::drives_endpoint`], and the answer differs per
@@ -149,7 +149,7 @@ pub struct AudioDevice {
     pub name: String,
 }
 
-/// The verdict of the startup integrity check (§3.0) — how far to trust the resume state
+/// The verdict of the startup integrity check — how far to trust the resume state
 /// remembered in settings.json. Backend-neutral: every backend has some notion of "what
 /// is applied right now", even though only EqAPO's lives in a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,7 +159,7 @@ pub enum StartupDecision {
     /// What is applied is byte-identical to what CAGEq last wrote (hash matches
     /// settings.json). The remembered resume state is trustworthy.
     ResumeTrusted,
-    /// CAGEq's safe state (§7.2) is still applied: the safety shutdown was active at the
+    /// CAGEq's safe state is still applied: the safety shutdown was active at the
     /// last exit/crash. Offer to restore the last state.
     SafeStateStillActive,
     /// What is applied differs from what CAGEq last wrote and isn't the safe state —
@@ -211,7 +211,7 @@ pub struct Capabilities {
     /// reload to collide with and reports [`Duration::ZERO`].
     pub min_write_spacing: Duration,
     /// The backend performs tonal transitions itself, so the core must **not** emulate
-    /// one by writing intermediate frames (§5.3a).
+    /// one by writing intermediate frames.
     ///
     /// False for EqAPO: its only transition is a fixed ~10 ms crossfade from a *cold*
     /// cascade, so a longer, smoother move has to be built out of many spaced writes.
@@ -220,7 +220,7 @@ pub struct Capabilities {
     /// could manage from outside, and the whole reason for building it.
     pub owns_transitions: bool,
     /// The backend shares a configuration file with other tools, so foreign directives
-    /// can stack on top of CAGEq's correction and may need disabling (§7.4). EqAPO-only:
+    /// can stack on top of CAGEq's correction and may need disabling. EqAPO-only:
     /// an in-process APO has no shared config surface to collide over.
     pub manages_foreign_config: bool,
     /// The backend can realise [`ResponseModel::AnalogMatched`] (warping-corrected filters).
@@ -247,16 +247,16 @@ pub trait EqBackend: Send + Sync {
 
     /// Make `configs` the applied state. Returns a stable content hash of what was
     /// applied — persisted in settings.json and handed back to [`Self::startup_decision`]
-    /// next launch (§3.0).
+    /// next launch.
     fn apply(&self, configs: &[DeviceConfig]) -> Result<String, BackendError>;
 
-    /// Apply CAGEq's safe state (§7.1/7.2): effective silence, recognised by
+    /// Apply CAGEq's safe state: effective silence, recognised by
     /// [`Self::startup_decision`] as [`StartupDecision::SafeStateStillActive`]. Called by
     /// the core when an apply fails, so it must be as close to infallible as the backend
     /// can manage.
     fn write_safe_state(&self) -> Result<(), BackendError>;
 
-    /// The §3.0 startup-integrity verdict, given the hash settings.json remembered for
+    /// The startup-integrity verdict, given the hash settings.json remembered for
     /// this device (`None` on a clean install).
     fn startup_decision(&self, expected_hash: Option<&str>) -> Result<StartupDecision, BackendError>;
 
@@ -299,10 +299,10 @@ pub trait EqBackend: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Windows playback-device enumeration (§3.0)
+// Windows playback-device enumeration
 // ---------------------------------------------------------------------------
 
-/// Enumerate active Windows playback (render) endpoints (§3.0), for the device picker.
+/// Enumerate active Windows playback (render) endpoints, for the device picker.
 /// Read-only registry access; returns an empty list on non-Windows, when the key is
 /// unreadable, or when nothing is active. Order follows the registry.
 ///

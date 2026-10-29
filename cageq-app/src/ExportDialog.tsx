@@ -32,7 +32,7 @@ type ExportFit = { filters: Band[]; preamp_db: number };
 /** One row of the export table — a parametric band, or a graphic-EQ point (no kind/Q to set). */
 type Row = { kind?: string; freq_hz: number; gain_db: number; q?: number };
 
-/** §8 mobile export dialog. Parametric tab: the active slot's full cascade fitted to a free band
+/** Mobile export dialog. Parametric tab: the active slot's full cascade fitted to a free band
  *  count (`fit_export_eq`, a backend solve). Graphic EQ tab: the slot's curve sampled, no solver —
  *  the dense 127-point `GraphicEQ` curve, or slider values for a 10-/31-band graphic EQ (see
  *  exportFormats.ts's module doc for why sampling, not fitting). Every mode is shown the same way:
@@ -40,7 +40,7 @@ type Row = { kind?: string; freq_hz: number; gain_db: number; q?: number };
  *  tab: the cascade itself as a WAV for a convolver, saved through a native dialog (Rust writes
  *  the file), with the curve it reproduces as the preview and the config line to load it as the text.
  *  `filters` is the slot's full composed cascade — `result.filters` in App.tsx, the same
- *  `Band[]` the §5.2 chart already draws for the active slot. Reuses the existing `.modal-card`
+ *  `Band[]` the chart already draws for the active slot. Reuses the existing `.modal-card`
  *  overlay convention (see the `presetSave` dialog in App.tsx) rather than inventing new modal
  *  chrome. */
 /** `model`: how the slot's own `filters` are realised on the desktop (the effective model) — the
