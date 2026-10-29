@@ -1,11 +1,8 @@
-A sharper, more honest spectrum view.
+More reliable peak markers in the spectrum.
 
-- **Improved:** the spectrum now resolves peaks in its upper part clearly at any window size,
-  including closely spaced harmonics that used to blur into noise. The curve is drawn from four
-  times as many points, so it shows its real shape; the levels it reads are unchanged. This also
-  applies to the spectrum behind the EQ chart.
-- **Changed:** anything quieter than the bottom of the spectrum's level range now drops off the
-  plot instead of lying flat along it, where it read as a real flat section.
-- **New:** the bottom of that range is adjustable — Floor in the spectrum's settings (−150 to
-  −30 dBFS; the default stays at −90).
+- **Fixed:** the spectrum's peak markers could sit on the wrong one of two nearly equally loud
+  partials — visible on test tones, and on music too, as markers slightly off the tops of the
+  curve. With your correction active, the peaks are now picked on the curve as shown (with the
+  EQ taken out), and close partials are ranked by their true level.
+- **New:** while you hold Shift over a spectrum, a faint band shows where the peak snap searches.
 - All changes are in the app itself; no engine update needed.
