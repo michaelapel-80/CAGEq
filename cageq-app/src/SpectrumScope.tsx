@@ -218,6 +218,20 @@ const PEAK_TRACK_MATCH_OCTAVES = 0.125;
 // *identity*, but both answer "how long does a peak reading outlive the instant that produced it".
 const PEAK_TRACK_HOLD_MS = 400;
 
+/** `cageq-monitor::pick_peaks`, repeated on EQ-corrected levels (see the call site): the loudest
+ *  `PEAK_COUNT` of `candidates`, each at least `separationOctaves` from every louder pick, then
+ *  ascending by frequency. Keep the two alike. Sorts `candidates` in place. */
+function pickPeaks(candidates: { hz: number; db: number }[], separationOctaves: number): { hz: number; db: number }[] {
+  candidates.sort((a, b) => b.db - a.db);
+  const picked: { hz: number; db: number }[] = [];
+  for (const c of candidates) {
+    if (picked.length >= PEAK_COUNT) break;
+    if (picked.some((p) => Math.abs(Math.log2(c.hz / p.hz)) < separationOctaves)) continue;
+    picked.push(c);
+  }
+  return picked.sort((a, b) => a.hz - b.hz);
+}
+
 /** A peak's identity across frames — its last-known frequency/level and when it last actually
  *  matched something in a fresh backend `peaks` list — kept by `trackPeaks`, independent of which
  *  readout chip it happens to be drawn into on any given tick (there is no fixed chip↔peak binding
@@ -582,6 +596,11 @@ export function SpectrumScope({
     // upload each time, a real contributor to the GPU-memory growth diagnosed earlier this session).
     let gradKey = "";
     let grad: CanvasGradient | null = null;
+    // The peaks re-picked on undistorted levels, and the spectrum and correction they came from —
+    // see where they're picked.
+    let picked: { hz: number; db: number }[] = [];
+    let pickedFrom: SpectrumData | null = null;
+    let pickedWith: Float64Array | null = null;
     // The peak readout's DOM writes, throttled independently of the (unthrottled) crosses below —
     // the underlying data is already smoothed at the source (cageq-monitor's SPEC_TAU_SECS), but
     // text updating 60x/s reads as vibrating rather than as a number, in a way a moving cross
@@ -745,24 +764,32 @@ export function SpectrumScope({
         const lnF0 = Math.log(s.f_min);
         const lnSpan = Math.log(s.f_max) - lnF0;
         const hzToFrac = (hz: number) => (p.linear ? (hz - s.f_min) / (s.f_max - s.f_min) : (Math.log(hz) - lnF0) / lnSpan);
-        // The backend has no notion of "undistort" — its peaks are always the raw, post-EQ
-        // spectrum's own. When undistort is on, the drawn curve subtracts `corr` (the EQ's own
-        // response) to show the reconstructed pre-EQ signal, so a raw peak's *level* is adjusted
-        // to match here too — interpolated into `corr`'s bins the same way the hover cursor's own
-        // dB readout is, below. This is a display-level correction only: which frequencies the
-        // backend picked as peaks was already decided on the uncorrected spectrum, a
-        // simplification accepted because a real EQ correction curve is broad and smooth relative
-        // to genuine peaks, not something that plausibly manufactures or hides one.
-        const rawPeaks = s.peaks ?? [];
-        const peaks = corr
-          ? rawPeaks.map((pk) => {
+        // The backend has no notion of "undistort" — its peaks are picked on the raw, post-EQ
+        // spectrum. When undistort is on, the drawn curve subtracts `corr` (the EQ's own response)
+        // to show the reconstructed pre-EQ signal, so the pick is repeated here on corrected
+        // levels: each candidate's level minus `corr`, interpolated into `corr`'s bins the same way
+        // the hover cursor's own dB readout is, below. Adjusting only the backend's picks used to
+        // be enough on the assumption that an EQ is smooth next to real peaks, but a pulse train's
+        // neighbouring harmonics are a fraction of a dB apart, so any EQ slope across them decided
+        // which one won, and the cross landed off the top the corrected curve shows (matching in
+        // Dry, which has nothing to correct). Redone only when the spectrum or the correction
+        // changes, not every frame.
+        let peaks = s.peaks ?? [];
+        if (corr) {
+          if (s !== pickedFrom || corr !== pickedWith) {
+            const cands = (s.peak_candidates ?? []).map((pk) => {
               const fi = Math.max(0, Math.min(n - 1, hzToFrac(pk.hz) * (n - 1)));
               const i0 = Math.floor(fi);
               const i1 = Math.min(n - 1, i0 + 1);
               const t = fi - i0;
               return { hz: pk.hz, db: pk.db - (corr[i0] * (1 - t) + corr[i1] * t) };
-            })
-          : rawPeaks;
+            });
+            picked = pickPeaks(cands, s.peak_separation_octaves);
+            pickedFrom = s;
+            pickedWith = corr;
+          }
+          peaks = picked;
+        }
         if (peaks.length) {
           markCtx.strokeStyle = PEAK_MARK_COLOR;
           markCtx.lineWidth = Math.max(1, H / REF_SIZE) * 1.5;

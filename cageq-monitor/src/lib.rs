@@ -150,6 +150,16 @@ pub struct SpectrumUpdate {
     /// sub-bin interpolation on it produced wildly wrong frequencies at the top of the spectrum —
     /// the bug this field exists to fix by not doing peak-finding on that curve at all.
     pub peaks: Vec<SpectrumPeak>,
+    /// Everything `peaks` was picked from, loudest first (up to `PEAK_CANDIDATES`): each
+    /// prominent, audible, harmonic-folded local maximum, refined like `peaks` — before the final
+    /// pick of `PEAK_COUNT` spaced at least `peak_separation_octaves` apart. For a view that
+    /// shows the spectrum with the EQ taken back out (SpectrumScope's undistort): the pick is
+    /// made on the post-EQ levels here, and wherever the EQ tilts across near-equal partials (a
+    /// pulse train's harmonics are a fraction of a dB apart) it would mark one the corrected
+    /// curve doesn't show on top. Such a view repeats the pick on corrected levels instead.
+    pub peak_candidates: Vec<SpectrumPeak>,
+    /// The minimum spacing `peaks` was picked with — see `peak_candidates`.
+    pub peak_separation_octaves: f32,
 }
 
 /// One detected spectral peak — see [`SpectrumUpdate::peaks`].
@@ -472,6 +482,10 @@ mod windows_impl {
 
     /// Up to this many peaks reported per snapshot.
     const PEAK_COUNT: usize = 5;
+    /// Up to this many `SpectrumUpdate::peak_candidates`, loudest first. Enough that a view
+    /// re-picking on EQ-corrected levels sees every plausible winner (a 100 Hz pulse train's
+    /// fifth pick, at 3.5 kHz, ranks ~26th), small enough not to matter next to the bins.
+    const PEAK_CANDIDATES: usize = 128;
     /// A candidate's dB must exceed both its flanking valleys by at least this much to count as a
     /// real, standalone peak rather than a shoulder riding on a bigger one.
     const PEAK_MIN_PROMINENCE_DB: f32 = 6.0;
@@ -1150,6 +1164,17 @@ mod windows_impl {
         min_separation_octaves: f32,
         max_range_db: f32,
     ) -> Vec<SpectrumPeak> {
+        pick_peaks(&peak_candidates(power, power_scale, bin_hz, fold_harmonics, max_range_db), min_separation_octaves)
+    }
+
+    /// `find_peaks`' steps 1-3: the candidates, refined (`interpolate_peak`) and loudest first.
+    fn peak_candidates(
+        power: &[f32],
+        power_scale: f32,
+        bin_hz: f32,
+        fold_harmonics: bool,
+        max_range_db: f32,
+    ) -> Vec<SpectrumPeak> {
         let n = power.len();
         if n < 3 {
             return Vec::new();
@@ -1228,37 +1253,39 @@ mod windows_impl {
             }
         }
 
-        // 4) Greedy pick by magnitude, skipping anything too close (in octaves) to an already-
-        // picked peak — otherwise one broad resonance's own ripples could fill every remaining
-        // slot.
-        roots.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let mut picked: Vec<(usize, f32)> = Vec::new();
-        for &(i, val) in &roots {
-            if picked.len() >= PEAK_COUNT {
-                break;
-            }
-            let f = bin_hz * i as f32;
-            let too_close = picked.iter().any(|&(pi, _)| {
-                let pf = bin_hz * pi as f32;
-                (f / pf).log2().abs() < min_separation_octaves
-            });
-            if too_close {
-                continue;
-            }
-            picked.push((i, val));
-        }
-
-        // 5) Presented by frequency, not the magnitude order they were picked in. Interpolated
-        // last, after every index-based comparison above is done with the coarse integer bin —
-        // those decisions don't need sub-bin precision, only the final reported frequency/level do.
-        picked.sort_by(|a, b| a.0.cmp(&b.0));
-        picked
+        // Refined before they're ranked, not after: a partial falling between two bins reads up
+        // to ~1 dB low at its nearest bin (Hann scalloping — nothing interpolates it away with no
+        // zero padding left, at the longest window), more than the gap between neighbouring
+        // partials of a pulse train, so ranking by the bin level picked the wrong one of two.
+        let mut out: Vec<SpectrumPeak> = roots
             .into_iter()
             .map(|(i, _)| {
                 let (ri, rv) = interpolate_peak(&v, i, n);
                 SpectrumPeak { hz: bin_hz * ri, db: rv }
             })
-            .collect()
+            .collect();
+        out.sort_by(|a, b| b.db.partial_cmp(&a.db).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+
+    /// `find_peaks`' steps 4-5, on `candidates` loudest first (`peak_candidates`): a greedy pick
+    /// by level, skipping anything too close (in octaves) to an already-picked peak — otherwise
+    /// one broad resonance's own ripples could fill every remaining slot — then presented by
+    /// frequency, not the level order they were picked in. SpectrumScope's `pickPeaks` repeats
+    /// this on EQ-corrected levels; keep the two alike.
+    fn pick_peaks(candidates: &[SpectrumPeak], min_separation_octaves: f32) -> Vec<SpectrumPeak> {
+        let mut picked: Vec<SpectrumPeak> = Vec::new();
+        for c in candidates {
+            if picked.len() >= PEAK_COUNT {
+                break;
+            }
+            if picked.iter().any(|p| (c.hz / p.hz).log2().abs() < min_separation_octaves) {
+                continue;
+            }
+            picked.push(*c);
+        }
+        picked.sort_by(|a, b| a.hz.partial_cmp(&b.hz).unwrap_or(std::cmp::Ordering::Equal));
+        picked
     }
 
     /// Parabolic (quadratic) interpolation across the three linear bins straddling a peak at
@@ -1689,14 +1716,16 @@ mod windows_impl {
             let (db_lin, db_lin_raw, peak_db_lin, peak_hz_lin) =
                 Self::reduce(&self.avg_power, self.power_scale, self.raw_power_scale, self.bin_hz, &self.ranges_lin);
             let hires = self.hires_peaks.load(Ordering::Relaxed);
-            let peaks = find_peaks(
+            let separation = if hires { PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES } else { PEAK_MIN_SEPARATION_OCTAVES };
+            let mut candidates = peak_candidates(
                 &self.avg_power,
                 self.power_scale,
                 self.bin_hz,
                 self.harmonic_fold.load(Ordering::Relaxed),
-                if hires { PEAK_MIN_SEPARATION_OCTAVES_HIGH_RES } else { PEAK_MIN_SEPARATION_OCTAVES },
                 if hires { PEAK_MAX_RANGE_DB_HIGH_RES } else { PEAK_MAX_RANGE_DB },
             );
+            let peaks = pick_peaks(&candidates, separation);
+            candidates.truncate(PEAK_CANDIDATES);
             SpectrumUpdate {
                 db,
                 peak_db,
@@ -1710,6 +1739,8 @@ mod windows_impl {
                 f_min: SPEC_F_MIN,
                 f_max: SPEC_F_MAX,
                 peaks,
+                peak_candidates: candidates,
+                peak_separation_octaves: separation,
             }
         }
     }
@@ -2745,6 +2776,35 @@ mod windows_impl {
     #[cfg(test)]
     mod peak_finding {
         use super::*;
+
+        /// Near-equal partials are ranked by their refined level, not their nearest bin's. A 100 Hz
+        /// pulse train (duty 0.1) puts its 3-4 kHz lobe's top between 3.4 and 3.5 kHz, with the
+        /// 3.5 kHz harmonic ~0.2 dB louder. At the longest window there is no zero padding, so
+        /// 3.5 kHz (0.4 bin off a bin centre) read ~0.4 dB *below* 3.4 kHz (0.1 bin off) at its
+        /// nearest bin, and the finder marked 3.4 kHz. Both windows must pick 3.5 kHz.
+        #[test]
+        fn near_equal_partials_rank_by_refined_level() {
+            let rate = 48_000u32;
+            for tier in [BASE_FFT_SIZE, MAX_FFT_SIZE] {
+                let mut spec = Spectrum::new(rate, tier, Arc::new(AtomicBool::new(false)));
+                let step = 2.0 * std::f64::consts::PI * 100.0 / rate as f64;
+                let mut theta = 0.0f64;
+                let mut buf = vec![0.0f32; 4096];
+                for _ in 0..(rate as usize * 3 / buf.len()) {
+                    for s in buf.iter_mut() {
+                        *s = 0.3 * crate::signal::Waveform::Pulse.sample(theta, 200);
+                        theta += step;
+                    }
+                    spec.push(&buf);
+                }
+                let u = spec.snapshot(true);
+                let top = u.peaks.iter().find(|p| (3000.0..4000.0).contains(&p.hz)).expect("a peak in the 3-4 kHz lobe");
+                assert!((top.hz - 3500.0).abs() < 1.0, "tier {tier}: picked {} Hz in the 3-4 kHz lobe, expected 3500", top.hz);
+                // The candidates are the same peaks, loudest first.
+                assert!(u.peak_candidates.windows(2).all(|w| w[0].db >= w[1].db));
+                assert!(u.peaks.iter().all(|p| u.peak_candidates.iter().any(|c| c.hz == p.hz)));
+            }
+        }
 
         /// Feed `spec` a full-scale sine at `freq` Hz for 2s (well past `SPEC_TAU_SECS`
         /// settling), matching `spectrum_reduction`'s own harness.

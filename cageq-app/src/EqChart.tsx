@@ -112,6 +112,10 @@ export type SpectrumData = {
   f_min: number;
   f_max: number;
   peaks: { hz: number; db: number }[];
+  /** What `peaks` was picked from, loudest first, and the spacing it was picked with — for a
+   *  view that repeats the pick on EQ-corrected levels (SpectrumScope's `pickPeaks`). */
+  peak_candidates: { hz: number; db: number }[];
+  peak_separation_octaves: number;
 };
 
 /** Draggable band handles: X = centre frequency, Y = gain, wheel = Q. A high-pass has no
