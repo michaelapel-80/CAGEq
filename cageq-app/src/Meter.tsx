@@ -53,11 +53,8 @@ type Params = {
   glow: number; // beam brightness at full (slow-beam) intensity; velocity glow dims it from here
   focus: number; // velocity-glow reference — see Vectorscope's own `focus` doc
   beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
-  /** Draw the beam on the GPU (`addSegments`, see phosphor.ts) rather than through Canvas 2D.
-   *  A switch only while the two are being compared. */
-  gpuTrace: boolean;
 };
-const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.006, focus: 90, beamWidth: 1.0, gpuTrace: true };
+const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.006, focus: 90, beamWidth: 1.0 };
 // The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
 // `doseMult` comment (same reasoning as Vectorscope.tsx's identical constant) for why this matters:
 // `glow`'s tuned defaults were dialed in under the OLD, refresh-rate-dependent dose behaviour, which
@@ -306,7 +303,7 @@ export function Meter({
       let doseMult = 1; // see the fresh-trace branch below for why this isn't always 1
       // On the GPU path (`addSegments`) there's no canvas to start: a frame that draws nothing
       // leaves an empty trace either way.
-      const gpu = p.gpuTrace && phos.addSegments !== undefined;
+      const gpu = phos.addSegments !== undefined;
       const ctx = gpu ? null : phos.begin();
       const s = scopeRef.current;
       if (s && s.signal && s.xy.length >= 4 && s !== drawn) {
@@ -443,10 +440,9 @@ export function Meter({
   const num = (v: number | undefined) => (showNums && v != null ? fmt(v) : "—");
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = Exclude<keyof Params, "gpuTrace">;
   // `log`: the slider moves through the range by equal ratios instead of equal steps — for a range
   // spanning a few hundred times, where a linear slider spends nearly all its travel on the top end.
-  const CONTROLS: { key: NumKey; label: string; hint: string; min: number; max: number; step: number; log?: boolean }[] = [
+  const CONTROLS: { key: keyof Params; label: string; hint: string; min: number; max: number; step: number; log?: boolean }[] = [
     { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 48, step: 1 },
     // Far below the other views' range: the additive beam deposits many passes per window (see DEFAULTS).
@@ -505,10 +501,6 @@ export function Meter({
               </label>
             );
           })}
-          <label className="vs-tune-row vs-tune-check" title={t("scope.gpuTraceHint")}>
-            <span className="vs-tune-label">{t("scope.gpuTrace")}</span>
-            <input name="meter-gpu-trace" type="checkbox" checked={params.gpuTrace} onChange={(e) => set("gpuTrace", e.currentTarget.checked)} />
-          </label>
           <div className="vs-tune-sep" />
           {/* Restarts Integrated/Loudness Range/Peak Max only — momentary/short-term keep
               running (it's a full ebur128 reset under the hood, see `reset_lufs_meter`'s own doc,

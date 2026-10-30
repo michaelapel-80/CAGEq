@@ -51,9 +51,6 @@ type Params = {
   //               ballooning (see phosphor.ts's own `commit()` doc for why that distinction matters)
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
-  /** Draw the trace on the GPU (`addSegments`, see phosphor.ts) rather than through Canvas 2D.
-   *  A switch only while the two are being compared. */
-  gpuTrace: boolean;
 };
 // Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
 // reasoning (shared verbatim: the Trail/Glow orthogonality fix keeps *steady-state* brightness
@@ -76,7 +73,6 @@ const DEFAULTS: Params = {
   haze: 0.6,
   rotate: false,
   invert: true,
-  gpuTrace: true,
 };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
@@ -226,10 +222,10 @@ export function Vectorscope({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fill]);
   const rawRes = Math.round(side * dpr);
-  // Whether the trace is actually on the GPU: the setting, and a GPU that offers the path (set once
-  // the phosphor exists, below).
+  // Whether the trace is on the GPU: whether the GPU offers the path (set once the phosphor
+  // exists, below).
   const [gpuTraceOk, setGpuTraceOk] = useState(false);
-  const capped = fill && !(params.gpuTrace && gpuTraceOk) && maxFillResRef.current !== null;
+  const capped = fill && !gpuTraceOk && maxFillResRef.current !== null;
   const res = capped ? Math.min(rawRes, maxFillResRef.current!) : rawRes; // canvas backing-store resolution
 
   // The active EQ cascade (for undistort) + the built, crossfading inverse cascade. Rebuilt by
@@ -401,7 +397,7 @@ export function Vectorscope({
       //    is the accumulator's job, applied in commit() at the end of the frame. On the GPU path
       //    (`addSegments`) there's no canvas to start: a frame that draws nothing leaves an empty
       //    trace either way.
-      const gpu = p.gpuTrace && phos.addSegments !== undefined;
+      const gpu = phos.addSegments !== undefined;
       const ctx = gpu ? null : phos.begin();
 
       // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns on,
@@ -772,10 +768,6 @@ export function Vectorscope({
               </div>
             </div>
             <div className="vs-tune-sep" />
-            <label className="vs-tune-row vs-tune-check" title={t("scope.gpuTraceHint")}>
-              <span className="vs-tune-label">{t("scope.gpuTrace")}</span>
-              <input name="vectorscope-gpu-trace" type="checkbox" checked={params.gpuTrace} onChange={(e) => set("gpuTrace", e.currentTarget.checked)} />
-            </label>
             <label className="vs-tune-row vs-tune-check" title={t("scope.rotateHint")}>
               <span className="vs-tune-label">{t("scope.rotate")}</span>
               <input name="vectorscope-rotate" type="checkbox" checked={params.rotate} onChange={(e) => set("rotate", e.currentTarget.checked)} />

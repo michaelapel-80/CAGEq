@@ -5,8 +5,11 @@ function readStored<T extends object>(key: string, defaults: T): T | null {
     const raw = localStorage.getItem(key);
     // Merged over `defaults` rather than used as-is, so a stored blob from an older version
     // missing a since-added field still gets that field's current default instead of `undefined`
-    // leaking into the live params.
-    return raw ? { ...defaults, ...JSON.parse(raw) } : null;
+    // leaking into the live params — and keeping only the fields `defaults` has, so one since
+    // removed doesn't linger (it would also make "is this the saved default" compare unequal).
+    if (!raw) return null;
+    const stored = JSON.parse(raw) as Record<string, unknown>;
+    return { ...defaults, ...Object.fromEntries(Object.entries(stored).filter(([k]) => k in defaults)) };
   } catch {
     return null; // corrupt/foreign JSON in that key — fall back rather than crash the view
   }

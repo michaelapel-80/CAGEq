@@ -162,8 +162,6 @@
     "hazeHint": "Broad, faint glow intensity around the trace",
     "floor": "Floor",
     "floorHint": "Bottom of the level range (dBFS); anything quieter drops off the plot",
-    "gpuTrace": "GPU trace",
-    "gpuTraceHint": "Draw the trace on the GPU (the new renderer) instead of with Canvas 2D — a switch for comparing the two",
     "rotate": "Rotate",
     "rotateHint": "Off: raw X-Y — mono reads as a 45° diagonal, the orientation oscilloscope-music is authored for. On: rotated so mono reads vertical, anti-phase horizontal.",
     "undistort": "Undistort",

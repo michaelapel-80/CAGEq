@@ -51,11 +51,8 @@ type Params = {
   // the other only on an explicit "save as default", was confusing rather than helpful). Default
   // "rta": most people want this on and are the ones actually reading real levels off the curve.
   tilt: TiltMode;
-  /** Draw the trace on the GPU (`strokeTrace`, see phosphor.ts) rather than through Canvas 2D.
-   *  A switch only while the two are being compared. */
-  gpuTrace: boolean;
 };
-const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, floor: -90, undistort: true, linear: false, tilt: "rta", gpuTrace: true };
+const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, floor: -90, undistort: true, linear: false, tilt: "rta" };
 // Curated Trail/Tail/Glow combinations. The Trail/Glow orthogonality fix below (`TAU_REF/trailTau`
 // in doseMult) keeps *steady-state* brightness independent of trailTau in theory, but live tuning
 // of "distribution" showed glow still needs its own adjustment to get the actual density read
@@ -661,9 +658,9 @@ export function SpectrumScope({
       const plotTop = H * 0.03;
       const plotBot = H * 0.97;
 
-      // The trace is drawn on the GPU (`strokeTrace`) unless switched off for comparison or on the
-      // 8-bit fallback, which has no GPU path; then through the 2D scratch canvas as before.
-      const ctx = p.gpuTrace && phos.strokeTrace ? null : phos.begin();
+      // The trace is drawn on the GPU (`strokeTrace`) unless on the 8-bit fallback, which has no
+      // GPU path; then through the 2D scratch canvas.
+      const ctx = phos.strokeTrace ? null : phos.begin();
       // Additive, not source-over: source-over is a weighted blend *toward* the stroke colour, so
       // repeated strokes converge on fully-opaque accent blue and stop — it structurally cannot
       // exceed its own hue however many stack. "lighter" sums R/G/B independently with no hue
@@ -1136,10 +1133,6 @@ export function SpectrumScope({
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
               <span className="vs-tune-label">{t("scope.undistort")}</span>
               <input name="spectrum-undistort" type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
-            </label>
-            <label className="vs-tune-row vs-tune-check" title={t("scope.gpuTraceHint")}>
-              <span className="vs-tune-label">{t("scope.gpuTrace")}</span>
-              <input name="spectrum-gpu-trace" type="checkbox" checked={params.gpuTrace} onChange={(e) => set("gpuTrace", e.currentTarget.checked)} />
             </label>
             <div className="vs-tune-row vs-tune-check" title={t("scope.tiltHint")}>
               <span className="vs-tune-label">{t("scope.tilt")}</span>

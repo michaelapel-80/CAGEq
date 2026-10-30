@@ -36,9 +36,6 @@ type Params = {
   trigger: boolean;
   triggerFilterHz: number;
   mode: "lr" | "mix";
-  /** Draw the trace on the GPU (`strokeTrace`, see phosphor.ts) rather than through Canvas 2D.
-   *  A switch only while the two are being compared. */
-  gpuTrace: boolean;
 };
 // Classic 1-2-5 time/div sequence, same convention a real scope's dial steps through. 10 divisions
 // (DIVISIONS) is the standard horizontal graticule count, so total span = ms/div × 10.
@@ -55,7 +52,7 @@ const DIVISIONS = 10;
 // trailTau/tail/glow: the Fast preset's values. The steady trigger leaves no smear for a trail to
 // hide, so an instant, unsmeared trace is the better first view; the former defaults live on as
 // the Smooth preset.
-const DEFAULTS: Params = { trailTau: 0.02, tail: 1, glow: 0.20, beam: 3.0, bloom: 0.3, haze: 0.6, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 60, mode: "mix", gpuTrace: true }; // 5 ms/div × 10 = 50 ms
+const DEFAULTS: Params = { trailTau: 0.02, tail: 1, glow: 0.20, beam: 3.0, bloom: 0.3, haze: 0.6, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 60, mode: "mix" }; // 5 ms/div × 10 = 50 ms
 // Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
 // reasoning (shared verbatim: the Trail/Glow orthogonality fix keeps *steady-state* brightness
 // independent of trailTau in theory, but live tuning showed glow still needs its own adjustment
@@ -556,7 +553,7 @@ export function TimeScope() {
       // 1) Start this frame's trace on a cleared scratch canvas; decaying everything before it is
       // the accumulator's job, applied in commit() below. On the GPU path (`strokeTrace`) there's
       // no canvas to start: a frame that draws nothing leaves an empty trace either way.
-      const ctx = p.gpuTrace && phos.strokeTrace ? null : phos.begin();
+      const ctx = phos.strokeTrace ? null : phos.begin();
 
       // 2) Faint peak-hold line(s), mirrored ± around each lane's centreline (a waveform is
       // bipolar; the peak tracked above is a magnitude). On their own cleared layer rather than in
@@ -791,10 +788,6 @@ export function TimeScope() {
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
               <span className="vs-tune-label">{t("scope.undistort")}</span>
               <input name="scope-undistort" type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
-            </label>
-            <label className="vs-tune-row vs-tune-check" title={t("scope.gpuTraceHint")}>
-              <span className="vs-tune-label">{t("scope.gpuTrace")}</span>
-              <input name="scope-gpu-trace" type="checkbox" checked={params.gpuTrace} onChange={(e) => set("gpuTrace", e.currentTarget.checked)} />
             </label>
           </div>
         )}

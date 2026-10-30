@@ -266,15 +266,12 @@ type SpecParams = {
   glowBase: number;
   undistort: boolean;
   tilt: TiltMode;
-  /** Draw the backdrop on the GPU (phosphor.ts's `fillTrace`/`overlayStroke`) rather than through
-   *  Canvas 2D. A switch only while the two are being compared. */
-  gpuTrace: boolean;
 };
 // `old_glowBase * tau/TAU_REF` (0.09 * 0.3/0.1 = 0.27) reproduced the exact pre-switch on-screen
 // brightness under the new TAU_REF/tau-corrected formula — confirming the blend swap alone was a
 // visual no-op — then hand-retuned live from that baseline to today's value, same as every other
 // view's glow default gets touched up after its own anchor change.
-const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3, undistort: true, tilt: "rta", gpuTrace: true };
+const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3, undistort: true, tilt: "rta" };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -789,9 +786,9 @@ export function EqChart({
       last = now;
       const { eqBands, preampDb, sampleRate, model, PAD, H, W, specParams } = specDrawCtx.current;
       const spectrum = spectrumRef?.current ?? null;
-      // On the GPU (`fillTrace` for the wash, `overlayStroke` for the edge) unless switched off for
-      // comparison or on the 8-bit fallback, which has no GPU path; then Canvas 2D as before.
-      const ctx = specParams.gpuTrace && phos.strokeTrace ? null : phos.begin();
+      // On the GPU (`fillTrace` for the wash, `overlayStroke` for the edge) unless on the 8-bit
+      // fallback, which has no GPU path; then Canvas 2D.
+      const ctx = phos.strokeTrace ? null : phos.begin();
       pendingStroke = null;
       // Own layer, cleared and fully redrawn every frame — see the stroke's own comment below for
       // why it doesn't run through the phosphor accumulator like the wash does. Unconditional (not
@@ -1568,18 +1565,6 @@ export function EqChart({
               onChange={(e) => {
                 const undistort = e.currentTarget.checked;
                 setSpecParams((p) => ({ ...p, undistort }));
-              }}
-            />
-          </label>
-          <label className="vs-tune-row vs-tune-check" title={t("scope.gpuTraceHint")}>
-            <span className="vs-tune-label">{t("scope.gpuTrace")}</span>
-            <input
-              name="spectrum-gpu-trace"
-              type="checkbox"
-              checked={specParams.gpuTrace}
-              onChange={(e) => {
-                const gpuTrace = e.currentTarget.checked;
-                setSpecParams((p) => ({ ...p, gpuTrace }));
               }}
             />
           </label>
