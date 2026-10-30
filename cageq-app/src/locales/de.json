@@ -164,6 +164,8 @@
     "floorHint": "Untere Grenze des Pegelbereichs (dBFS); alles Leisere fällt aus dem Bild",
     "rotate": "Drehen",
     "rotateHint": "Aus: rohe X-Y-Darstellung — Mono erscheint als 45°-Diagonale, die Ausrichtung, für die Oszilloskop-Musik komponiert wird. An: gedreht, sodass Mono senkrecht erscheint, Gegenphase waagerecht.",
+    "labels": "Beschriftung",
+    "labelsHint": "Die Buchstaben L, R, M und S auf dem Raster anzeigen",
     "undistort": "Entzerren",
     "undistortHint": "Loopback invers filtern, um das Bild vor der EQ-Korrektur zu zeigen (für Oszilloskop-Musik bei aktiver Korrektur)",
     "tilt": "Neigung",

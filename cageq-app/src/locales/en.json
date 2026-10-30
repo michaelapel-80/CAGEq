@@ -164,6 +164,8 @@
     "floorHint": "Bottom of the level range (dBFS); anything quieter drops off the plot",
     "rotate": "Rotate",
     "rotateHint": "Off: raw X-Y — mono reads as a 45° diagonal, the orientation oscilloscope-music is authored for. On: rotated so mono reads vertical, anti-phase horizontal.",
+    "labels": "Labels",
+    "labelsHint": "Show the L, R, M and S letters on the graticule",
     "undistort": "Undistort",
     "undistortHint": "Inverse-filter the loopback to show the pre-EQ image (for oscilloscope music with correction on)",
     "tilt": "Tilt",

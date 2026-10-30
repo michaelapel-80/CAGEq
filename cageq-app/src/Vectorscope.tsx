@@ -51,6 +51,7 @@ type Params = {
   //               ballooning (see phosphor.ts's own `commit()` doc for why that distinction matters)
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
+  labels: boolean; // the graticule's L/R/M/S letters
 };
 // Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
 // reasoning (shared verbatim: the Trail/Glow orthogonality fix keeps *steady-state* brightness
@@ -73,6 +74,7 @@ const DEFAULTS: Params = {
   haze: 0.6,
   rotate: false,
   invert: true,
+  labels: true,
 };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
@@ -300,6 +302,7 @@ export function Vectorscope({
     }
     ctx.stroke();
 
+    if (!params.labels) return;
     ctx.fillStyle = `rgba(${ar},${ag},${ab},${LABEL_ALPHA})`;
     ctx.font = `${Math.round(S * 0.045)}px system-ui, sans-serif`;
     ctx.textAlign = "center";
@@ -316,7 +319,7 @@ export function Vectorscope({
       ctx.fillText("M", c + d, c - d);
       ctx.fillText("S", c - d, c - d);
     }
-  }, [res, params.rotate, params.radiusFrac, params.gridAlpha]);
+  }, [res, params.rotate, params.radiusFrac, params.gridAlpha, params.labels]);
 
   // The trace: this frame's beam is drawn into a scratch 2D canvas and handed to the phosphor
   // accumulator, which owns the decay and the additive composite (see phosphor.ts — half-float
@@ -771,6 +774,10 @@ export function Vectorscope({
             <label className="vs-tune-row vs-tune-check" title={t("scope.rotateHint")}>
               <span className="vs-tune-label">{t("scope.rotate")}</span>
               <input name="vectorscope-rotate" type="checkbox" checked={params.rotate} onChange={(e) => set("rotate", e.currentTarget.checked)} />
+            </label>
+            <label className="vs-tune-row vs-tune-check" title={t("scope.labelsHint")}>
+              <span className="vs-tune-label">{t("scope.labels")}</span>
+              <input name="vectorscope-labels" type="checkbox" checked={params.labels} onChange={(e) => set("labels", e.currentTarget.checked)} />
             </label>
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
               <span className="vs-tune-label">{t("scope.undistort")}</span>
