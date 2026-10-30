@@ -182,6 +182,18 @@ export type TraceFill = {
   alpha: number;
 };
 
+/** Separate line segments, each with its own brightness — see `Phosphor.addSegments`. */
+export type TraceSegments = {
+  /** Five floats per segment: x0, y0, x1, y1 (the target canvas's pixels, y down) and its alpha. */
+  data: Float32Array;
+  /** How many segments of `data` to draw. */
+  count: number;
+  /** Line width, px. Flat ends, as Canvas 2D's `"butt"` `lineCap`. */
+  width: number;
+  /** Colour, 0..255 per channel. */
+  rgb: readonly [number, number, number];
+};
+
 /** Shared surface of both backends — see the module comment for why the fallback exists. */
 export type Phosphor = {
   /** Clear and return the 2D context for this frame's trace. Sized to the target canvas. */
@@ -210,6 +222,15 @@ export type Phosphor = {
    * after `commit()` in the same frame. Present when `strokeTrace` is.
    */
   overlayStroke?(stroke: TraceStroke): void;
+  /**
+   * Add separate segments into this frame's trace, each adding its own light: where segments cross
+   * or overlap, their alphas sum (the colour stays the stroke's), the way a beam deposits energy
+   * wherever it passes — Vectorscope's trace, a beam's path drawn sample to sample with its
+   * brightness falling as it speeds up. Coverage is the segment's own box-filtered area per pixel,
+   * along it and across it, so a zero-length segment adds nothing and two segments continuing in a
+   * line sum to full coverage at the point they share, not double. Present when `strokeTrace` is.
+   */
+  addSegments?(segs: TraceSegments): void;
   /**
    * Decay the history (time constant `tau` seconds over `dt`), add this frame's trace, present.
    * `tail` multiplies `tau` for *faint* content only (1 = a plain single exponential), giving the
@@ -342,6 +363,36 @@ uniform float uBase, uAlpha; uniform vec3 uRgb;
 void main(){
   float cov = clamp((vP.y - vEdge) / vSlant + 0.5, 0.0, 1.0) * clamp(uBase - vP.y + 0.5, 0.0, 1.0);
   gl_FragColor = vec4(uRgb, cov * uAlpha);
+}`;
+
+// `addSegments`' segments, one instance each: the shared quad stretched over the segment from
+// `aSeg.xy` to `aSeg.zw` (canvas px, y down), reaching one pixel past it on every side for the
+// anti-aliasing fringe. `vU`/`vV` are the fragment's position along and across the segment, px.
+const VS_SEG = `attribute vec2 aPos; attribute vec4 aSeg; attribute float aAlpha;
+uniform vec2 uSize; uniform float uHalf;
+varying float vU, vV, vLen, vAlpha;
+void main(){
+  vec2 d = aSeg.zw - aSeg.xy;
+  float len = length(d);
+  vec2 dir = len > 1e-4 ? d / len : vec2(1.0, 0.0);
+  vec2 nrm = vec2(-dir.y, dir.x);
+  float u = aPos.x > 0.0 ? len + 1.0 : -1.0;
+  float v = aPos.y * (uHalf + 1.0);
+  vec2 p = aSeg.xy + dir * u + nrm * v;
+  vU = u; vV = v; vLen = len; vAlpha = aAlpha;
+  gl_Position = vec4(p.x / uSize.x * 2.0 - 1.0, 1.0 - p.y / uSize.y * 2.0, 0.0, 1.0);
+}`;
+
+// The overlap of a one-pixel box around the fragment with the segment's own extent, along it
+// ([0, len]) times across it ([-half, half]): exact box-filtered coverage for an axis-aligned
+// segment, a close one otherwise. A segment narrower or shorter than a pixel covers that fraction.
+const FS_SEG = `precision highp float;
+varying float vU, vV, vLen, vAlpha;
+uniform float uHalf; uniform vec3 uRgb;
+void main(){
+  float along = clamp(min(vU + 0.5, vLen) - max(vU - 0.5, 0.0), 0.0, 1.0);
+  float across = clamp(min(vV + 0.5, uHalf) - max(vV - 0.5, -uHalf), 0.0, 1.0);
+  gl_FragColor = vec4(uRgb, along * across * vAlpha);
 }`;
 
 // `overlayStroke`'s composite: the stroke's (unpremultiplied) coverage texture, premultiplied for
@@ -669,6 +720,12 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     rgb: gl.getUniformLocation(fillProg, "uRgb"),
   };
   const overProg = lineProg ? link(gl, FS_OVER) : null;
+  const segProg = lineProg ? link(gl, FS_SEG, VS_SEG, ["aPos", "aSeg", "aAlpha"]) : null;
+  const segU = segProg && {
+    size: gl.getUniformLocation(segProg, "uSize"),
+    half: gl.getUniformLocation(segProg, "uHalf"),
+    rgb: gl.getUniformLocation(segProg, "uRgb"),
+  };
   const overTex = overProg && gl.getUniformLocation(overProg, "uTex");
   const lineBuf = lineProg ? gl.createBuffer() : null;
   const traceFbo = gl.createFramebuffer();
@@ -944,7 +1001,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   };
 
   // All three GPU drawing calls, or none: views branch on `strokeTrace` alone.
-  const gpuTrace = !!(lineProg && fillProg && overProg && lineBuf && instancing && minmax);
+  const gpuTrace = !!(lineProg && fillProg && overProg && segProg && lineBuf && instancing && minmax);
 
   const strokeTrace = gpuTrace
     ? (st: TraceStroke) => {
@@ -965,6 +1022,40 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         gl.uniform1f(fillU.alpha, f.alpha);
         gl.uniform3f(fillU.rgb, f.rgb[0] / 255, f.rgb[1] / 255, f.rgb[2] / 255);
         drawSegments(f.points, f.count);
+      }
+    : undefined;
+
+  const addSegments = gpuTrace
+    ? (sg: TraceSegments) => {
+        if (!bindTrace(trace !== "gpu")) return;
+        trace = "gpu";
+        if (!segProg || !segU || !instancing || sg.count < 1) return;
+        gl.useProgram(segProg);
+        const halfW = sg.width / 2;
+        gl.uniform2f(segU.size, target.width, target.height);
+        gl.uniform1f(segU.half, halfW);
+        gl.uniform3f(segU.rgb, sg.rgb[0] / 255, sg.rgb[1] / 255, sg.rgb[2] / 255);
+        gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, sg.data.subarray(0, sg.count * 5), gl.DYNAMIC_DRAW);
+        gl.enableVertexAttribArray(1);
+        gl.enableVertexAttribArray(2);
+        gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 20, 0);
+        gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 20, 16);
+        instancing.vertexAttribDivisorANGLE(1, 1);
+        instancing.vertexAttribDivisorANGLE(2, 1);
+        // Alpha adds; the colour is the same for every segment, so it's simply written.
+        gl.enable(gl.BLEND);
+        gl.blendFuncSeparate(gl.ONE, gl.ZERO, gl.ONE, gl.ONE);
+        instancing.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, sg.count);
+        gl.disable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ZERO);
+        instancing.vertexAttribDivisorANGLE(1, 0);
+        instancing.vertexAttribDivisorANGLE(2, 0);
+        gl.disableVertexAttribArray(1);
+        gl.disableVertexAttribArray(2);
+        gl.bindBuffer(gl.ARRAY_BUFFER, quad);
       }
     : undefined;
 
@@ -1000,6 +1091,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     strokeTrace,
     fillTrace,
     overlayStroke,
+    addSegments,
     commit(dt, tau, tail = 1, doseMult = 1, bloomIntensity = 0, bloomWide = 0) {
       const W = target.width;
       const H = target.height;
@@ -1198,6 +1290,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       if (lineProg) gl.deleteProgram(lineProg);
       if (fillProg) gl.deleteProgram(fillProg);
       if (overProg) gl.deleteProgram(overProg);
+      if (segProg) gl.deleteProgram(segProg);
       for (const pp of ping) {
         gl.deleteTexture(pp.tex);
         gl.deleteFramebuffer(pp.fbo);

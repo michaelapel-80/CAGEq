@@ -51,6 +51,9 @@ type Params = {
   //               ballooning (see phosphor.ts's own `commit()` doc for why that distinction matters)
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
+  /** Draw the trace on the GPU (`addSegments`, see phosphor.ts) rather than through Canvas 2D.
+   *  A switch only while the two are being compared. */
+  gpuTrace: boolean;
 };
 // Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
 // reasoning (shared verbatim: the Trail/Glow orthogonality fix keeps *steady-state* brightness
@@ -73,6 +76,7 @@ const DEFAULTS: Params = {
   haze: 0.6,
   rotate: false,
   invert: true,
+  gpuTrace: true,
 };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
@@ -368,6 +372,9 @@ export function Vectorscope({
     const bucketX1: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
     const bucketY1: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
     const bucketCount = new Int32Array(VEL_BUCKETS);
+    // The GPU path's segments instead (see `addSegments`): x0, y0, x1, y1, alpha each, in drawing
+    // order. Grown like the bucket buffers, never shrunk.
+    let segData = new Float32Array(0);
 
     const render = () => {
       const now = performance.now();
@@ -382,8 +389,11 @@ export function Vectorscope({
       const r0 = Math.max(1.5, p.beam * (S / REF_SIZE)); // beam/spot base radius
 
       // 1) Start this frame's trace on a cleared scratch canvas. The decay of everything before it
-      //    is the accumulator's job, applied in commit() at the end of the frame.
-      const ctx = phos.begin();
+      //    is the accumulator's job, applied in commit() at the end of the frame. On the GPU path
+      //    (`addSegments`) there's no canvas to start: a frame that draws nothing leaves an empty
+      //    trace either way.
+      const gpu = p.gpuTrace && phos.addSegments !== undefined;
+      const ctx = gpu ? null : phos.begin();
 
       // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns on,
       // then run each sample back through it to recover the pre-EQ source image. State persists
@@ -467,7 +477,9 @@ export function Vectorscope({
         // Upper bound on segments any one bucket could need this window — grown only when a bigger
         // window arrives than any buffer seen so far (see the buffers' own doc above).
         const maxSegments = Math.max(1, Math.floor(xy.length / 2));
-        if (bucketCap < maxSegments) {
+        if (gpu && segData.length < maxSegments * 5) segData = new Float32Array(maxSegments * 5);
+        let segCount = 0;
+        if (!gpu && bucketCap < maxSegments) {
           bucketCap = maxSegments;
           for (let b = 0; b < VEL_BUCKETS; b++) {
             bucketX0[b] = new Float64Array(bucketCap);
@@ -502,13 +514,25 @@ export function Vectorscope({
             const dist = Math.sqrt(dx * dx + dy * dy);
             pathLen += dist;
             const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
-            let b = (f * VEL_BUCKETS) | 0;
-            if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
-            const seg = bucketCount[b]++;
-            bucketX0[b][seg] = prevX;
-            bucketY0[b][seg] = prevY;
-            bucketX1[b][seg] = px;
-            bucketY1[b][seg] = py;
+            if (gpu) {
+              // Each segment its own brightness, no buckets: those only batched Canvas 2D strokes.
+              // Half a bucket up, the average of the 2D path's rounding (`(b + 1) / VEL_BUCKETS`),
+              // so `glow` keeps the brightness it was tuned to, without the steps.
+              const o = 5 * segCount++;
+              segData[o] = prevX;
+              segData[o + 1] = prevY;
+              segData[o + 2] = px;
+              segData[o + 3] = py;
+              segData[o + 4] = p.glow * Math.min(1, f + 0.5 / VEL_BUCKETS);
+            } else {
+              let b = (f * VEL_BUCKETS) | 0;
+              if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
+              const seg = bucketCount[b]++;
+              bucketX0[b][seg] = prevX;
+              bucketY0[b][seg] = prevY;
+              bucketX1[b][seg] = px;
+              bucketY1[b][seg] = py;
+            }
           }
           sumX += px;
           sumY += py;
@@ -516,33 +540,41 @@ export function Vectorscope({
           prevX = px;
           prevY = py;
         }
-        ctx.globalCompositeOperation = "lighter";
-        ctx.lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE));
-        // Butt (not round) caps: consecutive samples that land in different velocity buckets are
-        // stroked separately, and round caps at their shared point would overlap and add into a
-        // bright dot at every such sample. Flat caps meet at the point instead of stacking.
-        ctx.lineCap = "butt";
-        // Brightness ∝ velocity factor, from `glow/VEL_BUCKETS` at the fastest bucket up to the full
-        // `glow` at the slowest — never exactly zero, so the fastest beam movement stays faintly
-        // visible instead of being blanked outright. A hard blanking cutoff (skipping the fastest
-        // bucket(s) entirely) was tried, to fight burn-in under the old 8-bit phosphor accumulator's
-        // decay-stall bug (a fast-beam line that never fully faded) — dropped now that half-float
-        // storage fixed that stall at its source (see phosphor.ts), and with only VEL_BUCKETS
-        // buckets to tune a cutoff across, it wasn't worth keeping as a tunable either.
-        for (let b = 0; b < VEL_BUCKETS; b++) {
-          const count = bucketCount[b];
-          if (count === 0) continue;
-          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * (b + 1)) / VEL_BUCKETS})`;
-          ctx.beginPath();
-          const x0 = bucketX0[b];
-          const y0 = bucketY0[b];
-          const x1 = bucketX1[b];
-          const y1 = bucketY1[b];
-          for (let i = 0; i < count; i++) {
-            ctx.moveTo(x0[i], y0[i]);
-            ctx.lineTo(x1[i], y1[i]);
+        const lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE));
+        if (!ctx) {
+          // Fully additive: every segment adds its light, also where segments of the same speed
+          // cross — the beam deposits energy wherever it passes. The 2D path below combines
+          // segments within a bucket once (one stroked path each) and adds only across buckets.
+          phos.addSegments!({ data: segData, count: segCount, width: lineWidth, rgb: [ar, ag, ab] });
+        } else {
+          ctx.globalCompositeOperation = "lighter";
+          ctx.lineWidth = lineWidth;
+          // Butt (not round) caps: consecutive samples that land in different velocity buckets are
+          // stroked separately, and round caps at their shared point would overlap and add into a
+          // bright dot at every such sample. Flat caps meet at the point instead of stacking.
+          ctx.lineCap = "butt";
+          // Brightness ∝ velocity factor, from `glow/VEL_BUCKETS` at the fastest bucket up to the full
+          // `glow` at the slowest — never exactly zero, so the fastest beam movement stays faintly
+          // visible instead of being blanked outright. A hard blanking cutoff (skipping the fastest
+          // bucket(s) entirely) was tried, to fight burn-in under the old 8-bit phosphor accumulator's
+          // decay-stall bug (a fast-beam line that never fully faded) — dropped now that half-float
+          // storage fixed that stall at its source (see phosphor.ts), and with only VEL_BUCKETS
+          // buckets to tune a cutoff across, it wasn't worth keeping as a tunable either.
+          for (let b = 0; b < VEL_BUCKETS; b++) {
+            const count = bucketCount[b];
+            if (count === 0) continue;
+            ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * (b + 1)) / VEL_BUCKETS})`;
+            ctx.beginPath();
+            const x0 = bucketX0[b];
+            const y0 = bucketY0[b];
+            const x1 = bucketX1[b];
+            const y1 = bucketY1[b];
+            for (let i = 0; i < count; i++) {
+              ctx.moveTo(x0[i], y0[i]);
+              ctx.lineTo(x1[i], y1[i]);
+            }
+            ctx.stroke();
           }
-          ctx.stroke();
         }
         // Dwell spot: the window's whole beam energy concentrated where it barely moved. refL small,
         // so ordinary (moving) material gives ~0 while a still window (DC / silence zeros) saturates.
@@ -731,6 +763,10 @@ export function Vectorscope({
               </div>
             </div>
             <div className="vs-tune-sep" />
+            <label className="vs-tune-row vs-tune-check" title={t("scope.gpuTraceHint")}>
+              <span className="vs-tune-label">{t("scope.gpuTrace")}</span>
+              <input name="vectorscope-gpu-trace" type="checkbox" checked={params.gpuTrace} onChange={(e) => set("gpuTrace", e.currentTarget.checked)} />
+            </label>
             <label className="vs-tune-row vs-tune-check" title={t("scope.rotateHint")}>
               <span className="vs-tune-label">{t("scope.rotate")}</span>
               <input name="vectorscope-rotate" type="checkbox" checked={params.rotate} onChange={(e) => set("rotate", e.currentTarget.checked)} />
