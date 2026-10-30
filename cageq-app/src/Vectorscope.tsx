@@ -281,9 +281,14 @@ export function Vectorscope({
     ctx.moveTo(c - R, c);
     ctx.lineTo(c + R, c);
     if (!params.rotate) {
-      const d = R / SQRT2; // raw X-Y: mono runs the 45° diagonal — draw it as a guide
+      // Raw X-Y: mono runs the 45° diagonal — draw it as a guide — and anti-phase (side) the
+      // other one, which also balances the graticule (the rotated view's cross is the same pair
+      // of axes, turned).
+      const d = R / SQRT2;
       ctx.moveTo(c - d, c + d);
       ctx.lineTo(c + d, c - d);
+      ctx.moveTo(c - d, c - d);
+      ctx.lineTo(c + d, c + d);
     }
     ctx.stroke();
 
@@ -298,7 +303,10 @@ export function Vectorscope({
     } else {
       ctx.fillText("L", c - R * 0.88, c - R * 0.1); // Left channel → left end of the horizontal axis
       ctx.fillText("R", c + R * 0.1, c - R * 0.88);
-      ctx.fillText("M", c + R * 0.55, c - R * 0.55);
+      // M and S on the diagonals, at the same distance from the centre as L and R.
+      const d = (R * Math.hypot(0.88, 0.1)) / SQRT2;
+      ctx.fillText("M", c + d, c - d);
+      ctx.fillText("S", c - d, c - d);
     }
   }, [res, params.rotate, params.radiusFrac, params.gridAlpha]);
 
