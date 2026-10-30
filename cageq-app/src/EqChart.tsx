@@ -5,8 +5,8 @@ import { Band, composedCurveDb, highPassFc, HP_SLOPES, logGrid, phaseDeg, type F
 import { fftWindowMs } from "./fftWindow";
 import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
 import { TiltGlyph } from "./TiltGlyph";
-import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
-import { traceSmooth } from "./spline";
+import { createPhosphor, DOSE_REF_FPS, type TraceStroke } from "./phosphor";
+import { tessellatedCapacity, tessellateSmooth, traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
 import { fmtSnappedHz, noteShift, snapBin, snapRequested, snapSpan, SNAP_SPAN_COLOR } from "./peakSnap";
 
@@ -260,12 +260,21 @@ const TAU_REF = 0.1;
  *  the two views suit different defaults/use cases (this backdrop is read against a static EQ
  *  curve, closer to a conventional RTA; SpectrumScope's is read against itself over time), so
  *  toggling one was never meant to move the other. */
-type SpecParams = { tau: number; tail: number; glowBase: number; undistort: boolean; tilt: TiltMode };
+type SpecParams = {
+  tau: number;
+  tail: number;
+  glowBase: number;
+  undistort: boolean;
+  tilt: TiltMode;
+  /** Draw the backdrop on the GPU (phosphor.ts's `fillTrace`/`overlayStroke`) rather than through
+   *  Canvas 2D. A switch only while the two are being compared. */
+  gpuTrace: boolean;
+};
 // `old_glowBase * tau/TAU_REF` (0.09 * 0.3/0.1 = 0.27) reproduced the exact pre-switch on-screen
 // brightness under the new TAU_REF/tau-corrected formula — confirming the blend swap alone was a
 // visual no-op — then hand-retuned live from that baseline to today's value, same as every other
 // view's glow default gets touched up after its own anchor change.
-const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3, undistort: true, tilt: "rta" };
+const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3, undistort: true, tilt: "rta", gpuTrace: true };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -753,6 +762,11 @@ export function EqChart({
     // own comment for why. `NaN` marks "not yet initialized" so the first real frame snaps straight
     // to target instead of animating in from zero.
     let yStrokeSmooth = new Float64Array(0).fill(NaN);
+    // The tessellated wash edge and stroke for the GPU path (see `tessellateSmooth`), and the stroke
+    // waiting to be overlaid once `commit()` has presented the frame. Grown, never shrunk.
+    let washPts = new Float32Array(0);
+    let strokePts = new Float32Array(0);
+    let pendingStroke: TraceStroke | null = null;
     // Whether the cursor readout was showing last frame — same one-shot-hide idea SpectrumScope's
     // own `cursorShown` uses, so leaving the tube doesn't need a per-frame DOM write to keep
     // confirming it's still hidden.
@@ -775,7 +789,10 @@ export function EqChart({
       last = now;
       const { eqBands, preampDb, sampleRate, model, PAD, H, W, specParams } = specDrawCtx.current;
       const spectrum = spectrumRef?.current ?? null;
-      const ctx = phos.begin();
+      // On the GPU (`fillTrace` for the wash, `overlayStroke` for the edge) unless switched off for
+      // comparison or on the 8-bit fallback, which has no GPU path; then Canvas 2D as before.
+      const ctx = specParams.gpuTrace && phos.strokeTrace ? null : phos.begin();
+      pendingStroke = null;
       // Own layer, cleared and fully redrawn every frame — see the stroke's own comment below for
       // why it doesn't run through the phosphor accumulator like the wash does. Unconditional (not
       // only when `spectrum` is present) so a truly empty frame doesn't leave a stale line sitting
@@ -880,15 +897,22 @@ export function EqChart({
         // (in either direction) was the wrong tool here regardless of which end was bright.
         // traceSmooth's own leading `moveTo` becomes this path's true start point, so `closePath`
         // below draws straight back to it — no separate "walk up from the baseline" segment needed.
-        ctx.fillStyle = `rgba(${r},${g},${b},${specParams.glowBase * SPEC_WASH_FRAC})`;
-        ctx.beginPath();
-        traceSmooth(ctx, xScratch, yScratch, n);
-        ctx.lineTo(xScratch[n - 1], plotBot); // down to baseline at the right edge
-        ctx.lineTo(xScratch[0], plotBot); // across baseline to the left edge
-        ctx.closePath(); // straight line back up to the curve's own start
-        ctx.fill(); // full, undiminished alpha — see SPEC_UPDATE_HZ's own doc for why the per-second
-        // correction happens in commit()'s float dose math below, not here on the 8-bit canvas (a low
-        // ctx.globalAlpha on a smooth gradient visibly dithers in this WebView2 build).
+        const washAlpha = specParams.glowBase * SPEC_WASH_FRAC;
+        if (ctx) {
+          ctx.fillStyle = `rgba(${r},${g},${b},${washAlpha})`;
+          ctx.beginPath();
+          traceSmooth(ctx, xScratch, yScratch, n);
+          ctx.lineTo(xScratch[n - 1], plotBot); // down to baseline at the right edge
+          ctx.lineTo(xScratch[0], plotBot); // across baseline to the left edge
+          ctx.closePath(); // straight line back up to the curve's own start
+          ctx.fill(); // full, undiminished alpha — see SPEC_UPDATE_HZ's own doc for why the per-second
+          // correction happens in commit()'s float dose math below, not here on the 8-bit canvas (a low
+          // ctx.globalAlpha on a smooth gradient visibly dithers in this WebView2 build).
+        } else {
+          const cap = tessellatedCapacity(n) * 2;
+          if (washPts.length < cap) washPts = new Float32Array(cap);
+          phos.fillTrace!({ points: washPts, count: tessellateSmooth(xScratch, yScratch, n, washPts), baseY: plotBot, rgb: [r, g, b], alpha: washAlpha });
+        }
 
         // The informative edge: the same smooth curve, stroked at the live-tunable `glowBase` on its
         // own non-accumulating layer (`strokeCtx`) — a stroke is, by construction, drawn at each X's
@@ -908,12 +932,31 @@ export function EqChart({
         // (reported live as jitter). STROKE_SMOOTH_TAU restores just enough of it, but in the
         // geometry the line is built from rather than the pixels — still exactly one crisp line per
         // frame, no accumulation, no smearing of past positions.
-        strokeCtx.strokeStyle = `rgba(${sr},${sg},${sb},${specParams.glowBase})`;
-        strokeCtx.lineWidth = Math.max(1, H / SPEC_STROKE_REF_H) * 1.5;
-        strokeCtx.lineJoin = "round";
-        strokeCtx.beginPath();
-        traceSmooth(strokeCtx, xScratch, yStrokeSmooth, n);
-        strokeCtx.stroke();
+        //
+        // On the GPU path it can't go on that layer: it's drawn over this frame once `commit()` has
+        // presented it (`overlayStroke`, below) — the same thing, outside the accumulator.
+        const strokeWidth = Math.max(1, H / SPEC_STROKE_REF_H) * 1.5;
+        if (ctx) {
+          strokeCtx.strokeStyle = `rgba(${sr},${sg},${sb},${specParams.glowBase})`;
+          strokeCtx.lineWidth = strokeWidth;
+          strokeCtx.lineJoin = "round";
+          strokeCtx.beginPath();
+          traceSmooth(strokeCtx, xScratch, yStrokeSmooth, n);
+          strokeCtx.stroke();
+        } else {
+          const cap = tessellatedCapacity(n) * 2;
+          if (strokePts.length < cap) strokePts = new Float32Array(cap);
+          pendingStroke = {
+            points: strokePts,
+            count: tessellateSmooth(xScratch, yStrokeSmooth, n, strokePts),
+            width: strokeWidth,
+            rgb: [sr, sg, sb],
+            yBottom: plotBot,
+            yTop: plotTop,
+            alphaBottom: specParams.glowBase,
+            alphaTop: specParams.glowBase,
+          };
+        }
       }
 
       // Hover cursor — independent of `spectrum` being present (the frequency axis is worth
@@ -1029,6 +1072,7 @@ export function EqChart({
       // is scaled by this frame's `dt` — commit()'s own dose math already accounts for `dt` once;
       // doing so again here previously reintroduced refresh-rate-dependent brightness.
       phos.commit(dt, specParams.tau, specParams.tail, SPEC_DOSE_MULT * (TAU_REF / specParams.tau));
+      if (pendingStroke) phos.overlayStroke!(pendingStroke);
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -1524,6 +1568,18 @@ export function EqChart({
               onChange={(e) => {
                 const undistort = e.currentTarget.checked;
                 setSpecParams((p) => ({ ...p, undistort }));
+              }}
+            />
+          </label>
+          <label className="vs-tune-row vs-tune-check" title={t("scope.gpuTraceHint")}>
+            <span className="vs-tune-label">{t("scope.gpuTrace")}</span>
+            <input
+              name="spectrum-gpu-trace"
+              type="checkbox"
+              checked={specParams.gpuTrace}
+              onChange={(e) => {
+                const gpuTrace = e.currentTarget.checked;
+                setSpecParams((p) => ({ ...p, gpuTrace }));
               }}
             />
           </label>

@@ -168,6 +168,20 @@ export type TraceStroke = {
   alphaTop: number;
 };
 
+/** The area between a curve and a horizontal baseline below it — see `Phosphor.fillTrace`. */
+export type TraceFill = {
+  /** Interleaved x, y per point along the curve, x ascending, in the target canvas's pixels (y down). */
+  points: Float32Array;
+  /** How many points of `points` to use. */
+  count: number;
+  /** The baseline's y, px: the fill runs from the curve down to here. */
+  baseY: number;
+  /** Colour, 0..255 per channel. */
+  rgb: readonly [number, number, number];
+  /** Flat alpha. */
+  alpha: number;
+};
+
 /** Shared surface of both backends — see the module comment for why the fallback exists. */
 export type Phosphor = {
   /** Clear and return the 2D context for this frame's trace. Sized to the target canvas. */
@@ -185,6 +199,17 @@ export type Phosphor = {
    * absent otherwise, so a caller keeps its 2D path for that case.
    */
   strokeTrace?(stroke: TraceStroke): void;
+  /** `strokeTrace`'s counterpart for a filled area under a curve (EqChart's spectrum wash), into the
+   *  same trace; its top edge anti-aliased by the distance to the curve. Present when `strokeTrace` is. */
+  fillTrace?(fill: TraceFill): void;
+  /**
+   * Draw a stroke over the frame `commit()` just presented, *without* it entering the accumulator —
+   * for a line that must show only where the signal is now (EqChart's spectrum edge), which used to
+   * be a separate 2D canvas layered on top. Same coverage as `strokeTrace` (rendered the same way,
+   * one coverage per pixel), then composited with ordinary "over" blending, as that layer was. Call
+   * after `commit()` in the same frame. Present when `strokeTrace` is.
+   */
+  overlayStroke?(stroke: TraceStroke): void;
   /**
    * Decay the history (time constant `tau` seconds over `dt`), add this frame's trace, present.
    * `tail` multiplies `tau` for *faint* content only (1 = a plain single exponential), giving the
@@ -288,6 +313,41 @@ void main(){
   vP = p; vA = aP0; vB = aP1;
   gl_Position = vec4(p.x / uSize.x * 2.0 - 1.0, 1.0 - p.y / uSize.y * 2.0, 0.0, 1.0);
 }`;
+
+// `fillTrace`'s quads, one per curve segment, instanced like VS_LINE: from the curve between
+// `aP0` and `aP1` down to the baseline `uBase` (`aPos.y` +1 at the curve, -1 at the baseline). The
+// curve edge is pushed up far enough for its anti-aliasing fringe, which for a steep segment is
+// further than a pixel straight up. `vEdge` is the curve's y at the fragment's x (linear in x
+// across the quad, so interpolation reproduces it exactly), `vSlant` the factor turning a
+// vertical distance from it into a perpendicular one.
+const VS_FILL = `attribute vec2 aPos; attribute vec2 aP0, aP1;
+uniform vec2 uSize; uniform float uBase;
+varying vec2 vP; varying float vEdge, vSlant;
+void main(){
+  float dx = max(aP1.x - aP0.x, 1e-4);
+  float slope = (aP1.y - aP0.y) / dx;
+  float slant = sqrt(1.0 + slope * slope);
+  vec2 e = mix(aP0, aP1, aPos.x * 0.5 + 0.5);
+  float y = aPos.y > 0.0 ? min(e.y - slant, uBase) : uBase + 1.0;
+  vec2 p = vec2(e.x, y);
+  vP = p; vEdge = e.y; vSlant = slant;
+  gl_Position = vec4(p.x / uSize.x * 2.0 - 1.0, 1.0 - p.y / uSize.y * 2.0, 0.0, 1.0);
+}`;
+
+// Full coverage below the curve, fading over one pixel across its edge (by perpendicular distance)
+// and across the baseline. Unpremultiplied, like FS_LINE.
+const FS_FILL = `precision highp float;
+varying vec2 vP; varying float vEdge, vSlant;
+uniform float uBase, uAlpha; uniform vec3 uRgb;
+void main(){
+  float cov = clamp((vP.y - vEdge) / vSlant + 0.5, 0.0, 1.0) * clamp(uBase - vP.y + 0.5, 0.0, 1.0);
+  gl_FragColor = vec4(uRgb, cov * uAlpha);
+}`;
+
+// `overlayStroke`'s composite: the stroke's (unpremultiplied) coverage texture, premultiplied for
+// "over" blending (ONE, ONE_MINUS_SRC_ALPHA) onto the presented frame.
+const FS_OVER = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
+void main(){ vec4 c = texture2D(uTex, vUv); gl_FragColor = vec4(c.rgb * c.a, c.a); }`;
 
 // Coverage from the pixel centre's distance to the segment: full within half the width, falling
 // to nothing across one pixel at the edge — the analytic counterpart of Canvas 2D's anti-aliased
@@ -601,6 +661,15 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     rgb: gl.getUniformLocation(lineProg, "uRgb"),
     grad: gl.getUniformLocation(lineProg, "uGrad"),
   };
+  const fillProg = lineProg ? link(gl, FS_FILL, VS_FILL, ["aPos", "aP0", "aP1"]) : null;
+  const fillU = fillProg && {
+    size: gl.getUniformLocation(fillProg, "uSize"),
+    base: gl.getUniformLocation(fillProg, "uBase"),
+    alpha: gl.getUniformLocation(fillProg, "uAlpha"),
+    rgb: gl.getUniformLocation(fillProg, "uRgb"),
+  };
+  const overProg = lineProg ? link(gl, FS_OVER) : null;
+  const overTex = overProg && gl.getUniformLocation(overProg, "uTex");
   const lineBuf = lineProg ? gl.createBuffer() : null;
   const traceFbo = gl.createFramebuffer();
   const attachTrace = () => {
@@ -818,54 +887,106 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     return true;
   };
 
-  const strokeTrace =
-    lineProg && lineU && lineBuf && instancing && minmax
-      ? (st: TraceStroke) => {
-          resize();
-          const W = target.width;
-          const H = target.height;
-          if (dead || W === 0 || H === 0 || gl.isContextLost()) return;
-          gl.bindFramebuffer(gl.FRAMEBUFFER, traceFbo);
-          gl.viewport(0, 0, W, H);
-          if (trace !== "gpu") {
-            // The first stroke of the frame starts from an empty trace, as `begin()` does.
-            gl.clearColor(0, 0, 0, 0);
-            gl.clear(gl.COLOR_BUFFER_BIT);
-            trace = "gpu";
-          }
-          if (st.count < 2) return;
-          gl.useProgram(lineProg);
-          const halfW = st.width / 2;
-          gl.uniform2f(lineU.size, W, H);
-          gl.uniform1f(lineU.r, halfW + 1);
-          gl.uniform1f(lineU.half, halfW);
-          gl.uniform3f(lineU.rgb, st.rgb[0] / 255, st.rgb[1] / 255, st.rgb[2] / 255);
-          gl.uniform4f(lineU.grad, st.yBottom, st.yTop, st.alphaBottom, st.alphaTop);
-          // The quad's corners on attribute 0, the points as two per-instance attributes: point i
-          // and point i + 1 of the same buffer.
-          gl.bindBuffer(gl.ARRAY_BUFFER, quad);
-          gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-          gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
-          gl.bufferData(gl.ARRAY_BUFFER, st.points.subarray(0, st.count * 2), gl.DYNAMIC_DRAW);
-          gl.enableVertexAttribArray(1);
-          gl.enableVertexAttribArray(2);
-          gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 8, 0);
-          gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 8, 8);
-          instancing.vertexAttribDivisorANGLE(1, 1);
-          instancing.vertexAttribDivisorANGLE(2, 1);
-          gl.enable(gl.BLEND);
-          gl.blendEquation(minmax.MAX_EXT);
-          instancing.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, st.count - 1);
-          // Back to the state every other pass here assumes: no blending, plain attribute 0.
-          gl.disable(gl.BLEND);
-          gl.blendEquation(gl.FUNC_ADD);
-          instancing.vertexAttribDivisorANGLE(1, 0);
-          instancing.vertexAttribDivisorANGLE(2, 0);
-          gl.disableVertexAttribArray(1);
-          gl.disableVertexAttribArray(2);
-          gl.bindBuffer(gl.ARRAY_BUFFER, quad);
-        }
-      : undefined;
+  // Bind the trace texture's framebuffer, empty first if `clearIt` (the first GPU draw of a frame
+  // starts from an empty trace, as `begin()` does). False when there's nothing valid to draw into.
+  const bindTrace = (clearIt: boolean): boolean => {
+    resize();
+    const W = target.width;
+    const H = target.height;
+    if (dead || W === 0 || H === 0 || gl.isContextLost()) return false;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, traceFbo);
+    gl.viewport(0, 0, W, H);
+    if (clearIt) {
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+    }
+    return true;
+  };
+
+  // One instance per segment of `points` (point i and i + 1 of the same buffer, bound twice 8
+  // bytes apart) over the shared quad on attribute 0, MAX-blended into whatever is bound; then back
+  // to the state every other pass here assumes: no blending, plain attribute 0. The program and its
+  // uniforms are the caller's.
+  const drawSegments = (points: Float32Array, count: number) => {
+    if (!instancing || !minmax) return;
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, points.subarray(0, count * 2), gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(1);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 8, 0);
+    gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 8, 8);
+    instancing.vertexAttribDivisorANGLE(1, 1);
+    instancing.vertexAttribDivisorANGLE(2, 1);
+    gl.enable(gl.BLEND);
+    gl.blendEquation(minmax.MAX_EXT);
+    instancing.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, count - 1);
+    gl.disable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
+    instancing.vertexAttribDivisorANGLE(1, 0);
+    instancing.vertexAttribDivisorANGLE(2, 0);
+    gl.disableVertexAttribArray(1);
+    gl.disableVertexAttribArray(2);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  };
+
+  const drawStroke = (st: TraceStroke) => {
+    if (!lineProg || !lineU || st.count < 2) return;
+    gl.useProgram(lineProg);
+    const halfW = st.width / 2;
+    gl.uniform2f(lineU.size, target.width, target.height);
+    gl.uniform1f(lineU.r, halfW + 1);
+    gl.uniform1f(lineU.half, halfW);
+    gl.uniform3f(lineU.rgb, st.rgb[0] / 255, st.rgb[1] / 255, st.rgb[2] / 255);
+    gl.uniform4f(lineU.grad, st.yBottom, st.yTop, st.alphaBottom, st.alphaTop);
+    drawSegments(st.points, st.count);
+  };
+
+  // All three GPU drawing calls, or none: views branch on `strokeTrace` alone.
+  const gpuTrace = !!(lineProg && fillProg && overProg && lineBuf && instancing && minmax);
+
+  const strokeTrace = gpuTrace
+    ? (st: TraceStroke) => {
+        if (!bindTrace(trace !== "gpu")) return;
+        trace = "gpu";
+        drawStroke(st);
+      }
+    : undefined;
+
+  const fillTrace = gpuTrace
+    ? (f: TraceFill) => {
+        if (!bindTrace(trace !== "gpu")) return;
+        trace = "gpu";
+        if (!fillProg || !fillU || f.count < 2) return;
+        gl.useProgram(fillProg);
+        gl.uniform2f(fillU.size, target.width, target.height);
+        gl.uniform1f(fillU.base, f.baseY);
+        gl.uniform1f(fillU.alpha, f.alpha);
+        gl.uniform3f(fillU.rgb, f.rgb[0] / 255, f.rgb[1] / 255, f.rgb[2] / 255);
+        drawSegments(f.points, f.count);
+      }
+    : undefined;
+
+  // The trace texture is free again once `commit()` has consumed it, so the overlay borrows it:
+  // the stroke's coverage first (one per pixel), then that, composited over the presented frame.
+  // Whatever the next frame draws starts it afresh (`begin()`, the first GPU call, or `commit()`).
+  const overlayStroke = gpuTrace
+    ? (st: TraceStroke) => {
+        if (!bindTrace(true)) return;
+        drawStroke(st);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, target.width, target.height);
+        gl.useProgram(overProg);
+        gl.uniform1i(overTex, 0);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, texTrace);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.disable(gl.BLEND);
+      }
+    : undefined;
 
   return {
     precise: true,
@@ -877,6 +998,8 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       return scratch.ctx!;
     },
     strokeTrace,
+    fillTrace,
+    overlayStroke,
     commit(dt, tau, tail = 1, doseMult = 1, bloomIntensity = 0, bloomWide = 0) {
       const W = target.width;
       const H = target.height;
@@ -1073,6 +1196,8 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       gl.deleteFramebuffer(traceFbo);
       if (lineBuf) gl.deleteBuffer(lineBuf);
       if (lineProg) gl.deleteProgram(lineProg);
+      if (fillProg) gl.deleteProgram(fillProg);
+      if (overProg) gl.deleteProgram(overProg);
       for (const pp of ping) {
         gl.deleteTexture(pp.tex);
         gl.deleteFramebuffer(pp.fbo);
