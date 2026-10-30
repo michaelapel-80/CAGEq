@@ -695,12 +695,23 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   const mkTex = (type: number) => mkTexSized(type, target.width, target.height, gl.NEAREST);
 
   let texTrace = mkTex(gl.UNSIGNED_BYTE); // uploads come from a 2D canvas, so always 8-bit
+  // What the GPU drawing calls render into instead — float: additive segments (`addSegments`) sum
+  // many small amounts, which 8 bits would round away pass by pass and clip at full within the frame,
+  // before the dose is even applied. 32-bit where the GPU can render into and blend it, since even
+  // half-float stalls: with a 10-bit mantissa its step reaches 0.004 by a sum of 4, so a pass under
+  // half that rounds to nothing, and the meter's beam can pass the same height many times a window.
+  // Half-float otherwise (the accumulator already requires it).
+  let gpuTraceType =
+    gl.getExtension("OES_texture_float") && gl.getExtension("WEBGL_color_buffer_float") && gl.getExtension("EXT_float_blend")
+      ? gl.FLOAT
+      : half.HALF_FLOAT_OES;
+  let texGpuTrace = mkTex(gpuTraceType);
   let ping = [0, 1].map(() => ({ tex: mkTex(half.HALF_FLOAT_OES), fbo: gl.createFramebuffer() }));
   let src = 0;
   let sizedW = target.width;
   let sizedH = target.height;
 
-  // `strokeTrace`: renders into `texTrace` through its own framebuffer instead of uploading the
+  // `strokeTrace`: renders into `texGpuTrace` through its own framebuffer instead of uploading the
   // scratch canvas. Offered only when instancing, MAX blending and the program are all there.
   const instancing = gl.getExtension("ANGLE_instanced_arrays");
   const minmax = gl.getExtension("EXT_blend_minmax");
@@ -731,13 +742,14 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   const traceFbo = gl.createFramebuffer();
   const attachTrace = () => {
     gl.bindFramebuffer(gl.FRAMEBUFFER, traceFbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texTrace, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texGpuTrace, 0);
     const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     return ok;
   };
-  // What this frame's trace is: nothing yet, the scratch canvas (`begin()`), or rendered straight
-  // into `texTrace` (`strokeTrace`). `commit()` uploads, keeps or clears it to match.
+  // What this frame's trace is: nothing yet, the scratch canvas (`begin()`, uploaded to `texTrace`),
+  // or rendered straight into `texGpuTrace` (the GPU calls). `commit()` uploads, keeps or clears it
+  // to match.
   let trace: "none" | "canvas" | "gpu" = "none";
 
   // Status must be read while the FBO in question is *bound* — checking after unbinding inspects
@@ -754,6 +766,12 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     return ok;
   };
+  if (!attachTrace() && gpuTraceType === gl.FLOAT) {
+    // Offered but not renderable after all: half-float, as without the extensions.
+    gl.deleteTexture(texGpuTrace);
+    gpuTraceType = half.HALF_FLOAT_OES;
+    texGpuTrace = mkTex(gpuTraceType);
+  }
   if (!attach() || !attachTrace()) {
     for (const pp of ping) {
       gl.deleteTexture(pp.tex);
@@ -774,8 +792,10 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     sizedW = target.width;
     sizedH = target.height;
     gl.deleteTexture(texTrace);
+    gl.deleteTexture(texGpuTrace);
     for (const pp of ping) gl.deleteTexture(pp.tex);
     texTrace = mkTex(gl.UNSIGNED_BYTE);
+    texGpuTrace = mkTex(gpuTraceType);
     ping = ping.map((pp) => ({ tex: mkTex(half.HALF_FLOAT_OES), fbo: pp.fbo }));
     dead = !attach() || !attachTrace(); // fresh textures are zero-filled, so a resize also clears the trail
   };
@@ -1071,7 +1091,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         gl.useProgram(overProg);
         gl.uniform1i(overTex, 0);
         gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, texTrace);
+        gl.bindTexture(gl.TEXTURE_2D, texGpuTrace);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -1106,7 +1126,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         gl.clear(gl.COLOR_BUFFER_BIT);
       }
       gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, texTrace);
+      gl.bindTexture(gl.TEXTURE_2D, trace === "canvas" ? texTrace : texGpuTrace);
       if (trace === "canvas") gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, scratch.cv);
       trace = "none";
 
@@ -1285,6 +1305,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     },
     dispose() {
       gl.deleteTexture(texTrace);
+      gl.deleteTexture(texGpuTrace);
       gl.deleteFramebuffer(traceFbo);
       if (lineBuf) gl.deleteBuffer(lineBuf);
       if (lineProg) gl.deleteProgram(lineProg);

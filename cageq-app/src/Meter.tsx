@@ -53,8 +53,11 @@ type Params = {
   glow: number; // beam brightness at full (slow-beam) intensity; velocity glow dims it from here
   focus: number; // velocity-glow reference — see Vectorscope's own `focus` doc
   beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
+  /** Draw the beam on the GPU (`addSegments`, see phosphor.ts) rather than through Canvas 2D.
+   *  A switch only while the two are being compared. */
+  gpuTrace: boolean;
 };
-const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.21, focus: 90, beamWidth: 1.0 };
+const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.006, focus: 90, beamWidth: 1.0, gpuTrace: true };
 // The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
 // `doseMult` comment (same reasoning as Vectorscope.tsx's identical constant) for why this matters:
 // `glow`'s tuned defaults were dialed in under the OLD, refresh-rate-dependent dose behaviour, which
@@ -86,7 +89,11 @@ const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, no
 // value here (trailTau=0.3 is already close to it) while still being a fixed, non-arbitrary
 // reference. DEFAULTS.glow below is `old_glow * old_trailTau / TAU_REF` (0.07 * 0.3 / 0.1 = 0.21),
 // chosen so the shipped default renders identically to before the original decoupling change — only
-// the number's meaning moved, twice now.
+// the number's meaning moved, twice now. Then lowered to 0.006 for the GPU beam (`addSegments`), which
+// adds every pass of the beam where the Canvas 2D one counted a speed band's overlaps once: the beam
+// retraces the same column many times per window — every zero crossing sweeps it down to the floor
+// and back — so the bottom of the bar collects far more passes than the rest and blew out at the
+// old value. Tuned live, roughly.
 const TAU_REF = 0.1;
 const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05;
@@ -279,6 +286,9 @@ export function Meter({
     const bucketY0: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
     const bucketY1: Float64Array[] = Array.from({ length: VEL_BUCKETS }, () => new Float64Array(0));
     const bucketCount = new Int32Array(VEL_BUCKETS);
+    // The GPU path's segments instead (see `addSegments`): x0, y0, x1, y1, alpha each. Grown like
+    // the bucket buffers, never shrunk.
+    let segData = new Float32Array(0);
 
     // The 16 `rgba(...)` stroke-colour strings, one per bucket — depend only on the (fixed) accent
     // colour and `p.glow`, so they're rebuilt only when `glow` actually changes (a tuning-panel
@@ -294,7 +304,10 @@ export function Meter({
       const p = paramsRef.current;
 
       let doseMult = 1; // see the fresh-trace branch below for why this isn't always 1
-      const ctx = phos.begin();
+      // On the GPU path (`addSegments`) there's no canvas to start: a frame that draws nothing
+      // leaves an empty trace either way.
+      const gpu = p.gpuTrace && phos.addSegments !== undefined;
+      const ctx = gpu ? null : phos.begin();
       const s = scopeRef.current;
       if (s && s.signal && s.xy.length >= 4 && s !== drawn) {
         drawn = s;
@@ -334,7 +347,9 @@ export function Meter({
         // Upper bound on segments any one bucket could need this frame — grown only when a bigger
         // window arrives than any buffer seen so far (see the buffers' own doc above).
         const maxSegments = Math.max(1, Math.floor(xy.length / 2));
-        if (bucketCap < maxSegments) {
+        if (gpu && segData.length < maxSegments * 5) segData = new Float32Array(maxSegments * 5);
+        let segCount = 0;
+        if (!gpu && bucketCap < maxSegments) {
           bucketCap = maxSegments;
           for (let b = 0; b < VEL_BUCKETS; b++) {
             bucketY0[b] = new Float64Array(bucketCap);
@@ -352,41 +367,61 @@ export function Meter({
           if (!Number.isNaN(prevLin)) {
             const dist = Math.abs(lin - prevLin) * LIN_DIST_SCALE;
             const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
-            let b = (f * VEL_BUCKETS) | 0;
-            if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
-            const c = bucketCount[b]++;
-            bucketY0[b][c] = prevY;
-            bucketY1[b][c] = y;
+            if (gpu) {
+              // Each segment its own brightness, no buckets (those only batched Canvas 2D strokes):
+              // the 2D path's `b / (VEL_BUCKETS - 1)` with b = ⌊f·VEL_BUCKETS⌋, averaged over a
+              // bucket, so `glow` keeps the brightness it was tuned to, without the steps.
+              const o = 5 * segCount++;
+              segData[o] = cx;
+              segData[o + 1] = prevY;
+              segData[o + 2] = cx;
+              segData[o + 3] = y;
+              segData[o + 4] = p.glow * Math.min(1, Math.max(0, (f * VEL_BUCKETS - 0.5) / (VEL_BUCKETS - 1)));
+            } else {
+              let b = (f * VEL_BUCKETS) | 0;
+              if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
+              const c = bucketCount[b]++;
+              bucketY0[b][c] = prevY;
+              bucketY1[b][c] = y;
+            }
           }
           prevY = y;
           prevLin = lin;
         }
-        ctx.globalCompositeOperation = "lighter";
-        ctx.lineWidth = Math.max(1, W * p.beamWidth);
-        // Flat (not round) caps: consecutive samples landing in different velocity buckets are
-        // stroked separately, and round caps at their shared point would overlap and add into a
-        // bright dot at every such sample — see Vectorscope's identical note.
-        ctx.lineCap = "butt";
-        if (strokeCacheGlow !== p.glow) {
-          strokeCacheGlow = p.glow;
-          for (let b = 0; b < VEL_BUCKETS; b++) strokeStyles[b] = `rgba(${ar},${ag},${ab},${(p.glow * b) / (VEL_BUCKETS - 1)})`;
-        }
-        // Beam blanking: brightness ∝ velocity factor, reaching zero at the fastest bucket (a beam
-        // moving too fast to expose the phosphor draws nothing) — skip bucket 0.
-        for (let b = 1; b < VEL_BUCKETS; b++) {
-          const count = bucketCount[b];
-          if (count === 0) continue;
-          ctx.strokeStyle = strokeStyles[b];
-          ctx.beginPath();
-          const y0 = bucketY0[b];
-          const y1 = bucketY1[b];
-          for (let i = 0; i < count; i++) {
-            ctx.moveTo(cx, y0[i]);
-            ctx.lineTo(cx, y1[i]);
+        const lineWidth = Math.max(1, W * p.beamWidth);
+        if (!ctx) {
+          // Fully additive, like Vectorscope's: every segment adds its light, also where excursions
+          // of the same speed overlap. The 2D path below combines those once (one stroked path per
+          // bucket) and adds only across buckets.
+          phos.addSegments!({ data: segData, count: segCount, width: lineWidth, rgb: [ar, ag, ab] });
+        } else {
+          ctx.globalCompositeOperation = "lighter";
+          ctx.lineWidth = lineWidth;
+          // Flat (not round) caps: consecutive samples landing in different velocity buckets are
+          // stroked separately, and round caps at their shared point would overlap and add into a
+          // bright dot at every such sample — see Vectorscope's identical note.
+          ctx.lineCap = "butt";
+          if (strokeCacheGlow !== p.glow) {
+            strokeCacheGlow = p.glow;
+            for (let b = 0; b < VEL_BUCKETS; b++) strokeStyles[b] = `rgba(${ar},${ag},${ab},${(p.glow * b) / (VEL_BUCKETS - 1)})`;
           }
-          ctx.stroke();
+          // Beam blanking: brightness ∝ velocity factor, reaching zero at the fastest bucket (a beam
+          // moving too fast to expose the phosphor draws nothing) — skip bucket 0.
+          for (let b = 1; b < VEL_BUCKETS; b++) {
+            const count = bucketCount[b];
+            if (count === 0) continue;
+            ctx.strokeStyle = strokeStyles[b];
+            ctx.beginPath();
+            const y0 = bucketY0[b];
+            const y1 = bucketY1[b];
+            for (let i = 0; i < count; i++) {
+              ctx.moveTo(cx, y0[i]);
+              ctx.lineTo(cx, y1[i]);
+            }
+            ctx.stroke();
+          }
+          ctx.globalCompositeOperation = "source-over";
         }
-        ctx.globalCompositeOperation = "source-over";
       } else if (!s || !s.signal) {
         drawn = s; // idle: draw nothing this frame — the accumulator's own decay fades the trail out
       }
@@ -408,10 +443,14 @@ export function Meter({
   const num = (v: number | undefined) => (showNums && v != null ? fmt(v) : "—");
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  const CONTROLS: { key: keyof Params; label: string; hint: string; min: number; max: number; step: number }[] = [
+  type NumKey = Exclude<keyof Params, "gpuTrace">;
+  // `log`: the slider moves through the range by equal ratios instead of equal steps — for a range
+  // spanning a few hundred times, where a linear slider spends nearly all its travel on the top end.
+  const CONTROLS: { key: NumKey; label: string; hint: string; min: number; max: number; step: number; log?: boolean }[] = [
     { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 48, step: 1 },
-    { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.02, max: 1, step: 0.02 },
+    // Far below the other views' range: the additive beam deposits many passes per window (see DEFAULTS).
+    { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.0005, max: 0.4, step: 0.0001, log: true },
     { key: "focus", label: t("scope.focus"), hint: t("scope.focusHint"), min: 20, max: 200, step: 5.0 },
     { key: "beamWidth", label: t("scope.beam"), hint: t("scope.beamHint"), min: 0.1, max: 1, step: 0.05 },
   ];
@@ -444,23 +483,32 @@ export function Meter({
             </button>
           </div>
           {CONTROLS.map((cc) => {
-            const dp = cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : cc.step >= 0.01 ? 2 : 3;
+            const dp = cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : cc.step >= 0.01 ? 2 : cc.step >= 0.001 ? 3 : 4;
+            // A log slider runs 0..LOG_STEPS over ln(min)..ln(max); its value is rounded to `step`.
+            const LOG_STEPS = 400;
+            const span = Math.log(cc.max / cc.min);
+            const fromSlider = (v: number) => (cc.log ? Math.round((cc.min * Math.exp((v / LOG_STEPS) * span)) / cc.step) * cc.step : v);
+            const toSlider = (x: number) => (cc.log ? (Math.log(Math.max(x, cc.min) / cc.min) / span) * LOG_STEPS : x);
             return (
               <label key={cc.key} className="vs-tune-row" title={cc.hint}>
                 <span className="vs-tune-label">{cc.label}</span>
                 <input
                   name={`meter-${cc.key}`}
                   type="range"
-                  min={cc.min}
-                  max={cc.max}
-                  step={cc.step}
-                  value={params[cc.key]}
-                  onChange={(e) => set(cc.key, Number(e.currentTarget.value))}
+                  min={cc.log ? 0 : cc.min}
+                  max={cc.log ? LOG_STEPS : cc.max}
+                  step={cc.log ? 1 : cc.step}
+                  value={toSlider(params[cc.key])}
+                  onChange={(e) => set(cc.key, fromSlider(Number(e.currentTarget.value)))}
                 />
                 <b>{params[cc.key].toFixed(dp)}</b>
               </label>
             );
           })}
+          <label className="vs-tune-row vs-tune-check" title={t("scope.gpuTraceHint")}>
+            <span className="vs-tune-label">{t("scope.gpuTrace")}</span>
+            <input name="meter-gpu-trace" type="checkbox" checked={params.gpuTrace} onChange={(e) => set("gpuTrace", e.currentTarget.checked)} />
+          </label>
           <div className="vs-tune-sep" />
           {/* Restarts Integrated/Loudness Range/Peak Max only — momentary/short-term keep
               running (it's a full ebur128 reset under the hood, see `reset_lufs_meter`'s own doc,
