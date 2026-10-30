@@ -189,13 +189,17 @@ export function Vectorscope({
   // report a square box via `aspect-ratio:1`, but this stays correct even if that ever drifts.
   const [side, setSide] = useState(215);
   const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
-  // Pop-out (`fill`) only: cap the canvas backing-store resolution at whatever the pop-out window's
-  // own *actual* default size (760x800 — see App.tsx's `openScopeWindow`) first measures as, rather
-  // than letting it keep growing if the user maximizes or drags the window bigger, e.g. to a 4K
-  // display — CSS still stretches the same backing store to fill a larger box (a bit blurrier at
-  // large sizes), trading that for keeping draw cost bounded regardless of window size. Removing beam
-  // blanking (see git history) draws meaningfully more per frame now — a busy signal at an
-  // unconstrained 4K+ resolution could no longer keep up. The inline (non-`fill`) view is unaffected:
+  // Pop-out (`fill`) only, and only when the trace is drawn with Canvas 2D: cap the canvas
+  // backing-store resolution at whatever the pop-out window's own *actual* default size (760x800 —
+  // see App.tsx's `openScopeWindow`) first measures as, rather than letting it keep growing if the
+  // user maximizes or drags the window bigger, e.g. to a 4K display — CSS still stretches the same
+  // backing store to fill a larger box (a bit blurrier at large sizes), trading that for keeping
+  // draw cost bounded regardless of window size. Removing beam blanking (see git history) draws
+  // meaningfully more per frame now — a busy signal at an unconstrained 4K+ resolution could no
+  // longer keep up. The GPU trace (`addSegments`) doesn't need it: its CPU cost doesn't grow with
+  // the size at all (measured at 3200x3200: 240 fps, ~19% of a core, where Canvas 2D managed 191 fps
+  // at ~89%), and the GPU's own per-pixel passes stayed light there (~19% 3D-engine load against ~10%
+  // at the default size), so it runs at full resolution. The inline (non-`fill`) view is unaffected:
   // it's already bounded by the app's own fixed layout. Captured from the ResizeObserver's own first
   // real callback below, NOT derived from `side`'s initial (215) state during the first render — that
   // fallback is a generic placeholder for every use of this component, nowhere near the pop-out's own
@@ -222,7 +226,11 @@ export function Vectorscope({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fill]);
   const rawRes = Math.round(side * dpr);
-  const res = fill && maxFillResRef.current !== null ? Math.min(rawRes, maxFillResRef.current) : rawRes; // canvas backing-store resolution
+  // Whether the trace is actually on the GPU: the setting, and a GPU that offers the path (set once
+  // the phosphor exists, below).
+  const [gpuTraceOk, setGpuTraceOk] = useState(false);
+  const capped = fill && !(params.gpuTrace && gpuTraceOk) && maxFillResRef.current !== null;
+  const res = capped ? Math.min(rawRes, maxFillResRef.current!) : rawRes; // canvas backing-store resolution
 
   // The active EQ cascade (for undistort) + the built, crossfading inverse cascade. Rebuilt by
   // the rAF loop when the filters/rate change; state persists across frames. `null` until the
@@ -325,6 +333,7 @@ export function Vectorscope({
     if (!cv || !spotCv || !spotCtx) return;
     const phos = createPhosphor(cv);
     if (!phos) return;
+    setGpuTraceOk(phos.addSegments !== undefined);
     // See SpectrumScope.tsx's identical log — diagnosing a machine-specific "one view reads darker
     // than the others" report by checking whether any view silently fell back off the GPU
     // half-float accumulator (phosphor.ts's `precise`).
