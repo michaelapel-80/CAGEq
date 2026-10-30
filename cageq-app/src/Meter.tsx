@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { meterStream, scopeStream, type MeterData } from "./streams";
 import type { ScopeData } from "./Vectorscope";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
-import { useTunableParams } from "./useTunableParams";
+import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT } from "./appZoom";
 
 /**
@@ -54,7 +54,19 @@ type Params = {
   focus: number; // velocity-glow reference — see Vectorscope's own `focus` doc
   beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
 };
-const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.006, focus: 90, beamWidth: 1.0 };
+const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.002, focus: 90, beamWidth: 1.0 };
+/** Version 1: `glow` on the GPU beam's scale (see TAU_REF's doc). Every release before it shipped
+ *  0.21 for the Canvas 2D beam, so an older stored glow is scaled by the same 0.002 / 0.21 the
+ *  default moved by, keeping someone's preference relative to the default — but only from the old
+ *  slider's range (it started at 0.02): anything lower was already set on the new scale (a build
+ *  in between) and must not be scaled twice. */
+const METER_PARAMS_MIGRATION: ParamsMigration = {
+  version: 1,
+  migrate: (stored, from) =>
+    from < 1 && typeof stored.glow === "number" && stored.glow >= 0.02
+      ? { ...stored, glow: Number(((stored.glow * 0.002) / 0.21).toPrecision(3)) }
+      : stored,
+};
 // The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
 // `doseMult` comment (same reasoning as Vectorscope.tsx's identical constant) for why this matters:
 // `glow`'s tuned defaults were dialed in under the OLD, refresh-rate-dependent dose behaviour, which
@@ -86,11 +98,11 @@ const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, no
 // value here (trailTau=0.3 is already close to it) while still being a fixed, non-arbitrary
 // reference. DEFAULTS.glow below is `old_glow * old_trailTau / TAU_REF` (0.07 * 0.3 / 0.1 = 0.21),
 // chosen so the shipped default renders identically to before the original decoupling change — only
-// the number's meaning moved, twice now. Then lowered to 0.006 for the GPU beam (`addSegments`), which
+// the number's meaning moved, twice now. Then lowered to 0.002 for the GPU beam (`addSegments`), which
 // adds every pass of the beam where the Canvas 2D one counted a speed band's overlaps once: the beam
 // retraces the same column many times per window — every zero crossing sweeps it down to the floor
 // and back — so the bottom of the bar collects far more passes than the rest and blew out at the
-// old value. Tuned live, roughly.
+// old value. Tuned live. Stored settings from before are brought along by `METER_PARAMS_MIGRATION`.
 const TAU_REF = 0.1;
 const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05;
@@ -150,7 +162,7 @@ export function Meter({
   const [err, setErr] = useState<string | null>(null);
   const lastNums = useRef(0);
   const lastRate = useRef<number | null>(null);
-  const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-meter-params", DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory } = useTunableParams("cageq-meter-params", DEFAULTS, METER_PARAMS_MIGRATION);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -442,11 +454,13 @@ export function Meter({
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
   // `log`: the slider moves through the range by equal ratios instead of equal steps — for a range
   // spanning a few hundred times, where a linear slider spends nearly all its travel on the top end.
+  // Its value is rounded to three significant digits rather than to `step`, which a fixed step
+  // couldn't do evenly across such a range (unused for it).
   const CONTROLS: { key: keyof Params; label: string; hint: string; min: number; max: number; step: number; log?: boolean }[] = [
     { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 0.6, step: 0.01 },
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 48, step: 1 },
     // Far below the other views' range: the additive beam deposits many passes per window (see DEFAULTS).
-    { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.0005, max: 0.4, step: 0.0001, log: true },
+    { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.0002, max: 0.05, step: 0, log: true },
     { key: "focus", label: t("scope.focus"), hint: t("scope.focusHint"), min: 20, max: 200, step: 5.0 },
     { key: "beamWidth", label: t("scope.beam"), hint: t("scope.beamHint"), min: 0.1, max: 1, step: 0.05 },
   ];
@@ -483,7 +497,7 @@ export function Meter({
             // A log slider runs 0..LOG_STEPS over ln(min)..ln(max); its value is rounded to `step`.
             const LOG_STEPS = 400;
             const span = Math.log(cc.max / cc.min);
-            const fromSlider = (v: number) => (cc.log ? Math.round((cc.min * Math.exp((v / LOG_STEPS) * span)) / cc.step) * cc.step : v);
+            const fromSlider = (v: number) => (cc.log ? Number((cc.min * Math.exp((v / LOG_STEPS) * span)).toPrecision(3)) : v);
             const toSlider = (x: number) => (cc.log ? (Math.log(Math.max(x, cc.min) / cc.min) / span) * LOG_STEPS : x);
             return (
               <label key={cc.key} className="vs-tune-row" title={cc.hint}>
@@ -497,7 +511,7 @@ export function Meter({
                   value={toSlider(params[cc.key])}
                   onChange={(e) => set(cc.key, fromSlider(Number(e.currentTarget.value)))}
                 />
-                <b>{params[cc.key].toFixed(dp)}</b>
+                <b>{cc.log ? String(params[cc.key]) : params[cc.key].toFixed(dp)}</b>
               </label>
             );
           })}
