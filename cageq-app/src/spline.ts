@@ -59,3 +59,50 @@ export function traceSmooth(ctx: CanvasRenderingContext2D, xs: Float64Array, ys:
     ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, xs[i + 1], ys[i + 1]);
   }
 }
+
+/** Most pieces `tessellateSmooth` cuts one segment into. */
+const MAX_PIECES = 16;
+/** How far (px) a tessellated chord may stray from the true curve — well under a pixel, so the
+ *  polyline is indistinguishable from what `traceSmooth` strokes. */
+const FLATNESS_PX = 0.2;
+
+/** Points `tessellateSmooth` can write for `n` input points, at most — size its `out` for this. */
+export function tessellatedCapacity(n: number): number {
+  return Math.max(1, (n - 1) * MAX_PIECES + 1);
+}
+
+/** The curve `traceSmooth` draws, as a polyline for the GPU trace (phosphor.ts's
+ *  `strokeTrace`): the same Bezier per segment, cut into as many straight pieces as its curvature
+ *  needs to stay within `FLATNESS_PX` of the curve (a chord's error is at most an eighth of the
+ *  second derivative's bound over the square of the piece count). Writes interleaved x, y into
+ *  `out` (at least `tessellatedCapacity(n) * 2` long) and returns the number of points. */
+export function tessellateSmooth(xs: Float64Array, ys: Float64Array, n: number, out: Float32Array): number {
+  out[0] = xs[0];
+  out[1] = ys[0];
+  let k = 1;
+  for (let i = 0; i < n - 1; i++) {
+    const h = xs[i + 1] - xs[i];
+    const x0 = xs[i];
+    const y0 = ys[i];
+    const x1 = x0 + h / 3;
+    const y1 = y0 + (hermiteTangent(xs, ys, n, i) * h) / 3;
+    const x3 = xs[i + 1];
+    const y3 = ys[i + 1];
+    const x2 = x3 - h / 3;
+    const y2 = y3 - (hermiteTangent(xs, ys, n, i + 1) * h) / 3;
+    const dd = Math.max(Math.hypot(x0 - 2 * x1 + x2, y0 - 2 * y1 + y2), Math.hypot(x1 - 2 * x2 + x3, y1 - 2 * y2 + y3));
+    const pieces = Math.min(MAX_PIECES, Math.max(1, Math.ceil(Math.sqrt((6 * dd) / (8 * FLATNESS_PX)))));
+    for (let j = 1; j <= pieces; j++) {
+      const t = j / pieces;
+      const u = 1 - t;
+      const a = u * u * u;
+      const b = 3 * u * u * t;
+      const c = 3 * u * t * t;
+      const d = t * t * t;
+      out[2 * k] = a * x0 + b * x1 + c * x2 + d * x3;
+      out[2 * k + 1] = a * y0 + b * y1 + c * y2 + d * y3;
+      k++;
+    }
+  }
+  return k;
+}

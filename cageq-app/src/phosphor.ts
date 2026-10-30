@@ -150,10 +150,41 @@ const TAIL_FLOOR_PER_SEC = 0.0015;
 export const DOSE_REF_FPS = 240;
 const DOSE_REF_DT = 1 / DOSE_REF_FPS;
 
+/** A polyline drawn as one stroked path — see `Phosphor.strokeTrace`. */
+export type TraceStroke = {
+  /** Interleaved x, y per point, in the target canvas's pixels (y down). */
+  points: Float32Array;
+  /** How many points of `points` to draw. */
+  count: number;
+  /** Line width, px. Joins and caps are round, as with Canvas 2D's `"round"` `lineJoin`/`lineCap`. */
+  width: number;
+  /** Colour, 0..255 per channel. */
+  rgb: readonly [number, number, number];
+  /** A vertical alpha gradient: `alphaBottom` at `yBottom`, `alphaTop` at `yTop`, linear between
+   *  and held beyond — Canvas 2D's `createLinearGradient(0, yBottom, 0, yTop)` with those two stops. */
+  yBottom: number;
+  yTop: number;
+  alphaBottom: number;
+  alphaTop: number;
+};
+
 /** Shared surface of both backends — see the module comment for why the fallback exists. */
 export type Phosphor = {
   /** Clear and return the 2D context for this frame's trace. Sized to the target canvas. */
   begin(): CanvasRenderingContext2D;
+  /**
+   * Draw this frame's trace on the GPU, *instead of* `begin()` and a 2D stroke. Canvas 2D
+   * rasterizes a long, thick, anti-aliased path on the CPU (in the browser's GPU process) every
+   * frame, and that, not the upload or the accumulator, was the measured cost of these views: ~3 ms
+   * of CPU per frame for SpectrumScope's maximised curve, so most of a core at 240 Hz. Here each
+   * segment is a quad, anti-aliased in the shader from its distance to the segment, rendered
+   * straight into the trace texture; MAX blending merges the overlapping round caps into one
+   * covered shape, the way a single stroked path covers each pixel once.
+   *
+   * Only on the GL backend, and only where the GPU has what it needs (instancing, MAX blending):
+   * absent otherwise, so a caller keeps its 2D path for that case.
+   */
+  strokeTrace?(stroke: TraceStroke): void;
   /**
    * Decay the history (time constant `tau` seconds over `dt`), add this frame's trace, present.
    * `tail` multiplies `tau` for *faint* content only (1 = a plain single exponential), giving the
@@ -240,6 +271,39 @@ void main(){
 
 const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
 void main(){ gl_FragColor = texture2D(uTex, vUv); }`;
+
+// `strokeTrace`'s segments, one instance each: the shared quad (`aPos`, ±1 along and across the
+// segment) stretched over the segment from `aP0` to `aP1` (canvas px, y down), reaching `uR` past
+// it on every side — half the line width plus the anti-aliasing fringe. Instance i reads points i
+// and i+1 of the one point buffer (the same buffer bound twice, 8 bytes apart), so consecutive
+// segments share their ends.
+const VS_LINE = `attribute vec2 aPos; attribute vec2 aP0, aP1;
+uniform vec2 uSize; uniform float uR;
+varying vec2 vP, vA, vB;
+void main(){
+  vec2 d = aP1 - aP0;
+  float len = length(d);
+  vec2 dir = len > 1e-4 ? d / len : vec2(1.0, 0.0);
+  vec2 p = 0.5 * (aP0 + aP1) + dir * aPos.x * (0.5 * len + uR) + vec2(-dir.y, dir.x) * aPos.y * uR;
+  vP = p; vA = aP0; vB = aP1;
+  gl_Position = vec4(p.x / uSize.x * 2.0 - 1.0, 1.0 - p.y / uSize.y * 2.0, 0.0, 1.0);
+}`;
+
+// Coverage from the pixel centre's distance to the segment: full within half the width, falling
+// to nothing across one pixel at the edge — the analytic counterpart of Canvas 2D's anti-aliased
+// stroke. Unpremultiplied, like the uploaded canvas this stands in for (FS_ACCUM premultiplies).
+// The capsule ends make the round joins and caps; MAX blending keeps their overlaps from adding.
+const FS_LINE = `precision highp float;
+varying vec2 vP, vA, vB;
+uniform float uHalf; uniform vec3 uRgb; uniform vec4 uGrad;
+void main(){
+  vec2 ab = vB - vA;
+  float l2 = dot(ab, ab);
+  float t = l2 > 0.0 ? clamp(dot(vP - vA, ab) / l2, 0.0, 1.0) : 0.0;
+  float cov = clamp(uHalf + 0.5 - length(vP - (vA + ab * t)), 0.0, 1.0);
+  float g = clamp((vP.y - uGrad.x) / (uGrad.y - uGrad.x), 0.0, 1.0);
+  gl_FragColor = vec4(uRgb, cov * mix(uGrad.z, uGrad.w, g));
+}`;
 
 /** The wide (broad, faint halo) tier's target, in *fixed* pixels, not a fraction of the canvas —
  *  deliberately: the point of this tier is maximum softness/spread, and a fraction of a large
@@ -434,14 +498,14 @@ function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLSha
   return null;
 }
 
-function link(gl: WebGLRenderingContext, fsSrc: string): WebGLProgram | null {
-  const vs = compile(gl, gl.VERTEX_SHADER, VS_QUAD);
+function link(gl: WebGLRenderingContext, fsSrc: string, vsSrc = VS_QUAD, attribs = ["aPos"]): WebGLProgram | null {
+  const vs = compile(gl, gl.VERTEX_SHADER, vsSrc);
   const fs = compile(gl, gl.FRAGMENT_SHADER, fsSrc);
   const prog = gl.createProgram();
   if (!vs || !fs || !prog) return null;
   gl.attachShader(prog, vs);
   gl.attachShader(prog, fs);
-  gl.bindAttribLocation(prog, 0, "aPos");
+  attribs.forEach((a, i) => gl.bindAttribLocation(prog, i, a));
   gl.linkProgram(prog);
   if (gl.getProgramParameter(prog, gl.LINK_STATUS)) return prog;
   console.warn("[phosphor] program link failed:", gl.getProgramInfoLog(prog));
@@ -525,6 +589,31 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   let sizedW = target.width;
   let sizedH = target.height;
 
+  // `strokeTrace`: renders into `texTrace` through its own framebuffer instead of uploading the
+  // scratch canvas. Offered only when instancing, MAX blending and the program are all there.
+  const instancing = gl.getExtension("ANGLE_instanced_arrays");
+  const minmax = gl.getExtension("EXT_blend_minmax");
+  const lineProg = instancing && minmax ? link(gl, FS_LINE, VS_LINE, ["aPos", "aP0", "aP1"]) : null;
+  const lineU = lineProg && {
+    size: gl.getUniformLocation(lineProg, "uSize"),
+    r: gl.getUniformLocation(lineProg, "uR"),
+    half: gl.getUniformLocation(lineProg, "uHalf"),
+    rgb: gl.getUniformLocation(lineProg, "uRgb"),
+    grad: gl.getUniformLocation(lineProg, "uGrad"),
+  };
+  const lineBuf = lineProg ? gl.createBuffer() : null;
+  const traceFbo = gl.createFramebuffer();
+  const attachTrace = () => {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, traceFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texTrace, 0);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return ok;
+  };
+  // What this frame's trace is: nothing yet, the scratch canvas (`begin()`), or rendered straight
+  // into `texTrace` (`strokeTrace`). `commit()` uploads, keeps or clears it to match.
+  let trace: "none" | "canvas" | "gpu" = "none";
+
   // Status must be read while the FBO in question is *bound* — checking after unbinding inspects
   // the default framebuffer, which is always COMPLETE, so the validation silently passes and the
   // renderer then draws into an incomplete FBO every frame. That took down the GPU process (a
@@ -539,11 +628,12 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     return ok;
   };
-  if (!attach()) {
+  if (!attach() || !attachTrace()) {
     for (const pp of ping) {
       gl.deleteTexture(pp.tex);
       gl.deleteFramebuffer(pp.fbo);
     }
+    gl.deleteFramebuffer(traceFbo);
     return null;
   }
 
@@ -561,7 +651,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     for (const pp of ping) gl.deleteTexture(pp.tex);
     texTrace = mkTex(gl.UNSIGNED_BYTE);
     ping = ping.map((pp) => ({ tex: mkTex(half.HALF_FLOAT_OES), fbo: pp.fbo }));
-    dead = !attach(); // fresh textures are zero-filled, so a resize also clears the trail
+    dead = !attach() || !attachTrace(); // fresh textures are zero-filled, so a resize also clears the trail
   };
 
   // Bloom's four programs (brightpass/blur are shared between both tiers) and two pairs of small
@@ -728,23 +818,82 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     return true;
   };
 
+  const strokeTrace =
+    lineProg && lineU && lineBuf && instancing && minmax
+      ? (st: TraceStroke) => {
+          resize();
+          const W = target.width;
+          const H = target.height;
+          if (dead || W === 0 || H === 0 || gl.isContextLost()) return;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, traceFbo);
+          gl.viewport(0, 0, W, H);
+          if (trace !== "gpu") {
+            // The first stroke of the frame starts from an empty trace, as `begin()` does.
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            trace = "gpu";
+          }
+          if (st.count < 2) return;
+          gl.useProgram(lineProg);
+          const halfW = st.width / 2;
+          gl.uniform2f(lineU.size, W, H);
+          gl.uniform1f(lineU.r, halfW + 1);
+          gl.uniform1f(lineU.half, halfW);
+          gl.uniform3f(lineU.rgb, st.rgb[0] / 255, st.rgb[1] / 255, st.rgb[2] / 255);
+          gl.uniform4f(lineU.grad, st.yBottom, st.yTop, st.alphaBottom, st.alphaTop);
+          // The quad's corners on attribute 0, the points as two per-instance attributes: point i
+          // and point i + 1 of the same buffer.
+          gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+          gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+          gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
+          gl.bufferData(gl.ARRAY_BUFFER, st.points.subarray(0, st.count * 2), gl.DYNAMIC_DRAW);
+          gl.enableVertexAttribArray(1);
+          gl.enableVertexAttribArray(2);
+          gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 8, 0);
+          gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 8, 8);
+          instancing.vertexAttribDivisorANGLE(1, 1);
+          instancing.vertexAttribDivisorANGLE(2, 1);
+          gl.enable(gl.BLEND);
+          gl.blendEquation(minmax.MAX_EXT);
+          instancing.drawArraysInstancedANGLE(gl.TRIANGLE_STRIP, 0, 4, st.count - 1);
+          // Back to the state every other pass here assumes: no blending, plain attribute 0.
+          gl.disable(gl.BLEND);
+          gl.blendEquation(gl.FUNC_ADD);
+          instancing.vertexAttribDivisorANGLE(1, 0);
+          instancing.vertexAttribDivisorANGLE(2, 0);
+          gl.disableVertexAttribArray(1);
+          gl.disableVertexAttribArray(2);
+          gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+        }
+      : undefined;
+
   return {
     precise: true,
     begin() {
       resize();
       scratch.sync();
       scratch.ctx!.clearRect(0, 0, target.width, target.height);
+      trace = "canvas";
       return scratch.ctx!;
     },
+    strokeTrace,
     commit(dt, tau, tail = 1, doseMult = 1, bloomIntensity = 0, bloomWide = 0) {
       const W = target.width;
       const H = target.height;
       if (dead || W === 0 || H === 0 || gl.isContextLost()) return;
       const dst = 1 - src;
 
+      // This frame's trace: upload the scratch canvas, keep what `strokeTrace` rendered, or clear
+      // it when nothing was drawn at all.
+      if (trace === "none") {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, traceFbo);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, texTrace);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, scratch.cv);
+      if (trace === "canvas") gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, scratch.cv);
+      trace = "none";
 
       gl.bindBuffer(gl.ARRAY_BUFFER, quad);
       gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
@@ -921,6 +1070,9 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     },
     dispose() {
       gl.deleteTexture(texTrace);
+      gl.deleteFramebuffer(traceFbo);
+      if (lineBuf) gl.deleteBuffer(lineBuf);
+      if (lineProg) gl.deleteProgram(lineProg);
       for (const pp of ping) {
         gl.deleteTexture(pp.tex);
         gl.deleteFramebuffer(pp.fbo);

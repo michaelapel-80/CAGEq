@@ -162,6 +162,8 @@
     "hazeHint": "Breite, schwache Glühintensität um die Spur",
     "floor": "Untergrenze",
     "floorHint": "Untere Grenze des Pegelbereichs (dBFS); alles Leisere fällt aus dem Bild",
+    "gpuTrace": "GPU-Spur",
+    "gpuTraceHint": "Die Spur auf der GPU zeichnen (neuer Renderer) statt mit Canvas 2D — ein Schalter zum Vergleichen der beiden",
     "rotate": "Drehen",
     "rotateHint": "Aus: rohe X-Y-Darstellung — Mono erscheint als 45°-Diagonale, die Ausrichtung, für die Oszilloskop-Musik komponiert wird. An: gedreht, sodass Mono senkrecht erscheint, Gegenphase waagerecht.",
     "undistort": "Entzerren",

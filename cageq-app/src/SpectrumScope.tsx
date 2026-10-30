@@ -8,7 +8,7 @@ import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
 import { TiltGlyph } from "./TiltGlyph";
 import { spectrumStream } from "./streams";
 import { createPhosphor } from "./phosphor";
-import { traceSmooth } from "./spline";
+import { tessellatedCapacity, tessellateSmooth, traceSmooth } from "./spline";
 import { useTunableParams } from "./useTunableParams";
 import { FftSizeRow, type SpectrumData } from "./EqChart";
 import type { ScopeEq } from "./Vectorscope";
@@ -51,8 +51,11 @@ type Params = {
   // the other only on an explicit "save as default", was confusing rather than helpful). Default
   // "rta": most people want this on and are the ones actually reading real levels off the curve.
   tilt: TiltMode;
+  /** Draw the trace on the GPU (`strokeTrace`, see phosphor.ts) rather than through Canvas 2D.
+   *  A switch only while the two are being compared. */
+  gpuTrace: boolean;
 };
-const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, floor: -90, undistort: true, linear: false, tilt: "rta" };
+const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, floor: -90, undistort: true, linear: false, tilt: "rta", gpuTrace: true };
 // Curated Trail/Tail/Glow combinations. The Trail/Glow orthogonality fix below (`TAU_REF/trailTau`
 // in doseMult) keeps *steady-state* brightness independent of trailTau in theory, but live tuning
 // of "distribution" showed glow still needs its own adjustment to get the actual density read
@@ -645,6 +648,8 @@ export function SpectrumScope({
     // (the window-drag stutter fix). NaN marks "not yet initialized" so a fresh bin snaps straight
     // to target instead of animating in from zero.
     let yScratchSmooth = new Float64Array(0).fill(NaN);
+    // The tessellated curve for the GPU trace — see `tessellateSmooth`. Grown, never shrunk.
+    let tessScratch = new Float32Array(0);
 
     const render = () => {
       const now = performance.now();
@@ -656,13 +661,15 @@ export function SpectrumScope({
       const plotTop = H * 0.03;
       const plotBot = H * 0.97;
 
-      const ctx = phos.begin();
+      // The trace is drawn on the GPU (`strokeTrace`) unless switched off for comparison or on the
+      // 8-bit fallback, which has no GPU path; then through the 2D scratch canvas as before.
+      const ctx = p.gpuTrace && phos.strokeTrace ? null : phos.begin();
       // Additive, not source-over: source-over is a weighted blend *toward* the stroke colour, so
       // repeated strokes converge on fully-opaque accent blue and stop — it structurally cannot
       // exceed its own hue however many stack. "lighter" sums R/G/B independently with no hue
       // ceiling, so a genuine dwell keeps adding light until each channel clips, i.e. white. Set
       // every frame because a canvas resize resets the whole 2D context state.
-      ctx.globalCompositeOperation = "lighter";
+      if (ctx) ctx.globalCompositeOperation = "lighter";
 
       const s = curRef.current;
       const n = (p.linear ? s?.db_lin.length : s?.db.length) ?? 0;
@@ -677,17 +684,22 @@ export function SpectrumScope({
       markCtx.clearRect(0, 0, W, H);
       if (n >= 2 && s && s.signal) {
         const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s, sampleRateRef.current, dt * 1000, p.linear) : null;
-        const key = `${plotTop}|${plotBot}|${ar},${ag},${ab}|${p.glow}`;
-        if (key !== gradKey) {
-          gradKey = key;
-          grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
-          grad.addColorStop(0, `rgba(${ar},${ag},${ab},${p.glow * 0.35})`);
-          grad.addColorStop(1, `rgba(${ar},${ag},${ab},${p.glow})`);
+        const lineWidth = Math.max(1, H / REF_SIZE) * 2;
+        // Faint at the floor, full `glow` at the top: a vertical gradient, both ways of drawing.
+        const alphaBottom = p.glow * 0.35;
+        if (ctx) {
+          const key = `${plotTop}|${plotBot}|${ar},${ag},${ab}|${p.glow}`;
+          if (key !== gradKey) {
+            gradKey = key;
+            grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
+            grad.addColorStop(0, `rgba(${ar},${ag},${ab},${alphaBottom})`);
+            grad.addColorStop(1, `rgba(${ar},${ag},${ab},${p.glow})`);
+          }
+          ctx.strokeStyle = grad!;
+          ctx.lineWidth = lineWidth;
+          ctx.lineJoin = "round";
+          ctx.lineCap = "round";
         }
-        ctx.strokeStyle = grad!;
-        ctx.lineWidth = Math.max(1, H / REF_SIZE) * 2;
-        ctx.lineJoin = "round";
-        ctx.lineCap = "round";
 
         if (xScratch.length < n) {
           xScratch = new Float64Array(n);
@@ -748,9 +760,24 @@ export function SpectrumScope({
           yScratchSmooth[i] = Number.isNaN(yScratchSmooth[i]) ? yScratch[i] : yScratch[i] + (yScratchSmooth[i] - yScratch[i]) * smoothK;
         }
         // n >= 2 already guaranteed by the outer `if`.
-        ctx.beginPath();
-        traceSmooth(ctx, xScratch, yScratchSmooth, n);
-        ctx.stroke();
+        if (ctx) {
+          ctx.beginPath();
+          traceSmooth(ctx, xScratch, yScratchSmooth, n);
+          ctx.stroke();
+        } else {
+          const cap = tessellatedCapacity(n) * 2;
+          if (tessScratch.length < cap) tessScratch = new Float32Array(cap);
+          phos.strokeTrace!({
+            points: tessScratch,
+            count: tessellateSmooth(xScratch, yScratchSmooth, n, tessScratch),
+            width: lineWidth,
+            rgb: [ar, ag, ab],
+            yBottom: plotBot,
+            yTop: plotTop,
+            alphaBottom,
+            alphaTop: p.glow,
+          });
+        }
 
         // Peak crosses: recomputed and redrawn every frame (not throttled — see below), so they
         // track the live trace exactly as fluidly as the trace itself does. (Layer already cleared
@@ -1109,6 +1136,10 @@ export function SpectrumScope({
             <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHint")}>
               <span className="vs-tune-label">{t("scope.undistort")}</span>
               <input name="spectrum-undistort" type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
+            </label>
+            <label className="vs-tune-row vs-tune-check" title={t("scope.gpuTraceHint")}>
+              <span className="vs-tune-label">{t("scope.gpuTrace")}</span>
+              <input name="spectrum-gpu-trace" type="checkbox" checked={params.gpuTrace} onChange={(e) => set("gpuTrace", e.currentTarget.checked)} />
             </label>
             <div className="vs-tune-row vs-tune-check" title={t("scope.tiltHint")}>
               <span className="vs-tune-label">{t("scope.tilt")}</span>
