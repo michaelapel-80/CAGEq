@@ -34,6 +34,8 @@ type Params = {
   haze: number; // broad, faint glow intensity (phosphor.ts's bloomWide) — 0 = off
   saturation: number; // the phosphor's saturation (phosphor.ts's setTone) — 0 = linear
   contrast: number; // the display response, intensity^contrast (phosphor.ts's setTone) — 1 = linear
+  headroom: number; // how far past the display's white the phosphor saturates (phosphor.ts's setTone) — 1 = at white
+  bloomWhite: number; // the bloom's colour, 0 the beam's hue to 1 white (phosphor.ts's setTone)
   bwLimit: number; // the GPU trace's bandwidth limit, a Gaussian low-pass this many px wide — 0 = off
   undistort: boolean;
   msPerDivIdx: number;
@@ -93,7 +95,24 @@ function boxBlur(src: Float32Array, dst: Float32Array, n: number, w: number): vo
 // trailTau/tail/glow: the Fast preset's values. The steady trigger leaves no smear for a trail to
 // hide, so an instant, unsmeared trace is the better first view; the former defaults live on as
 // the Smooth preset.
-const DEFAULTS: Params = { trailTau: 0.02, tail: 1, glow: 2.0, beam: 1.0, bloom: 0.8, haze: 0.6, saturation: 2.0, contrast: 2.2, bwLimit: 1.4, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 60, mode: "mix" }; // 5 ms/div × 10 = 50 ms
+const DEFAULTS: Params = {
+  trailTau: 0.02,
+  tail: 1,
+  glow: 2.0,
+  beam: 1.0,
+  bloom: 0.8,
+  haze: 0.2,
+  saturation: 2.0,
+  contrast: 1.5,
+  headroom: 1.8,
+  bloomWhite: 0.1,
+  bwLimit: 1.4,
+  undistort: true,
+  msPerDivIdx: 4, // 5 ms/div × 10 = 50 ms
+  trigger: true,
+  triggerFilterHz: 60,
+  mode: "mix",
+};
 // Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
 // reasoning (shared verbatim: the Trail/Glow orthogonality fix keeps *steady-state* brightness
 // independent of trailTau in theory, but live tuning showed glow still needs its own adjustment
@@ -760,7 +779,7 @@ export function TimeScope() {
       }
 
       // 4) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
-      phos.setTone?.(p.saturation, p.contrast);
+      phos.setTone?.(p.saturation, p.contrast, p.headroom, p.bloomWhite);
       phos.commit(dt, p.trailTau, p.tail, doseMult, p.bloom, p.haze);
 
       raf = requestAnimationFrame(render);
@@ -773,7 +792,7 @@ export function TimeScope() {
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "tail" | "glow" | "beam" | "bloom" | "haze" | "saturation" | "contrast" | "bwLimit" | "triggerFilterHz";
+  type NumKey = "trailTau" | "tail" | "glow" | "beam" | "bloom" | "haze" | "saturation" | "contrast" | "headroom" | "bloomWhite" | "bwLimit" | "triggerFilterHz";
   const CONTROLS: { key: NumKey; label: string; hint: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 2.0, step: 0.01 },
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 64, step: 1 },
@@ -783,6 +802,8 @@ export function TimeScope() {
     { key: "haze", label: t("scope.haze"), hint: t("scope.hazeHint"), min: 0, max: 4, step: 0.05 },
     { key: "saturation", label: t("scope.saturation"), hint: t("scope.saturationHint"), min: 0, max: 10, step: 0.1 },
     { key: "contrast", label: t("scope.contrast"), hint: t("scope.contrastHint"), min: 1, max: 3, step: 0.05 },
+    { key: "headroom", label: t("scope.headroom"), hint: t("scope.headroomHint"), min: 0.5, max: 8, step: 0.05 },
+    { key: "bloomWhite", label: t("scope.bloomWhite"), hint: t("scope.bloomWhiteHint"), min: 0, max: 1, step: 0.05 },
     { key: "bwLimit", label: t("scope.bwLimit"), hint: t("scope.bwLimitHint"), min: 0, max: 3, step: 0.1 },
     { key: "triggerFilterHz", label: t("scope.trigFilter"), hint: t("scope.trigFilterHint"), min: 20, max: 1000, step: 10 },
   ];

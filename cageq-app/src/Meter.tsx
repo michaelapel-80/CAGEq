@@ -55,9 +55,10 @@ type Params = {
   beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
   saturation: number; // the phosphor's saturation (phosphor.ts's setTone) — 0 = linear
   contrast: number; // the display response, intensity^contrast (phosphor.ts's setTone) — 1 = linear
+  headroom: number; // how far past the display's white the phosphor saturates (phosphor.ts's setTone) — 1 = at white
 };
 // Live-tuned for linear light (PhosphorOptions' `linearLight`) and the tone stage.
-const DEFAULTS: Params = { trailTau: 0.3, tail: 6, glow: 0.005, beamWidth: 1.0, saturation: 1.0, contrast: 2.2 };
+const DEFAULTS: Params = { trailTau: 0.3, tail: 6, glow: 0.005, beamWidth: 1.0, saturation: 1.0, contrast: 2.2, headroom: 1 };
 // The factor glow's default moved by with linear light (0.002 -> 0.005). The Canvas 2D fallback,
 // still drawing encoded values, divides it back out, so it keeps the look it had.
 const LINEAR_GLOW_SCALE = 0.005 / 0.002;
@@ -508,7 +509,7 @@ export function Meter({
         drawn = s; // idle: draw nothing this frame — the accumulator's own decay fades the trail out
       }
 
-      phos.setTone?.(p.saturation, p.contrast);
+      phos.setTone?.(p.saturation, p.contrast, p.headroom);
       phos.commit(dt, p.trailTau, p.tail, doseMult);
       raf = requestAnimationFrame(render);
     };
@@ -538,6 +539,7 @@ export function Meter({
     { key: "beamWidth", label: t("scope.beam"), hint: t("scope.beamHint"), min: 0.1, max: 1, step: 0.05 },
     { key: "saturation", label: t("scope.saturation"), hint: t("scope.saturationHint"), min: 0, max: 10, step: 0.1 },
     { key: "contrast", label: t("scope.contrast"), hint: t("scope.contrastHint"), min: 1, max: 3, step: 0.05 },
+    { key: "headroom", label: t("scope.headroom"), hint: t("scope.headroomHint"), min: 0.5, max: 8, step: 0.05 },
   ];
 
   return (

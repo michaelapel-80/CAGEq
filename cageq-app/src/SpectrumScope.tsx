@@ -9,7 +9,7 @@ import { TiltGlyph } from "./TiltGlyph";
 import { spectrumStream } from "./streams";
 import { createPhosphor } from "./phosphor";
 import { tessellatedCapacity, tessellateSmooth, traceSmooth } from "./spline";
-import { useTunableParams } from "./useTunableParams";
+import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { FftSizeRow, type SpectrumData } from "./EqChart";
 import type { ScopeEq } from "./Vectorscope";
 import { APP_ZOOM_EVENT } from "./appZoom";
@@ -25,8 +25,8 @@ import { fmtSnappedHz, noteShift, snapBin, snapRequested, snapSpan, SNAP_SPAN_CO
  *  backend's already-FFT'd, already-log-binned dB values. */
 // bloom/haze: phosphor.ts's opt-in glow tiers (see Vectorscope.tsx's own Params doc, tried there
 // first) — a log-frequency curve rather than a dwelling point/beam was the one content shape this
-// hadn't been tried against yet; confirmed live to fit better than expected, enabled by default
-// with its own tuned numbers rather than Vectorscope's/TimeScope's.
+// hadn't been tried against yet; confirmed live to fit better than expected, so enabled by default
+// (see DEFAULTS for the numbers since linear light).
 // `linear` picks SpectrumUpdate's linear-axis bins (`db_lin`/`peak_db_lin`, constant-Hz spacing)
 // over the default log ones — pure per-viewer display choice, unlike `fftSize`/`harmonicFold`
 // (App.tsx-owned, since those are enforced by the one shared backend monitor): the backend always
@@ -41,6 +41,10 @@ type Params = {
   glow: number;
   bloom: number;
   haze: number;
+  saturation: number; // the phosphor's saturation (phosphor.ts's setTone) — 0 = linear
+  contrast: number; // the display response, intensity^contrast (phosphor.ts's setTone) — 1 = linear
+  headroom: number; // how far past the display's white the phosphor saturates (phosphor.ts's setTone) — 1 = at white
+  bloomWhite: number; // the bloom's colour, 0 the beam's hue to 1 white (phosphor.ts's setTone)
   /** Bottom of the display range, dBFS (the top is SPEC_TOP_DB). */
   floor: number;
   undistort: boolean;
@@ -52,7 +56,31 @@ type Params = {
   // "rta": most people want this on and are the ones actually reading real levels off the curve.
   tilt: TiltMode;
 };
-const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze: 0.8, floor: -90, undistort: true, linear: false, tilt: "rta" };
+// Live-tuned for linear light (PhosphorOptions' `linearLight`) and the tone stage.
+const DEFAULTS: Params = {
+  trailTau: 0.1,
+  tail: 6,
+  glow: 0.1,
+  bloom: 0.3,
+  haze: 0.4,
+  saturation: 2.0,
+  contrast: 1.8,
+  headroom: 4.0,
+  bloomWhite: 0.5,
+  floor: -90,
+  undistort: true,
+  linear: false,
+  tilt: "rta",
+};
+// The Canvas 2D fallback still draws encoded values, as before linear light: scaled back by the
+// factor glow's default moved by (0.2 -> 0.1), so it keeps the look it had.
+const FALLBACK_GLOW_SCALE = 0.2 / 0.1;
+// Stored settings from before linear light (v1): glow, bloom and haze meant something else there
+// (encoded values, a thresholded bloom), so they take the new defaults.
+const SPECTRUM_PARAMS_MIGRATION: ParamsMigration = {
+  version: 1,
+  migrate: (stored, from) => (from < 1 ? { ...stored, glow: DEFAULTS.glow, bloom: DEFAULTS.bloom, haze: DEFAULTS.haze } : stored),
+};
 // Curated Trail/Tail/Glow combinations. The Trail/Glow orthogonality fix below (`TAU_REF/trailTau`
 // in doseMult) keeps *steady-state* brightness independent of trailTau in theory, but live tuning
 // of "distribution" showed glow still needs its own adjustment to get the actual density read
@@ -62,8 +90,8 @@ const DEFAULTS: Params = { trailTau: 0.2, tail: 18, glow: 0.2, bloom: 0.8, haze:
 // dense electronic material than slowing the FFT itself (which only ever collapses to one averaged
 // number per bin). Numbers below are a starting point for that live tuning, not the final word.
 const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" | "glow">> = {
-  fast: { trailTau: 0.05, tail: 4, glow: 0.1 },
-  distribution: { trailTau: 1.4, tail: 6, glow: 0.3 },
+  fast: { trailTau: 0.02, tail: 1, glow: 0.1 },
+  distribution: { trailTau: 2.0, tail: 64, glow: 0.4 },
 };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
@@ -446,7 +474,7 @@ export function SpectrumScope({
   const cursorHzRef = useRef<HTMLSpanElement | null>(null);
   const cursorDbRef = useRef<HTMLSpanElement | null>(null);
   const cursorHintRef = useRef<HTMLSpanElement | null>(null); // the faint "⇧": Shift would snap here
-  const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-spectrum-params", DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-spectrum-params", DEFAULTS, SPECTRUM_PARAMS_MIGRATION);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -577,7 +605,8 @@ export function SpectrumScope({
     const markCv = markRef.current;
     const markCtx = markCv?.getContext("2d");
     if (!cv || !markCv || !markCtx) return;
-    const phos = createPhosphor(cv);
+    // Linear light: the trace's light adds and decays as light (see PhosphorOptions).
+    const phos = createPhosphor(cv, { linearLight: true });
     if (!phos) return;
     // Reported live: this view specifically (not TimeScope/Vectorscope) reads much darker on some
     // machines. `precise` (see phosphor.ts) was built for exactly this — silently falling back from
@@ -689,8 +718,8 @@ export function SpectrumScope({
           if (key !== gradKey) {
             gradKey = key;
             grad = ctx.createLinearGradient(0, plotBot, 0, plotTop);
-            grad.addColorStop(0, `rgba(${ar},${ag},${ab},${alphaBottom})`);
-            grad.addColorStop(1, `rgba(${ar},${ag},${ab},${p.glow})`);
+            grad.addColorStop(0, `rgba(${ar},${ag},${ab},${alphaBottom * FALLBACK_GLOW_SCALE})`);
+            grad.addColorStop(1, `rgba(${ar},${ag},${ab},${p.glow * FALLBACK_GLOW_SCALE})`);
           }
           ctx.strokeStyle = grad!;
           ctx.lineWidth = lineWidth;
@@ -960,6 +989,7 @@ export function SpectrumScope({
       }
 
       // TAU_REF/p.trailTau is the Trail/Glow orthogonality fix — see TAU_REF's own doc.
+      phos.setTone?.(p.saturation, p.contrast, p.headroom, p.bloomWhite);
       phos.commit(dt, p.trailTau, p.tail, TAU_REF / p.trailTau, p.bloom, p.haze);
       raf = requestAnimationFrame(render);
     };
@@ -984,13 +1014,17 @@ export function SpectrumScope({
   };
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "tail" | "glow" | "bloom" | "haze" | "floor";
+  type NumKey = "trailTau" | "tail" | "glow" | "bloom" | "haze" | "saturation" | "contrast" | "headroom" | "bloomWhite" | "floor";
   const CONTROLS: { key: NumKey; label: string; hint: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 2.0, step: 0.01 },
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.02, max: 1, step: 0.02 },
     { key: "bloom", label: t("scope.bloom"), hint: t("scope.bloomHint"), min: 0, max: 2, step: 0.05 },
     { key: "haze", label: t("scope.haze"), hint: t("scope.hazeHint"), min: 0, max: 4, step: 0.05 },
+    { key: "saturation", label: t("scope.saturation"), hint: t("scope.saturationHint"), min: 0, max: 10, step: 0.1 },
+    { key: "contrast", label: t("scope.contrast"), hint: t("scope.contrastHint"), min: 1, max: 3, step: 0.05 },
+    { key: "headroom", label: t("scope.headroom"), hint: t("scope.headroomHint"), min: 0.5, max: 8, step: 0.05 },
+    { key: "bloomWhite", label: t("scope.bloomWhite"), hint: t("scope.bloomWhiteHint"), min: 0, max: 1, step: 0.05 },
     { key: "floor", label: t("scope.floor"), hint: t("scope.floorHint"), min: -150, max: -30, step: 5 },
   ];
 

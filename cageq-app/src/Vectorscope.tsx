@@ -48,6 +48,8 @@ type Params = {
   //               of ballooning (see phosphor.ts's own `commit()` doc for why that distinction matters)
   saturation: number; // the phosphor's saturation (phosphor.ts's setTone) — 0 = linear
   contrast: number; // the display response, intensity^contrast (phosphor.ts's setTone) — 1 = linear
+  headroom: number; // how far past the display's white the phosphor saturates (phosphor.ts's setTone) — 1 = at white
+  bloomWhite: number; // the bloom's colour, 0 the beam's hue to 1 white (phosphor.ts's setTone)
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
   labels: boolean; // the graticule's L/R/M/S letters
@@ -65,7 +67,7 @@ const PRESETS: Record<"fast" | "distribution", { trailTau: number; tail: number;
 const DEFAULTS: Params = {
   trailTau: 0.06,
   tail: 2,
-  glow: 1.5,
+  glow: 1.0,
   beam: 0.6,
   radiusFrac: 0.48,
   gridAlpha: 0.22,
@@ -73,13 +75,15 @@ const DEFAULTS: Params = {
   haze: 0.4,
   saturation: 1.0,
   contrast: 2.2,
+  headroom: 1.8,
+  bloomWhite: 0.1,
   rotate: false,
   invert: true,
   labels: true,
 };
 // The Canvas 2D fallback still draws at alpha = glow, as before linear light: scaled back by the
-// factor glow's default moved by (0.32 -> 1.5), so it keeps the look it had.
-const FALLBACK_GLOW_SCALE = 0.32 / 1.5;
+// factor glow's default moved by (0.32 -> 1.0), so it keeps the look it had.
+const FALLBACK_GLOW_SCALE = 0.32 / 1.0;
 // Stored settings from before linear light (v1): glow, bloom and haze meant something else there
 // (encoded values, a thresholded bloom), so they take the new defaults.
 const VECTORSCOPE_PARAMS_MIGRATION: ParamsMigration = {
@@ -634,7 +638,7 @@ export function Vectorscope({
       }
 
       // 3) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
-      phos.setTone?.(p.saturation, p.contrast);
+      phos.setTone?.(p.saturation, p.contrast, p.headroom, p.bloomWhite);
       phos.commit(dt, p.trailTau, p.tail, doseMult, p.bloom, p.haze);
 
       raf = requestAnimationFrame(render);
@@ -658,6 +662,8 @@ export function Vectorscope({
     { key: "haze", label: t("scope.haze"), hint: t("scope.hazeHint"), min: 0, max: 4, step: 0.05 },
     { key: "saturation", label: t("scope.saturation"), hint: t("scope.saturationHint"), min: 0, max: 10, step: 0.1 },
     { key: "contrast", label: t("scope.contrast"), hint: t("scope.contrastHint"), min: 1, max: 3, step: 0.05 },
+    { key: "headroom", label: t("scope.headroom"), hint: t("scope.headroomHint"), min: 0.5, max: 8, step: 0.05 },
+    { key: "bloomWhite", label: t("scope.bloomWhite"), hint: t("scope.bloomWhiteHint"), min: 0, max: 1, step: 0.05 },
   ];
 
   // Inline (not fill): `.vectorscope-wrap:not(.fill)` is already an exact CSS square
