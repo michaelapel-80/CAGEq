@@ -59,22 +59,22 @@ type Params = {
 // Live-tuned for linear light (PhosphorOptions' `linearLight`) and the tone stage.
 const DEFAULTS: Params = {
   trailTau: 0.1,
-  tail: 6,
-  glow: 0.1,
+  tail: 3,
+  glow: 0.24,
   bloom: 0.3,
-  haze: 0.4,
-  saturation: 2.0,
-  contrast: 1.8,
-  headroom: 4.0,
-  bloomWhite: 0.5,
+  haze: 0.2,
+  saturation: 1.5,
+  contrast: 2.2,
+  headroom: 2.0,
+  bloomWhite: 0.6,
   floor: -90,
   undistort: true,
   linear: false,
   tilt: "rta",
 };
 // The Canvas 2D fallback still draws encoded values, as before linear light: scaled back by the
-// factor glow's default moved by (0.2 -> 0.1), so it keeps the look it had.
-const FALLBACK_GLOW_SCALE = 0.2 / 0.1;
+// factor glow's default moved by (0.2 -> 0.24), so it keeps the look it had.
+const FALLBACK_GLOW_SCALE = 0.2 / 0.24;
 // Stored settings from before linear light (v1): glow, bloom and haze meant something else there
 // (encoded values, a thresholded bloom), so they take the new defaults.
 const SPECTRUM_PARAMS_MIGRATION: ParamsMigration = {
@@ -91,7 +91,7 @@ const SPECTRUM_PARAMS_MIGRATION: ParamsMigration = {
 // number per bin). Numbers below are a starting point for that live tuning, not the final word.
 const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" | "glow">> = {
   fast: { trailTau: 0.02, tail: 1, glow: 0.1 },
-  distribution: { trailTau: 2.0, tail: 64, glow: 0.4 },
+  distribution: { trailTau: 2.0, tail: 64, glow: 0.7 },
 };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
@@ -112,6 +112,16 @@ const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" 
 // renders identically to before the original decoupling change — only the number's meaning moved,
 // twice now.
 const TAU_REF = 0.1;
+// The beam, as a swept analyser's: it crosses the frequency axis at a constant rate, once per
+// frame, at a fixed current, so every pixel of width gets the same energy, spread over however
+// much curve that width holds. Flat stretches of the spectrum burn bright; steep flanks, where the
+// beam covers far more height in the same time, are dim in proportion (a 45° flank at ~0.7, a
+// near-vertical one barely lit). That replaces the stroke's constant brightness and its fade
+// toward the floor, which only ever stood in for it: the floor's noise reads dim because it is
+// jagged, not because it is low. Energy per pixel of width = glow x this.
+const SWEEP_ENERGY = 1;
+// Shortest piece drawn: a piece of no length still deposits its energy, just on a tiny stretch.
+const MIN_SEG_PX = 0.05;
 
 function computeCorrectionCurve(eq: ScopeEq, s: SpectrumData, n: number, sampleRate: number | undefined, linear: boolean): Float64Array {
   const arr = new Float64Array(n);
@@ -674,8 +684,10 @@ export function SpectrumScope({
     // (the window-drag stutter fix). NaN marks "not yet initialized" so a fresh bin snaps straight
     // to target instead of animating in from zero.
     let yScratchSmooth = new Float64Array(0).fill(NaN);
-    // The tessellated curve for the GPU trace — see `tessellateSmooth`. Grown, never shrunk.
+    // The tessellated curve for the GPU trace — see `tessellateSmooth` — and its pieces as
+    // `addSegments` segments (x0, y0, x1, y1, alpha each). Grown, never shrunk.
     let tessScratch = new Float32Array(0);
+    let segData = new Float32Array(0);
 
     const render = () => {
       const now = performance.now();
@@ -711,9 +723,10 @@ export function SpectrumScope({
       if (n >= 2 && s && s.signal) {
         const corr = p.undistort ? getCorrection(corrCacheRef, eqRef.current, s, sampleRateRef.current, dt * 1000, p.linear) : null;
         const lineWidth = Math.max(1, H / REF_SIZE) * 2;
-        // Faint at the floor, full `glow` at the top: a vertical gradient, both ways of drawing.
-        const alphaBottom = p.glow * 0.35;
         if (ctx) {
+          // The fallback can't express the energy model (see SWEEP_ENERGY), so it keeps the earlier
+          // look: faint at the floor, full `glow` at the top, a vertical gradient.
+          const alphaBottom = p.glow * 0.35;
           const key = `${plotTop}|${plotBot}|${ar},${ag},${ab}|${p.glow}`;
           if (key !== gradKey) {
             gradKey = key;
@@ -791,18 +804,29 @@ export function SpectrumScope({
           traceSmooth(ctx, xScratch, yScratchSmooth, n);
           ctx.stroke();
         } else {
-          const cap = tessellatedCapacity(n) * 2;
-          if (tessScratch.length < cap) tessScratch = new Float32Array(cap);
-          phos.strokeTrace!({
-            points: tessScratch,
-            count: tessellateSmooth(xScratch, yScratchSmooth, n, tessScratch),
-            width: lineWidth,
-            rgb: [ar, ag, ab],
-            yBottom: plotBot,
-            yTop: plotTop,
-            alphaBottom,
-            alphaTop: p.glow,
-          });
+          const cap = tessellatedCapacity(n);
+          if (tessScratch.length < cap * 2) {
+            tessScratch = new Float32Array(cap * 2);
+            segData = new Float32Array(cap * 5);
+          }
+          const count = tessellateSmooth(xScratch, yScratchSmooth, n, tessScratch);
+          // The beam sweeps the frequency axis at a constant rate (see SWEEP_ENERGY): each piece
+          // of the curve gets the energy of the width it spans, spread over its own length.
+          const perPx = p.glow * SWEEP_ENERGY;
+          for (let k = 0; k < count - 1; k++) {
+            const x0 = tessScratch[2 * k];
+            const y0 = tessScratch[2 * k + 1];
+            const x1 = tessScratch[2 * k + 2];
+            const y1 = tessScratch[2 * k + 3];
+            const len = Math.hypot(x1 - x0, y1 - y0);
+            const o = 5 * k;
+            segData[o] = x0;
+            segData[o + 1] = y0;
+            segData[o + 2] = len < MIN_SEG_PX ? x0 + MIN_SEG_PX : x1;
+            segData[o + 3] = y1;
+            segData[o + 4] = (perPx * (x1 - x0)) / Math.max(MIN_SEG_PX, len);
+          }
+          phos.addSegments!({ data: segData, count: count - 1, width: lineWidth, rgb: [ar, ag, ab], round: true });
         }
 
         // Peak crosses: recomputed and redrawn every frame (not throttled — see below), so they
