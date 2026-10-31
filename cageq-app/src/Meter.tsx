@@ -50,11 +50,10 @@ const BAR_TOP_GAP = 14;
 type Params = {
   trailTau: number; // phosphor decay time constant (s)
   tail: number; // multiplies trailTau for *faint* content only — the long afterglow (see phosphor.ts)
-  glow: number; // beam brightness at full (slow-beam) intensity; velocity glow dims it from here
-  focus: number; // velocity-glow reference — see Vectorscope's own `focus` doc
+  glow: number; // beam current: the energy each sample deposits (see BEAM_ENERGY)
   beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
 };
-const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.002, focus: 90, beamWidth: 1.0 };
+const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.002, beamWidth: 1.0 };
 /** Version 1: `glow` on the GPU beam's scale (see TAU_REF's doc). Every release before it shipped
  *  0.21 for the Canvas 2D beam, so an older stored glow is scaled by the same 0.002 / 0.21 the
  *  default moved by, keeping someone's preference relative to the default — but only from the old
@@ -104,19 +103,45 @@ const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, no
 // and back — so the bottom of the bar collects far more passes than the rest and blew out at the
 // old value. Tuned live. Stored settings from before are brought along by `METER_PARAMS_MIGRATION`.
 const TAU_REF = 0.1;
+// The beam, as a CRT's: a fixed current, so every sample interval deposits the same energy,
+// spread over however far the beam travels on screen in that interval — a fast pass covers more
+// height and lights each pixel less. A height's brightness is then the time the level spends
+// there, whatever the frequency: a faster signal passes more often, but each pass is that much
+// fainter. (The earlier model gave every segment the same brightness per pixel, a velocity dimming
+// that almost never engaged at real audio speeds, so a longer, faster pass deposited more: over the
+// same second at the same level, a 5 kHz sine laid down 21x the light of a 100 Hz one; now within
+// 1%.) Movement is judged on screen, on the dB axis, not in linear amplitude: a zero crossing
+// sweeps the lower range fast, so it gets little light per pixel — no longer a blown-out floor.
+//
+// Energy per sample = glow x BEAM_ENERGY x bar height (so the same signal reads the same at any bar
+// height). First set so that glow 0.002, tuned live on the earlier model, deposited the same total
+// on music-like material (0.034); that earlier tuning had leaned low to keep high-frequency content
+// from blowing out, which this model no longer needs, so raised 1.4x on a live retune (to what glow
+// 0.0028 gave). Kept in this constant rather than the default, so the default stays the 0.002 that
+// v0.19.0 shipped and stored settings keep their meaning.
+const BEAM_ENERGY = 0.048;
+// Each sample interval is cut into pieces in *linear* amplitude, each mapped to dB, because the
+// level's path between two samples is curved on a dB axis: drawn as one straight segment, a step
+// toward a zero crossing spread its energy evenly down the lower range, which with only ~10 samples
+// per cycle at 5 kHz flattened the bottom of the profile. A piece per PIECE_PX of on-screen travel,
+// at most MAX_PIECES: matches the 100 Hz profile at 1 and 5 kHz to within ~0.05 of a band
+// (measured offline), at ~8 pieces per sample on music.
+const PIECE_PX = 4;
+const MAX_PIECES = 32;
+// Shortest segment drawn: a beam standing still still deposits its energy, just on a tiny stretch.
+const MIN_SEG_PX = 0.05;
+const toDbLin = (lin: number) => (lin > 0 ? 20 * Math.log10(lin) : -Infinity);
+
+// The 8-bit Canvas 2D fallback can't express the energy model (per-pixel alpha above 1, exact
+// sums), so it keeps the earlier one: velocity buckets, each segment at a brightness falling with
+// its speed in linear amplitude past FALLBACK_FOCUS.
 const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05;
 const VEL_REF_RATE = 48000;
-// Linear amplitude has no natural "pixels" — this is the arbitrary (but fixed, so `focus` stays a
-// meaningful, comparable knob) convention: a full -1..1 swing spans one bar-height's worth of
-// "distance" for velocity purposes, independent of the dB mapping used for the Y position below and
-// independent of the canvas's own resolution (unlike Vectorscope's pixel-space velocity, which does
-// scale with its tube size).
+// Linear amplitude has no natural "pixels" — this is the arbitrary (but fixed) convention: a full
+// -1..1 swing spans one bar-height's worth of "distance" for velocity purposes.
 const LIN_DIST_SCALE = 420;
-// Velocity MUST be measured in the signal's own linear domain, not after the dB mapping below — dB
-// compresses/distorts velocity (a fast linear zero-crossing becomes an even faster dB swing, log
-// diverging near zero), which was a real, confirmed bug in the spike before this was fixed.
-const toDbLin = (lin: number) => (lin > 0 ? 20 * Math.log10(lin) : -Infinity);
+const FALLBACK_FOCUS = 90;
 
 /** Parse a `#rrggbb` hex (the `--accent` CSS var) to [r,g,b]; a green phosphor fallback — the same
  *  small helper Vectorscope.tsx keeps privately for the identical purpose. */
@@ -351,12 +376,18 @@ export function Meter({
         const W = cv.width;
         const cx = W / 2;
         const rate = s.rate > 0 ? s.rate : 48000;
-        const kRef = Math.max(0.001, p.focus * (VEL_REF_RATE / rate));
+        const kRef = FALLBACK_FOCUS * (VEL_REF_RATE / rate);
+        const barH = cv.height;
+        const energy = p.glow * BEAM_ENERGY * barH;
+        // On-screen y of a level: the bar's dB scale, not clamped at its floor — quieter content
+        // runs off the bottom (down to one bar height below it) instead of piling up on the edge.
+        const yOf = (lin: number) => (1 - Math.max(-1, Math.min(1, (toDbLin(Math.abs(lin)) - LEVEL_MIN_DB) / -LEVEL_MIN_DB))) * barH;
+        const onScreen = (y: number) => Math.min(barH, Math.max(0, y));
         const xy = s.xy;
         // Upper bound on segments any one bucket could need this frame — grown only when a bigger
         // window arrives than any buffer seen so far (see the buffers' own doc above).
         const maxSegments = Math.max(1, Math.floor(xy.length / 2));
-        if (gpu && segData.length < maxSegments * 5) segData = new Float32Array(maxSegments * 5);
+        if (gpu && segData.length < maxSegments * MAX_PIECES * 5) segData = new Float32Array(maxSegments * MAX_PIECES * 5);
         let segCount = 0;
         if (!gpu && bucketCap < maxSegments) {
           bucketCap = maxSegments;
@@ -374,19 +405,27 @@ export function Meter({
           const frac = Math.max(0, Math.min(1, (db - LEVEL_MIN_DB) / -LEVEL_MIN_DB));
           const y = (1 - frac) * cv.height; // canvas y=0 (top) = 0 dBFS, matching the bar's own scale
           if (!Number.isNaN(prevLin)) {
-            const dist = Math.abs(lin - prevLin) * LIN_DIST_SCALE;
-            const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
             if (gpu) {
-              // Each segment its own brightness, no buckets (those only batched Canvas 2D strokes):
-              // the 2D path's `b / (VEL_BUCKETS - 1)` with b = ⌊f·VEL_BUCKETS⌋, averaged over a
-              // bucket, so `glow` keeps the brightness it was tuned to, without the steps.
-              const o = 5 * segCount++;
-              segData[o] = cx;
-              segData[o + 1] = prevY;
-              segData[o + 2] = cx;
-              segData[o + 3] = y;
-              segData[o + 4] = p.glow * Math.min(1, Math.max(0, (f * VEL_BUCKETS - 0.5) / (VEL_BUCKETS - 1)));
+              // This interval's energy, in pieces along its path (see BEAM_ENERGY, PIECE_PX), each
+              // spread over its own on-screen length.
+              const ya = yOf(prevLin);
+              const yb = yOf(lin);
+              const n = Math.min(MAX_PIECES, Math.max(1, Math.ceil(Math.abs(onScreen(yb) - onScreen(ya)) / PIECE_PX)));
+              let y0 = ya;
+              for (let j = 1; j <= n; j++) {
+                const y1 = j === n ? yb : yOf(prevLin + ((lin - prevLin) * j) / n);
+                const len = Math.max(MIN_SEG_PX, Math.abs(y1 - y0));
+                const o = 5 * segCount++;
+                segData[o] = cx;
+                segData[o + 1] = y0;
+                segData[o + 2] = cx;
+                segData[o + 3] = Math.abs(y1 - y0) < MIN_SEG_PX ? y0 + MIN_SEG_PX : y1;
+                segData[o + 4] = energy / n / len;
+                y0 = y1;
+              }
             } else {
+              const dist = Math.abs(lin - prevLin) * LIN_DIST_SCALE;
+              const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
               let b = (f * VEL_BUCKETS) | 0;
               if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
               const c = bucketCount[b]++;
@@ -399,10 +438,18 @@ export function Meter({
         }
         const lineWidth = Math.max(1, W * p.beamWidth);
         if (!ctx) {
-          // Fully additive, like Vectorscope's: every segment adds its light, also where excursions
-          // of the same speed overlap. The 2D path below combines those once (one stroked path per
-          // bucket) and adds only across buckets.
-          phos.addSegments!({ data: segData, count: segCount, width: lineWidth, rgb: [ar, ag, ab] });
+          // Fully additive: every pass adds its energy (see BEAM_ENERGY). The 2D path below
+          // combines a speed bucket's overlaps once (one stroked path per bucket) and adds only
+          // across buckets.
+          // The beam's spot is round: as tall as the beam is wide (the Beam setting), so a turning
+          // point of the waveform lights a soft band at its level rather than a one-pixel line.
+          // That matters on dynamic content: each new peak lands a little higher or lower than the
+          // last (a decaying note drops a fraction of a dB per cycle), and with too short a spot
+          // those dwell lines stack up as stripes. Measured on a re-struck bass note with a kick
+          // and a chord, small-scale ripple in the bar: ~5% with no spot, ~3.7% with a 3.6 px one,
+          // ~1.2% at the bar's full width (the default beam). A steady signal never showed it — its
+          // turning points all sit at one level.
+          phos.addSegments!({ data: segData, count: segCount, width: lineWidth, rgb: [ar, ag, ab], spot: lineWidth });
         } else {
           ctx.globalCompositeOperation = "lighter";
           ctx.lineWidth = lineWidth;
@@ -461,7 +508,6 @@ export function Meter({
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 48, step: 1 },
     // Far below the other views' range: the additive beam deposits many passes per window (see DEFAULTS).
     { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.0002, max: 0.05, step: 0, log: true },
-    { key: "focus", label: t("scope.focus"), hint: t("scope.focusHint"), min: 20, max: 200, step: 5.0 },
     { key: "beamWidth", label: t("scope.beam"), hint: t("scope.beamHint"), min: 0.1, max: 1, step: 0.05 },
   ];
 

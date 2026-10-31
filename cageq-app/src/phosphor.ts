@@ -192,6 +192,10 @@ export type TraceSegments = {
   width: number;
   /** Colour, 0..255 per channel. */
   rgb: readonly [number, number, number];
+  /** The beam spot's length along the segment, px (default 1, a pixel): each end fades in and out
+   *  over this instead of over one pixel — the deposit spread by a spot that has length, not just
+   *  width, with its total unchanged. */
+  spot?: number;
 };
 
 /** Shared surface of both backends — see the module comment for why the fallback exists. */
@@ -366,31 +370,35 @@ void main(){
 }`;
 
 // `addSegments`' segments, one instance each: the shared quad stretched over the segment from
-// `aSeg.xy` to `aSeg.zw` (canvas px, y down), reaching one pixel past it on every side for the
-// anti-aliasing fringe. `vU`/`vV` are the fragment's position along and across the segment, px.
+// `aSeg.xy` to `aSeg.zw` (canvas px, y down), reaching one pixel past it across for the
+// anti-aliasing fringe and half the spot (`uSpotHalf`) plus a pixel past its ends. `vU`/`vV` are the
+// fragment's position along and across the segment, px.
 const VS_SEG = `attribute vec2 aPos; attribute vec4 aSeg; attribute float aAlpha;
-uniform vec2 uSize; uniform float uHalf;
+uniform vec2 uSize; uniform float uHalf, uSpotHalf;
 varying float vU, vV, vLen, vAlpha;
 void main(){
   vec2 d = aSeg.zw - aSeg.xy;
   float len = length(d);
   vec2 dir = len > 1e-4 ? d / len : vec2(1.0, 0.0);
   vec2 nrm = vec2(-dir.y, dir.x);
-  float u = aPos.x > 0.0 ? len + 1.0 : -1.0;
+  float reach = uSpotHalf + 1.0;
+  float u = aPos.x > 0.0 ? len + reach : -reach;
   float v = aPos.y * (uHalf + 1.0);
   vec2 p = aSeg.xy + dir * u + nrm * v;
   vU = u; vV = v; vLen = len; vAlpha = aAlpha;
   gl_Position = vec4(p.x / uSize.x * 2.0 - 1.0, 1.0 - p.y / uSize.y * 2.0, 0.0, 1.0);
 }`;
 
-// The overlap of a one-pixel box around the fragment with the segment's own extent, along it
-// ([0, len]) times across it ([-half, half]): exact box-filtered coverage for an axis-aligned
-// segment, a close one otherwise. A segment narrower or shorter than a pixel covers that fraction.
+// The overlap of a box around the fragment with the segment's own extent — along it ([0, len]) a
+// box the spot's length (at least a pixel), its overlap divided by that length; across it
+// ([-half, half]) a pixel box: exact box-filtered coverage for an axis-aligned segment, a close one
+// otherwise. Along, it integrates to exactly `len`, so the spot spreads the deposit without
+// changing its total, and a segment shorter than the spot reaches only `len / spot` of its alpha.
 const FS_SEG = `precision highp float;
 varying float vU, vV, vLen, vAlpha;
-uniform float uHalf; uniform vec3 uRgb;
+uniform float uHalf, uSpotHalf; uniform vec3 uRgb;
 void main(){
-  float along = clamp(min(vU + 0.5, vLen) - max(vU - 0.5, 0.0), 0.0, 1.0);
+  float along = clamp(min(vU + uSpotHalf, vLen) - max(vU - uSpotHalf, 0.0), 0.0, 2.0 * uSpotHalf) / (2.0 * uSpotHalf);
   float across = clamp(min(vV + 0.5, uHalf) - max(vV - 0.5, -uHalf), 0.0, 1.0);
   gl_FragColor = vec4(uRgb, along * across * vAlpha);
 }`;
@@ -735,6 +743,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   const segU = segProg && {
     size: gl.getUniformLocation(segProg, "uSize"),
     half: gl.getUniformLocation(segProg, "uHalf"),
+    spotHalf: gl.getUniformLocation(segProg, "uSpotHalf"),
     rgb: gl.getUniformLocation(segProg, "uRgb"),
   };
   const overTex = overProg && gl.getUniformLocation(overProg, "uTex");
@@ -1054,6 +1063,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         const halfW = sg.width / 2;
         gl.uniform2f(segU.size, target.width, target.height);
         gl.uniform1f(segU.half, halfW);
+        gl.uniform1f(segU.spotHalf, Math.max(1, sg.spot ?? 1) / 2);
         gl.uniform3f(segU.rgb, sg.rgb[0] / 255, sg.rgb[1] / 255, sg.rgb[2] / 255);
         gl.bindBuffer(gl.ARRAY_BUFFER, quad);
         gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
