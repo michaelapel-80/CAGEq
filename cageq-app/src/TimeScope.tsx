@@ -6,6 +6,7 @@ import { type FadingInverse, retargetFadingInverse, stepFadingInverse } from "./
 import { detectorSample, findRisingEdge, triggerDetector, type TriggerDetector } from "./scopeTrigger";
 import { scopeStream } from "./streams";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
+import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT, appZoom } from "./appZoom";
 import type { ScopeData, ScopeEq } from "./Vectorscope";
@@ -44,19 +45,13 @@ type Params = {
 // (DIVISIONS) is the standard horizontal graticule count, so total span = ms/div × 10.
 const MS_PER_DIV_STEPS = [0.2, 0.5, 1, 2, 5, 10];
 const DIVISIONS = 10;
-// The GPU beam's path between samples: the band-limited signal the samples stand for, not straight
-// chords between them. Chords put the beam's speed in the wrong places — constant along each one,
-// where the real signal slows into its turning points — and at every join the light piled up into a
-// dot. Measured against a finely sampled sine at 16 samples per cycle: chords 0.36 rms off (worst
-// +0.65 of the peak), reconstructed 0.05 (+0.03, with the round spot). Each interval in a piece per
-// PIECE_PX of on-screen travel, each interpolated with Lanczos (LANCZOS_A lobes) from a table of
-// LANCZOS_PHASES fractional positions. At most DENSE_PIECES per interval, or one per pixel of its
-// width where samples sit further apart, up to MAX_PIECES: dense content (pink noise at 2-8
-// samples/px) is within 4% of a 16x reconstruction at 4 pieces (straight chords: 20-30% off), while
-// sparse samples (a few kHz at 0.2 ms/div) need ~8-16 — cheap there, the window being few samples.
-// Measured cost per window, both lanes: ~0.3 ms for a tone, ~0.6 ms for dense content at the
-// default 50 ms, ~1.8 ms at 100 ms of 96 kHz.
-const PIECE_PX = 4;
+// The GPU beam's path between samples is reconstructed (beamPath.ts). Here, at most DENSE_PIECES
+// per interval, or one per pixel of its width where samples sit further apart, up to MAX_PIECES:
+// dense content (pink noise at 2-8 samples/px) is within 4% of a 16x reconstruction at 4 pieces
+// (straight chords: 20-30% off), while sparse samples (a few kHz at 0.2 ms/div) need ~8-16 — cheap
+// there, the window being few samples. Measured cost per window, both lanes: ~0.3 ms for a tone,
+// ~0.6 ms for dense content at the default 50 ms, ~1.8 ms at 100 ms of 96 kHz.
+const DENSE_PIECES = 4;
 // The bandwidth limit's smallest sigma worth filtering with, in samples (see bwLimit): below it the
 // kernel is all but a single tap.
 const BW_MIN_SIGMA = 0.3;
@@ -86,29 +81,6 @@ function boxBlur(src: Float32Array, dst: Float32Array, n: number, w: number): vo
     acc += at(k + r + 1) - at(k - r);
   }
 }
-const DENSE_PIECES = 4;
-const MAX_PIECES = 16;
-const LANCZOS_A = 4;
-const LANCZOS_PHASES = 64;
-// Row `ph` holds the 2·LANCZOS_A tap weights for a position ph/LANCZOS_PHASES past a sample, taps
-// from LANCZOS_A − 1 samples before it to LANCZOS_A after; each row normalized to sum to 1, so a
-// constant stays exactly constant (the raw kernel's sum ripples by a fraction of a percent).
-const LANCZOS_TABLE = (() => {
-  const taps = 2 * LANCZOS_A;
-  const t = new Float32Array((LANCZOS_PHASES + 1) * taps);
-  for (let ph = 0; ph <= LANCZOS_PHASES; ph++) {
-    const f = ph / LANCZOS_PHASES;
-    let sum = 0;
-    for (let k = 0; k < taps; k++) {
-      const x = f - (k - LANCZOS_A + 1);
-      const w = Math.abs(x) < 1e-9 ? 1 : (LANCZOS_A * Math.sin(Math.PI * x) * Math.sin((Math.PI * x) / LANCZOS_A)) / (Math.PI * Math.PI * x * x);
-      t[ph * taps + k] = w;
-      sum += w;
-    }
-    for (let k = 0; k < taps; k++) t[ph * taps + k] /= sum;
-  }
-  return t;
-})();
 // glow/beam/bloom/haze/saturation/contrast: tuned live on the GPU beam in linear light (see
 // PhosphorOptions' `linearLight`, `Phosphor.setTone`). The contrast near 2.2 is what gives back the
 // glow look the old output had by accident; saturation lets a dense trace's slow points roll off
@@ -720,8 +692,7 @@ export function TimeScope() {
           const step = W / (dispN - 1);
           const energy = p.glow * step;
           const maxPieces = Math.min(MAX_PIECES, Math.max(DENSE_PIECES, Math.ceil(step)));
-          const taps = 2 * LANCZOS_A;
-          const padded = dispN + taps;
+          const padded = dispN + LANCZOS_TAPS;
           if (laneVals.length < padded) {
             laneVals = new Float32Array(padded);
             laneRaw = new Float32Array(padded);
@@ -771,13 +742,7 @@ export function TimeScope() {
               const pieceEnergy = energy / n;
               for (let j = 1; j <= n; j++) {
                 let y1 = yEnd;
-                if (j < n) {
-                  // Taps i − LANCZOS_A + 1 … i + LANCZOS_A, which sit at laneVals[i + 1 …].
-                  const row = Math.round((j / n) * LANCZOS_PHASES) * taps;
-                  let v = 0;
-                  for (let k = 0; k < taps; k++) v += laneVals[i + 1 + k] * LANCZOS_TABLE[row + k];
-                  y1 = cy - v * amp;
-                }
+                if (j < n) y1 = cy - lanczosAt(laneVals, i, lanczosRow(j / n)) * amp;
                 const x1 = (i + j / n) * step;
                 segData[o] = x0;
                 segData[o + 1] = y0;

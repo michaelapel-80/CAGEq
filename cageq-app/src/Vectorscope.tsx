@@ -5,7 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { type Band, type FadingInverse, type ResponseModel, retargetFadingInverse, stepFadingInverse } from "./biquad";
 import { scopeStream } from "./streams";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
-import { useTunableParams } from "./useTunableParams";
+import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
+import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT } from "./appZoom";
 
 /** A stereo vectorscope window from the loopback (see cageq-monitor `ScopeUpdate`): interleaved
@@ -45,6 +46,8 @@ type Params = {
   //               phosphor.ts's own "Bloom" doc. Both are whole-frame, not per-primitive, so a
   //               beam standing still blooms by the same modest amount as the moving trace instead
   //               of ballooning (see phosphor.ts's own `commit()` doc for why that distinction matters)
+  saturation: number; // the phosphor's saturation (phosphor.ts's setTone) — 0 = linear
+  contrast: number; // the display response, intensity^contrast (phosphor.ts's setTone) — 1 = linear
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
   labels: boolean; // the graticule's L/R/M/S letters
@@ -55,21 +58,34 @@ type Params = {
 // per preset). Here, "distribution" reads as a stereo-image density cloud instead of the usual
 // dwelling point/curve. Numbers below are a starting point for live tuning, not the final word.
 const PRESETS: Record<"fast" | "distribution", { trailTau: number; tail: number; glow: number }> = {
-  fast: { trailTau: 0.03, tail: 3, glow: 0.3 },
-  distribution: { trailTau: 0.8, tail: 6, glow: 0.6 },
+  fast: { trailTau: 0.03, tail: 3, glow: 1.0 },
+  distribution: { trailTau: 0.8, tail: 6, glow: 1.5 },
 };
+// Live-tuned for linear light (PhosphorOptions' `linearLight`) and the tone stage.
 const DEFAULTS: Params = {
-  trailTau: 0.08,
-  tail: 6,
-  glow: 0.32,
-  beam: 1.0,
+  trailTau: 0.06,
+  tail: 2,
+  glow: 1.5,
+  beam: 0.6,
   radiusFrac: 0.48,
   gridAlpha: 0.22,
-  bloom: 0.3,
-  haze: 0.6,
+  bloom: 0.4,
+  haze: 0.4,
+  saturation: 1.0,
+  contrast: 2.2,
   rotate: false,
   invert: true,
   labels: true,
+};
+// The Canvas 2D fallback still draws at alpha = glow, as before linear light: scaled back by the
+// factor glow's default moved by (0.32 -> 1.5), so it keeps the look it had.
+const FALLBACK_GLOW_SCALE = 0.32 / 1.5;
+// Stored settings from before linear light (v1): glow, bloom and haze meant something else there
+// (encoded values, a thresholded bloom), so they take the new defaults.
+const VECTORSCOPE_PARAMS_MIGRATION: ParamsMigration = {
+  version: 1,
+  migrate: (stored, from) =>
+    from < 1 ? { ...stored, glow: DEFAULTS.glow, bloom: DEFAULTS.bloom, haze: DEFAULTS.haze } : stored,
 };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled
@@ -181,7 +197,7 @@ export function Vectorscope({
   // Latest payload, written by the listener and read by the rAF loop — a ref, not state, so the
   // 60 fps stream drives the imperative canvas without ever re-rendering React.
   const scopeRef = useRef<ScopeData | null>(null);
-  const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-vectorscope-params", DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-vectorscope-params", DEFAULTS, VECTORSCOPE_PARAMS_MIGRATION);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -333,7 +349,9 @@ export function Vectorscope({
   useEffect(() => {
     const cv = trailRef.current;
     if (!cv) return;
-    const phos = createPhosphor(cv);
+    // Linear light: the beam's energy model only reads right if half the energy shows as half the
+    // light (see PhosphorOptions).
+    const phos = createPhosphor(cv, { linearLight: true });
     if (!phos) return;
     setGpuTraceOk(phos.addSegments !== undefined);
     // See SpectrumScope.tsx's identical log — diagnosing a machine-specific "one view reads darker
@@ -368,6 +386,10 @@ export function Vectorscope({
     // The GPU path's segments instead (see `addSegments`): x0, y0, x1, y1, alpha each, in drawing
     // order. Grown like the bucket buffers, never shrunk.
     let segData = new Float32Array(0);
+    // The window's beam positions for the reconstruction (beamPath.ts), padded by LANCZOS_A each
+    // side (its own end positions held). Grown, never shrunk.
+    let pathX = new Float32Array(0);
+    let pathY = new Float32Array(0);
     // The one segment of a beam standing still at the centre — see the idle branch.
     const restSeg = new Float32Array(5);
 
@@ -433,11 +455,11 @@ export function Vectorscope({
         if (dt > 0) {
           doseMult = TAU_REF / p.trailTau / (dt * DOSE_REF_FPS);
           if (ctx) {
-            ctx.fillStyle = `rgba(${ar},${ag},${ab},${p.glow})`;
+            ctx.fillStyle = `rgba(${ar},${ag},${ab},${p.glow * FALLBACK_GLOW_SCALE})`;
             ctx.fillRect(c - lineWidth / 2, c - lineWidth / 2, lineWidth, lineWidth);
           } else {
             restSeg.set([c, c, c + MIN_SEG_PX, c, (energy * rate * dt) / MIN_SEG_PX]);
-            phos.addSegments!({ data: restSeg, count: 1, width: lineWidth, rgb: [ar, ag, ab], spot: lineWidth });
+            phos.addSegments!({ data: restSeg, count: 1, width: lineWidth, rgb: [ar, ag, ab], round: true });
           }
         }
       } else if (s !== drawn) {
@@ -482,7 +504,11 @@ export function Vectorscope({
         // Upper bound on segments any one bucket could need this window — grown only when a bigger
         // window arrives than any buffer seen so far (see the buffers' own doc above).
         const maxSegments = Math.max(1, Math.floor(xy.length / 2));
-        if (gpu && segData.length < maxSegments * 5) segData = new Float32Array(maxSegments * 5);
+        if (gpu && pathX.length < maxSegments + LANCZOS_TAPS) {
+          pathX = new Float32Array(maxSegments + LANCZOS_TAPS);
+          pathY = new Float32Array(maxSegments + LANCZOS_TAPS);
+        }
+        let pathN = 0;
         let segCount = 0;
         if (!gpu && bucketCap < maxSegments) {
           bucketCap = maxSegments;
@@ -509,39 +535,72 @@ export function Vectorscope({
           const yp = p.rotate ? (l + r) / SQRT2 : r;
           const px = c + xp * scale;
           const py = c - yp * scale; // canvas y is down
-          if (!Number.isNaN(prevX)) {
+          if (gpu) {
+            pathX[LANCZOS_A + pathN] = px;
+            pathY[LANCZOS_A + pathN] = py;
+            pathN++;
+          } else if (!Number.isNaN(prevX)) {
             const dx = px - prevX;
             const dy = py - prevY;
             const dist = Math.sqrt(dx * dx + dy * dy);
-            if (gpu) {
-              // This sample's energy, spread over the distance the beam covered (see BEAM_ENERGY).
-              const len = Math.max(MIN_SEG_PX, dist);
-              const o = 5 * segCount++;
-              segData[o] = prevX;
-              segData[o + 1] = prevY;
-              segData[o + 2] = dist < MIN_SEG_PX ? prevX + MIN_SEG_PX : px;
-              segData[o + 3] = py;
-              segData[o + 4] = energy / len;
-            } else {
-              const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
-              let b = (f * VEL_BUCKETS) | 0;
-              if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
-              const seg = bucketCount[b]++;
-              bucketX0[b][seg] = prevX;
-              bucketY0[b][seg] = prevY;
-              bucketX1[b][seg] = px;
-              bucketY1[b][seg] = py;
-            }
+            const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
+            let b = (f * VEL_BUCKETS) | 0;
+            if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
+            const seg = bucketCount[b]++;
+            bucketX0[b][seg] = prevX;
+            bucketY0[b][seg] = prevY;
+            bucketX1[b][seg] = px;
+            bucketY1[b][seg] = py;
           }
           prevX = px;
           prevY = py;
         }
         if (!ctx) {
-          // Fully additive: every segment adds its energy, also where segments of the same speed
-          // cross. The 2D path below combines segments within a bucket once (one stroked path each)
-          // and adds only across buckets. The spot is round, as tall as the beam is wide, like
-          // the meter's — here mostly so a beam standing still burns a dot, not a hairline.
-          phos.addSegments!({ data: segData, count: segCount, width: lineWidth, rgb: [ar, ag, ab], spot: lineWidth });
+          // The beam's path between samples is the band-limited signal's (beamPath.ts), both axes
+          // being band-limited signals: a piece per PIECE_PX of travel, each sample's energy
+          // (BEAM_ENERGY) split evenly over its pieces and spread over each one's own length.
+          for (let k = 0; k < LANCZOS_A; k++) {
+            pathX[k] = pathX[LANCZOS_A];
+            pathY[k] = pathY[LANCZOS_A];
+            pathX[LANCZOS_A + pathN + k] = pathX[LANCZOS_A + pathN - 1];
+            pathY[LANCZOS_A + pathN + k] = pathY[LANCZOS_A + pathN - 1];
+          }
+          let x0 = pathX[LANCZOS_A];
+          let y0 = pathY[LANCZOS_A];
+          for (let i = 0; i < pathN - 1; i++) {
+            const xEnd = pathX[i + 1 + LANCZOS_A];
+            const yEnd = pathY[i + 1 + LANCZOS_A];
+            const n = Math.min(MAX_PIECES, Math.max(1, Math.ceil(Math.hypot(xEnd - x0, yEnd - y0) / PIECE_PX)));
+            if (5 * (segCount + n) > segData.length) {
+              const grown = new Float32Array(Math.max(2 * segData.length, 5 * (segCount + n), 5 * maxSegments));
+              grown.set(segData.subarray(0, 5 * segCount));
+              segData = grown;
+            }
+            const pieceEnergy = energy / n;
+            for (let j = 1; j <= n; j++) {
+              let x1 = xEnd;
+              let y1 = yEnd;
+              if (j < n) {
+                const row = lanczosRow(j / n);
+                x1 = lanczosAt(pathX, i, row);
+                y1 = lanczosAt(pathY, i, row);
+              }
+              const dist = Math.hypot(x1 - x0, y1 - y0);
+              const o = 5 * segCount++;
+              segData[o] = x0;
+              segData[o + 1] = y0;
+              segData[o + 2] = dist < MIN_SEG_PX ? x0 + MIN_SEG_PX : x1;
+              segData[o + 3] = y1;
+              segData[o + 4] = pieceEnergy / Math.max(MIN_SEG_PX, dist);
+              x0 = x1;
+              y0 = y1;
+            }
+          }
+          // Fully additive: every segment adds its energy, also where segments cross. The 2D path
+          // below combines segments within a bucket once (one stroked path each) and adds only
+          // across buckets. The spot is round (TraceSegments' `round`): it sums exactly at a bend,
+          // and a beam standing still burns a dot, not a hairline.
+          phos.addSegments!({ data: segData, count: segCount, width: lineWidth, rgb: [ar, ag, ab], round: true });
         } else {
           ctx.globalCompositeOperation = "lighter";
           ctx.lineWidth = lineWidth;
@@ -559,7 +618,7 @@ export function Vectorscope({
           for (let b = 0; b < VEL_BUCKETS; b++) {
             const count = bucketCount[b];
             if (count === 0) continue;
-            ctx.strokeStyle = `rgba(${ar},${ag},${ab},${(p.glow * (b + 1)) / VEL_BUCKETS})`;
+            ctx.strokeStyle = `rgba(${ar},${ag},${ab},${((p.glow * (b + 1)) / VEL_BUCKETS) * FALLBACK_GLOW_SCALE})`;
             ctx.beginPath();
             const x0 = bucketX0[b];
             const y0 = bucketY0[b];
@@ -575,6 +634,7 @@ export function Vectorscope({
       }
 
       // 3) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
+      phos.setTone?.(p.saturation, p.contrast);
       phos.commit(dt, p.trailTau, p.tail, doseMult, p.bloom, p.haze);
 
       raf = requestAnimationFrame(render);
@@ -590,12 +650,14 @@ export function Vectorscope({
   const CONTROLS: { key: keyof Params; label: string; hint: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 2.0, step: 0.01 },
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 64, step: 1 },
-    { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.02, max: 1, step: 0.02 },
+    { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.02, max: 10, step: 0.02 },
     { key: "beam", label: t("scope.beam"), hint: t("scope.beamHint"), min: 0.1, max: 5, step: 0.05 },
     { key: "radiusFrac", label: t("scope.scale"), hint: t("scope.scaleHint"), min: 0.3, max: 0.5, step: 0.01 },
     { key: "gridAlpha", label: t("scope.grid"), hint: t("scope.gridHint"), min: 0, max: 0.5, step: 0.02 },
     { key: "bloom", label: t("scope.bloom"), hint: t("scope.bloomHint"), min: 0, max: 2, step: 0.05 },
     { key: "haze", label: t("scope.haze"), hint: t("scope.hazeHint"), min: 0, max: 4, step: 0.05 },
+    { key: "saturation", label: t("scope.saturation"), hint: t("scope.saturationHint"), min: 0, max: 10, step: 0.1 },
+    { key: "contrast", label: t("scope.contrast"), hint: t("scope.contrastHint"), min: 1, max: 3, step: 0.05 },
   ];
 
   // Inline (not fill): `.vectorscope-wrap:not(.fill)` is already an exact CSS square
