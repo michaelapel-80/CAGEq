@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { meterStream, scopeStream, type MeterData } from "./streams";
 import type { ScopeData } from "./Vectorscope";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
+import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT } from "./appZoom";
 
@@ -52,19 +53,24 @@ type Params = {
   tail: number; // multiplies trailTau for *faint* content only — the long afterglow (see phosphor.ts)
   glow: number; // beam current: the energy each sample deposits (see BEAM_ENERGY)
   beamWidth: number; // fraction of the bar's own (backing-store) width the stroke fills
+  saturation: number; // the phosphor's saturation (phosphor.ts's setTone) — 0 = linear
+  contrast: number; // the display response, intensity^contrast (phosphor.ts's setTone) — 1 = linear
 };
-const DEFAULTS: Params = { trailTau: 0.3, tail: 12, glow: 0.002, beamWidth: 1.0 };
+// Live-tuned for linear light (PhosphorOptions' `linearLight`) and the tone stage.
+const DEFAULTS: Params = { trailTau: 0.3, tail: 6, glow: 0.005, beamWidth: 1.0, saturation: 1.0, contrast: 2.2 };
+// The factor glow's default moved by with linear light (0.002 -> 0.005). The Canvas 2D fallback,
+// still drawing encoded values, divides it back out, so it keeps the look it had.
+const LINEAR_GLOW_SCALE = 0.005 / 0.002;
 /** Version 1: `glow` on the GPU beam's scale (see TAU_REF's doc). Every release before it shipped
  *  0.21 for the Canvas 2D beam, so an older stored glow is scaled by the same 0.002 / 0.21 the
  *  default moved by, keeping someone's preference relative to the default — but only from the old
  *  slider's range (it started at 0.02): anything lower was already set on the new scale (a build
- *  in between) and must not be scaled twice. */
+ *  in between) and must not be scaled twice. Version 2: linear light — glow takes the new default,
+ *  as the scopes' did (a build in between stored linear-light values as version 1 too, so scaling
+ *  could hit a value twice). */
 const METER_PARAMS_MIGRATION: ParamsMigration = {
-  version: 1,
-  migrate: (stored, from) =>
-    from < 1 && typeof stored.glow === "number" && stored.glow >= 0.02
-      ? { ...stored, glow: Number(((stored.glow * 0.002) / 0.21).toPrecision(3)) }
-      : stored,
+  version: 2,
+  migrate: (stored, from) => (from < 2 ? { ...stored, glow: DEFAULTS.glow } : stored),
 };
 // The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
 // `doseMult` comment (same reasoning as Vectorscope.tsx's identical constant) for why this matters:
@@ -118,16 +124,23 @@ const TAU_REF = 0.1;
 // stream (twice the samples) doesn't read twice as bright. First set so that glow 0.002, tuned live on the earlier model, deposited the same total
 // on music-like material (0.034); that earlier tuning had leaned low to keep high-frequency content
 // from blowing out, which this model no longer needs, so raised 1.4x on a live retune (to what glow
-// 0.0028 gave). Kept in this constant rather than the default, so the default stays the 0.002 that
-// v0.19.0 shipped and stored settings keep their meaning.
+// 0.0028 gave). Kept in this constant rather than the default, so the default stayed the 0.002 that
+// v0.19.0 shipped and stored settings kept their meaning (until linear light — see LINEAR_GLOW_SCALE).
 const BEAM_ENERGY = 0.048;
-// Each sample interval is cut into pieces in *linear* amplitude, each mapped to dB, because the
-// level's path between two samples is curved on a dB axis: drawn as one straight segment, a step
-// toward a zero crossing spread its energy evenly down the lower range, which with only ~10 samples
-// per cycle at 5 kHz flattened the bottom of the profile. A piece per PIECE_PX of on-screen travel,
-// at most MAX_PIECES: matches the 100 Hz profile at 1 and 5 kHz to within ~0.05 of a band
-// (measured offline), at ~8 pieces per sample on music.
+// Each sample interval is cut into pieces in amplitude, each mapped to dB, because the level's path
+// between two samples is curved on a dB axis: drawn as one straight segment, a step toward a zero
+// crossing spread its energy evenly down the lower range, which with only ~10 samples per cycle at
+// 5 kHz flattened the bottom of the profile. The pieces follow the band-limited signal the samples
+// stand for (beamPath.ts), not straight lines in amplitude between them: in the treble the waveform's
+// peaks fall between samples, where the beam dwells, and straight lines cut them off. Measured
+// against the signal at 64x, the bar's profile (through a 21 px spot, shorter than the default
+// beam's): straight lines 20%, 57%, 76% off for sines at 5, 10, 15 kHz and 7% on noise;
+// reconstructed 2.5-4%, and 0.8%.
+// A piece per PIECE_PX of on-screen travel, at least MIN_PIECES (a peak between two samples at the
+// same level travels nowhere between their endpoints), at most MAX_PIECES. Following the path
+// through each zero crossing to the floor changed none of that measurably, so it doesn't.
 const PIECE_PX = 4;
+const MIN_PIECES = 4;
 const MAX_PIECES = 32;
 // Shortest segment drawn: a beam standing still still deposits its energy, just on a tiny stretch.
 const MIN_SEG_PX = 0.05;
@@ -292,7 +305,9 @@ export function Meter({
   useEffect(() => {
     const cv = beamCanvasRef.current;
     if (!cv) return;
-    const phos = createPhosphor(cv);
+    // Linear light: the beam's energy model only reads right if half the energy shows as half the
+    // light (see PhosphorOptions).
+    const phos = createPhosphor(cv, { linearLight: true });
     if (!phos) return;
     // See Vectorscope.tsx's identical log — diagnosing a machine-specific "one view reads darker
     // than the others" report by checking whether any view silently fell back off the GPU
@@ -324,6 +339,9 @@ export function Meter({
     // The GPU path's segments instead (see `addSegments`): x0, y0, x1, y1, alpha each. Grown like
     // the bucket buffers, never shrunk.
     let segData = new Float32Array(0);
+    // The window's mono levels for the reconstruction (beamPath.ts), padded by LANCZOS_A each side
+    // (its own end levels held). Grown, never shrunk.
+    let levels = new Float32Array(0);
 
     // The 16 `rgba(...)` stroke-colour strings, one per bucket — depend only on the (fixed) accent
     // colour and `p.glow`, so they're rebuilt only when `glow` actually changes (a tuning-panel
@@ -389,6 +407,8 @@ export function Meter({
         // window arrives than any buffer seen so far (see the buffers' own doc above).
         const maxSegments = Math.max(1, Math.floor(xy.length / 2));
         if (gpu && segData.length < maxSegments * MAX_PIECES * 5) segData = new Float32Array(maxSegments * MAX_PIECES * 5);
+        if (gpu && levels.length < maxSegments + LANCZOS_TAPS) levels = new Float32Array(maxSegments + LANCZOS_TAPS);
+        let levelN = 0;
         let segCount = 0;
         if (!gpu && bucketCap < maxSegments) {
           bucketCap = maxSegments;
@@ -405,40 +425,45 @@ export function Meter({
           const db = toDbLin(Math.abs(lin));
           const frac = Math.max(0, Math.min(1, (db - LEVEL_MIN_DB) / -LEVEL_MIN_DB));
           const y = (1 - frac) * cv.height; // canvas y=0 (top) = 0 dBFS, matching the bar's own scale
-          if (!Number.isNaN(prevLin)) {
-            if (gpu) {
-              // This interval's energy, in pieces along its path (see BEAM_ENERGY, PIECE_PX), each
-              // spread over its own on-screen length.
-              const ya = yOf(prevLin);
-              const yb = yOf(lin);
-              const n = Math.min(MAX_PIECES, Math.max(1, Math.ceil(Math.abs(onScreen(yb) - onScreen(ya)) / PIECE_PX)));
-              let y0 = ya;
-              for (let j = 1; j <= n; j++) {
-                const y1 = j === n ? yb : yOf(prevLin + ((lin - prevLin) * j) / n);
-                const len = Math.max(MIN_SEG_PX, Math.abs(y1 - y0));
-                const o = 5 * segCount++;
-                segData[o] = cx;
-                segData[o + 1] = y0;
-                segData[o + 2] = cx;
-                segData[o + 3] = Math.abs(y1 - y0) < MIN_SEG_PX ? y0 + MIN_SEG_PX : y1;
-                segData[o + 4] = energy / n / len;
-                y0 = y1;
-              }
-            } else {
-              const dist = Math.abs(lin - prevLin) * LIN_DIST_SCALE;
-              const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
-              let b = (f * VEL_BUCKETS) | 0;
-              if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
-              const c = bucketCount[b]++;
-              bucketY0[b][c] = prevY;
-              bucketY1[b][c] = y;
-            }
+          if (gpu) {
+            levels[LANCZOS_A + levelN++] = lin;
+          } else if (!Number.isNaN(prevLin)) {
+            const dist = Math.abs(lin - prevLin) * LIN_DIST_SCALE;
+            const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
+            let b = (f * VEL_BUCKETS) | 0;
+            if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
+            const c = bucketCount[b]++;
+            bucketY0[b][c] = prevY;
+            bucketY1[b][c] = y;
           }
           prevY = y;
           prevLin = lin;
         }
         const lineWidth = Math.max(1, W * p.beamWidth);
         if (!ctx) {
+          // Each interval's energy, in pieces along the reconstructed path (see BEAM_ENERGY,
+          // PIECE_PX), each spread over its own on-screen length.
+          for (let k = 0; k < LANCZOS_A; k++) {
+            levels[k] = levels[LANCZOS_A];
+            levels[LANCZOS_A + levelN + k] = levels[LANCZOS_A + levelN - 1];
+          }
+          for (let i = 0; i < levelN - 1; i++) {
+            const ya = yOf(levels[LANCZOS_A + i]);
+            const yb = yOf(levels[LANCZOS_A + i + 1]);
+            const n = Math.min(MAX_PIECES, Math.max(MIN_PIECES, Math.ceil(Math.abs(onScreen(yb) - onScreen(ya)) / PIECE_PX)));
+            let y0 = ya;
+            for (let j = 1; j <= n; j++) {
+              const y1 = j === n ? yb : yOf(lanczosAt(levels, i, lanczosRow(j / n)));
+              const len = Math.max(MIN_SEG_PX, Math.abs(y1 - y0));
+              const o = 5 * segCount++;
+              segData[o] = cx;
+              segData[o + 1] = y0;
+              segData[o + 2] = cx;
+              segData[o + 3] = Math.abs(y1 - y0) < MIN_SEG_PX ? y0 + MIN_SEG_PX : y1;
+              segData[o + 4] = energy / n / len;
+              y0 = y1;
+            }
+          }
           // Fully additive: every pass adds its energy (see BEAM_ENERGY). The 2D path below
           // combines a speed bucket's overlaps once (one stroked path per bucket) and adds only
           // across buckets.
@@ -460,7 +485,7 @@ export function Meter({
           ctx.lineCap = "butt";
           if (strokeCacheGlow !== p.glow) {
             strokeCacheGlow = p.glow;
-            for (let b = 0; b < VEL_BUCKETS; b++) strokeStyles[b] = `rgba(${ar},${ag},${ab},${(p.glow * b) / (VEL_BUCKETS - 1)})`;
+            for (let b = 0; b < VEL_BUCKETS; b++) strokeStyles[b] = `rgba(${ar},${ag},${ab},${(p.glow * b) / (VEL_BUCKETS - 1) / LINEAR_GLOW_SCALE})`;
           }
           // Beam blanking: brightness ∝ velocity factor, reaching zero at the fastest bucket (a beam
           // moving too fast to expose the phosphor draws nothing) — skip bucket 0.
@@ -483,6 +508,7 @@ export function Meter({
         drawn = s; // idle: draw nothing this frame — the accumulator's own decay fades the trail out
       }
 
+      phos.setTone?.(p.saturation, p.contrast);
       phos.commit(dt, p.trailTau, p.tail, doseMult);
       raf = requestAnimationFrame(render);
     };
@@ -510,6 +536,8 @@ export function Meter({
     // Far below the other views' range: the additive beam deposits many passes per window (see DEFAULTS).
     { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.0002, max: 0.05, step: 0, log: true },
     { key: "beamWidth", label: t("scope.beam"), hint: t("scope.beamHint"), min: 0.1, max: 1, step: 0.05 },
+    { key: "saturation", label: t("scope.saturation"), hint: t("scope.saturationHint"), min: 0, max: 10, step: 0.1 },
+    { key: "contrast", label: t("scope.contrast"), hint: t("scope.contrastHint"), min: 1, max: 3, step: 0.05 },
   ];
 
   return (
