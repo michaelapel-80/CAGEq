@@ -127,13 +127,13 @@ const DEFAULTS: Params = { trailTau: 0.02, tail: 1, glow: 2.0, beam: 1.0, bloom:
 // independent of trailTau in theory, but live tuning showed glow still needs its own adjustment
 // per preset). Here, "distribution" mainly pays off in free-run mode on dense/non-periodic
 // material, where a long window overlays many cycles into a waveform-density cloud rather than one
-// blurred average trace. Numbers below are a starting point for live tuning, not the final word:
-// Smooth's and Distribution's glow were carried over from the old renderer by Fast's own factor
-// (0.2 -> 2.6), not retuned. In button order, shortest persistence first.
+// blurred average trace — the preset that gains most from linear light, its faint density no
+// longer crushed to black. All three tuned live in linear light. In button order, shortest
+// persistence first.
 const PRESETS = {
   fast: { trailTau: 0.02, tail: 1, glow: 2.0 },
-  smooth: { trailTau: 0.06, tail: 6, glow: 5.2 },
-  distribution: { trailTau: 0.8, tail: 40, glow: 10.4 },
+  smooth: { trailTau: 0.04, tail: 3, glow: 3.0 },
+  distribution: { trailTau: 0.8, tail: 40, glow: 10.0 },
 } satisfies Record<string, Pick<Params, "trailTau" | "tail" | "glow">>;
 // Stored settings from before the GPU beam's linear light (v1): glow, bloom and haze meant
 // something else there (energy shown as an encoded value, a thresholded bloom), so they take the
@@ -230,8 +230,8 @@ const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, no
 // twice now. (A third time with the GPU beam's linear light — see DEFAULTS and FALLBACK_GLOW_SCALE.)
 const TAU_REF = 0.1;
 // The Canvas 2D fallback still strokes at alpha = glow, as before linear light: scaled back by the
-// factor glow's default moved by (0.2 -> 2.6), so it keeps the look it had.
-const FALLBACK_GLOW_SCALE = 0.2 / 2.6;
+// factor glow's default moved by (0.2 -> 2.0), so it keeps the look it had.
+const FALLBACK_GLOW_SCALE = 0.2 / 2.0;
 
 /** Lane geometry (vertical centre + amplitude scale + label) for the current channel mode — shared
  *  between the graticule and the trace so they always agree. `amp` leaves a small margin (0.5 of
