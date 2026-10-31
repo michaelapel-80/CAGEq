@@ -6,7 +6,7 @@ import { type FadingInverse, retargetFadingInverse, stepFadingInverse } from "./
 import { detectorSample, findRisingEdge, triggerDetector, type TriggerDetector } from "./scopeTrigger";
 import { scopeStream } from "./streams";
 import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
-import { useTunableParams } from "./useTunableParams";
+import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT, appZoom } from "./appZoom";
 import type { ScopeData, ScopeEq } from "./Vectorscope";
 
@@ -31,6 +31,9 @@ type Params = {
   bloom: number; // tight-radius glow intensity (phosphor.ts's bloomIntensity) — 0 = off; see
   //                Vectorscope.tsx's own Params doc, tried there first
   haze: number; // broad, faint glow intensity (phosphor.ts's bloomWide) — 0 = off
+  saturation: number; // the phosphor's saturation (phosphor.ts's setTone) — 0 = linear
+  contrast: number; // the display response, intensity^contrast (phosphor.ts's setTone) — 1 = linear
+  bwLimit: number; // the GPU trace's bandwidth limit, a Gaussian low-pass this many px wide — 0 = off
   undistort: boolean;
   msPerDivIdx: number;
   trigger: boolean;
@@ -41,9 +44,75 @@ type Params = {
 // (DIVISIONS) is the standard horizontal graticule count, so total span = ms/div × 10.
 const MS_PER_DIV_STEPS = [0.2, 0.5, 1, 2, 5, 10];
 const DIVISIONS = 10;
-// bloom/haze default 0 (off) rather than copying Vectorscope's tuned 0.3/1.2 — this view's beam
-// (thicker, brighter by default) and content (two lanes of a continuous waveform, not a dwelling
-// point/curve) haven't been checked against those numbers at all yet.
+// The GPU beam's path between samples: the band-limited signal the samples stand for, not straight
+// chords between them. Chords put the beam's speed in the wrong places — constant along each one,
+// where the real signal slows into its turning points — and at every join the light piled up into a
+// dot. Measured against a finely sampled sine at 16 samples per cycle: chords 0.36 rms off (worst
+// +0.65 of the peak), reconstructed 0.05 (+0.03, with the round spot). Each interval in a piece per
+// PIECE_PX of on-screen travel, each interpolated with Lanczos (LANCZOS_A lobes) from a table of
+// LANCZOS_PHASES fractional positions. At most DENSE_PIECES per interval, or one per pixel of its
+// width where samples sit further apart, up to MAX_PIECES: dense content (pink noise at 2-8
+// samples/px) is within 4% of a 16x reconstruction at 4 pieces (straight chords: 20-30% off), while
+// sparse samples (a few kHz at 0.2 ms/div) need ~8-16 — cheap there, the window being few samples.
+// Measured cost per window, both lanes: ~0.3 ms for a tone, ~0.6 ms for dense content at the
+// default 50 ms, ~1.8 ms at 100 ms of 96 kHz.
+const PIECE_PX = 4;
+// The bandwidth limit's smallest sigma worth filtering with, in samples (see bwLimit): below it the
+// kernel is all but a single tap.
+const BW_MIN_SIGMA = 0.3;
+// Above this sigma (samples) the Gaussian is approximated by three running box sums instead (see
+// boxBlur): their cost doesn't grow with the width, where direct taps at the longest timebase
+// (sigma ~23 samples at 100 ms of 96 kHz, 3 px) cost ~3 ms a window. Three boxes come within a few
+// percent of a Gaussian, and a box is all-positive too, so still no overshoot.
+const BW_DIRECT_MAX_SIGMA = 3;
+
+/** Box widths (odd) for `passes` running box sums approximating a Gaussian of standard deviation
+ *  `sigma` — the usual mix of two adjacent odd widths, chosen to match the variance. */
+function boxesForGauss(sigma: number, passes: number): number[] {
+  let wl = Math.floor(Math.sqrt((12 * sigma * sigma) / passes + 1));
+  if (wl % 2 === 0) wl--;
+  const m = Math.round((12 * sigma * sigma - passes * wl * wl - 4 * passes * wl - 3 * passes) / (-4 * wl - 4));
+  return Array.from({ length: passes }, (_, i) => (i < m ? wl : wl + 2));
+}
+
+/** One running box sum of odd width `w` over `src[0, n)` into `dst`, ends held. */
+function boxBlur(src: Float32Array, dst: Float32Array, n: number, w: number): void {
+  const r = (w - 1) / 2;
+  const at = (k: number) => src[Math.min(n - 1, Math.max(0, k))];
+  let acc = 0;
+  for (let k = -r; k <= r; k++) acc += at(k);
+  for (let k = 0; k < n; k++) {
+    dst[k] = acc / w;
+    acc += at(k + r + 1) - at(k - r);
+  }
+}
+const DENSE_PIECES = 4;
+const MAX_PIECES = 16;
+const LANCZOS_A = 4;
+const LANCZOS_PHASES = 64;
+// Row `ph` holds the 2·LANCZOS_A tap weights for a position ph/LANCZOS_PHASES past a sample, taps
+// from LANCZOS_A − 1 samples before it to LANCZOS_A after; each row normalized to sum to 1, so a
+// constant stays exactly constant (the raw kernel's sum ripples by a fraction of a percent).
+const LANCZOS_TABLE = (() => {
+  const taps = 2 * LANCZOS_A;
+  const t = new Float32Array((LANCZOS_PHASES + 1) * taps);
+  for (let ph = 0; ph <= LANCZOS_PHASES; ph++) {
+    const f = ph / LANCZOS_PHASES;
+    let sum = 0;
+    for (let k = 0; k < taps; k++) {
+      const x = f - (k - LANCZOS_A + 1);
+      const w = Math.abs(x) < 1e-9 ? 1 : (LANCZOS_A * Math.sin(Math.PI * x) * Math.sin((Math.PI * x) / LANCZOS_A)) / (Math.PI * Math.PI * x * x);
+      t[ph * taps + k] = w;
+      sum += w;
+    }
+    for (let k = 0; k < taps; k++) t[ph * taps + k] /= sum;
+  }
+  return t;
+})();
+// glow/beam/bloom/haze/saturation/contrast: tuned live on the GPU beam in linear light (see
+// PhosphorOptions' `linearLight`, `Phosphor.setTone`). The contrast near 2.2 is what gives back the
+// glow look the old output had by accident; saturation lets a dense trace's slow points roll off
+// into it rather than standing out as dots. A starting point, to be fine-tuned.
 // triggerFilterHz 60: a lower cutoff locks more steadily (fewer harmonics to hop between). It used
 // to sit at 120 because low cutoffs stopped triggering at all: the filtered waveform shrinks, and
 // any near-DC content then held it clear of the zero level. The AC-coupled level (scopeTrigger.ts)
@@ -52,19 +121,28 @@ const DIVISIONS = 10;
 // trailTau/tail/glow: the Fast preset's values. The steady trigger leaves no smear for a trail to
 // hide, so an instant, unsmeared trace is the better first view; the former defaults live on as
 // the Smooth preset.
-const DEFAULTS: Params = { trailTau: 0.02, tail: 1, glow: 0.20, beam: 3.0, bloom: 0.3, haze: 0.6, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 60, mode: "mix" }; // 5 ms/div × 10 = 50 ms
+const DEFAULTS: Params = { trailTau: 0.02, tail: 1, glow: 2.0, beam: 1.0, bloom: 0.8, haze: 0.6, saturation: 2.0, contrast: 2.2, bwLimit: 1.4, undistort: true, msPerDivIdx: 4, trigger: true, triggerFilterHz: 60, mode: "mix" }; // 5 ms/div × 10 = 50 ms
 // Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
 // reasoning (shared verbatim: the Trail/Glow orthogonality fix keeps *steady-state* brightness
 // independent of trailTau in theory, but live tuning showed glow still needs its own adjustment
 // per preset). Here, "distribution" mainly pays off in free-run mode on dense/non-periodic
 // material, where a long window overlays many cycles into a waveform-density cloud rather than one
-// blurred average trace. Numbers below are a starting point for live tuning, not the final word.
-// In button order, shortest persistence first.
+// blurred average trace. Numbers below are a starting point for live tuning, not the final word:
+// Smooth's and Distribution's glow were carried over from the old renderer by Fast's own factor
+// (0.2 -> 2.6), not retuned. In button order, shortest persistence first.
 const PRESETS = {
-  fast: { trailTau: 0.02, tail: 1, glow: 0.20 },
-  smooth: { trailTau: 0.06, tail: 6, glow: 0.40 },
-  distribution: { trailTau: 0.8, tail: 40, glow: 0.8 },
+  fast: { trailTau: 0.02, tail: 1, glow: 2.0 },
+  smooth: { trailTau: 0.06, tail: 6, glow: 5.2 },
+  distribution: { trailTau: 0.8, tail: 40, glow: 10.4 },
 } satisfies Record<string, Pick<Params, "trailTau" | "tail" | "glow">>;
+// Stored settings from before the GPU beam's linear light (v1): glow, bloom and haze meant
+// something else there (energy shown as an encoded value, a thresholded bloom), so they take the
+// new defaults rather than carrying numbers over that no longer mean the same. The rest (trail,
+// beam, timebase, trigger) keeps its meaning.
+const TIMESCOPE_PARAMS_MIGRATION: ParamsMigration = {
+  version: 1,
+  migrate: (stored, from) => (from < 1 ? { ...stored, glow: DEFAULTS.glow, bloom: DEFAULTS.bloom, haze: DEFAULTS.haze } : stored),
+};
 const PRESET_LABELS: Record<keyof typeof PRESETS, string> = { fast: "scope.presetFast", smooth: "scope.presetSmooth", distribution: "scope.presetDistribution" };
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
 const GRID_ALPHA = 0.22;
@@ -149,8 +227,11 @@ const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, no
 // quantisation cliff while still being a fixed, non-arbitrary reference. DEFAULTS.glow below is
 // `old_glow * old_trailTau / TAU_REF` (0.50 * 0.06 / 0.1 = 0.30), chosen so the shipped default
 // renders identically to before the original decoupling change — only the number's meaning moved,
-// twice now.
+// twice now. (A third time with the GPU beam's linear light — see DEFAULTS and FALLBACK_GLOW_SCALE.)
 const TAU_REF = 0.1;
+// The Canvas 2D fallback still strokes at alpha = glow, as before linear light: scaled back by the
+// factor glow's default moved by (0.2 -> 2.6), so it keeps the look it had.
+const FALLBACK_GLOW_SCALE = 0.2 / 2.6;
 
 /** Lane geometry (vertical centre + amplitude scale + label) for the current channel mode — shared
  *  between the graticule and the trace so they always agree. `amp` leaves a small margin (0.5 of
@@ -224,7 +305,7 @@ export function TimeScope() {
   // toward white instead of holding steady (see phosphor.ts's closing note).
   const peakRef = useRef<HTMLCanvasElement>(null);
   const scopeRef = useRef<ScopeData | null>(null);
-  const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-timescope-params", DEFAULTS);
+  const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-timescope-params", DEFAULTS, TIMESCOPE_PARAMS_MIGRATION);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
   paramsRef.current = params;
@@ -341,7 +422,9 @@ export function TimeScope() {
     const peakCv = peakRef.current;
     const peakCtx = peakCv?.getContext("2d");
     if (!cv || !peakCv || !peakCtx) return;
-    const phos = createPhosphor(cv);
+    // Linear light: the beam's energy model only reads right if half the energy shows as half the
+    // light (see PhosphorOptions).
+    const phos = createPhosphor(cv, { linearLight: true });
     if (!phos) return;
     // See SpectrumScope.tsx's identical log — diagnosing a machine-specific "one view reads darker
     // than the others" report by checking whether any view silently fell back off the GPU
@@ -368,8 +451,18 @@ export function TimeScope() {
     let outLBuf = new Float64Array(0);
     let outRBuf = new Float64Array(0);
     let dispLBuf = new Float64Array(0);
-    // One lane's trace as points for the GPU path (`strokeTrace`). Grown, never shrunk.
-    let lanePts = new Float32Array(0);
+    // The GPU path's segments, every lane's (see `addSegments`): x0, y0, x1, y1, alpha each. Grown,
+    // never shrunk.
+    let segData = new Float32Array(0);
+    // One lane's samples for the reconstruction, padded by LANCZOS_A each side (the window's own end
+    // samples held). Grown, never shrunk.
+    let laneVals = new Float32Array(0);
+    // The same, before the bandwidth limit (see bwLimit), and its kernel for the sigma it was built
+    // for. Grown, never shrunk.
+    let laneRaw = new Float32Array(0);
+    let laneTmp = new Float32Array(0);
+    let bwKernel = new Float32Array(0);
+    let bwKernelSigma = -1;
     let dispRBuf = new Float64Array(0);
 
     // Triggering: a circular buffer of the (possibly undistorted) display samples, plus a parallel
@@ -551,9 +644,9 @@ export function TimeScope() {
       }
 
       // 1) Start this frame's trace on a cleared scratch canvas; decaying everything before it is
-      // the accumulator's job, applied in commit() below. On the GPU path (`strokeTrace`) there's
+      // the accumulator's job, applied in commit() below. On the GPU path (`addSegments`) there's
       // no canvas to start: a frame that draws nothing leaves an empty trace either way.
-      const ctx = phos.strokeTrace ? null : phos.begin();
+      const ctx = phos.addSegments ? null : phos.begin();
 
       // 2) Faint peak-hold line(s), mirrored ± around each lane's centreline (a waveform is
       // bipolar; the peak tracked above is a magnitude). On their own cleared layer rather than in
@@ -599,34 +692,110 @@ export function TimeScope() {
           ctx.lineWidth = lineWidth;
           ctx.lineJoin = "round";
           ctx.lineCap = "round";
-          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${p.glow})`;
+          ctx.strokeStyle = `rgba(${ar},${ag},${ab},${p.glow * FALLBACK_GLOW_SCALE})`;
           for (const path of paths) ctx.stroke(path);
         } else {
-          // Each lane one stroke. Into the same trace, so the lanes combine by MAX rather than
-          // adding the way the 2D canvas's "lighter" did — the same wherever they don't overlap,
-          // which, each in its own lane, they normally don't.
-          if (lanePts.length < dispN * 2) lanePts = new Float32Array(dispN * 2);
+          // The beam, as a CRT's (like Vectorscope's and the meter's): a fixed current, so each
+          // sample interval deposits the same energy, spread over however far the beam travels in
+          // it — a flat stretch, where it only moves with the sweep, is bright, and a steep edge,
+          // where it jumps a long way in one interval, is faint (a square wave's edges nearly
+          // vanish, as on a real scope). Energy per sample = glow x the sweep's step per sample, so
+          // a flat stretch reads exactly glow at any timebase, as the plain stroke did. Not 1/sweep
+          // speed, as a real scope's would: this redraws one window per data update whatever the
+          // timebase, so sweeps per second aren't physical here to begin with. Additive across the
+          // lanes and wherever the trace crosses itself. The path between samples is reconstructed
+          // (see PIECE_PX), and the spot is round (see TraceSegments' `round`): together, a smooth
+          // curve reads as one, with no dot at the joins.
+          //
+          // Optionally band-limited first (bwLimit), a real scope's "BW limit" switch, with its
+          // cutoff set in screen pixels rather than Hz: a Gaussian low-pass, sigma = bwLimit px of
+          // sweep. Gaussian because its step response has no overshoot — a square wave keeps flat
+          // tops, its edges round over ~2.5 sigma — where a steeper filter would ring (Gibbs). In
+          // pixels because what it's for is detail finer than the timebase can show as shape: at a
+          // long timebase dense content has many samples per pixel, and what's finer than a few
+          // pixels across only shows as vertical grass and speckle. At short timebases sigma falls
+          // well under a sample, and it does nothing (skipped under BW_MIN_SIGMA). The cost: high-
+          // frequency content shows less of its height there (a 10 kHz tone at 5 ms/div shrinks
+          // toward a line), which is why it's a setting.
+          const step = W / (dispN - 1);
+          const energy = p.glow * step;
+          const maxPieces = Math.min(MAX_PIECES, Math.max(DENSE_PIECES, Math.ceil(step)));
+          const taps = 2 * LANCZOS_A;
+          const padded = dispN + taps;
+          if (laneVals.length < padded) {
+            laneVals = new Float32Array(padded);
+            laneRaw = new Float32Array(padded);
+            laneTmp = new Float32Array(padded);
+          }
+          // The bandwidth limit's sigma, in samples, and its kernel (rebuilt when that changes).
+          const bwSigma = p.bwLimit / step;
+          const bwOn = bwSigma >= BW_MIN_SIGMA;
+          const bwBoxes = bwOn && bwSigma > BW_DIRECT_MAX_SIGMA ? boxesForGauss(bwSigma, 3) : null;
+          if (bwOn && !bwBoxes && bwSigma !== bwKernelSigma) {
+            const r = Math.ceil(3 * bwSigma);
+            bwKernel = new Float32Array(2 * r + 1);
+            let sum = 0;
+            for (let j = -r; j <= r; j++) sum += bwKernel[j + r] = Math.exp((-0.5 * j * j) / (bwSigma * bwSigma));
+            for (let j = 0; j < bwKernel.length; j++) bwKernel[j] /= sum;
+            bwKernelSigma = bwSigma;
+          }
+          let o = 0;
           for (let lane = 0; lane < lanes.length; lane++) {
             const { cy, amp } = lanes[lane];
-            for (let i = 0; i < dispN; i++) {
-              lanePts[2 * i] = (i / (dispN - 1)) * W;
-              lanePts[2 * i + 1] = cy - valueAt(i, lane) * amp;
+            const src = bwOn ? laneRaw : laneVals;
+            for (let k = 0; k < padded; k++) src[k] = valueAt(Math.min(dispN - 1, Math.max(0, k - LANCZOS_A)), lane);
+            if (bwBoxes) {
+              boxBlur(laneRaw, laneTmp, padded, bwBoxes[0]);
+              boxBlur(laneTmp, laneRaw, padded, bwBoxes[1]);
+              boxBlur(laneRaw, laneVals, padded, bwBoxes[2]);
+            } else if (bwOn) {
+              // The window's ends held beyond it, as the padding already is.
+              const r = (bwKernel.length - 1) / 2;
+              for (let k = 0; k < padded; k++) {
+                let v = 0;
+                for (let j = -r; j <= r; j++) v += bwKernel[j + r] * laneRaw[Math.min(padded - 1, Math.max(0, k + j))];
+                laneVals[k] = v;
+              }
             }
-            phos.strokeTrace!({
-              points: lanePts,
-              count: dispN,
-              width: lineWidth,
-              rgb: [ar, ag, ab],
-              yBottom: H,
-              yTop: 0,
-              alphaBottom: p.glow,
-              alphaTop: p.glow,
-            });
+            let x0 = 0;
+            let y0 = cy - laneVals[LANCZOS_A] * amp;
+            for (let i = 0; i < dispN - 1; i++) {
+              // Pieces by the chord's on-screen length (the reconstructed path is close to it).
+              const yEnd = cy - laneVals[i + 1 + LANCZOS_A] * amp;
+              const n = Math.min(maxPieces, Math.max(1, Math.ceil(Math.hypot(step, yEnd - y0) / PIECE_PX)));
+              if (o + 5 * n > segData.length) {
+                const grown = new Float32Array(Math.max(2 * segData.length, o + 5 * n, 5 * lanes.length * (dispN - 1)));
+                grown.set(segData.subarray(0, o));
+                segData = grown;
+              }
+              const pieceEnergy = energy / n;
+              for (let j = 1; j <= n; j++) {
+                let y1 = yEnd;
+                if (j < n) {
+                  // Taps i − LANCZOS_A + 1 … i + LANCZOS_A, which sit at laneVals[i + 1 …].
+                  const row = Math.round((j / n) * LANCZOS_PHASES) * taps;
+                  let v = 0;
+                  for (let k = 0; k < taps; k++) v += laneVals[i + 1 + k] * LANCZOS_TABLE[row + k];
+                  y1 = cy - v * amp;
+                }
+                const x1 = (i + j / n) * step;
+                segData[o] = x0;
+                segData[o + 1] = y0;
+                segData[o + 2] = x1;
+                segData[o + 3] = y1;
+                segData[o + 4] = pieceEnergy / Math.hypot(x1 - x0, y1 - y0); // never zero: x always moves
+                o += 5;
+                x0 = x1;
+                y0 = y1;
+              }
+            }
           }
+          phos.addSegments!({ data: segData, count: o / 5, width: lineWidth, rgb: [ar, ag, ab], round: true });
         }
       }
 
       // 4) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
+      phos.setTone?.(p.saturation, p.contrast);
       phos.commit(dt, p.trailTau, p.tail, doseMult, p.bloom, p.haze);
 
       raf = requestAnimationFrame(render);
@@ -639,14 +808,17 @@ export function TimeScope() {
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "tail" | "glow" | "beam" | "bloom" | "haze" | "triggerFilterHz";
+  type NumKey = "trailTau" | "tail" | "glow" | "beam" | "bloom" | "haze" | "saturation" | "contrast" | "bwLimit" | "triggerFilterHz";
   const CONTROLS: { key: NumKey; label: string; hint: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 2.0, step: 0.01 },
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 64, step: 1 },
-    { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.02, max: 1, step: 0.02 },
+    { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.02, max: 12, step: 0.02 },
     { key: "beam", label: t("scope.beam"), hint: t("scope.beamHint"), min: 0.1, max: 8, step: 0.05 },
     { key: "bloom", label: t("scope.bloom"), hint: t("scope.bloomHint"), min: 0, max: 2, step: 0.05 },
     { key: "haze", label: t("scope.haze"), hint: t("scope.hazeHint"), min: 0, max: 4, step: 0.05 },
+    { key: "saturation", label: t("scope.saturation"), hint: t("scope.saturationHint"), min: 0, max: 10, step: 0.1 },
+    { key: "contrast", label: t("scope.contrast"), hint: t("scope.contrastHint"), min: 1, max: 3, step: 0.05 },
+    { key: "bwLimit", label: t("scope.bwLimit"), hint: t("scope.bwLimitHint"), min: 0, max: 3, step: 0.1 },
     { key: "triggerFilterHz", label: t("scope.trigFilter"), hint: t("scope.trigFilterHint"), min: 20, max: 1000, step: 10 },
   ];
   const msPerDiv = MS_PER_DIV_STEPS[params.msPerDivIdx] ?? MS_PER_DIV_STEPS[0];

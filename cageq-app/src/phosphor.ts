@@ -194,8 +194,13 @@ export type TraceSegments = {
   rgb: readonly [number, number, number];
   /** The beam spot's length along the segment, px (default 1, a pixel): each end fades in and out
    *  over this instead of over one pixel — the deposit spread by a spot that has length, not just
-   *  width, with its total unchanged. */
+   *  width, with its total unchanged. Ignored when `round`. */
   spot?: number;
+  /** A round beam instead: a Gaussian spot, `width` across in every direction (see FS_SEG), for a
+   *  path that turns. The default spot is a box aligned with each segment, which turns with it, so
+   *  at a bend the inside of the corner gets both segments' ends and the outside neither — a dot at
+   *  every join. Fine for a path that never turns (the meter's), wrong for one that does. */
+  round?: boolean;
 };
 
 /** Shared surface of both backends — see the module comment for why the fallback exists. */
@@ -232,7 +237,8 @@ export type Phosphor = {
    * wherever it passes — Vectorscope's trace, a beam's path drawn sample to sample with its
    * brightness falling as it speeds up. Coverage is the segment's own box-filtered area per pixel,
    * along it and across it, so a zero-length segment adds nothing and two segments continuing in a
-   * line sum to full coverage at the point they share, not double. Present when `strokeTrace` is.
+   * line sum to full coverage at the point they share, not double — or, with `round`, a Gaussian
+   * spot swept along it, which sums exactly at a bend too. Present when `strokeTrace` is.
    */
   addSegments?(segs: TraceSegments): void;
   /**
@@ -269,6 +275,18 @@ export type Phosphor = {
    * the 2D fallback, which has no cheap way to blur.
    */
   commit(dt: number, tau: number, tail?: number, doseMult?: number, bloomIntensity?: number, bloomWide?: number): void;
+  /**
+   * The tone of a linear-light accumulator (PhosphorOptions' `linearLight`; ignored otherwise), in
+   * effect from the next `commit()`. Two stages, in the order the light meets them:
+   *   * `saturation` (k, 0 = none): the phosphor's own output saturating at high excitation —
+   *     light = (1 − e^(−k·E)) / (1 − e^(−k)) of the stored energy E, still 0 at 0 and 1 at full, a
+   *     softer and softer shoulder as k rises. Before the halation (a saturated core scatters its
+   *     saturated light), see GLSL_TONE.
+   *   * `contrast` (gamma, 1 = none): the eye's or a camera's response, intensity^gamma, applied
+   *     last to the intensity (not per channel, so the beam keeps its hue). ~2.2 is the look this
+   *     module had before linear light, which presented energy as an encoded value: light ∝ E^2.2.
+   */
+  setTone?(saturation: number, contrast: number): void;
   /** True for the half-float GL backend; false when running the 8-bit canvas fallback. */
   readonly precise: boolean;
   dispose(): void;
@@ -276,6 +294,22 @@ export type Phosphor = {
 
 const VS_QUAD = `attribute vec2 aPos; varying vec2 vUv;
 void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+// sRGB's transfer curve (the exact piecewise one), both ways: an encoded value, what a canvas and
+// the display carry, to the light it stands for, and back. See PhosphorOptions' `linearLight`.
+const GLSL_SRGB = `
+vec3 srgbToLinear(vec3 c){ return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+vec3 linearToSrgb(vec3 c){ return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
+float linearToSrgb1(float x){ return x < 0.0031308 ? x * 12.92 : 1.055 * pow(x, 1.0 / 2.4) - 0.055; }`;
+
+// The linear-light tone stages (see `Phosphor.setTone`). A texel is premultiplied light, rgb = the
+// colour's light x E, alpha = E, so saturating E scales the whole texel; contrast works on the
+// intensity, the brightest channel (the same proxy FS_ACCUM's decay uses), which for one hue is E.
+const GLSL_TONE = `uniform float uSat, uContrast;
+float satCurve(float e){ return uSat > 1e-4 ? (1.0 - exp(-uSat * e)) / (1.0 - exp(-uSat)) : e; }
+vec3 saturateLight(vec4 c){ return c.a > 0.0 ? c.rgb * (satCurve(c.a) / c.a) : vec3(0.0); }
+vec3 contrastLight(vec3 l){ float m = max(l.r, max(l.g, l.b)); return m > 0.0 ? l * pow(m, uContrast - 1.0) : l; }
+float toneAlpha(float e){ return linearToSrgb1(pow(satCurve(e), uContrast)); }`;
 
 // Decay the history and add this frame's trace. `uKeep` is exp(-dt/tau).
 //
@@ -291,7 +325,8 @@ void main(){ vUv = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }`;
 // longer, which raises the apparent floor and forces glow up before the faint end reads against it.
 // The point of this module is a trail that reaches zero, not a different look.
 const FS_ACCUM = `precision highp float; varying vec2 vUv;
-uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uDose;
+uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uDose, uLinear;
+${GLSL_SRGB}
 void main(){
   vec4 prev = texture2D(uPrev, vUv);
   // Brightness-dependent decay rate: bright content falls at uKeep, faint content at the slower
@@ -311,6 +346,9 @@ void main(){
   // contributes proportionally MORE per second on a higher-refresh display, purely because commit()
   // gets called more often, not because anything drawn is actually brighter.
   cur.a *= uDose;
+  // Linear light: the trace's colour is an encoded one, so the light it deposits is its linear
+  // value times the energy (see PhosphorOptions' \`linearLight\`).
+  if (uLinear > 0.5) cur.rgb = srgbToLinear(cur.rgb);
   cur.rgb *= cur.a;
   vec4 decayed = max(prev * k - uFloor, 0.0);
   // Stacks toward saturation and has no hue ceiling — the overdraw every caller wants (see the
@@ -321,6 +359,17 @@ void main(){
 
 const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
 void main(){ gl_FragColor = texture2D(uTex, vUv); }`;
+
+// The present pass without bloom: FS_BLIT, plus the encode a linear-light accumulator needs (see
+// PhosphorOptions' `linearLight`) — its colour per channel, its alpha (the energy, which is how
+// much of the backdrop the light covers) the same way, so it stays premultiplied.
+const FS_PRESENT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex; uniform float uLinear;
+${GLSL_SRGB}
+${GLSL_TONE}
+void main(){
+  vec4 c = texture2D(uTex, vUv);
+  gl_FragColor = uLinear > 0.5 ? vec4(linearToSrgb(contrastLight(saturateLight(c))), toneAlpha(c.a)) : c;
+}`;
 
 // `strokeTrace`'s segments, one instance each: the shared quad (`aPos`, ±1 along and across the
 // segment) stretched over the segment from `aP0` to `aP1` (canvas px, y down), reaching `uR` past
@@ -370,36 +419,60 @@ void main(){
 }`;
 
 // `addSegments`' segments, one instance each: the shared quad stretched over the segment from
-// `aSeg.xy` to `aSeg.zw` (canvas px, y down), reaching one pixel past it across for the
-// anti-aliasing fringe and half the spot (`uSpotHalf`) plus a pixel past its ends. `vU`/`vV` are the
+// `aSeg.xy` to `aSeg.zw` (canvas px, y down), reaching past its ends by `uReachU` and to either side
+// by `uReachV` — as far as the spot's coverage goes (set in `addSegments`). `vU`/`vV` are the
 // fragment's position along and across the segment, px.
 const VS_SEG = `attribute vec2 aPos; attribute vec4 aSeg; attribute float aAlpha;
-uniform vec2 uSize; uniform float uHalf, uSpotHalf;
+uniform vec2 uSize; uniform float uReachU, uReachV;
 varying float vU, vV, vLen, vAlpha;
 void main(){
   vec2 d = aSeg.zw - aSeg.xy;
   float len = length(d);
   vec2 dir = len > 1e-4 ? d / len : vec2(1.0, 0.0);
   vec2 nrm = vec2(-dir.y, dir.x);
-  float reach = uSpotHalf + 1.0;
-  float u = aPos.x > 0.0 ? len + reach : -reach;
-  float v = aPos.y * (uHalf + 1.0);
+  float u = aPos.x > 0.0 ? len + uReachU : -uReachU;
+  float v = aPos.y * uReachV;
   vec2 p = aSeg.xy + dir * u + nrm * v;
   vU = u; vV = v; vLen = len; vAlpha = aAlpha;
   gl_Position = vec4(p.x / uSize.x * 2.0 - 1.0, 1.0 - p.y / uSize.y * 2.0, 0.0, 1.0);
 }`;
 
-// The overlap of a box around the fragment with the segment's own extent — along it ([0, len]) a
-// box the spot's length (at least a pixel), its overlap divided by that length; across it
+// The segment's deposit at the fragment: the spot swept along the segment's own extent ([0, len]).
+//
+// Box spot (`uSigma` 0): the overlap of a box around the fragment with that extent — along it a box
+// the spot's length (at least a pixel), its overlap divided by that length; across it
 // ([-half, half]) a pixel box: exact box-filtered coverage for an axis-aligned segment, a close one
 // otherwise. Along, it integrates to exactly `len`, so the spot spreads the deposit without
 // changing its total, and a segment shorter than the spot reaches only `len / spot` of its alpha.
+// The box is aligned with the segment, so it turns with it: segments continuing in a line sum
+// exactly, but at a bend they don't (see TraceSegments' `round`).
+//
+// Round spot (`uSigma` > 0): a Gaussian of standard deviation sigma. Isotropic, so it separates in
+// the segment's own frame whatever its direction, and the sweep has a closed form — a Gaussian
+// across, a difference of two erfs along. Segments then sum exactly at any join, bends included:
+// each is just its share of one integral along the whole path. Scaled so the across profile still
+// integrates to the width (the same total deposit as the box), which with sigma = width / sqrt(2pi)
+// also peaks at 1, as the box does; the display's own response is folded into sigma (see
+// DISPLAY_SIGMA), so a thin beam doesn't alias.
 const FS_SEG = `precision highp float;
 varying float vU, vV, vLen, vAlpha;
-uniform float uHalf, uSpotHalf; uniform vec3 uRgb;
+uniform float uHalf, uSpotHalf, uSigma; uniform vec3 uRgb;
+// erf, Abramowitz & Stegun 7.1.26 (absolute error under 1.5e-7).
+float erf1(float x){
+  float t = 1.0 / (1.0 + 0.3275911 * abs(x));
+  float y = 1.0 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-x * x);
+  return x < 0.0 ? -y : y;
+}
 void main(){
-  float along = clamp(min(vU + uSpotHalf, vLen) - max(vU - uSpotHalf, 0.0), 0.0, 2.0 * uSpotHalf) / (2.0 * uSpotHalf);
-  float across = clamp(min(vV + 0.5, uHalf) - max(vV - 0.5, -uHalf), 0.0, 1.0);
+  float along, across;
+  if (uSigma > 0.0) {
+    float k = 0.70710678 / uSigma;
+    along = 0.5 * (erf1(vU * k) - erf1((vU - vLen) * k));
+    across = 2.0 * uHalf / (2.5066283 * uSigma) * exp(-0.5 * vV * vV / (uSigma * uSigma));
+  } else {
+    along = clamp(min(vU + uSpotHalf, vLen) - max(vU - uSpotHalf, 0.0), 0.0, 2.0 * uSpotHalf) / (2.0 * uSpotHalf);
+    across = clamp(min(vV + 0.5, uHalf) - max(vV - 0.5, -uHalf), 0.0, 1.0);
+  }
   gl_FragColor = vec4(uRgb, along * across * vAlpha);
 }`;
 
@@ -479,6 +552,16 @@ const BLOOM_FAR_BLUR_PASSES = 2;
  *  trail brightness at default `glow` instead of only at the clamp — re-tune from here once seen
  *  live, not guessed again. */
 const BLOOM_THRESHOLD = 0.2;
+/** The display's own spot, px: a Gaussian this wide convolved into a round beam spot (in quadrature
+ *  with the beam's own, see FS_SEG). Pixels are the finest detail the screen can show, so light has
+ *  to be band-limited to them before anything non-linear sees it. A spot narrower than that lands
+ *  on one pixel or spreads over two depending on where it falls between pixel centres — the same
+ *  total, but a linear-light tone (`Phosphor.setTone`) shows the two differently, and a sloped thin
+ *  line beaded along its length. Measured on a sloped line through saturation 2 / contrast 2.2,
+ *  peak-to-peak brightness along it: 17% at sigma 0.38 px (a 0.6 px beam with only the pixel's box
+ *  variance, as before), 3% at 0.66, 2% at 0.86; linear light alone stayed within 3% throughout. A
+ *  thinner beam now draws as the finest spot the display can show, with its energy unchanged. */
+const DISPLAY_SIGMA = 0.8;
 
 // Every reduction in the bloom chain is an exact box average of the source texels the target texel
 // covers, computed from `gl_FragCoord` rather than left to the sampler: `uFactor` (1 or 2 per axis)
@@ -533,9 +616,13 @@ void main(){ gl_FragColor = texture2D(uTex, vUv * uUvScale); }`;
 // a different *compositing* operator, not just a different colour). The tight tier collapses it
 // to white afterwards (FS_TIGHT). Same `max(r,g,b)` brightness proxy FS_ACCUM's own decay math
 // already uses, for consistency within this file.
+// In linear light it's the saturated light instead, all of it (see FS_COMPOSITE, `Phosphor.setTone`).
 const FS_BRIGHTPASS = `precision highp float;
-uniform sampler2D uTex; uniform float uThreshold;
+uniform sampler2D uTex; uniform float uThreshold, uLinear;
+${GLSL_SRGB}
+${GLSL_TONE}
 vec3 tap(sampler2D t, vec2 uv){
+  if (uLinear > 0.5) return saturateLight(texture2D(t, uv));
   vec3 c = texture2D(t, uv).rgb;
   float v = max(c.r, max(c.g, c.b));
   return v > 0.0 ? c * (max(v - uThreshold, 0.0) / v) : vec3(0.0);
@@ -549,14 +636,16 @@ void main(){ gl_FragColor = vec4(down2(uTex), 1.0); }`;
 // colour, and it's what "seems to not saturate to white but full saturation again" was reporting
 // when this kept the coloured channels. For a single hue, the brightest channel of the hue-scaled
 // excess is exactly the excess itself.
+// In linear light (PhosphorOptions' `linearLight`) it keeps the hue instead: there the bloom is
+// plain scatter, see FS_COMPOSITE.
 const FS_TIGHT = `precision highp float;
-uniform sampler2D uTex;
+uniform sampler2D uTex; uniform float uLinear;
 ${GLSL_TAP_PLAIN}
 ${GLSL_DOWN2}
 void main(){
   vec3 c = down2(uTex);
   float b = max(c.r, max(c.g, c.b));
-  gl_FragColor = vec4(b, b, b, 1.0);
+  gl_FragColor = vec4(uLinear > 0.5 ? c : vec3(b), 1.0);
 }`;
 
 // Separable 5-tap approx-Gaussian (weights sum to 1): run once with a horizontal uOffset, once
@@ -591,14 +680,31 @@ void main(){
 //     tight's own bloom pushing a pixel just high enough to dodge the comparison.
 // Both bilinearly upscaled on sample — see the bloom textures' own LINEAR filtering. Carries the
 // sharp texture's own alpha through unchanged — bloom is extra light, not extra coverage.
+//
+// In linear light (PhosphorOptions' `linearLight`) all of the above gives way to the physical
+// thing: halation, a fraction of *all* the emitted light scattering in the faceplate. Linear, so no
+// threshold (commit() passes 0) — a threshold switched the halo on only where the trace crossed it,
+// which picked out a beam's slowest points as hot spots — in the beam's own colour (FS_TIGHT), and
+// simply added. Added light in linear terms is also what keeps it from blowing out dense areas, the
+// reason `max()` was needed above: a halo a few percent of a bright core's light barely moves its
+// encoded value, while it lifts the dark around it visibly. The phosphor's saturation comes first,
+// the contrast and the encode last, as in FS_PRESENT (see `Phosphor.setTone`).
 const FS_COMPOSITE = `precision highp float; varying vec2 vUv;
-uniform sampler2D uSharp, uBloom, uBloomWide; uniform float uIntensity, uIntensityWide;
+uniform sampler2D uSharp, uBloom, uBloomWide; uniform float uIntensity, uIntensityWide, uLinear;
 uniform vec2 uBloomUv; // the canvas's share of the tight texture — see GLSL_DOWN2's doc
+${GLSL_SRGB}
+${GLSL_TONE}
 void main(){
   vec4 sharpC = texture2D(uSharp, vUv);
-  vec3 withTight = min(sharpC.rgb + uIntensity * texture2D(uBloom, vUv * uBloomUv).rgb, 1.0);
-  vec3 result = max(withTight, uIntensityWide * texture2D(uBloomWide, vUv).rgb);
-  gl_FragColor = vec4(result, sharpC.a);
+  vec3 tightC = uIntensity * texture2D(uBloom, vUv * uBloomUv).rgb;
+  vec3 wideC = uIntensityWide * texture2D(uBloomWide, vUv).rgb;
+  if (uLinear > 0.5) {
+    vec3 light = min(saturateLight(sharpC) + tightC + wideC, 1.0);
+    gl_FragColor = vec4(linearToSrgb(contrastLight(light)), toneAlpha(sharpC.a));
+    return;
+  }
+  vec3 withTight = min(sharpC.rgb + tightC, 1.0);
+  gl_FragColor = vec4(max(withTight, wideC), sharpC.a);
 }`;
 
 // Logged on failure, not just returned null: every caller of link()/compile() otherwise fails
@@ -646,7 +752,7 @@ function makeScratch(target: HTMLCanvasElement) {
   return { cv, ctx, sync };
 }
 
-function createGl(target: HTMLCanvasElement): Phosphor | null {
+function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
   const gl = target.getContext("webgl", {
     alpha: true,
     premultipliedAlpha: true,
@@ -663,8 +769,9 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
 
   const accum = link(gl, FS_ACCUM);
   const blit = link(gl, FS_BLIT);
+  const present = link(gl, FS_PRESENT);
   const quad = gl.createBuffer();
-  if (!accum || !blit || !quad) return null;
+  if (!accum || !blit || !present || !quad) return null;
 
   const uKeep = gl.getUniformLocation(accum, "uKeep");
   const uKeepTail = gl.getUniformLocation(accum, "uKeepTail");
@@ -674,6 +781,20 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
   const uPrev = gl.getUniformLocation(accum, "uPrev");
   const uTrace = gl.getUniformLocation(accum, "uTrace");
   const uTex = gl.getUniformLocation(blit, "uTex");
+  const uPresentTex = gl.getUniformLocation(present, "uTex");
+  gl.useProgram(accum);
+  gl.uniform1f(gl.getUniformLocation(accum, "uLinear"), linear ? 1 : 0);
+  gl.useProgram(present);
+  gl.uniform1f(gl.getUniformLocation(present, "uLinear"), linear ? 1 : 0);
+  // The tone (see `setTone`), per program that applies it: present here, the bloom's two below.
+  const tonePrograms: WebGLProgram[] = [present];
+  let tone: [number, number] = [0, 1];
+  const applyTone = (prog: WebGLProgram) => {
+    gl.useProgram(prog);
+    gl.uniform1f(gl.getUniformLocation(prog, "uSat"), tone[0]);
+    gl.uniform1f(gl.getUniformLocation(prog, "uContrast"), tone[1]);
+  };
+  applyTone(present);
 
   gl.bindBuffer(gl.ARRAY_BUFFER, quad);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
@@ -744,6 +865,9 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     size: gl.getUniformLocation(segProg, "uSize"),
     half: gl.getUniformLocation(segProg, "uHalf"),
     spotHalf: gl.getUniformLocation(segProg, "uSpotHalf"),
+    sigma: gl.getUniformLocation(segProg, "uSigma"),
+    reachU: gl.getUniformLocation(segProg, "uReachU"),
+    reachV: gl.getUniformLocation(segProg, "uReachV"),
     rgb: gl.getUniformLocation(segProg, "uRgb"),
   };
   const overTex = overProg && gl.getUniformLocation(overProg, "uTex");
@@ -889,6 +1013,15 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       const blur = link(gl, FS_BLUR);
       const composite = link(gl, FS_COMPOSITE);
       if (!down2 || !resample || !brightPass || !tight || !blur || !composite) return false;
+      gl.useProgram(composite);
+      gl.uniform1f(gl.getUniformLocation(composite, "uLinear"), linear ? 1 : 0);
+      gl.useProgram(tight);
+      gl.uniform1f(gl.getUniformLocation(tight, "uLinear"), linear ? 1 : 0);
+      gl.useProgram(brightPass);
+      gl.uniform1f(gl.getUniformLocation(brightPass, "uLinear"), linear ? 1 : 0);
+      tonePrograms.push(brightPass, composite);
+      applyTone(brightPass);
+      applyTone(composite);
       const d2 = (prog: WebGLProgram): Down2Prog => ({
         prog,
         uSrcSize: gl.getUniformLocation(prog, "uSrcSize"),
@@ -1061,9 +1194,16 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         if (!segProg || !segU || !instancing || sg.count < 1) return;
         gl.useProgram(segProg);
         const halfW = sg.width / 2;
+        const spotHalf = Math.max(1, sg.spot ?? 1) / 2;
+        // The round spot's sigma (see FS_SEG), and the quad's reach: four sigma for it (the rest is
+        // below 1e-4 of the peak), otherwise a pixel past the box.
+        const sigma = sg.round ? Math.sqrt((sg.width * sg.width) / (2 * Math.PI) + DISPLAY_SIGMA * DISPLAY_SIGMA) : 0;
         gl.uniform2f(segU.size, target.width, target.height);
         gl.uniform1f(segU.half, halfW);
-        gl.uniform1f(segU.spotHalf, Math.max(1, sg.spot ?? 1) / 2);
+        gl.uniform1f(segU.spotHalf, spotHalf);
+        gl.uniform1f(segU.sigma, sigma);
+        gl.uniform1f(segU.reachU, sg.round ? 4 * sigma : spotHalf + 1);
+        gl.uniform1f(segU.reachV, sg.round ? 4 * sigma : halfW + 1);
         gl.uniform3f(segU.rgb, sg.rgb[0] / 255, sg.rgb[1] / 255, sg.rgb[2] / 255);
         gl.bindBuffer(gl.ARRAY_BUFFER, quad);
         gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
@@ -1122,6 +1262,11 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
     fillTrace,
     overlayStroke,
     addSegments,
+    setTone(saturation, contrast) {
+      if (tone[0] === saturation && tone[1] === contrast) return;
+      tone = [saturation, contrast];
+      for (const prog of tonePrograms) applyTone(prog);
+    },
     commit(dt, tau, tail = 1, doseMult = 1, bloomIntensity = 0, bloomWide = 0) {
       const W = target.width;
       const H = target.height;
@@ -1180,7 +1325,7 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
         // exact 2x2 average (see GLSL_DOWN2), so every texel of the accumulator contributes to both
         // tiers.
         useDown2(bloomProg.brightPass, W, H, 2, 2);
-        gl.uniform1f(bloomProg.uThreshold, BLOOM_THRESHOLD);
+        gl.uniform1f(bloomProg.uThreshold, linear ? 0 : BLOOM_THRESHOLD); // see FS_COMPOSITE
         gl.uniform1i(bloomProg.uBPTex, 0);
         gl.bindFramebuffer(gl.FRAMEBUFFER, pf.fbo);
         gl.viewport(0, 0, prefilterW, prefilterH);
@@ -1306,8 +1451,8 @@ function createGl(target: HTMLCanvasElement): Phosphor | null {
       } else {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, W, H);
-        gl.useProgram(blit);
-        gl.uniform1i(uTex, 0);
+        gl.useProgram(present);
+        gl.uniform1i(uPresentTex, 0);
         gl.bindTexture(gl.TEXTURE_2D, ping[dst].tex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       }
@@ -1439,14 +1584,28 @@ function create2d(target: HTMLCanvasElement): Phosphor | null {
   };
 }
 
+export type PhosphorOptions = {
+  /** Accumulate light, not encoded values. The accumulator adds and decays what it's given, and a
+   *  beam's energy is light: half the energy, half the light. But the canvas and the display carry
+   *  sRGB-encoded values, where half the value is about a fifth of the light — so presenting the
+   *  energy as the value, as this module always has, shows every partial deposit far too dark: a
+   *  stroke given 1/20 of a dwell's energy came out at ~1/200 of its light instead of 1/20, turning
+   *  a beam's slow points into isolated dots against strokes that all but vanished. With this, the
+   *  trace's colour is converted to light before it's deposited, everything after (decay, bloom)
+   *  works on light, and the result is encoded once, at present. At full energy a trace keeps
+   *  exactly its colour; everything fainter reads brighter, as it physically is. The 8-bit canvas
+   *  fallback ignores it. */
+  linearLight?: boolean;
+};
+
 /** Half-float GL accumulator, or the 8-bit canvas fallback when the GPU can't render half-float.
  *  Capability is settled on a throwaway canvas first (see `halfFloatRenderable`) so the caller's
  *  canvas is only ever bound to the context type actually being used — it keeps that type for life.
  *  Returns null only if even a 2D context is unobtainable. */
-export function createPhosphor(target: HTMLCanvasElement): Phosphor | null {
+export function createPhosphor(target: HTMLCanvasElement, opts: PhosphorOptions = {}): Phosphor | null {
   if (halfFloatRenderable()) {
     try {
-      const gl = createGl(target);
+      const gl = createGl(target, opts.linearLight ?? false);
       if (gl) return gl;
     } catch (e) {
       console.warn("[phosphor] half-float accumulator failed, using the 8-bit fallback", e);
