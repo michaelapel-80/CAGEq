@@ -150,8 +150,6 @@
     "glowHint": "Helligkeit der Spur bei voller (langsam bewegter) Intensität — schneller bewegte Abschnitte dunkeln von hier aus ab",
     "beam": "Strahl",
     "beamHint": "Wie dick der gezeichnete Strahl/die Spur ist",
-    "focus": "Fokus",
-    "focusHint": "Bezugswert für das geschwindigkeitsabhängige Glühen — Abschnitte, die kürzer sind als dieser Wert, werden mit voller Helligkeit gezeichnet; schnellere (längere) dunkeln Richtung Grundhelligkeit ab",
     "scale": "Skala",
     "scaleHint": "Vollausschlag-Ringradius, als Anteil der Röhrengröße",
     "grid": "Raster",

@@ -26,9 +26,8 @@ export type ScopeEq = { filters: Band[]; preampDb: number; model: ResponseModel 
 // tried before landing on that. Consequence worth knowing: the Trail slider's whole range is
 // genuinely usable now, where it used to be short-end-only.
 //
-// Two things must NOT be drawn into the trail canvas, because the accumulator composites additively:
-// the graticule (static, on its own canvas below) and the resting spot (constant brightness, redrawn
-// every frame, on its own canvas above). Either would stack toward white instead of holding steady.
+// The graticule must NOT be drawn into the trail canvas, because the accumulator composites
+// additively: static, redrawn every frame, it would stack toward white. It has its own canvas below.
 
 /** Live-tunable render parameters (adjustable in the on-screen panel so tuning isn't a recompile).
  *  `rotate` picks orientation: off = raw X-Y (L→horizontal, R→vertical, mono = 45° diagonal — the
@@ -36,19 +35,16 @@ export type ScopeEq = { filters: Band[]; preampDb: number; model: ResponseModel 
 type Params = {
   trailTau: number; // phosphor decay time constant (s) — time-based, so the trail is refresh-independent
   tail: number; // multiplies trailTau for *faint* content only — the long afterglow (see phosphor.ts)
-  glow: number; // beam brightness at full (slow-beam) intensity; velocity glow dims it from here
+  glow: number; // beam current: the energy the beam deposits per unit of time (see BEAM_ENERGY)
   beam: number; // beam line width, in reference px (scaled by the tube size)
-  focus: number; // velocity-glow reference: segments shorter than this (ref px) draw full-bright,
-  //                longer (faster beam = higher freq) dim as ~1/length — a CRT's constant
-  //                energy-per-sample. Larger = weaker effect (more of the trace stays bright).
   radiusFrac: number; // full-scale ring radius as a fraction of the half-size
   gridAlpha: number; // graticule brightness
   bloom: number; // tight-radius glow intensity (phosphor.ts's bloomIntensity) — 0 = off
   haze: number; // broad, faint glow intensity (phosphor.ts's bloomWide) — 0 = off; a genuinely
   //               wider/softer halo than `bloom`, not the same effect at a bigger radius, see
   //               phosphor.ts's own "Bloom" doc. Both are whole-frame, not per-primitive, so a
-  //               resting spot blooms by the same modest amount as the moving trace instead of
-  //               ballooning (see phosphor.ts's own `commit()` doc for why that distinction matters)
+  //               beam standing still blooms by the same modest amount as the moving trace instead
+  //               of ballooning (see phosphor.ts's own `commit()` doc for why that distinction matters)
   rotate: boolean;
   invert: boolean; // undistort: inverse-filter the loopback back to the pre-EQ source image
   labels: boolean; // the graticule's L/R/M/S letters
@@ -67,7 +63,6 @@ const DEFAULTS: Params = {
   tail: 6,
   glow: 0.32,
   beam: 1.0,
-  focus: 8,
   radiusFrac: 0.48,
   gridAlpha: 0.22,
   bloom: 0.3,
@@ -94,7 +89,21 @@ const VEL_BUCKETS = 16;
 const VEL_FLOOR = 0.05; // dimmest a fast segment goes (keeps sharp transitions faintly visible)
 const VEL_REF_RATE = 48000; // the velocity glow judges beam speed in *time*; the per-sample segment
 //   length is scaled to this rate so a given speed reads the same at 44.1/48/96/192 kHz.
-const SPOT_TAU = 0.12; // resting-spot fade-in/out time constant (s) — eases it on/off, no popping
+// The Canvas 2D fallback's velocity glow: segments shorter than this (reference px) draw full-
+// bright, longer ones dim as ~1/length. The GPU beam has no such knob — see BEAM_ENERGY.
+const FALLBACK_FOCUS = 8;
+// The beam, as a CRT's: a fixed current, so it deposits the same energy per unit of time, spread
+// over however far it travels — a fast stroke lights each pixel less, a dwell more, so a point's
+// brightness is the time the beam spends there, whatever the frequency. (The earlier model drew
+// segments up to the focus length at full brightness and only dimmed longer ones, so slow,
+// bass-heavy figures laid down ~4x less light than busy material.) Per sample: glow x BEAM_ENERGY
+// x tube size x VEL_REF_RATE / rate — the same at any tube size and any sample rate. First set so
+// that glow kept its total brightness on busy material (0.0087, measured offline), then lowered on a
+// live retune to what glow 0.2 gave, so the default stays the 0.32 v0.19.0 shipped (and the presets
+// keep their relative meaning). Slow, dwelling figures read brighter than before — the physical part.
+const BEAM_ENERGY = 0.0054;
+// Shortest segment drawn: a beam standing still still deposits its energy, just on a tiny stretch.
+const MIN_SEG_PX = 0.05;
 // The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
 // `doseMult` comment for why this matters: `glow`'s tuned defaults were dialed in under the OLD,
 // refresh-rate-dependent dose behaviour, which happened to equal SCOPE_UPDATE_HZ/DOSE_REF_FPS of
@@ -146,9 +155,9 @@ function parseHex(hex: string): [number, number, number] {
  * persistence: fade-then-draw on rAF turns motion into a glowing, decaying figure. Continuous lines
  * (not decimated dots) are what render oscilloscope-music Lissajous shapes. Purely a monitor.
  *
- * Three stacked canvases over the dark backdrop: a **static** graticule, the **trace** (whose
- * persistence phosphor.ts owns), and the **resting spot**. Keeping the graticule and the spot off
- * the trace canvas is what stops them accumulating into it — see the file-level note above.
+ * Two stacked canvases over the dark backdrop: a **static** graticule and the **trace** (whose
+ * persistence phosphor.ts owns). Keeping the graticule off the trace canvas is what stops it
+ * accumulating into it — see the file-level note above.
  *
  * Always sized by measuring its own container (`ResizeObserver`, both inline and in the pop-out
  * window) rather than a fixed prop — `.vectorscope-wrap:not(.fill)` is `height:100%;
@@ -169,10 +178,6 @@ export function Vectorscope({
   const wrapRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLCanvasElement>(null);
   const trailRef = useRef<HTMLCanvasElement>(null);
-  // The resting spot gets its own layer above the trail: it's redrawn at a constant brightness
-  // every frame, and the trail accumulates *additively*, so drawing it there would pile it up frame
-  // over frame instead of holding it steady (see phosphor.ts's closing note).
-  const spotRef = useRef<HTMLCanvasElement>(null);
   // Latest payload, written by the listener and read by the rAF loop — a ref, not state, so the
   // 60 fps stream drives the imperative canvas without ever re-rendering React.
   const scopeRef = useRef<ScopeData | null>(null);
@@ -327,9 +332,7 @@ export function Vectorscope({
   // an in-place 8-bit `destination-out` fade does at long trail settings).
   useEffect(() => {
     const cv = trailRef.current;
-    const spotCv = spotRef.current;
-    const spotCtx = spotCv?.getContext("2d");
-    if (!cv || !spotCv || !spotCtx) return;
+    if (!cv) return;
     const phos = createPhosphor(cv);
     if (!phos) return;
     setGpuTraceOk(phos.addSegments !== undefined);
@@ -343,24 +346,6 @@ export function Vectorscope({
     let last = performance.now();
     let drawn: ScopeData | null = null; // last payload already traced (draw each once)
     let lastTrace = performance.now(); // when `drawn` last actually changed — see doseMult below
-    let spotX = NaN; // the beam's dwell spot — position + brightness, redrawn every frame so it
-    let spotY = NaN; //   holds during silence; updated per window from the beam's mean + path length
-    let spotB = 0; // target brightness
-    let spotVis = 0; // eased toward spotB so the spot fades in/out instead of popping
-    // The bloom/core gradients below are rebuilt from spotVis every frame this runs (up to 60/s,
-    // for as long as the scope stays open — potentially hours). Each fresh CanvasGradient costs the
-    // GPU compositor a shader/texture upload; unbounded over a long session that's a steady
-    // GPU-memory drain that doesn't show up in the JS heap or Task Manager's default memory column
-    // (a plausible cause of a WebView2 "out of memory" crash with no visible memory growth).
-    // Cached here: built in local space (centred at the origin, so position is applied via
-    // ctx.translate at fill time) and keyed on spotVis quantized to 512 levels — far finer than
-    // the eye resolves at 8-bit output — so a steady dwell (the common, long-duration case) reuses
-    // the same two gradient objects indefinitely instead of reallocating every frame.
-    let gradS = -1;
-    let gradQ = -1;
-    let bloomGrad: CanvasGradient | null = null;
-    let coreGrad: CanvasGradient | null = null;
-
     // Per-velocity-bucket segment buffers, reused across frames — replaces a fresh `Path2D` per
     // bucket (VEL_BUCKETS) per scope window (~60/s from the backend). Path2D has no reset/clear
     // method, so the original code had no way to reuse the objects themselves; these plain
@@ -383,6 +368,8 @@ export function Vectorscope({
     // The GPU path's segments instead (see `addSegments`): x0, y0, x1, y1, alpha each, in drawing
     // order. Grown like the bucket buffers, never shrunk.
     let segData = new Float32Array(0);
+    // The one segment of a beam standing still at the centre — see the idle branch.
+    const restSeg = new Float32Array(5);
 
     const render = () => {
       const now = performance.now();
@@ -394,7 +381,7 @@ export function Vectorscope({
       const c = S / 2;
       const R = S * p.radiusFrac;
       const scale = p.rotate ? R / SQRT2 : R;
-      const r0 = Math.max(1.5, p.beam * (S / REF_SIZE)); // beam/spot base radius
+      const lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE));
 
       // 1) Start this frame's trace on a cleared scratch canvas. The decay of everything before it
       //    is the accumulator's job, applied in commit() at the end of the frame. On the GPU path
@@ -426,23 +413,33 @@ export function Vectorscope({
       // match A/B (whose preamp the inverse also removes) — or while fading out a departing
       // cascade that had either.
       const undistort = iv !== null && (iv.to.coeffs.length > 0 || iv.to.gain !== 1 || iv.from !== null);
+      // The GPU beam's energy per sample (see BEAM_ENERGY).
+      const energy = p.glow * BEAM_ENERGY * S * (VEL_REF_RATE / rate);
 
-      // 2) Trace + resting spot. The beam is always somewhere: while it moves we draw the connected
-      //    trace (velocity-graded — a fast/high-frequency sweep dims, a slow dwell brightens, the
-      //    CRT's constant energy per sample), and every frame we mark the beam's *dwell* with a spot
-      //    at the window's mean position. Its brightness rises as the window's path length shrinks
-      //    (that same energy concentrated). So silence — samples collapsed to centre, line segments
-      //    ~zero-length and invisible — renders as an immediate saturated spot; an empty/absent
-      //    window parks it at centre. No silence detection, no dark gap. (Bucketed strokes keep the
-      //    velocity glow to VEL_BUCKETS stroke calls, not one per segment.)
+      // 2) The trace. The beam is always somewhere, depositing the same energy per unit of time (see
+      //    BEAM_ENERGY): spread thin while it moves fast, concentrated where it dwells — so a beam
+      //    standing still (DC, or digital silence while audio plays) burns a bright dot by itself,
+      //    with no separate spot drawn on top. (The Canvas 2D fallback grades by velocity buckets
+      //    instead — VEL_BUCKETS stroke calls, not one per segment.)
       let doseMult = 1; // see the fresh-trace branch below for why this isn't always 1
       const s = scopeRef.current;
       const idle = !s || !s.signal || s.xy.length < 4;
       if (idle) {
         if (s) drawn = s;
-        spotX = c; // resting beam parks at centre, full intensity
-        spotY = c;
-        spotB = p.glow;
+        // Silence: the beam rests at the centre. The backend sends no samples while the endpoint is
+        // silent, so deposit what a stream of zero samples would have — this frame's worth of them,
+        // at one point — with the dose a real window gets per unit of time (see the fresh-trace
+        // branch): TAU_REF/trailTau per window-second, spread over this frame's own dt.
+        if (dt > 0) {
+          doseMult = TAU_REF / p.trailTau / (dt * DOSE_REF_FPS);
+          if (ctx) {
+            ctx.fillStyle = `rgba(${ar},${ag},${ab},${p.glow})`;
+            ctx.fillRect(c - lineWidth / 2, c - lineWidth / 2, lineWidth, lineWidth);
+          } else {
+            restSeg.set([c, c, c + MIN_SEG_PX, c, (energy * rate * dt) / MIN_SEG_PX]);
+            phos.addSegments!({ data: restSeg, count: 1, width: lineWidth, rgb: [ar, ag, ab], spot: lineWidth });
+          }
+        }
       } else if (s !== drawn) {
         drawn = s;
         // This view only draws a fresh trace once per real scope window (~60/s from the backend —
@@ -480,7 +477,7 @@ export function Vectorscope({
         // Full-bright segment length (px), scaled to a reference rate: at a higher rate the beam
         // moves less per sample, so shrink the threshold to match → the velocity glow tracks beam
         // *speed* (px/s), not px/sample, and the intensity no longer jumps with the sample rate.
-        const kRef = Math.max(0.001, p.focus * (S / REF_SIZE) * (VEL_REF_RATE / rate));
+        const kRef = FALLBACK_FOCUS * (S / REF_SIZE) * (VEL_REF_RATE / rate);
         const xy = s.xy;
         // Upper bound on segments any one bucket could need this window — grown only when a bigger
         // window arrives than any buffer seen so far (see the buffers' own doc above).
@@ -497,10 +494,6 @@ export function Vectorscope({
           }
         }
         bucketCount.fill(0);
-        let sumX = 0;
-        let sumY = 0;
-        let cnt = 0;
-        let pathLen = 0;
         // Connect only *within* the window — no bridge from the previous window's last point. Windows
         // aren't guaranteed contiguous (tail-cap drops at high rates, timing jitter), so bridging drew
         // long stray lines that piled into a haze box. The 1-sample gap at each boundary is invisible.
@@ -520,19 +513,17 @@ export function Vectorscope({
             const dx = px - prevX;
             const dy = py - prevY;
             const dist = Math.sqrt(dx * dx + dy * dy);
-            pathLen += dist;
-            const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
             if (gpu) {
-              // Each segment its own brightness, no buckets: those only batched Canvas 2D strokes.
-              // Half a bucket up, the average of the 2D path's rounding (`(b + 1) / VEL_BUCKETS`),
-              // so `glow` keeps the brightness it was tuned to, without the steps.
+              // This sample's energy, spread over the distance the beam covered (see BEAM_ENERGY).
+              const len = Math.max(MIN_SEG_PX, dist);
               const o = 5 * segCount++;
               segData[o] = prevX;
               segData[o + 1] = prevY;
-              segData[o + 2] = px;
+              segData[o + 2] = dist < MIN_SEG_PX ? prevX + MIN_SEG_PX : px;
               segData[o + 3] = py;
-              segData[o + 4] = p.glow * Math.min(1, f + 0.5 / VEL_BUCKETS);
+              segData[o + 4] = energy / len;
             } else {
+              const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
               let b = (f * VEL_BUCKETS) | 0;
               if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
               const seg = bucketCount[b]++;
@@ -542,18 +533,15 @@ export function Vectorscope({
               bucketY1[b][seg] = py;
             }
           }
-          sumX += px;
-          sumY += py;
-          cnt++;
           prevX = px;
           prevY = py;
         }
-        const lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE));
         if (!ctx) {
-          // Fully additive: every segment adds its light, also where segments of the same speed
-          // cross — the beam deposits energy wherever it passes. The 2D path below combines
-          // segments within a bucket once (one stroked path each) and adds only across buckets.
-          phos.addSegments!({ data: segData, count: segCount, width: lineWidth, rgb: [ar, ag, ab] });
+          // Fully additive: every segment adds its energy, also where segments of the same speed
+          // cross. The 2D path below combines segments within a bucket once (one stroked path each)
+          // and adds only across buckets. The spot is round, as tall as the beam is wide, like
+          // the meter's — here mostly so a beam standing still burns a dot, not a hairline.
+          phos.addSegments!({ data: segData, count: segCount, width: lineWidth, rgb: [ar, ag, ab], spot: lineWidth });
         } else {
           ctx.globalCompositeOperation = "lighter";
           ctx.lineWidth = lineWidth;
@@ -584,65 +572,10 @@ export function Vectorscope({
             ctx.stroke();
           }
         }
-        // Dwell spot: the window's whole beam energy concentrated where it barely moved. refL small,
-        // so ordinary (moving) material gives ~0 while a still window (DC / silence zeros) saturates.
-        const refL = r0 * 2.5;
-        spotX = cnt > 0 ? sumX / cnt : c;
-        spotY = cnt > 0 ? sumY / cnt : c;
-        spotB = (p.glow * refL) / (pathLen + refL);
       }
 
       // 3) Hand the frame's trace to the accumulator — it decays the history and adds this on top.
       phos.commit(dt, p.trailTau, p.tail, doseMult, p.bloom, p.haze);
-
-      // 4) Draw the beam spot every frame — the beam's energy dumped on one point, like a CRT dot.
-      // Its brightness eases toward the target (spotVis → spotB) so it fades in when silence lands
-      // and fades out when the trace resumes, instead of popping. Skipped once it's fully faded.
-      // On its own layer (see spotRef), cleared each frame: the trail composites additively, so a
-      // constant-brightness redraw belongs outside it or it would stack toward white.
-      spotVis += (spotB - spotVis) * (1 - Math.exp(-dt / SPOT_TAU));
-      spotCtx.clearRect(0, 0, S, S);
-      if (spotVis > 0.01 && !Number.isNaN(spotX)) {
-        // source-over: the radii below *are* the spot size, drawn once per frame onto a cleared
-        // layer. Sized to the tube (S) so it scales proportionally inline and in the pop-out,
-        // independent of the beam width.
-        const ctx = spotCtx;
-        ctx.globalCompositeOperation = "source-over";
-        // Bloom: a steep *exponential* falloff (not a flat gradient disk, which reads fake) —
-        // intense at the core, dropping fast into a faint tail, the real phosphor point-spread.
-        // `bloomR` (tube-relative) is the one size knob; the core is a fixed fraction of it.
-        const bloomR = S * 0.018;
-        const coreR = bloomR * 0.13;
-        const q = Math.round(spotVis * 511); // quantized cache key, see the comment above
-        if (gradS !== S || gradQ !== q || !bloomGrad || !coreGrad) {
-          gradS = S;
-          gradQ = q;
-          const vis = q / 511;
-          bloomGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, bloomR);
-          const STOPS = 8;
-          for (let i = 0; i <= STOPS; i++) {
-            const t = i / STOPS;
-            const a = i === STOPS ? 0 : Math.min(1, vis * 0.85) * Math.exp(-t * 20);
-            bloomGrad.addColorStop(t, `rgba(${ar},${ag},${ab},${a})`);
-          }
-          // tight white-hot core — a saturated point
-          coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, coreR);
-          coreGrad.addColorStop(0, `rgba(255,255,255,${Math.min(1, vis * 2)})`); // white-hot centre
-          coreGrad.addColorStop(0.55, `rgba(${ar},${ag},${ab},${Math.min(1, vis * 1.3)})`);
-          coreGrad.addColorStop(1, `rgba(${ar},${ag},${ab},0)`);
-        }
-        ctx.save();
-        ctx.translate(spotX, spotY);
-        ctx.fillStyle = bloomGrad;
-        ctx.beginPath();
-        ctx.arc(0, 0, bloomR, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = coreGrad;
-        ctx.beginPath();
-        ctx.arc(0, 0, coreR, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
 
       raf = requestAnimationFrame(render);
     };
@@ -659,7 +592,6 @@ export function Vectorscope({
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 64, step: 1 },
     { key: "glow", label: t("scope.glow"), hint: t("scope.glowHint"), min: 0.02, max: 1, step: 0.02 },
     { key: "beam", label: t("scope.beam"), hint: t("scope.beamHint"), min: 0.1, max: 5, step: 0.05 },
-    { key: "focus", label: t("scope.focus"), hint: t("scope.focusHint"), min: 1, max: 24, step: 0.5 },
     { key: "radiusFrac", label: t("scope.scale"), hint: t("scope.scaleHint"), min: 0.3, max: 0.5, step: 0.01 },
     { key: "gridAlpha", label: t("scope.grid"), hint: t("scope.gridHint"), min: 0, max: 0.5, step: 0.02 },
     { key: "bloom", label: t("scope.bloom"), hint: t("scope.bloomHint"), min: 0, max: 2, step: 0.05 },
@@ -677,7 +609,6 @@ export function Vectorscope({
       <div className="vs-screen" style={canvasStyle}>
         <canvas ref={gridRef} className="vectorscope-canvas vs-grid" width={res} height={res} style={canvasStyle} aria-hidden="true" />
         <canvas ref={trailRef} className="vectorscope-canvas vs-trail" width={res} height={res} style={canvasStyle} aria-hidden="true" />
-        <canvas ref={spotRef} className="vectorscope-canvas vs-spot" width={res} height={res} style={canvasStyle} aria-hidden="true" />
         <div className="vs-tools">
           {onPopOut && (
             <button type="button" className="vs-tool" title={t("scope.popOut")} onClick={onPopOut}>

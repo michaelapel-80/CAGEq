@@ -150,8 +150,6 @@
     "glowHint": "Trace brightness at full (slow-moving) intensity — faster-moving segments dim from here",
     "beam": "Beam",
     "beamHint": "How thick the drawn beam/trace stroke is",
-    "focus": "Focus",
-    "focusHint": "Velocity-glow reference — segments shorter than this draw at full brightness; faster (longer) ones dim toward the floor",
     "scale": "Scale",
     "scaleHint": "Full-scale ring radius, as a fraction of the tube's own size",
     "grid": "Grid",

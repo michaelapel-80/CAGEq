@@ -113,8 +113,9 @@ const TAU_REF = 0.1;
 // 1%.) Movement is judged on screen, on the dB axis, not in linear amplitude: a zero crossing
 // sweeps the lower range fast, so it gets little light per pixel — no longer a blown-out floor.
 //
-// Energy per sample = glow x BEAM_ENERGY x bar height (so the same signal reads the same at any bar
-// height). First set so that glow 0.002, tuned live on the earlier model, deposited the same total
+// Energy per sample = glow x BEAM_ENERGY x bar height x VEL_REF_RATE / rate: the same signal reads
+// the same at any bar height, and the current is per unit of time, not per sample, so a 96 kHz
+// stream (twice the samples) doesn't read twice as bright. First set so that glow 0.002, tuned live on the earlier model, deposited the same total
 // on music-like material (0.034); that earlier tuning had leaned low to keep high-frequency content
 // from blowing out, which this model no longer needs, so raised 1.4x on a live retune (to what glow
 // 0.0028 gave). Kept in this constant rather than the default, so the default stays the 0.002 that
@@ -378,7 +379,7 @@ export function Meter({
         const rate = s.rate > 0 ? s.rate : 48000;
         const kRef = FALLBACK_FOCUS * (VEL_REF_RATE / rate);
         const barH = cv.height;
-        const energy = p.glow * BEAM_ENERGY * barH;
+        const energy = p.glow * BEAM_ENERGY * barH * (VEL_REF_RATE / rate);
         // On-screen y of a level: the bar's dB scale, not clamped at its floor — quieter content
         // runs off the bottom (down to one bar height below it) instead of piling up on the edge.
         const yOf = (lin: number) => (1 - Math.max(-1, Math.min(1, (toDbLin(Math.abs(lin)) - LEVEL_MIN_DB) / -LEVEL_MIN_DB))) * barH;

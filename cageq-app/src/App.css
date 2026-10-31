@@ -975,13 +975,12 @@ select:disabled {
 /* Layers cleared and redrawn every frame instead of accumulating into the phosphor trail — they
    have to live outside it because it composites *additively*, so a constant-brightness redraw would
    stack toward white rather than hold steady (see phosphor.ts).
-   The vectorscope's resting spot and the Spectrum pane's peak-cross markers both go above the trail;
-   the time scope's peak-hold lines go below it instead (no z-index — DOM order puts them over the
-   graticule but under the trail's z-index:1), so the beam still reads over the reference line where
-   they cross, as it did when both shared a canvas. The peak crosses go above for the opposite
-   reason: they're meant to stay findable precisely when a resonance is loud enough to bloom the
-   trail brightly, not get washed out by it. */
-.vs-spot,
+   The Spectrum pane's peak-cross markers go above the trail; the time scope's peak-hold lines go
+   below it instead (no z-index — DOM order puts them over the graticule but under the trail's
+   z-index:1), so the beam still reads over the reference line where they cross, as it did when both
+   shared a canvas. The peak crosses go above for the opposite reason: they're meant to stay
+   findable precisely when a resonance is loud enough to bloom the trail brightly, not get washed
+   out by it. */
 .vs-peakmarks {
   z-index: 2;
 }
