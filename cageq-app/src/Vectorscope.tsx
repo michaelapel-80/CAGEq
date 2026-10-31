@@ -4,7 +4,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type Band, type FadingInverse, type ResponseModel, retargetFadingInverse, stepFadingInverse } from "./biquad";
 import { scopeStream } from "./streams";
-import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
+import { createPhosphor, DOSE_REF_FPS, retuneForRelativeContrast } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT } from "./appZoom";
@@ -60,14 +60,16 @@ type Params = {
 // per preset). Here, "distribution" reads as a stereo-image density cloud instead of the usual
 // dwelling point/curve. Numbers below are a starting point for live tuning, not the final word.
 const PRESETS: Record<"fast" | "distribution", { trailTau: number; tail: number; glow: number }> = {
-  fast: { trailTau: 0.03, tail: 3, glow: 1.0 },
-  distribution: { trailTau: 0.8, tail: 6, glow: 1.5 },
+  fast: { trailTau: 0.03, tail: 3, glow: 0.81 },
+  distribution: { trailTau: 0.8, tail: 6, glow: 1.22 },
 };
 // Live-tuned for linear light (PhosphorOptions' `linearLight`) and the tone stage.
+// glow and headroom (and the presets' glow) scaled by 0.815 when contrast became relative to the
+// trace's colour (contrastRetuneScale at contrast 2.2), so the tuned look stays as it was.
 const DEFAULTS: Params = {
   trailTau: 0.06,
   tail: 2,
-  glow: 1.0,
+  glow: 0.81,
   beam: 0.6,
   radiusFrac: 0.48,
   gridAlpha: 0.22,
@@ -75,21 +77,27 @@ const DEFAULTS: Params = {
   haze: 0.4,
   saturation: 1.0,
   contrast: 2.2,
-  headroom: 1.8,
+  headroom: 1.47,
   bloomWhite: 0.1,
   rotate: false,
   invert: true,
   labels: true,
 };
 // The Canvas 2D fallback still draws at alpha = glow, as before linear light: scaled back by the
-// factor glow's default moved by (0.32 -> 1.0), so it keeps the look it had.
-const FALLBACK_GLOW_SCALE = 0.32 / 1.0;
+// factor glow's default moved by (0.32 -> 0.81), so it keeps the look it had.
+const FALLBACK_GLOW_SCALE = 0.32 / 0.81;
 // Stored settings from before linear light (v1): glow, bloom and haze meant something else there
-// (encoded values, a thresholded bloom), so they take the new defaults.
+// (encoded values, a thresholded bloom), so they take the new defaults. Version 2: contrast
+// relative to the trace's colour — linear-light settings (v1) brought along by
+// retuneForRelativeContrast.
 const VECTORSCOPE_PARAMS_MIGRATION: ParamsMigration = {
-  version: 1,
+  version: 2,
   migrate: (stored, from) =>
-    from < 1 ? { ...stored, glow: DEFAULTS.glow, bloom: DEFAULTS.bloom, haze: DEFAULTS.haze } : stored,
+    from < 1
+      ? { ...stored, glow: DEFAULTS.glow, bloom: DEFAULTS.bloom, haze: DEFAULTS.haze }
+      : from < 2
+        ? retuneForRelativeContrast(stored, DEFAULTS.contrast)
+        : stored,
 };
 const LABEL_ALPHA = 0.5;
 const REF_SIZE = 512; // beam width is authored against this tube size, then scaled

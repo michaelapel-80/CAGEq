@@ -290,8 +290,12 @@ export type Phosphor = {
    *     ceiling moves, to H / (1 − e^(−k)). Past white a dense core overexposes and washes toward
    *     white (see DISPLAY_SHOULDER). No effect without saturation, which has no ceiling to move.
    *   * `contrast` (gamma, 1 = none): the eye's or a camera's response, intensity^gamma, applied
-   *     to the intensity (not per channel, so the beam keeps its hue). ~2.2 is the look this module
-   *     had before linear light, which presented energy as an encoded value: light ∝ E^2.2.
+   *     to the intensity (not per channel, so the beam keeps its hue) against the trace's own colour
+   *     at full excitation, so a full trace shows exactly its colour at any contrast. ~2.2 is the
+   *     look this module had before linear light, which presented energy as an encoded value:
+   *     light ∝ E^2.2. (It used to be against the display's white instead, which also dimmed every
+   *     trace by its colour's own brightness to the power gamma − 1: the accent's to ~0.64 at 2.2, a
+   *     dim wash's to ~0.2 — see `contrastRetuneScale`.)
    * Then the display's own limit, per channel (DISPLAY_SHOULDER). And `bloomWhite` (0 = none), not
    * part of the light's path but of the look: how far the tight bloom tier turns from the beam's
    * hue to white of the same brightness (see FS_TIGHT).
@@ -318,15 +322,17 @@ float linearToSrgb1(float x){ return x < 0.0031308 ? x * 12.92 : 1.055 * pow(x, 
 // washes toward white — what an eye or a camera sees of an overdriven trace, whatever the
 // phosphor's colour. A soft shoulder from this much of the white up, not a hard clip, so the hue
 // turns smoothly rather than with a kink where each channel hits the top; below it, untouched
-// (the app's accent at full energy, headroom 1, reaches ~0.45 there).
+// (the app's accent at full excitation reaches ~0.69 there).
 const DISPLAY_SHOULDER = 0.8;
 
 // The linear-light display stages (see `Phosphor.setTone`). A texel is premultiplied light, rgb =
 // the colour's light x N, alpha = N, the phosphor's excitation (already saturated — see FS_ACCUM).
-// Contrast works on the intensity, the brightest channel (the same proxy FS_ACCUM's decay uses),
-// which for one hue is N. `overexpose` is the display's limit, per channel (see DISPLAY_SHOULDER).
-const GLSL_TONE = `uniform float uContrast;
-vec3 contrastLight(vec3 l){ float m = max(l.r, max(l.g, l.b)); return m > 0.0 ? l * pow(m, uContrast - 1.0) : l; }
+// Contrast works on the intensity: the brightest channel (the same proxy FS_ACCUM's decay uses)
+// against the trace colour's own (uColourMax, see `noteColour`), which for one hue is N — and
+// works the same on halo light, which has no N of its own. `overexpose` is the display's limit,
+// per channel (see DISPLAY_SHOULDER).
+const GLSL_TONE = `uniform float uContrast, uColourMax;
+vec3 contrastLight(vec3 l){ float m = max(l.r, max(l.g, l.b)) / uColourMax; return m > 0.0 ? l * pow(m, uContrast - 1.0) : l; }
 vec3 overexpose(vec3 l){
   const float S = ${DISPLAY_SHOULDER.toFixed(2)};
   return min(l, S) + (1.0 - S) * (1.0 - exp(-max(l - S, 0.0) / (1.0 - S)));
@@ -755,6 +761,35 @@ void main(){
 // compile, but the bloom passes are new and unverified on whatever GL/ANGLE build is actually
 // running, so a compile or link error here needs to be visible, not just inferred from "bloom
 // does nothing."
+/** An encoded sRGB value (0..1) as light. */
+function srgbToLinear1(c: number): number {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+/** The factor that keeps a linear-light look tuned before contrast was measured against the trace's
+ *  own colour (see `Phosphor.setTone`): scaling glow and headroom by it shows exactly what the
+ *  old, white-referenced contrast did — the excitation scaled so that its gamma-th power carries the
+ *  colour's lost brightness, colourMax^((gamma − 1) / gamma). For settings migrations and retuned
+ *  defaults. `rgb`: the trace colour, 0..255. */
+export function contrastRetuneScale(contrast: number, rgb: readonly [number, number, number]): number {
+  const m = srgbToLinear1(Math.max(rgb[0], rgb[1], rgb[2]) / 255);
+  return m > 0 && contrast > 0 ? Math.pow(m, (contrast - 1) / contrast) : 1;
+}
+
+/** App.css's `--accent`, the colour every instrument draws its trace in. */
+export const ACCENT_RGB = [0x39, 0x6c, 0xd8] as const;
+
+/** A view's stored settings brought across contrast becoming relative to the trace's colour (see
+ *  `contrastRetuneScale`): glow and headroom scaled for the stored contrast, so they look as they
+ *  did. For a settings migration from the version before it, in the accent. */
+export function retuneForRelativeContrast(stored: Record<string, unknown>, defaultContrast: number): Record<string, unknown> {
+  const s = contrastRetuneScale(typeof stored.contrast === "number" ? stored.contrast : defaultContrast, ACCENT_RGB);
+  const out = { ...stored };
+  if (typeof out.glow === "number") out.glow = Number((out.glow * s).toPrecision(3));
+  if (typeof out.headroom === "number") out.headroom = Number((out.headroom * s).toPrecision(3));
+  return out;
+}
+
 function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLShader | null {
   const sh = gl.createShader(type);
   if (!sh) return null;
@@ -832,6 +867,9 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
   // headroom) and present here, the bloom's below. A uniform a program lacks is skipped (null location).
   const tonePrograms: WebGLProgram[] = [accum, present];
   let tone: [number, number, number, number] = [0, 1, 1, 0];
+  // The trace colour's brightest channel, in light — what contrast measures against (GLSL_TONE).
+  // Taken from the colour the caller draws with: one per phosphor in every view.
+  let colourMax = 1;
   const applyTone = (prog: WebGLProgram) => {
     const [k, contrast, headroom, bloomWhite] = tone;
     // FS_ACCUM's ceiling and initial slope: on a dark screen, N = uNmax (1 − e^(−uGain·E/uNmax))
@@ -841,9 +879,16 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
     gl.uniform1f(gl.getUniformLocation(prog, "uNmax"), sat ? headroom / (1 - Math.exp(-k)) : 0);
     gl.uniform1f(gl.getUniformLocation(prog, "uGain"), sat ? k / (1 - Math.exp(-k)) : 1);
     gl.uniform1f(gl.getUniformLocation(prog, "uContrast"), contrast);
+    gl.uniform1f(gl.getUniformLocation(prog, "uColourMax"), colourMax);
     gl.uniform1f(gl.getUniformLocation(prog, "uBloomWhite"), bloomWhite); // FS_TIGHT's
   };
   for (const prog of tonePrograms) applyTone(prog);
+  const noteColour = (rgb: readonly [number, number, number]) => {
+    const m = srgbToLinear1(Math.max(rgb[0], rgb[1], rgb[2]) / 255);
+    if (m <= 0 || m === colourMax) return;
+    colourMax = m;
+    for (const prog of tonePrograms) applyTone(prog);
+  };
 
   gl.bindBuffer(gl.ARRAY_BUFFER, quad);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
@@ -1222,6 +1267,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
     ? (st: TraceStroke) => {
         if (!bindTrace(trace !== "gpu")) return;
         trace = "gpu";
+        noteColour(st.rgb);
         drawStroke(st);
       }
     : undefined;
@@ -1230,6 +1276,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
     ? (f: TraceFill) => {
         if (!bindTrace(trace !== "gpu")) return;
         trace = "gpu";
+        noteColour(f.rgb);
         if (!fillProg || !fillU || f.count < 2) return;
         gl.useProgram(fillProg);
         gl.uniform2f(fillU.size, target.width, target.height);
@@ -1244,6 +1291,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
     ? (sg: TraceSegments) => {
         if (!bindTrace(trace !== "gpu")) return;
         trace = "gpu";
+        noteColour(sg.rgb);
         if (!segProg || !segU || !instancing || sg.count < 1) return;
         gl.useProgram(segProg);
         const halfW = sg.width / 2;

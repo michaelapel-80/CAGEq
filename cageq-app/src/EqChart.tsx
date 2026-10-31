@@ -264,6 +264,9 @@ type SpecParams = {
   tau: number;
   tail: number;
   glowBase: number;
+  saturation: number; // the phosphor's saturation (phosphor.ts's setTone) — 0 = linear
+  contrast: number; // the display response, intensity^contrast (phosphor.ts's setTone) — 1 = linear
+  headroom: number; // how far past the display's white the phosphor saturates (phosphor.ts's setTone) — 1 = at white
   undistort: boolean;
   tilt: TiltMode;
 };
@@ -271,7 +274,10 @@ type SpecParams = {
 // brightness under the new TAU_REF/tau-corrected formula — confirming the blend swap alone was a
 // visual no-op — then hand-retuned live from that baseline to today's value, same as every other
 // view's glow default gets touched up after its own anchor change.
-const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3, undistort: true, tilt: "rta" };
+// saturation/contrast/headroom: the look this had before linear light (PhosphorOptions'
+// `linearLight`) — contrast 2.2 against the wash's own colour is about the encoded presentation it
+// had, and a steady wash stays under full (~0.9), where the old clamp never bit, so no saturation.
+const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3, saturation: 0, contrast: 2.2, headroom: 1, undistort: true, tilt: "rta" };
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -741,7 +747,8 @@ export function EqChart({
     // Plain additive, same as every scope view — see TAU_REF's own doc above for why this used to
     // be phosphor.ts's `over` blend instead (a backdrop-specific self-limiting compromise) and why
     // that's no longer needed.
-    const phos = createPhosphor(cv);
+    // Linear light: the wash's light adds and decays as light (see PhosphorOptions).
+    const phos = createPhosphor(cv, { linearLight: true });
     if (!phos) return;
     let raf = 0;
     let last = performance.now();
@@ -1068,6 +1075,7 @@ export function EqChart({
       // Trail/Glow's steady-state coupling so a longer trail doesn't also silently brighten. Neither
       // is scaled by this frame's `dt` — commit()'s own dose math already accounts for `dt` once;
       // doing so again here previously reintroduced refresh-rate-dependent brightness.
+      phos.setTone?.(specParams.saturation, specParams.contrast, specParams.headroom);
       phos.commit(dt, specParams.tau, specParams.tail, SPEC_DOSE_MULT * (TAU_REF / specParams.tau));
       if (pendingStroke) phos.overlayStroke!(pendingStroke);
       raf = requestAnimationFrame(render);
@@ -1506,7 +1514,7 @@ export function EqChart({
               synchronously with the event, and by the time it does, React has already nulled out
               the synthetic event's currentTarget, throwing on read. The scope views' own tuning
               panels dodge this via a `set(key, value)` helper that captures the value the same
-              way, just less visibly; inlined here since this is only two fields. */}
+              way, just less visibly; inlined here since there are only a few fields. */}
           <label className="vs-tune-row" title={t("scope.trailHint")}>
             <span className="vs-tune-label">{t("scope.trail")}</span>
             <input
@@ -1554,6 +1562,54 @@ export function EqChart({
               }}
             />
             <b>{specParams.glowBase.toFixed(2)}</b>
+          </label>
+          <label className="vs-tune-row" title={t("scope.saturationHint")}>
+            <span className="vs-tune-label">{t("scope.saturation")}</span>
+            <input
+              name="spectrum-saturation"
+              type="range"
+              min={0}
+              max={10}
+              step={0.1}
+              value={specParams.saturation}
+              onChange={(e) => {
+                const saturation = Number(e.currentTarget.value);
+                setSpecParams((p) => ({ ...p, saturation }));
+              }}
+            />
+            <b>{specParams.saturation.toFixed(1)}</b>
+          </label>
+          <label className="vs-tune-row" title={t("scope.contrastHint")}>
+            <span className="vs-tune-label">{t("scope.contrast")}</span>
+            <input
+              name="spectrum-contrast"
+              type="range"
+              min={1}
+              max={3}
+              step={0.05}
+              value={specParams.contrast}
+              onChange={(e) => {
+                const contrast = Number(e.currentTarget.value);
+                setSpecParams((p) => ({ ...p, contrast }));
+              }}
+            />
+            <b>{specParams.contrast.toFixed(2)}</b>
+          </label>
+          <label className="vs-tune-row" title={t("scope.headroomHint")}>
+            <span className="vs-tune-label">{t("scope.headroom")}</span>
+            <input
+              name="spectrum-headroom"
+              type="range"
+              min={0.5}
+              max={8}
+              step={0.05}
+              value={specParams.headroom}
+              onChange={(e) => {
+                const headroom = Number(e.currentTarget.value);
+                setSpecParams((p) => ({ ...p, headroom }));
+              }}
+            />
+            <b>{specParams.headroom.toFixed(2)}</b>
           </label>
           <div className="vs-tune-sep" />
           <label className="vs-tune-row vs-tune-check" title={t("scope.undistortHintSpectrum")}>

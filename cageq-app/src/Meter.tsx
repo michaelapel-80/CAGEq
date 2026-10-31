@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { meterStream, scopeStream, type MeterData } from "./streams";
 import type { ScopeData } from "./Vectorscope";
-import { createPhosphor, DOSE_REF_FPS } from "./phosphor";
+import { createPhosphor, DOSE_REF_FPS, retuneForRelativeContrast } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT } from "./appZoom";
@@ -58,20 +58,24 @@ type Params = {
   headroom: number; // how far past the display's white the phosphor saturates (phosphor.ts's setTone) — 1 = at white
 };
 // Live-tuned for linear light (PhosphorOptions' `linearLight`) and the tone stage.
-const DEFAULTS: Params = { trailTau: 0.3, tail: 6, glow: 0.005, beamWidth: 1.0, saturation: 1.0, contrast: 2.2, headroom: 1 };
-// The factor glow's default moved by with linear light (0.002 -> 0.005). The Canvas 2D fallback,
+// glow and headroom (and the presets' glow) scaled by 0.815 when contrast became relative to the
+// trace's colour (contrastRetuneScale at contrast 2.2), so the tuned look stays as it was.
+const DEFAULTS: Params = { trailTau: 0.3, tail: 6, glow: 0.0041, beamWidth: 1.0, saturation: 1.0, contrast: 2.2, headroom: 0.81 };
+// The factor glow's default moved by with linear light (0.002 -> 0.0041). The Canvas 2D fallback,
 // still drawing encoded values, divides it back out, so it keeps the look it had.
-const LINEAR_GLOW_SCALE = 0.005 / 0.002;
+const LINEAR_GLOW_SCALE = 0.0041 / 0.002;
 /** Version 1: `glow` on the GPU beam's scale (see TAU_REF's doc). Every release before it shipped
  *  0.21 for the Canvas 2D beam, so an older stored glow is scaled by the same 0.002 / 0.21 the
  *  default moved by, keeping someone's preference relative to the default — but only from the old
  *  slider's range (it started at 0.02): anything lower was already set on the new scale (a build
  *  in between) and must not be scaled twice. Version 2: linear light — glow takes the new default,
  *  as the scopes' did (a build in between stored linear-light values as version 1 too, so scaling
- *  could hit a value twice). */
+ *  could hit a value twice). Version 3: contrast relative to the trace's colour — linear-light
+ *  settings (v2) brought along by retuneForRelativeContrast. */
 const METER_PARAMS_MIGRATION: ParamsMigration = {
-  version: 2,
-  migrate: (stored, from) => (from < 2 ? { ...stored, glow: DEFAULTS.glow } : stored),
+  version: 3,
+  migrate: (stored, from) =>
+    from < 2 ? { ...stored, glow: DEFAULTS.glow } : from < 3 ? retuneForRelativeContrast(stored, DEFAULTS.contrast) : stored,
 };
 // The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
 // `doseMult` comment (same reasoning as Vectorscope.tsx's identical constant) for why this matters:
