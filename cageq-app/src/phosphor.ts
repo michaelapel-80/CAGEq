@@ -279,11 +279,11 @@ export type Phosphor = {
   /**
    * The tone of a linear-light accumulator (PhosphorOptions' `linearLight`; ignored otherwise), in
    * effect from the next `commit()`. In the order the light meets them:
-   *   * `saturation` (k, 0 = none): the phosphor's own output saturating at high excitation —
-   *     light = (1 − e^(−k·E)) / (1 − e^(−k)) of the stored energy E, still 0 at 0 and 1 at full, a
-   *     softer and softer shoulder as k rises, levelling off at 1 / (1 − e^(−k)) of full however
-   *     much energy stacks up. Before the halation (a saturated core scatters its saturated light),
-   *     see GLSL_TONE.
+   *   * `saturation` (k, 0 = none): the phosphor saturating as it's excited — it has only so many
+   *     centres to excite, so the more already are, the less a further dose adds, levelling off at
+   *     1 / (1 − e^(−k)) of full. On a dark screen a dose E lights (1 − e^(−k·E)) / (1 − e^(−k)):
+   *     still 0 at 0 and 1 at full, a softer and softer shoulder as k rises. In the accumulator, at
+   *     the deposit (see FS_ACCUM), so an overdriven trace starts fading from the next frame on.
    *   * `headroom` (1 = none): how much light the phosphor gives before it saturates, against the
    *     display's white — the curve stretched by this along both axes, H·sat(E/H), so its start
    *     (the faint end, where Glow sets the brightness) stays exactly where it was and only its
@@ -321,19 +321,17 @@ float linearToSrgb1(float x){ return x < 0.0031308 ? x * 12.92 : 1.055 * pow(x, 
 // (the app's accent at full energy, headroom 1, reaches ~0.45 there).
 const DISPLAY_SHOULDER = 0.8;
 
-// The linear-light tone stages (see `Phosphor.setTone`). A texel is premultiplied light, rgb = the
-// colour's light x E, alpha = E, so saturating E scales the whole texel;
-// contrast works on the intensity, the brightest channel (the same proxy FS_ACCUM's decay uses),
-// which for one hue is E. `overexpose` is the display's limit, per channel (see DISPLAY_SHOULDER).
-const GLSL_TONE = `uniform float uSat, uContrast, uHeadroom;
-float satCurve(float e){ return uSat > 1e-4 ? uHeadroom * (1.0 - exp(-uSat * e / uHeadroom)) / (1.0 - exp(-uSat)) : e; }
-vec3 saturateLight(vec4 c){ return c.a > 0.0 ? c.rgb * (satCurve(c.a) / c.a) : vec3(0.0); }
+// The linear-light display stages (see `Phosphor.setTone`). A texel is premultiplied light, rgb =
+// the colour's light x N, alpha = N, the phosphor's excitation (already saturated — see FS_ACCUM).
+// Contrast works on the intensity, the brightest channel (the same proxy FS_ACCUM's decay uses),
+// which for one hue is N. `overexpose` is the display's limit, per channel (see DISPLAY_SHOULDER).
+const GLSL_TONE = `uniform float uContrast;
 vec3 contrastLight(vec3 l){ float m = max(l.r, max(l.g, l.b)); return m > 0.0 ? l * pow(m, uContrast - 1.0) : l; }
 vec3 overexpose(vec3 l){
   const float S = ${DISPLAY_SHOULDER.toFixed(2)};
   return min(l, S) + (1.0 - S) * (1.0 - exp(-max(l - S, 0.0) / (1.0 - S)));
 }
-float toneAlpha(float e){ return linearToSrgb1(min(pow(satCurve(e), uContrast), 1.0)); }`;
+float toneAlpha(float n){ return linearToSrgb1(min(pow(n, uContrast), 1.0)); }`;
 
 // Decay the history and add this frame's trace. `uKeep` is exp(-dt/tau).
 //
@@ -348,14 +346,20 @@ float toneAlpha(float e){ return linearToSrgb1(min(pow(satCurve(e), uContrast), 
 // on every write and began fading immediately. That made bright content bloom harder and hold
 // longer, which raises the apparent floor and forces glow up before the faint end reads against it.
 // The point of this module is a trail that reaches zero, not a different look.
-// In linear light (PhosphorOptions' `linearLight`) the energy is stored as it is, up to
-// LINEAR_ENERGY_CAP (only there to keep half-float finite): there the phosphor's own saturation
-// bounds its light (see `Phosphor.setTone`), and what the clamp cut off is exactly the energy that
-// overexposes — a core holding more than full brightness, washing toward white and staying hot
-// until it has decayed back below it, as a real overdriven trace does.
+// In linear light (PhosphorOptions' `linearLight`) the store is the phosphor's excitation instead,
+// and saturates as a phosphor does, at the deposit: of the uNmax it can hold, a dose excites a share
+// of what's left, N + (uNmax − N)(1 − e^(−dose/uNmax)) (`Phosphor.setTone`'s saturation and
+// headroom). It can hold more than the display's white, so a dense core overexposes (see
+// DISPLAY_SHOULDER), but no more than that: an overdriven trace sits at its ceiling and fades from
+// the next frame on, so the newest trace stays the brightest. Saturating the light at display time
+// instead, on energy stored without a bound, held every overdriven pixel at its ceiling until decay
+// had worked through the excess — the last several frames of a concentrated trace (a band-limited
+// bass, ~10x full a frame) all showed alike, and a moving one smeared into equal copies. Without
+// saturation (uNmax 0) the dose just adds, up to LINEAR_ENERGY_CAP (only there to keep half-float
+// finite).
 const LINEAR_ENERGY_CAP = 1024;
 const FS_ACCUM = `precision highp float; varying vec2 vUv;
-uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uDose, uLinear;
+uniform sampler2D uPrev, uTrace; uniform float uKeep, uKeepTail, uKnee, uFloor, uDose, uLinear, uNmax, uGain;
 ${GLSL_SRGB}
 void main(){
   vec4 prev = texture2D(uPrev, vUv);
@@ -376,15 +380,22 @@ void main(){
   // contributes proportionally MORE per second on a higher-refresh display, purely because commit()
   // gets called more often, not because anything drawn is actually brighter.
   cur.a *= uDose;
-  // Linear light: the trace's colour is an encoded one, so the light it deposits is its linear
-  // value times the energy (see PhosphorOptions' \`linearLight\`).
-  if (uLinear > 0.5) cur.rgb = srgbToLinear(cur.rgb);
-  cur.rgb *= cur.a;
   vec4 decayed = max(prev * k - uFloor, 0.0);
+  // Linear light: the trace's colour is an encoded one, so the light it deposits is its linear
+  // value times the excitation it adds (see PhosphorOptions' \`linearLight\`) — saturating against
+  // what the phosphor already holds (see LINEAR_ENERGY_CAP's doc).
+  if (uLinear > 0.5) {
+    float dose = cur.a * uGain;
+    float n0 = decayed.a;
+    float n1 = uNmax > 0.0 ? n0 + (uNmax - n0) * (1.0 - exp(-dose / uNmax)) : min(n0 + dose, ${LINEAR_ENERGY_CAP.toFixed(1)});
+    gl_FragColor = vec4(decayed.rgb + srgbToLinear(cur.rgb) * (n1 - n0), n1);
+    return;
+  }
+  cur.rgb *= cur.a;
   // Stacks toward saturation and has no hue ceiling — the overdraw every caller wants (see the
   // module doc's "What must NOT be drawn through this" for the one thing that rules out: anything
   // meant to hold a *constant* brightness needs its own non-accumulating layer instead).
-  gl_FragColor = min(decayed + cur, uLinear > 0.5 ? ${LINEAR_ENERGY_CAP.toFixed(1)} : 1.0);
+  gl_FragColor = min(decayed + cur, 1.0);
 }`;
 
 const FS_BLIT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex;
@@ -398,7 +409,7 @@ ${GLSL_SRGB}
 ${GLSL_TONE}
 void main(){
   vec4 c = texture2D(uTex, vUv);
-  gl_FragColor = uLinear > 0.5 ? vec4(linearToSrgb(overexpose(contrastLight(saturateLight(c)))), toneAlpha(c.a)) : c;
+  gl_FragColor = uLinear > 0.5 ? vec4(linearToSrgb(overexpose(contrastLight(c.rgb))), toneAlpha(c.a)) : c;
 }`;
 
 // `strokeTrace`'s segments, one instance each: the shared quad (`aPos`, ±1 along and across the
@@ -646,13 +657,11 @@ void main(){ gl_FragColor = texture2D(uTex, vUv * uUvScale); }`;
 // a different *compositing* operator, not just a different colour). The tight tier collapses it
 // to white afterwards (FS_TIGHT). Same `max(r,g,b)` brightness proxy FS_ACCUM's own decay math
 // already uses, for consistency within this file.
-// In linear light it's the saturated light instead, all of it (see FS_COMPOSITE, `Phosphor.setTone`).
+// In linear light it's the light instead, all of it (see FS_COMPOSITE).
 const FS_BRIGHTPASS = `precision highp float;
 uniform sampler2D uTex; uniform float uThreshold, uLinear;
-${GLSL_SRGB}
-${GLSL_TONE}
 vec3 tap(sampler2D t, vec2 uv){
-  if (uLinear > 0.5) return saturateLight(texture2D(t, uv));
+  if (uLinear > 0.5) return texture2D(t, uv).rgb;
   vec3 c = texture2D(t, uv).rgb;
   float v = max(c.r, max(c.g, c.b));
   return v > 0.0 ? c * (max(v - uThreshold, 0.0) / v) : vec3(0.0);
@@ -720,8 +729,8 @@ void main(){
 // which picked out a beam's slowest points as hot spots — in the beam's own colour (FS_TIGHT), and
 // simply added. Added light in linear terms is also what keeps it from blowing out dense areas, the
 // reason `max()` was needed above: a halo a few percent of a bright core's light barely moves its
-// encoded value, while it lifts the dark around it visibly. The phosphor's saturation comes first,
-// the contrast and the encode last, as in FS_PRESENT (see `Phosphor.setTone`).
+// encoded value, while it lifts the dark around it visibly. The contrast and the encode come last,
+// as in FS_PRESENT (see `Phosphor.setTone`).
 const FS_COMPOSITE = `precision highp float; varying vec2 vUv;
 uniform sampler2D uSharp, uBloom, uBloomWide; uniform float uIntensity, uIntensityWide, uLinear;
 uniform vec2 uBloomUv; // the canvas's share of the tight texture — see GLSL_DOWN2's doc
@@ -732,7 +741,7 @@ void main(){
   vec3 tightC = uIntensity * texture2D(uBloom, vUv * uBloomUv).rgb;
   vec3 wideC = uIntensityWide * texture2D(uBloomWide, vUv).rgb;
   if (uLinear > 0.5) {
-    vec3 light = saturateLight(sharpC) + tightC + wideC;
+    vec3 light = sharpC.rgb + tightC + wideC;
     gl_FragColor = vec4(linearToSrgb(overexpose(contrastLight(light))), toneAlpha(sharpC.a));
     return;
   }
@@ -819,17 +828,22 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
   gl.uniform1f(gl.getUniformLocation(accum, "uLinear"), linear ? 1 : 0);
   gl.useProgram(present);
   gl.uniform1f(gl.getUniformLocation(present, "uLinear"), linear ? 1 : 0);
-  // The tone (see `setTone`), per program that applies it: present here, the bloom's two below.
-  const tonePrograms: WebGLProgram[] = [present];
+  // The tone (see `setTone`), per program that applies part of it: the accumulator (saturation,
+  // headroom) and present here, the bloom's below. A uniform a program lacks is skipped (null location).
+  const tonePrograms: WebGLProgram[] = [accum, present];
   let tone: [number, number, number, number] = [0, 1, 1, 0];
   const applyTone = (prog: WebGLProgram) => {
+    const [k, contrast, headroom, bloomWhite] = tone;
+    // FS_ACCUM's ceiling and initial slope: on a dark screen, N = uNmax (1 − e^(−uGain·E/uNmax))
+    // = headroom (1 − e^(−k·E/headroom)) / (1 − e^(−k)). No saturation: no ceiling, slope 1.
+    const sat = k > 1e-4;
     gl.useProgram(prog);
-    gl.uniform1f(gl.getUniformLocation(prog, "uSat"), tone[0]);
-    gl.uniform1f(gl.getUniformLocation(prog, "uContrast"), tone[1]);
-    gl.uniform1f(gl.getUniformLocation(prog, "uHeadroom"), tone[2]);
-    gl.uniform1f(gl.getUniformLocation(prog, "uBloomWhite"), tone[3]); // FS_TIGHT's, the others have none
+    gl.uniform1f(gl.getUniformLocation(prog, "uNmax"), sat ? headroom / (1 - Math.exp(-k)) : 0);
+    gl.uniform1f(gl.getUniformLocation(prog, "uGain"), sat ? k / (1 - Math.exp(-k)) : 1);
+    gl.uniform1f(gl.getUniformLocation(prog, "uContrast"), contrast);
+    gl.uniform1f(gl.getUniformLocation(prog, "uBloomWhite"), bloomWhite); // FS_TIGHT's
   };
-  applyTone(present);
+  for (const prog of tonePrograms) applyTone(prog);
 
   gl.bindBuffer(gl.ARRAY_BUFFER, quad);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
@@ -1058,8 +1072,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
       gl.uniform1f(gl.getUniformLocation(tight, "uLinear"), linear ? 1 : 0);
       gl.useProgram(brightPass);
       gl.uniform1f(gl.getUniformLocation(brightPass, "uLinear"), linear ? 1 : 0);
-      tonePrograms.push(brightPass, tight, composite);
-      applyTone(brightPass);
+      tonePrograms.push(tight, composite);
       applyTone(tight);
       applyTone(composite);
       const d2 = (prog: WebGLProgram): Down2Prog => ({
