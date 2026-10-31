@@ -37,6 +37,7 @@ type Params = {
   headroom: number; // how far past the display's white the phosphor saturates (phosphor.ts's setTone) — 1 = at white
   bloomWhite: number; // the bloom's colour, 0 the beam's hue to 1 white (phosphor.ts's setTone)
   bwLimit: number; // the GPU trace's bandwidth limit, a Gaussian low-pass this many px wide — 0 = off
+  speedDim: number; // how much the GPU beam dims where it moves fast — 1 = a real beam's, 0 = a drawn line's
   undistort: boolean;
   msPerDivIdx: number;
   trigger: boolean;
@@ -83,11 +84,11 @@ function boxBlur(src: Float32Array, dst: Float32Array, n: number, w: number): vo
     acc += at(k + r + 1) - at(k - r);
   }
 }
-// glow/beam/bloom/haze/saturation/contrast: tuned live on the GPU beam in linear light (see
-// PhosphorOptions' `linearLight`, `Phosphor.setTone`). The contrast near 2.2 is what gives back the
-// glow look the old output had by accident; saturation lets a dense trace's slow points roll off
-// into it rather than standing out as dots. A starting point, to be fine-tuned.
-// triggerFilterHz 60: a lower cutoff locks more steadily (fewer harmonics to hop between). It used
+// glow/beam/bloom/haze/saturation/contrast/headroom/bloomWhite/bwLimit/speedDim: tuned live on the
+// GPU beam in linear light (see PhosphorOptions' `linearLight`, `Phosphor.setTone`). Saturation lets
+// a dense trace's slow points roll off rather than standing out as dots; speedDim below 1 keeps
+// dense content a readable stroke rather than a speckle (see where it's applied).
+// triggerFilterHz 80: a lower cutoff locks more steadily (fewer harmonics to hop between). It used
 // to sit at 120 because low cutoffs stopped triggering at all: the filtered waveform shrinks, and
 // any near-DC content then held it clear of the zero level. The AC-coupled level (scopeTrigger.ts)
 // removed that, so it now triggers reliably down to the knob's 20 Hz minimum.
@@ -97,20 +98,21 @@ function boxBlur(src: Float32Array, dst: Float32Array, n: number, w: number): vo
 // the Smooth preset.
 const DEFAULTS: Params = {
   trailTau: 0.02,
-  tail: 1,
-  glow: 2.0,
-  beam: 1.0,
-  bloom: 0.8,
-  haze: 0.2,
+  tail: 3,
+  glow: 1.0,
+  beam: 1.2,
+  bloom: 0.4,
+  haze: 0.1,
   saturation: 2.0,
-  contrast: 1.5,
-  headroom: 1.8,
-  bloomWhite: 0.1,
-  bwLimit: 1.4,
+  contrast: 1.6,
+  headroom: 2.0,
+  bloomWhite: 0.2,
+  bwLimit: 1.0,
+  speedDim: 0.6,
   undistort: true,
   msPerDivIdx: 4, // 5 ms/div × 10 = 50 ms
   trigger: true,
-  triggerFilterHz: 60,
+  triggerFilterHz: 80,
   mode: "mix",
 };
 // Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
@@ -122,9 +124,9 @@ const DEFAULTS: Params = {
 // longer crushed to black. All three tuned live in linear light. In button order, shortest
 // persistence first.
 const PRESETS = {
-  fast: { trailTau: 0.02, tail: 1, glow: 2.0 },
-  smooth: { trailTau: 0.04, tail: 3, glow: 3.0 },
-  distribution: { trailTau: 0.8, tail: 40, glow: 10.0 },
+  fast: { trailTau: 0.02, tail: 3, glow: 1.0 },
+  smooth: { trailTau: 0.04, tail: 3, glow: 1.0 },
+  distribution: { trailTau: 0.8, tail: 64, glow: 5.0 },
 } satisfies Record<string, Pick<Params, "trailTau" | "tail" | "glow">>;
 // Stored settings from before the GPU beam's linear light (v1): glow, bloom and haze meant
 // something else there (energy shown as an encoded value, a thresholded bloom), so they take the
@@ -221,8 +223,8 @@ const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, no
 // twice now. (A third time with the GPU beam's linear light — see DEFAULTS and FALLBACK_GLOW_SCALE.)
 const TAU_REF = 0.1;
 // The Canvas 2D fallback still strokes at alpha = glow, as before linear light: scaled back by the
-// factor glow's default moved by (0.2 -> 2.0), so it keeps the look it had.
-const FALLBACK_GLOW_SCALE = 0.2 / 2.0;
+// factor glow's default moved by (0.2 -> 1.0), so it keeps the look it had.
+const FALLBACK_GLOW_SCALE = 0.2 / 1.0;
 
 /** Lane geometry (vertical centre + amplitude scale + label) for the current channel mode — shared
  *  between the graticule and the trace so they always agree. `amp` leaves a small margin (0.5 of
@@ -708,8 +710,15 @@ export function TimeScope() {
           // well under a sample, and it does nothing (skipped under BW_MIN_SIGMA). The cost: high-
           // frequency content shows less of its height there (a 10 kHz tone at 5 ms/div shrinks
           // toward a line), which is why it's a setting.
+          //
+          // How much a fast stretch dims is a setting too (speedDim): brightness per length goes as
+          // (sweep step / length)^speedDim, so 1 is the beam above and 0 a drawn line, every part of
+          // the path as bright as a flat stretch, as before the beam was simulated. In between, fast
+          // stretches dim less. Not physics but readability: on dense content the real beam leaves
+          // nearly all its light at the turning points of each wiggle, a speckle that lands somewhere
+          // new every frame and reads as a fuzzy, shimmering band rather than a waveform; the drawn
+          // line keeps each trace one continuous stroke. A flat stretch reads glow either way.
           const step = W / (dispN - 1);
-          const energy = p.glow * step;
           const maxPieces = Math.min(MAX_PIECES, Math.max(DENSE_PIECES, Math.ceil(step)));
           const padded = dispN + LANCZOS_TAPS;
           if (laneVals.length < padded) {
@@ -758,7 +767,7 @@ export function TimeScope() {
                 grown.set(segData.subarray(0, o));
                 segData = grown;
               }
-              const pieceEnergy = energy / n;
+              const pieceDx = step / n;
               for (let j = 1; j <= n; j++) {
                 let y1 = yEnd;
                 if (j < n) y1 = cy - lanczosAt(laneVals, i, lanczosRow(j / n)) * amp;
@@ -767,7 +776,8 @@ export function TimeScope() {
                 segData[o + 1] = y0;
                 segData[o + 2] = x1;
                 segData[o + 3] = y1;
-                segData[o + 4] = pieceEnergy / Math.hypot(x1 - x0, y1 - y0); // never zero: x always moves
+                const len = Math.hypot(x1 - x0, y1 - y0); // never zero: x always moves
+                segData[o + 4] = p.glow * (p.speedDim === 1 ? pieceDx / len : Math.pow(pieceDx / len, p.speedDim));
                 o += 5;
                 x0 = x1;
                 y0 = y1;
@@ -792,7 +802,7 @@ export function TimeScope() {
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
-  type NumKey = "trailTau" | "tail" | "glow" | "beam" | "bloom" | "haze" | "saturation" | "contrast" | "headroom" | "bloomWhite" | "bwLimit" | "triggerFilterHz";
+  type NumKey = "trailTau" | "tail" | "glow" | "beam" | "bloom" | "haze" | "saturation" | "contrast" | "headroom" | "bloomWhite" | "bwLimit" | "speedDim" | "triggerFilterHz";
   const CONTROLS: { key: NumKey; label: string; hint: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 2.0, step: 0.01 },
     { key: "tail", label: t("scope.tail"), hint: t("scope.tailHint"), min: 1, max: 64, step: 1 },
@@ -805,6 +815,7 @@ export function TimeScope() {
     { key: "headroom", label: t("scope.headroom"), hint: t("scope.headroomHint"), min: 0.5, max: 8, step: 0.05 },
     { key: "bloomWhite", label: t("scope.bloomWhite"), hint: t("scope.bloomWhiteHint"), min: 0, max: 1, step: 0.05 },
     { key: "bwLimit", label: t("scope.bwLimit"), hint: t("scope.bwLimitHint"), min: 0, max: 3, step: 0.1 },
+    { key: "speedDim", label: t("scope.speedDim"), hint: t("scope.speedDimHint"), min: 0, max: 1, step: 0.05 },
     { key: "triggerFilterHz", label: t("scope.trigFilter"), hint: t("scope.trigFilterHint"), min: 20, max: 1000, step: 10 },
   ];
   const msPerDiv = MS_PER_DIV_STEPS[params.msPerDivIdx] ?? MS_PER_DIV_STEPS[0];

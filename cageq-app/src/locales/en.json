@@ -168,6 +168,8 @@
     "bloomWhiteHint": "The bloom's colour: 0 the beam's own hue, 1 white, washing bright parts pale",
     "bwLimit": "BW limit",
     "bwLimitHint": "Bandwidth limit, in screen pixels (0 = off): smooths away detail finer than the timebase can show as shape, the speckle of dense content at long timebases. No overshoot on edges, but high frequencies show less of their height",
+    "speedDim": "Speed dimming",
+    "speedDimHint": "How much the trace dims where the beam moves fast: 1 as a real beam, whose light is the time it spends (steep edges faint, dense content a speckle); 0 as a drawn line, every part equally bright",
     "floor": "Floor",
     "floorHint": "Bottom of the level range (dBFS); anything quieter drops off the plot",
     "rotate": "Rotate",

@@ -168,6 +168,8 @@
     "bloomWhiteHint": "Farbe des Blooms: 0 der Farbton des Strahls, 1 weiß, helle Stellen werden blasser",
     "bwLimit": "BW-Begrenzung",
     "bwLimitHint": "Bandbreitenbegrenzung in Bildschirmpixeln (0 = aus): glättet Details, die feiner sind, als die Zeitbasis als Form zeigen kann, das Gesprenkel dichter Signale bei langen Zeitbasen. Kein Überschwingen an Flanken, aber hohe Frequenzen zeigen weniger von ihrer Höhe",
+    "speedDim": "Tempo-Abdunklung",
+    "speedDimHint": "Wie stark die Spur dunkler wird, wo der Strahl schnell läuft: 1 wie ein echter Strahl, dessen Licht die verweilte Zeit ist (steile Flanken schwach, dichte Signale gesprenkelt); 0 wie eine gezeichnete Linie, überall gleich hell",
     "floor": "Untergrenze",
     "floorHint": "Untere Grenze des Pegelbereichs (dBFS); alles Leisere fällt aus dem Bild",
     "rotate": "Drehen",
