@@ -60,16 +60,14 @@ type Params = {
 // per preset). Here, "distribution" reads as a stereo-image density cloud instead of the usual
 // dwelling point/curve. Numbers below are a starting point for live tuning, not the final word.
 const PRESETS: Record<"fast" | "distribution", { trailTau: number; tail: number; glow: number }> = {
-  fast: { trailTau: 0.03, tail: 3, glow: 0.81 },
+  fast: { trailTau: 0.03, tail: 3, glow: 0.80 },
   distribution: { trailTau: 0.8, tail: 6, glow: 1.22 },
 };
 // Live-tuned for linear light (PhosphorOptions' `linearLight`) and the tone stage.
-// glow and headroom (and the presets' glow) scaled by 0.815 when contrast became relative to the
-// trace's colour (contrastRetuneScale at contrast 2.2), so the tuned look stays as it was.
 const DEFAULTS: Params = {
   trailTau: 0.06,
   tail: 2,
-  glow: 0.81,
+  glow: 0.80,
   beam: 0.6,
   radiusFrac: 0.48,
   gridAlpha: 0.22,
@@ -77,15 +75,15 @@ const DEFAULTS: Params = {
   haze: 0.4,
   saturation: 1.0,
   contrast: 2.2,
-  headroom: 1.47,
-  bloomWhite: 0.1,
+  headroom: 1.8,
+  bloomWhite: 0.2,
   rotate: false,
   invert: true,
   labels: true,
 };
 // The Canvas 2D fallback still draws at alpha = glow, as before linear light: scaled back by the
-// factor glow's default moved by (0.32 -> 0.81), so it keeps the look it had.
-const FALLBACK_GLOW_SCALE = 0.32 / 0.81;
+// factor glow's default moved by (0.32 -> 0.8), so it keeps the look it had.
+const FALLBACK_GLOW_SCALE = 0.32 / 0.8;
 // Stored settings from before linear light (v1): glow, bloom and haze meant something else there
 // (encoded values, a thresholded bloom), so they take the new defaults. Version 2: contrast
 // relative to the trace's colour — linear-light settings (v1) brought along by
