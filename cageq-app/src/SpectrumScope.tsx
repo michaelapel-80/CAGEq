@@ -1056,7 +1056,7 @@ export function SpectrumScope({
     { key: "haze", label: t("scope.haze"), hint: t("scope.hazeHint"), min: 0, max: 4, step: 0.05 },
     { key: "saturation", label: t("scope.saturation"), hint: t("scope.saturationHint"), min: 0, max: 10, step: 0.1 },
     { key: "contrast", label: t("scope.contrast"), hint: t("scope.contrastHint"), min: 1, max: 3, step: 0.05 },
-    { key: "headroom", label: t("scope.headroom"), hint: t("scope.headroomHint"), min: 0.5, max: 8, step: 0.05 },
+    { key: "headroom", label: t("scope.headroom"), hint: t("scope.headroomHint"), min: 0.5, max: 16, step: 0.1 },
     { key: "bloomWhite", label: t("scope.bloomWhite"), hint: t("scope.bloomWhiteHint"), min: 0, max: 1, step: 0.05 },
     { key: "floor", label: t("scope.floor"), hint: t("scope.floorHint"), min: -150, max: -30, step: 5 },
   ];

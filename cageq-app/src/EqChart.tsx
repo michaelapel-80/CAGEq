@@ -1601,8 +1601,8 @@ export function EqChart({
               name="spectrum-headroom"
               type="range"
               min={0.5}
-              max={8}
-              step={0.05}
+              max={16}
+              step={0.1}
               value={specParams.headroom}
               onChange={(e) => {
                 const headroom = Number(e.currentTarget.value);
