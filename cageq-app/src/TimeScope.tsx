@@ -90,7 +90,7 @@ function boxBlur(src: Float32Array, dst: Float32Array, n: number, w: number): vo
 // content a readable stroke rather than a speckle (see where it's applied).
 // bwLimit off: dense content can get a bit grainy without it, which the tuning above mostly
 // mitigates, but a moving signal is harder to follow with it on. Left in as a setting.
-// triggerFilterHz 80: a lower cutoff locks more steadily (fewer harmonics to hop between). It used
+// triggerFilterHz 60: a lower cutoff locks more steadily (fewer harmonics to hop between). It used
 // to sit at 120 because low cutoffs stopped triggering at all: the filtered waveform shrinks, and
 // any near-DC content then held it clear of the zero level. The AC-coupled level (scopeTrigger.ts)
 // removed that, so it now triggers reliably down to the knob's 20 Hz minimum.
@@ -114,7 +114,7 @@ const DEFAULTS: Params = {
   undistort: true,
   msPerDivIdx: 4, // 5 ms/div × 10 = 50 ms
   trigger: true,
-  triggerFilterHz: 80,
+  triggerFilterHz: 60,
   mode: "mix",
 };
 // Curated Trail/Tail/Glow combinations — see SpectrumScope's own PRESETS doc for the full
