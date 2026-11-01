@@ -57,26 +57,24 @@ type Params = {
   tilt: TiltMode;
 };
 // Live-tuned for linear light (PhosphorOptions' `linearLight`) and the tone stage.
-// glow and headroom (and the presets' glow) scaled by 0.815 when contrast became relative to the
-// trace's colour (contrastRetuneScale at contrast 2.2), so the tuned look stays as it was.
 const DEFAULTS: Params = {
   trailTau: 0.1,
   tail: 3,
-  glow: 0.2,
+  glow: 0.12,
   bloom: 0.3,
-  haze: 0.2,
-  saturation: 1.5,
+  haze: 0.4,
+  saturation: 2.0,
   contrast: 2.2,
-  headroom: 1.63,
-  bloomWhite: 0.6,
+  headroom: 8.0,
+  bloomWhite: 0.7,
   floor: -90,
   undistort: true,
   linear: false,
   tilt: "rta",
 };
 // The Canvas 2D fallback still draws encoded values, as before linear light: scaled back by the
-// factor glow's default moved by (0.2 -> 0.2, by way of 0.1 and 0.24), so it keeps the look it had.
-const FALLBACK_GLOW_SCALE = 0.2 / 0.2;
+// factor glow's default moved by (0.2 -> 0.12), so it keeps the look it had.
+const FALLBACK_GLOW_SCALE = 0.2 / 0.12;
 // Stored settings from before linear light (v1): glow, bloom and haze meant something else there
 // (encoded values, a thresholded bloom), so they take the new defaults. Version 2: contrast
 // relative to the trace's colour — linear-light settings (v1) brought along by
@@ -100,7 +98,7 @@ const SPECTRUM_PARAMS_MIGRATION: ParamsMigration = {
 // number per bin). Numbers below are a starting point for that live tuning, not the final word.
 const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" | "glow">> = {
   fast: { trailTau: 0.02, tail: 1, glow: 0.08 },
-  distribution: { trailTau: 2.0, tail: 64, glow: 0.57 },
+  distribution: { trailTau: 2.0, tail: 64, glow: 0.3 },
 };
 // Trail/Glow orthogonality: at steady state (a dose added every commit, decaying at
 // `exp(-dt/trailTau)` between them), accumulated brightness is approximately
