@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { meterStream, scopeStream, type MeterData } from "./streams";
 import type { ScopeData } from "./Vectorscope";
-import { createPhosphor, DOSE_REF_FPS, retuneForRelativeContrast } from "./phosphor";
+import { createPhosphor, createPhosphorColumn, DOSE_REF_FPS, excitationShowing, retuneForRelativeContrast } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT } from "./appZoom";
@@ -147,6 +147,16 @@ const BEAM_ENERGY = 0.048;
 const PIECE_PX = 4;
 const MIN_PIECES = 4;
 const MAX_PIECES = 32;
+// The peak mark reads the true peak (the backend's follower: instant attack, hold, release) but only
+// falls once the phosphor has: it stays on the highest light still on screen (PhosphorColumn), so it
+// can't drop past a trace it's supposed to top. The trail is the slower of the two by seconds (a
+// -6 dB tone cut to -20: the follower at -20 after ~1 s, the -6 dB light visible for ~2 s), and a
+// fixed longer hold would be wrong for most material, since how long a level's light lasts depends
+// on how much it got. "Still on screen": at PEAK_LIT_LEVEL, encoded, about where it disappears
+// against the bar's background. Falls at no more than PEAK_FALL_DB_PER_SEC, the follower's own
+// release: the last light of a level goes out all at once, and the mark shouldn't jump with it.
+const PEAK_LIT_LEVEL = 6 / 255;
+const PEAK_FALL_DB_PER_SEC = 20;
 // Shortest segment drawn: a beam standing still still deposits its energy, just on a tiny stretch.
 const MIN_SEG_PX = 0.05;
 const toDbLin = (lin: number) => (lin > 0 ? 20 * Math.log10(lin) : -Infinity);
@@ -200,6 +210,7 @@ export function Meter({
   const liveRef = useRef(false); // last value handed to setLive — guards against a redundant call every tick
   const rmsMarkRef = useRef<HTMLElement | null>(null);
   const peakMarkRef = useRef<HTMLElement | null>(null);
+  const peakDbRef = useRef(-Infinity); // the backend's follower, read by the beam's rAF loop (see PEAK_LIT_LEVEL)
   const lufsFillRef = useRef<HTMLElement | null>(null);
   const lufsMarkRef = useRef<HTMLElement | null>(null);
   const [nums, setNums] = useState<MeterData | null>(null); // throttled: readouts
@@ -225,7 +236,7 @@ export function Meter({
       // mounted yet" (the very tick `live` flips true, before React has committed that render) —
       // harmless, the next tick a few ms later catches up.
       if (rmsMarkRef.current) rmsMarkRef.current.style.bottom = mark(pctOf(update.rms_db, LEVEL_MIN_DB));
-      if (peakMarkRef.current) peakMarkRef.current.style.bottom = mark(pctOf(update.peak_db, LEVEL_MIN_DB));
+      peakDbRef.current = isLive ? update.peak_db : -Infinity;
       if (lufsFillRef.current) lufsFillRef.current.style.height = `${pctOf(update.short_term_lufs, LUFS_MIN)}%`;
       if (lufsMarkRef.current) lufsMarkRef.current.style.bottom = mark(pctOf(update.momentary_lufs, LUFS_MIN));
       const rate = update.sample_rate || null;
@@ -319,6 +330,10 @@ export function Meter({
     // half-float accumulator (phosphor.ts's `precise`).
     if (!phos.precise) console.warn("[Meter] phosphor fell back to the 8-bit canvas accumulator (no half-float GPU support)");
     const [ar, ag, ab] = parseAccent(getComputedStyle(cv).getPropertyValue("--accent"));
+    // The GPU path's light, for the peak mark. The 2D fallback's mark is just the backend's follower.
+    const column = phos.addSegments ? createPhosphorColumn([ar, ag, ab]) : null;
+    let peakDb = -Infinity; // where the mark is
+    let peakShown = false;
 
     let raf = 0;
     let last = performance.now();
@@ -365,6 +380,8 @@ export function Meter({
       // On the GPU path (`addSegments`) there's no canvas to start: a frame that draws nothing
       // leaves an empty trace either way.
       const gpu = phos.addSegments !== undefined;
+      column?.setRows(cv.height);
+      const lineWidth = Math.max(1, cv.width * p.beamWidth);
       const ctx = gpu ? null : phos.begin();
       const s = scopeRef.current;
       if (s && s.signal && s.xy.length >= 4 && s !== drawn) {
@@ -444,10 +461,10 @@ export function Meter({
           prevY = y;
           prevLin = lin;
         }
-        const lineWidth = Math.max(1, W * p.beamWidth);
         if (!ctx) {
           // Each interval's energy, in pieces along the reconstructed path (see BEAM_ENERGY,
           // PIECE_PX), each spread over its own on-screen length.
+          const hang = lineWidth / 2; // see the spot's note below
           for (let k = 0; k < LANCZOS_A; k++) {
             levels[k] = levels[LANCZOS_A];
             levels[LANCZOS_A + levelN + k] = levels[LANCZOS_A + levelN - 1];
@@ -462,10 +479,11 @@ export function Meter({
               const len = Math.max(MIN_SEG_PX, Math.abs(y1 - y0));
               const o = 5 * segCount++;
               segData[o] = cx;
-              segData[o + 1] = y0;
+              segData[o + 1] = y0 + hang;
               segData[o + 2] = cx;
-              segData[o + 3] = Math.abs(y1 - y0) < MIN_SEG_PX ? y0 + MIN_SEG_PX : y1;
+              segData[o + 3] = (Math.abs(y1 - y0) < MIN_SEG_PX ? y0 + MIN_SEG_PX : y1) + hang;
               segData[o + 4] = energy / n / len;
+              column?.deposit(segData[o + 1], segData[o + 3], segData[o + 4]);
               y0 = y1;
             }
           }
@@ -480,6 +498,9 @@ export function Meter({
           // and a chord, small-scale ripple in the bar: ~5% with no spot, ~3.7% with a 3.6 px one,
           // ~1.2% at the bar's full width (the default beam). A steady signal never showed it — its
           // turning points all sit at one level.
+          // The spot hangs below the level instead of centring on it (`hang`): this bar's top edge
+          // is a reading, and half a spot above the level is 1.5 dB above the peak mark at the
+          // default beam, on a typical bar. The light lands that much lower, its shape unchanged.
           phos.addSegments!({ data: segData, count: segCount, width: lineWidth, rgb: [ar, ag, ab], spot: lineWidth });
         } else {
           ctx.globalCompositeOperation = "lighter";
@@ -515,6 +536,21 @@ export function Meter({
 
       phos.setTone?.(p.saturation, p.contrast, p.headroom);
       phos.commit(dt, p.trailTau, p.tail, doseMult);
+      column?.commit(dt, p.trailTau, p.tail, doseMult, p.saturation, p.headroom, lineWidth);
+
+      const litRow = column ? column.top(excitationShowing(PEAK_LIT_LEVEL, p.contrast, [ar, ag, ab])) : -1;
+      const target = Math.max(peakDbRef.current, litRow < 0 ? -Infinity : (litRow / cv.height) * LEVEL_MIN_DB);
+      peakDb = target >= peakDb ? target : Math.max(target, peakDb - PEAK_FALL_DB_PER_SEC * dt);
+      const el = peakMarkRef.current;
+      if (el) {
+        // Outlives `live` while there's still light to top.
+        const shown = peakDb > LEVEL_MIN_DB || liveRef.current;
+        if (shown !== peakShown) {
+          peakShown = shown;
+          el.style.display = shown ? "" : "none";
+        }
+        if (shown) el.style.bottom = mark(pctOf(peakDb, LEVEL_MIN_DB));
+      }
       raf = requestAnimationFrame(render);
     };
     raf = requestAnimationFrame(render);
@@ -623,7 +659,7 @@ export function Meter({
             <canvas ref={beamCanvasRef} className="vbar-beam" width={beamSize.w} height={beamSize.h} />
             <i className="vbar-ticks" />
             {live && <i ref={rmsMarkRef} className="vbar-rms" />}
-            {live && <i ref={peakMarkRef} className="vbar-peak" />}
+            <i ref={peakMarkRef} className="vbar-peak" style={{ display: "none" }} />
           </div>
           <span className="vbar-cap">dBFS</span>
         </div>

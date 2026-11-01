@@ -779,6 +779,93 @@ export function contrastRetuneScale(contrast: number, rgb: readonly [number, num
 /** App.css's `--accent`, the colour every instrument draws its trace in. */
 export const ACCENT_RGB = [0x39, 0x6c, 0xd8] as const;
 
+/** The excitation (FS_ACCUM's N) at which a linear-light trace of this colour reaches `level` on
+ *  screen, encoded (0..1). FS_PRESENT inverted, on the trace's brightest channel. */
+export function excitationShowing(level: number, contrast: number, rgb: readonly [number, number, number]): number {
+  return Math.pow(srgbToLinear1(level) / srgbToLinear1(Math.max(rgb[0], rgb[1], rgb[2]) / 255), 1 / contrast);
+}
+
+/** A vertical strip of a linear-light phosphor on the CPU: FS_ACCUM's excitation over a box spot,
+ *  one value per canvas row, in step with `Phosphor`'s own calls. For a view that has to know where
+ *  its light is. Reading the GPU back would tell it exactly, but WebGL 1 can only do that by
+ *  stalling on the pipeline, every frame, and these rows cost next to nothing. */
+export type PhosphorColumn = {
+  /** Match the canvas's height. A change starts the column dark, as a canvas resize does. */
+  setRows(rows: number): void;
+  /** One of `addSegments`' segments, y only: canvas px, y down, alpha per px. */
+  deposit(y0: number, y1: number, alpha: number): void;
+  /** `commit` and `setTone`'s values, plus the segments' spot (px). */
+  commit(dt: number, tau: number, tail: number, doseMult: number, saturation: number, headroom: number, spot: number): void;
+  /** The topmost row at `minN` or above, or -1. */
+  top(minN: number): number;
+};
+
+export function createPhosphorColumn(rgb: readonly [number, number, number]): PhosphorColumn {
+  const colourMax = srgbToLinear1(Math.max(rgb[0], rgb[1], rgb[2]) / 255);
+  let excitation = new Float64Array(0);
+  // A segment's share of each row: the rows it fills as a slope (the change from the row above), so
+  // a long one costs no more than a short one, and the partial ones at its ends as a mass.
+  let mass = new Float64Array(0);
+  let slope = new Float64Array(0);
+  let cum = new Float64Array(0);
+  return {
+    setRows(rows) {
+      if (rows === excitation.length) return;
+      excitation = new Float64Array(rows);
+      mass = new Float64Array(rows);
+      slope = new Float64Array(rows + 1);
+      cum = new Float64Array(rows + 1);
+    },
+    deposit(y0, y1, alpha) {
+      const rows = excitation.length;
+      const lo = Math.max(0, Math.min(y0, y1));
+      const hi = Math.min(rows, Math.max(y0, y1));
+      if (hi <= lo) return;
+      const a = Math.floor(lo);
+      const b = Math.min(rows - 1, Math.floor(hi));
+      if (a === b) {
+        mass[a] += alpha * (hi - lo);
+        return;
+      }
+      mass[a] += alpha * (a + 1 - lo);
+      mass[b] += alpha * (hi - b);
+      slope[a + 1] += alpha;
+      slope[b] -= alpha;
+    },
+    commit(dt, tau, tail, doseMult, saturation, headroom, spot) {
+      const rows = excitation.length;
+      const keep = Math.exp(-dt / tau);
+      const keepTail = Math.exp(-dt / (tau * Math.max(1, tail)));
+      const floor = TAIL_FLOOR_PER_SEC * dt;
+      // See applyTone.
+      const sat = saturation > 1e-4;
+      const nMax = sat ? headroom / (1 - Math.exp(-saturation)) : 0;
+      const gain = sat ? saturation / (1 - Math.exp(-saturation)) : 1;
+      const dose = (dt / DOSE_REF_DT) * doseMult * gain;
+      let run = 0;
+      for (let r = 0; r < rows; r++) {
+        run += slope[r];
+        cum[r + 1] = cum[r] + mass[r] + run;
+        mass[r] = 0;
+        slope[r] = 0;
+      }
+      slope[rows] = 0;
+      const half = Math.floor(Math.max(1, spot) / 2);
+      for (let r = 0; r < rows; r++) {
+        const s = Math.min(1, (excitation[r] * colourMax) / TAIL_KNEE);
+        const k = keepTail + (keep - keepTail) * s * s * (3 - 2 * s);
+        const n0 = Math.max(excitation[r] * k - floor, 0);
+        const e = ((cum[Math.min(rows, r + half + 1)] - cum[Math.max(0, r - half)]) / (2 * half + 1)) * dose;
+        excitation[r] = e <= 0 ? n0 : nMax > 0 ? n0 + (nMax - n0) * (1 - Math.exp(-e / nMax)) : Math.min(n0 + e, LINEAR_ENERGY_CAP);
+      }
+    },
+    top(minN) {
+      for (let r = 0; r < excitation.length; r++) if (excitation[r] >= minN) return r;
+      return -1;
+    },
+  };
+}
+
 /** A view's stored settings brought across contrast becoming relative to the trace's colour (see
  *  `contrastRetuneScale`): glow and headroom scaled for the stored contrast, so they look as they
  *  did. For a settings migration from the version before it, in the accent. */
