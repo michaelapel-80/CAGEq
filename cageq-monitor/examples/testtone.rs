@@ -27,13 +27,14 @@
 //!   cargo run -p cageq-monitor --example testtone -- --device "Phonitor"  # match by name
 //!   cargo run -p cageq-monitor --example testtone -- --sine 12000 --rate 44100  # test Windows' resampler
 //!   cargo run -p cageq-monitor --example testtone -- --isp 3.0103 --unsafe  # +3 dBTP true-peak over
+//!   cargo run -p cageq-monitor --example testtone -- --isp16 7.185384 --unsafe  # +7.19 dBTP, 16-sample pattern
 //!   cargo run -p cageq-monitor --example testtone -- --chirp-log 20 20000 8     # log sweep, repeats every 8s
 //!   cargo run -p cageq-monitor --example testtone -- --chirp-linear 20 20000 8  # linear sweep, same range
 //!   cargo run -p cageq-monitor --example testtone -- --am 1000 5 1.0    # 1kHz carrier, 5Hz/100% AM
 //!   cargo run -p cageq-monitor --example testtone -- --fm 1000 5 200    # 1kHz carrier, ±200Hz/5Hz FM
 //!   cargo run -p cageq-monitor --example testtone -- --poison 1000 250 --unsafe  # inject NaN/Inf every 250ms
 //!
-//! `--sine`/`--square`/`--triangle`/`--sawtooth`/`--pulse`/`--pink`/`--white`/`--isp`/
+//! `--sine`/`--square`/`--triangle`/`--sawtooth`/`--pulse`/`--pink`/`--white`/`--isp`/`--isp16`/
 //! `--chirp-log`/`--chirp-linear`/`--am`/`--fm`/`--poison` are all mutually exclusive (one signal
 //! at a time); omitting every one of them plays pink noise, same as passing `--pink` explicitly.
 //!
@@ -71,11 +72,16 @@
 //! bandlimited) reconstruction filter the DAC uses — every one of them reproduces the same
 //! original sinusoid. `<db-over>` is how far above 0 dBFS the *true* peak should land (0..=3.0103,
 //! clamped); the sample-domain level needed to hit it (`db-over - 3.0103`, always ≤ 0 dBFS) is
-//! derived automatically and `--level` is ignored. Real mastered/clipped material can occasionally
-//! exceed 3.0103 dB of ISP, but that's this generator's ceiling: the largest overshoot a single
-//! pure tone can produce deterministically, reconstruction-filter-agnostic. See ITU-R BS.1770
-//! Annex 2 / EBU Tech 3341 for the same construction used as the standard true-peak-meter
-//! calibration example.
+//! derived automatically and `--level` is ignored. 3.0103 dB is the largest overshoot a single pure
+//! tone can produce deterministically, reconstruction-filter-agnostic. See ITU-R BS.1770 Annex 2 /
+//! EBU Tech 3341 for the same construction used as the standard true-peak-meter calibration example.
+//!
+//! `--isp16 <db-over>` goes further with several tones: `ISP16_PATTERN`, a sustained 16-sample
+//! pattern whose odd harmonics all peak together at one midpoint, reaching +7.1854 dB over its
+//! sample peak (`ISP16_MAX_OVER_DB`, see its doc). Same clamping, same `--unsafe` rule, and
+//! `--level` is ignored the same way. Its top line is 7·Fs/16, so most of its energy sits at the
+//! top of the audio band: mind your tweeters. A true-peak meter can under-read it, because the
+//! meter's own short filter droops up there.
 //!
 //! Pink and white noise are also the calibrated pair for the Monitor pane's
 //! spectrum *display* (not just the source-referred EQ check above): pink noise's power spectral
@@ -106,7 +112,7 @@
 //! blast. `--unsafe` lifts both clamps for a deliberate full-scale (0 dBFS) torture test. Ctrl+C
 //! stops it (abrupt; use --seconds for a clean fade-out).
 //!
-//! `--isp` always requires `--unsafe`: even at its gentlest (`--isp 0`, a true peak sitting right
+//! `--isp`/`--isp16` always require `--unsafe`: even at its gentlest (`--isp 0`, a true peak sitting right
 //! at 0 dBTP) the sample-domain level it needs is -3.0103 dBFS — already past the default -3 dBFS
 //! ceiling — and every `--isp` value above 0 needs a sample level closer to 0 dBFS still. There's
 //! no in-between "safe" `--isp` setting the way there is for the other signals.
@@ -146,7 +152,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cageq_monitor::signal::{
         am_sample, build_wavetable, chirp_phase, fm_phase, poison_override, wavetable_sample, wavetable_step,
-        ISP_MAX_OVER_DB, PinkNoise, Signal, Waveform,
+        ISP16_MAX_OVER_DB, ISP_MAX_OVER_DB, PinkNoise, Signal, Waveform,
     };
     use std::time::Duration;
     use wasapi::{initialize_mta, Direction, SampleType, StreamMode, WaveFormat};
@@ -169,7 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // erroring.
         let mut set_signal = |sig: Signal| -> Result<(), Box<dyn std::error::Error>> {
             if signal.is_some() {
-                return Err("only one of --sine/--square/--triangle/--sawtooth/--pulse/--pink/--white/--isp/--chirp-log/--chirp-linear/--am/--fm/--poison may be given".into());
+                return Err("only one of --sine/--square/--triangle/--sawtooth/--pulse/--pink/--white/--isp/--isp16/--chirp-log/--chirp-linear/--am/--fm/--poison may be given".into());
             }
             signal = Some(sig);
             Ok(())
@@ -183,6 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--pink" => set_signal(Signal::Pink)?,
             "--white" => set_signal(Signal::White)?,
             "--isp" => set_signal(Signal::Isp { db_over: args.next().ok_or("--isp needs a dB-over-0-dBFS true-peak target (0..=3.0103)")?.parse()? })?,
+            "--isp16" => set_signal(Signal::Isp16 { db_over: args.next().ok_or("--isp16 needs a dB-over-0-dBFS true-peak target (0..=7.185384)")?.parse()? })?,
             "--chirp-log" => set_signal(Signal::Chirp {
                 f0: args.next().ok_or("--chirp-log needs <f0> <f1> <seconds>")?.parse()?,
                 f1: args.next().ok_or("--chirp-log needs <f0> <f1> <seconds>")?.parse()?,
@@ -224,7 +231,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (0 dBFS) torture test. Opt-in and deliberate — mind your ears and gear.
             "--unsafe" => unsafe_mode = true,
             "-h" | "--help" => {
-                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth|--pulse <hz>] [--pink|--white] [--isp <db-over> --unsafe] [--chirp-log|--chirp-linear <f0> <f1> <seconds>] [--am <carrier_hz> <mod_hz> <depth>] [--fm <carrier_hz> <mod_hz> <deviation_hz>] [--poison <carrier_hz> <interval_ms> --unsafe] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
+                eprintln!("usage: testtone [--sine|--square|--triangle|--sawtooth|--pulse <hz>] [--pink|--white] [--isp|--isp16 <db-over> --unsafe] [--chirp-log|--chirp-linear <f0> <f1> <seconds>] [--am <carrier_hz> <mod_hz> <depth>] [--fm <carrier_hz> <mod_hz> <deviation_hz>] [--poison <carrier_hz> <interval_ms> --unsafe] [--level <dbfs>] [--rate <hz>] [--seconds <n>] [--device <name-substr>] [--unsafe]");
                 return Ok(());
             }
             other => return Err(format!("unknown arg: {other}").into()),
@@ -242,14 +249,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // doc), and refuse outright without --unsafe — there is no "safe" --isp setting (see the
     // safety doc above), so this is checked before the generic ceiling logic even gets a chance
     // to just clamp it down to something quieter and silently defeat the whole point.
-    if let Signal::Isp { db_over: requested_over } = signal {
+    if let Signal::Isp { db_over: requested_over } | Signal::Isp16 { db_over: requested_over } = signal {
+        let (flag, max_over) = if matches!(signal, Signal::Isp16 { .. }) { ("--isp16", ISP16_MAX_OVER_DB) } else { ("--isp", ISP_MAX_OVER_DB) };
         if !unsafe_mode {
-            return Err("--isp requires --unsafe — it deliberately drives the sample peak up near 0 dBFS to construct a true-peak-over (see the file header doc)".into());
+            return Err(format!("{flag} requires --unsafe — it deliberately drives the sample peak up near 0 dBFS to construct a true-peak-over (see the file header doc)").into());
         }
-        let over = requested_over.clamp(0.0, ISP_MAX_OVER_DB);
+        let over = requested_over.clamp(0.0, max_over);
         if (over - requested_over).abs() > 1e-9 {
             eprintln!(
-                "[testtone] --isp {requested_over} is outside 0..={ISP_MAX_OVER_DB:.4} (the exact max for this construction) — clamping to {over:.4}."
+                "[testtone] {flag} {requested_over} is outside 0..={max_over:.4} (the exact max for this construction) — clamping to {over:.4}."
             );
         }
         // Reassign with the clamped value so every downstream use (status line, wavetable) sees
@@ -264,11 +272,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // the other way round. Confirmed against `--isp 3.0103 --unsafe`: `level_dbfs` = 3.0103
         // → gain = √2 → sample peak = √2 · (1/√2) = 1.0 (exactly 0 dBFS, the textbook case) →
         // true peak = √2 · 1.0 = +3.0103 dBTP, matching the request.
-        signal = Signal::Isp { db_over: over };
+        signal = if matches!(signal, Signal::Isp16 { .. }) { Signal::Isp16 { db_over: over } } else { Signal::Isp { db_over: over } };
         level_dbfs = over as f32;
-        let sample_peak_dbfs = over - ISP_MAX_OVER_DB;
+        let sample_peak_dbfs = over - max_over;
         eprintln!(
-            "[testtone] --isp: true (reconstructed) peak targeted at {over:.4} dBTP, sample peak {sample_peak_dbfs:.4} dBFS; --level is ignored for this signal."
+            "[testtone] {flag}: true (reconstructed) peak targeted at {over:.4} dBTP, sample peak {sample_peak_dbfs:.4} dBFS; --level is ignored for this signal."
         );
     }
     // §Poison: same "no in-between safe setting" posture as §ISP above, checked before the
@@ -289,7 +297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if unsafe_mode {
         eprintln!("[testtone] --unsafe: full-scale (0 dBFS) allowed and the per-sample limiter is off — mind your ears/gear.");
     }
-    let is_isp = matches!(signal, Signal::Isp { .. });
+    let is_isp = matches!(signal, Signal::Isp { .. } | Signal::Isp16 { .. });
     if !is_isp && level_dbfs > level_ceil_dbfs {
         eprintln!("[testtone] level {level_dbfs} dBFS is above the {level_ceil_dbfs} dBFS ceiling — clamping.");
         level_dbfs = level_ceil_dbfs;
@@ -375,6 +383,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "[testtone] ISP torture: Fs/4 45°-phase sine, sample peak {:.4} dBFS → true peak {db_over:.4} dBTP, source {rate} Hz / {channels} ch{resample}",
             db_over - ISP_MAX_OVER_DB
         ),
+        Signal::Isp16 { db_over } => eprintln!(
+            "[testtone] ISP torture: 16-sample pattern, sample peak {:.4} dBFS → true peak {db_over:.4} dBTP, source {rate} Hz / {channels} ch{resample}",
+            db_over - ISP16_MAX_OVER_DB
+        ),
         Signal::Chirp { f0, f1, duration_secs, log } => eprintln!(
             "[testtone] {} chirp {f0} Hz → {f1} Hz over {duration_secs}s (repeating) @ {level_dbfs} dBFS, source {rate} Hz / {channels} ch{resample}",
             if log { "log" } else { "linear" }
@@ -392,7 +404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("[testtone] Ctrl+C to stop.");
 
-    // Wavetable (Tone/Isp) — built once, walked by a fractional phase accumulator
+    // Wavetable (Tone/Isp/Isp16) — built once, walked by a fractional phase accumulator
     // (`wavetable_step`/`wavetable_sample`, not a plain integer index — see their own docs for
     // why); Pink/White are generated per-sample below via `PinkNoise` instead (see
     // `build_wavetable`'s own doc for why they don't share this). Both come from
@@ -446,7 +458,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mono = match signal {
-                Signal::Tone { .. } | Signal::Isp { .. } => {
+                Signal::Tone { .. } | Signal::Isp { .. } | Signal::Isp16 { .. } => {
                     let s = wavetable_sample(&table, phase) * gain;
                     phase = (phase + step).rem_euclid(table.len() as f64);
                     s

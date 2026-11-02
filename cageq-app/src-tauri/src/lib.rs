@@ -1034,7 +1034,7 @@ fn start_test_signal(device: Option<String>, state: State<TestSignalState>) -> R
 struct GeneratorRequest {
     device: Option<String>,
     signal: cageq_monitor::signal::Signal,
-    /// The window's requested level (dBFS for every signal but `Isp`, where — see
+    /// The window's requested level (dBFS for every signal but `Isp`/`Isp16`, where — see
     /// `cageq_monitor::signal::GeneratorParams`'s own doc — it's the true-peak target directly).
     level_dbfs: f32,
     rate_override: Option<u32>,
@@ -1047,7 +1047,7 @@ struct GeneratorRequest {
 /// `TestSignalState` slot (correct: only one thing should ever be rendering to an output at once).
 #[tauri::command]
 fn start_test_generator(req: GeneratorRequest, state: State<TestSignalState>) -> Result<(), String> {
-    use cageq_monitor::signal::{GeneratorParams, ISP_MAX_OVER_DB, SAFE_PLAYBACK_CEILING_DBFS, Signal};
+    use cageq_monitor::signal::{GeneratorParams, ISP16_MAX_OVER_DB, ISP_MAX_OVER_DB, SAFE_PLAYBACK_CEILING_DBFS, Signal};
 
     // Mostly mirrors testtone.rs's own policy (file header doc there): Isp always requires
     // unsafe_mode (no "safe" Isp setting exists); Isp's own db_over is separately clamped to
@@ -1058,7 +1058,7 @@ fn start_test_generator(req: GeneratorRequest, state: State<TestSignalState>) ->
     // uses), not testtone.rs's -3 dBFS — -3 dBFS is fine for a tool you have to open a terminal
     // to run, but this window is a GUI default anyone can reach by clicking around, so it gets
     // the more conservative "safe for a real user's device" number instead.
-    let is_isp = matches!(req.signal, Signal::Isp { .. });
+    let is_isp = matches!(req.signal, Signal::Isp { .. } | Signal::Isp16 { .. });
     if is_isp && !req.unsafe_mode {
         return Err("Isp requires unsafe_mode".to_string());
     }
@@ -1071,6 +1071,7 @@ fn start_test_generator(req: GeneratorRequest, state: State<TestSignalState>) ->
     }
     let signal = match req.signal {
         Signal::Isp { db_over } => Signal::Isp { db_over: db_over.clamp(0.0, ISP_MAX_OVER_DB) },
+        Signal::Isp16 { db_over } => Signal::Isp16 { db_over: db_over.clamp(0.0, ISP16_MAX_OVER_DB) },
         // Same posture as Isp above: re-clamp server-side rather than trust the window's own
         // field bounds. 1..=40_000 Hz mirrors the frequency field's own range (ToneWindow.tsx);
         // 0.5..=60s keeps a sweep from being pathologically fast (a near-zero duration blows up
@@ -1099,7 +1100,7 @@ fn start_test_generator(req: GeneratorRequest, state: State<TestSignalState>) ->
         other => other,
     };
     let level_ceil_dbfs: f32 = if req.unsafe_mode { 0.0 } else { SAFE_PLAYBACK_CEILING_DBFS };
-    let level_dbfs = if let Signal::Isp { db_over } = signal {
+    let level_dbfs = if let Signal::Isp { db_over } | Signal::Isp16 { db_over } = signal {
         db_over as f32
     } else if req.level_dbfs.is_finite() {
         req.level_dbfs.clamp(-80.0, level_ceil_dbfs)

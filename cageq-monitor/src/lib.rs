@@ -804,7 +804,7 @@ mod windows_impl {
 
     /// Render `params.signal` out the endpoint until `stop`, honoring `params.seconds` as an
     /// auto-stop with a fade-out. Mirrors `testtone.rs`'s own main loop (device/format/stream
-    /// setup, fade in/out envelope, wavetable indexing for `Tone`/`Isp`, `PinkNoise` for
+    /// setup, fade in/out envelope, wavetable indexing for `Tone`/`Isp`/`Isp16`, `PinkNoise` for
     /// `Pink`/`White`) but stop-flag-driven instead of Ctrl+C-driven, and silent (no `eprintln!`
     /// diagnostics — those are CLI-only concerns `testtone.rs` keeps for itself).
     ///
@@ -889,7 +889,7 @@ mod windows_impl {
                     }
                 }
                 let mono = match params.signal {
-                    Signal::Tone { .. } | Signal::Isp { .. } => {
+                    Signal::Tone { .. } | Signal::Isp { .. } | Signal::Isp16 { .. } => {
                         let s = wavetable_sample(&table, phase) * gain;
                         phase = (phase + step).rem_euclid(table.len() as f64);
                         s

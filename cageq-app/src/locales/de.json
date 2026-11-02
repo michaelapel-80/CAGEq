@@ -277,11 +277,13 @@
       "Fm": "FM (Frequenzmodulation)",
       "Pink": "Rosa Rauschen",
       "White": "Weißes Rauschen",
-      "Isp": "ISP-Torturetest (True-Peak-Über)"
+      "Isp": "ISP-Torturetest (True-Peak-Über)",
+      "Isp16": "ISP-Torturetest, 16 Samples (härter)"
     },
     "frequency": "Frequenz",
     "dbOver": "True-Peak-Ziel",
     "ispHint": "Wie weit über 0 dBFS der rekonstruierte (wahre) Peak liegen soll, 0..{{max}} dBTP — der nötige Pegel im Sample-Bereich wird automatisch berechnet.",
+    "isp16Hint": "Ein sich wiederholendes 16-Sample-Muster mit bis zu {{max}} dBTP. Der Großteil seiner Energie liegt am oberen Ende des Hörbereichs und belastet daher Hochtöner. CAGEqs eigene Anzeige liest unter 96 kHz höchstens +5,41 dBTP und kann den vollen Überschuss dort nicht darstellen.",
     "chirpF0": "Startfrequenz",
     "chirpF1": "Endfrequenz",
     "chirpDuration": "Sweep-Dauer",

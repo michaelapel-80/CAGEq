@@ -131,6 +131,10 @@ pub enum Signal {
     /// a fixed Fs/4, 45°-phase sine, parameterised by how many dB above 0 dBFS the *reconstructed*
     /// peak should reach (clamped to `0.0..=ISP_MAX_OVER_DB` by the caller).
     Isp { db_over: f64 },
+    /// The harder true-peak-over torture test: the 16-sample pattern [`ISP16_PATTERN`],
+    /// parameterised the same way as `Isp` (`db_over` clamped to `0.0..=ISP16_MAX_OVER_DB` by the
+    /// caller). See that constant's own doc for the construction.
+    Isp16 { db_over: f64 },
     /// A swept sine from `f0` to `f1` Hz over `duration_secs`, then repeating — see
     /// [`chirp_phase`] for the construction. `log` selects a logarithmic (equal time per octave,
     /// matching the spectrum view's own log-Hz axis) vs. linear (equal Hz/sec) sweep. Unlike
@@ -269,6 +273,26 @@ pub const SAFE_PLAYBACK_CEILING_DBFS: f32 = -18.0;
 /// since it's the deterministic maximum a single pure tone gives you.
 pub const ISP_MAX_OVER_DB: f64 = 3.0103;
 
+/// One period of `Signal::Isp16`: the signs of a 16-point periodic sinc (Dirichlet kernel) centred
+/// half a sample after index 0, which makes every term of the interpolation sum at that instant
+/// add in phase. It's the same worst-case argument as `sgn(sinc(t))`, cut down to something
+/// sustainable.
+///
+/// Why period 16 rather than longer: the pattern is half-wave antisymmetric, so it contains only
+/// odd harmonics and no DC or Nyquist line, and its top line is 7·Fs/16 (19.3 kHz at 44.1 kHz,
+/// 21 kHz at 48 kHz). That still sits in the passband of an ordinary sharp reconstruction filter,
+/// so the overshoot is a property of the signal, not of the filter, as it is for `Isp`. Period 32
+/// puts its top line at 15·Fs/32, inside the transition band, and starts to depend on the filter.
+pub const ISP16_PATTERN: [i8; 16] = [1, 1, -1, 1, -1, 1, -1, 1, -1, -1, 1, -1, 1, -1, 1, -1];
+
+/// The exact dB the true (reconstructed) peak sits above the sample peak for [`ISP16_PATTERN`]:
+/// the sum of the Dirichlet kernel's absolute values at that half-sample instant (≈2.28702).
+/// `Signal::Isp16`'s ceiling, the point where its samples reach 0 dBFS.
+///
+/// A meter's own filter can read this low: `ebur128`'s 48-tap true-peak filter can't report more
+/// than +5.41 dB over sample peak below 96 kHz, or +7.26 dB from there up to 192 kHz, on any input.
+pub const ISP16_MAX_OVER_DB: f64 = 7.185384;
+
 /// Fixed table resolution for a `Signal::Tone`'s wavetable, independent of the requested
 /// frequency — see [`build_wavetable`]'s own doc for why: tying the table length to an exact
 /// integer cycle count (as an earlier version of this did, `round(rate/hz)`) means the *actual*
@@ -290,7 +314,10 @@ pub const TONE_TABLE_LEN: usize = 4096;
 /// for why: a plain wraparound index is exactly what used to make `Tone` play the wrong
 /// frequency at the top of its range).
 ///
-/// Only meaningful for `Signal::Tone`/`Signal::Isp` — `Pink`/`White` aren't periodic, so callers
+/// `Isp16` follows `Isp`'s convention: its samples peak at ±10^(-[`ISP16_MAX_OVER_DB`]/20), so the
+/// gain in dB is the true peak in dBTP directly.
+///
+/// Only meaningful for `Signal::Tone`/`Signal::Isp`/`Signal::Isp16` — `Pink`/`White` aren't periodic, so callers
 /// handle those separately via [`PinkNoise`], which generates per-sample from an RNG+filter
 /// instead of a lookup table.
 pub fn build_wavetable(signal: Signal, rate: u32) -> Vec<f32> {
@@ -307,6 +334,7 @@ pub fn build_wavetable(signal: Signal, rate: u32) -> Vec<f32> {
     let table_len = match signal {
         Signal::Tone { .. } if tone_hz > 0.0 => TONE_TABLE_LEN,
         Signal::Isp { .. } => 4,
+        Signal::Isp16 { .. } => ISP16_PATTERN.len(),
         _ => 1,
     };
     (0..table_len)
@@ -318,6 +346,7 @@ pub fn build_wavetable(signal: Signal, rate: u32) -> Vec<f32> {
                 std::f64::consts::TAU * (i as f64) / (table_len as f64) + std::f64::consts::FRAC_PI_4,
                 1,
             ),
+            Signal::Isp16 { .. } => (ISP16_PATTERN[i] as f64 * 10f64.powf(-ISP16_MAX_OVER_DB / 20.0)) as f32,
             _ => 0.0,
         })
         .collect()
@@ -327,13 +356,13 @@ pub fn build_wavetable(signal: Signal, rate: u32) -> Vec<f32> {
 /// with [`wavetable_sample`]. `Tone`'s step is a real, generally non-integer number — that's the
 /// whole fix: the exact requested `hz` comes from advancing through a *fixed-size* table at
 /// whatever fractional rate reproduces it, rather than by choosing the table's size to make the
-/// step exactly 1. `Isp`'s step is always exactly `1.0` (its 4-sample table has no fractional
+/// step exactly 1. `Isp`'s and `Isp16`'s step is always exactly `1.0` (their tables have no fractional
 /// positions to interpolate between — see [`wavetable_sample`]'s own doc for why that's safe).
 /// `Pink`/`White` don't use a wavetable at all; `0.0` is unused dead weight for them.
 pub fn wavetable_step(signal: Signal, rate: u32) -> f64 {
     match signal {
         Signal::Tone { hz, .. } => TONE_TABLE_LEN as f64 * hz / rate as f64,
-        Signal::Isp { .. } => 1.0,
+        Signal::Isp { .. } | Signal::Isp16 { .. } => 1.0,
         _ => 0.0,
     }
 }
@@ -433,6 +462,84 @@ mod tests {
         }
         // Signs alternate in pairs: +, +, -, - (see this module's `build_wavetable` doc).
         assert!(table[0] > 0.0 && table[1] > 0.0 && table[2] < 0.0 && table[3] < 0.0);
+    }
+
+    /// Band-limited reconstruction of `table` at `t` samples, from its DFT lines. Nyquist is empty
+    /// (`isp16_has_only_odd_harmonics_up_to_seven_sixteenths_of_fs`), so summing the bins below it
+    /// is unambiguous.
+    fn isp16_reconstruct(table: &[f32], t: f64) -> f64 {
+        use std::f64::consts::TAU;
+        let n = table.len() as f64;
+        let mut acc = table.iter().map(|&s| s as f64).sum::<f64>() / n;
+        for k in 1..table.len() / 2 {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, &s) in table.iter().enumerate() {
+                let w = TAU * k as f64 * i as f64 / n;
+                re += s as f64 * w.cos();
+                im -= s as f64 * w.sin();
+            }
+            let w = TAU * k as f64 * t / n;
+            acc += 2.0 * (re * w.cos() - im * w.sin()) / n;
+        }
+        acc
+    }
+
+    /// The constant is the actual overshoot of the actual table: at 0 dB gain the reconstructed
+    /// peak lands on exactly 1 (0 dBTP), half a sample after index 0, and at the top of the range
+    /// the samples land on exactly full scale.
+    #[test]
+    fn isp16_true_peak_matches_its_constant() {
+        let table = build_wavetable(Signal::Isp16 { db_over: ISP16_MAX_OVER_DB }, 48_000);
+        assert_eq!(table.len(), 16);
+        let mut peak = (0.0f64, 0.0f64);
+        for i in 0..16 * 256 {
+            let t = i as f64 / 256.0;
+            let v = isp16_reconstruct(&table, t).abs();
+            if v > peak.0 + 1e-9 {
+                peak = (v, t);
+            }
+        }
+        assert!((peak.0 - 1.0).abs() < 1e-5, "true peak {} not 1.0", peak.0);
+        assert_eq!(peak.1, 0.5, "peak should sit midway between samples 0 and 1");
+        let full_scale = 10f64.powf(ISP16_MAX_OVER_DB / 20.0);
+        for &s in &table {
+            assert!((s.abs() as f64 * full_scale - 1.0).abs() < 1e-6, "{s} doesn't reach full scale at the ceiling");
+        }
+    }
+
+    /// Pins the meter figures in `ISP16_MAX_OVER_DB`'s doc and the tone window's hint against the
+    /// real `ebur128` crate rather than a model of its filter: played at full scale, the pattern
+    /// reads well under its true +7.19 dBTP below 96 kHz.
+    #[test]
+    fn isp16_under_reads_on_the_ebur128_meter() {
+        for (rate, expected_db) in [(48_000u32, 5.41f64), (96_000, 7.08)] {
+            let mut meter = ebur128::EbuR128::new(1, rate, ebur128::Mode::TRUE_PEAK).unwrap();
+            let frames: Vec<f32> = ISP16_PATTERN.iter().cycle().take(16 * 1000).map(|&s| s as f32).collect();
+            meter.add_frames_f32(&frames).unwrap();
+            let read_db = 20.0 * meter.true_peak(0).unwrap().log10();
+            assert!((read_db - expected_db).abs() < 0.05, "{rate} Hz: read {read_db:.3} dB, expected {expected_db}");
+        }
+    }
+
+    /// What makes it filter-independent (see `ISP16_PATTERN`'s doc): odd harmonics only, so no DC
+    /// and nothing at Nyquist, topping out at 7·Fs/16.
+    #[test]
+    fn isp16_has_only_odd_harmonics_up_to_seven_sixteenths_of_fs() {
+        use std::f64::consts::TAU;
+        for k in 0..=8usize {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, &s) in ISP16_PATTERN.iter().enumerate() {
+                let w = TAU * (k * i) as f64 / 16.0;
+                re += s as f64 * w.cos();
+                im += s as f64 * w.sin();
+            }
+            let mag = (re * re + im * im).sqrt();
+            if k % 2 == 0 {
+                assert!(mag < 1e-9, "bin {k} should be empty, got {mag}");
+            } else {
+                assert!(mag > 1.0, "bin {k} should carry a line, got {mag}");
+            }
+        }
     }
 
     /// A tone's wavetable is always `TONE_TABLE_LEN` samples, regardless of `hz` — the old

@@ -12,6 +12,7 @@ type Signal =
   | { kind: "Pink" }
   | { kind: "White" }
   | { kind: "Isp"; db_over: number }
+  | { kind: "Isp16"; db_over: number }
   | { kind: "Chirp"; f0: number; f1: number; duration_secs: number; log: boolean }
   | { kind: "Am"; carrier_hz: number; mod_hz: number; depth: number }
   | { kind: "Fm"; carrier_hz: number; mod_hz: number; deviation_hz: number };
@@ -31,13 +32,13 @@ type ResumeDeviceOnly = { deviceId?: string } | null;
 
 // The one flat selection the UI offers — mirrors testtone.rs's mutually-exclusive CLI flags
 // (--sine/--square/--triangle/--sawtooth/--pulse/--chirp-log/--chirp-linear/--am/--fm/--pink/
-// --white/--isp) as one dropdown instead of a signal-kind selector plus a separate waveform-shape
+// --white/--isp/--isp16) as one dropdown instead of a signal-kind selector plus a separate waveform-shape
 // sub-selector. "Chirp" covers both --chirp-log/--chirp-linear — log vs. linear is its own field
 // below, the same way Tone's five shapes are flattened into SELECTIONS but a shape's own params
 // (hz) live in a conditional block rather than the dropdown.
-type Selected = Waveform | "Chirp" | "Am" | "Fm" | "Pink" | "White" | "Isp";
+type Selected = Waveform | "Chirp" | "Am" | "Fm" | "Pink" | "White" | "Isp" | "Isp16";
 const TONE_WAVEFORMS: Waveform[] = ["Sine", "Square", "Triangle", "Sawtooth", "Pulse"];
-const SELECTIONS: Selected[] = [...TONE_WAVEFORMS, "Chirp", "Am", "Fm", "Pink", "White", "Isp"];
+const SELECTIONS: Selected[] = [...TONE_WAVEFORMS, "Chirp", "Am", "Fm", "Pink", "White", "Isp", "Isp16"];
 function isToneWaveform(s: Selected): s is Waveform {
   return (TONE_WAVEFORMS as Selected[]).includes(s);
 }
@@ -46,6 +47,8 @@ function isToneWaveform(s: Selected): s is Waveform {
 // `cageq_monitor::signal::ISP_MAX_OVER_DB` (kept in sync by hand; it's a fixed textbook constant,
 // not something either side expects to change).
 const ISP_MAX_OVER_DB = 3.0103;
+// Same for `Isp16`, mirroring `cageq_monitor::signal::ISP16_MAX_OVER_DB`.
+const ISP16_MAX_OVER_DB = 7.185384;
 
 /**
  * The detached test-tone generator window (loaded via `index.html#tone`, see main.tsx) — an
@@ -62,6 +65,7 @@ export function ToneWindow() {
   const [selected, setSelected] = useState<Selected>("Pink");
   const [hz, setHz] = useState(1000);
   const [dbOver, setDbOver] = useState(ISP_MAX_OVER_DB);
+  const [db16Over, setDb16Over] = useState(ISP16_MAX_OVER_DB);
   const [chirpF0, setChirpF0] = useState(20);
   const [chirpF1, setChirpF1] = useState(20000);
   const [chirpDuration, setChirpDuration] = useState(8);
@@ -104,11 +108,11 @@ export function ToneWindow() {
     };
   }, []);
 
-  // Isp has no "safe" setting at all (file header doc, `testtone.rs`) — falling back out of
+  // Isp/Isp16 have no "safe" setting at all (file header doc, `testtone.rs`) — falling back out of
   // Unsafe while it's selected would otherwise leave a disabled-but-still-selected option, which
   // reads as broken rather than as the deliberate gate it is.
   useEffect(() => {
-    if (!unsafeMode && selected === "Isp") setSelected("Pink");
+    if (!unsafeMode && (selected === "Isp" || selected === "Isp16")) setSelected("Pink");
   }, [unsafeMode, selected]);
 
   // -18 dBFS mirrors `cageq_monitor::signal::SAFE_PLAYBACK_CEILING_DBFS` (kept in sync by hand,
@@ -128,6 +132,8 @@ export function ToneWindow() {
       ? { kind: "Tone", waveform: selected, hz }
       : selected === "Isp"
         ? { kind: "Isp", db_over: dbOver }
+        : selected === "Isp16"
+          ? { kind: "Isp16", db_over: db16Over }
         : selected === "Chirp"
           ? { kind: "Chirp", f0: chirpF0, f1: chirpF1, duration_secs: chirpDuration, log: chirpLog }
           : selected === "Am"
@@ -169,7 +175,7 @@ export function ToneWindow() {
         {t("toneGen.signal")}
         <select name="signal" value={selected} onChange={(e) => setSelected(e.currentTarget.value as Selected)}>
           {SELECTIONS.map((s) => (
-            <option key={s} value={s} disabled={s === "Isp" && !unsafeMode}>
+            <option key={s} value={s} disabled={(s === "Isp" || s === "Isp16") && !unsafeMode}>
               {t(`toneGen.waveform.${s}`)}
             </option>
           ))}
@@ -368,7 +374,28 @@ export function ToneWindow() {
         </>
       )}
 
-      {selected === "Isp" ? (
+      {selected === "Isp16" ? (
+        <>
+          <label className="row">
+            {t("toneGen.dbOver")}
+            <ScrubNumber
+              value={db16Over}
+              onInput={setDb16Over}
+              onCommit={setDb16Over}
+              min={0}
+              max={ISP16_MAX_OVER_DB}
+              mode="add"
+              arrowStep={0.1}
+              decimals={4}
+              name="tone-db16Over"
+              ariaLabel={t("toneGen.dbOver")}
+              style={{ width: "5em" }}
+            />
+            dBTP
+          </label>
+          <p style={{ fontSize: "0.75em", opacity: 0.7 }}>{t("toneGen.isp16Hint", { max: ISP16_MAX_OVER_DB.toFixed(2) })}</p>
+        </>
+      ) : selected === "Isp" ? (
         <>
           <label className="row">
             {t("toneGen.dbOver")}
