@@ -267,7 +267,7 @@ type SpecParams = {
 };
 // Tuned live, on linear light (PhosphorOptions' `linearLight`) with the fill and line's own glows:
 // the current window stands out against a long, soft fade of its recent peaks.
-const SPEC_DEFAULTS: SpecParams = { tau: 1.5, tail: 6, glowLine: 1, glowFill: 0.18, saturation: 2, contrast: 2.2, headroom: 1.9, undistort: true, tilt: "rta" };
+const SPEC_DEFAULTS: SpecParams = { tau: 1.5, tail: 6, glowLine: 0.9, glowFill: 0.16, saturation: 2, contrast: 2.2, headroom: 1.8, undistort: true, tilt: "rta" };
 /** Version 1: the one `glowBase` split into `glowLine` and `glowFill`, at the ratio it drew them. */
 const SPEC_PARAMS_MIGRATION: ParamsMigration = {
   version: 1,
