@@ -265,15 +265,9 @@ type SpecParams = {
   undistort: boolean;
   tilt: TiltMode;
 };
-// `old_glowBase * tau/TAU_REF` (0.09 * 0.3/0.1 = 0.27) reproduced the exact pre-switch on-screen
-// brightness under the new TAU_REF/tau-corrected formula — confirming the blend swap alone was a
-// visual no-op — then hand-retuned live from that baseline to today's value, same as every other
-// view's glow default gets touched up after its own anchor change.
-// saturation/contrast/headroom: the look this had before linear light (PhosphorOptions'
-// `linearLight`) — contrast 2.2 against the wash's own colour is about the encoded presentation it
-// had, and a steady wash stays under full (~0.9), where the old clamp never bit, so no saturation.
-// glowLine and glowFill: one `glowBase` until they were split, the fill at half of it, this default's 0.3.
-const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowLine: 0.3, glowFill: 0.15, saturation: 0, contrast: 2.2, headroom: 1, undistort: true, tilt: "rta" };
+// Tuned live, on linear light (PhosphorOptions' `linearLight`) with the fill and line's own glows:
+// the current window stands out against a long, soft fade of its recent peaks.
+const SPEC_DEFAULTS: SpecParams = { tau: 1.5, tail: 6, glowLine: 1, glowFill: 0.18, saturation: 2, contrast: 2.2, headroom: 1.9, undistort: true, tilt: "rta" };
 /** Version 1: the one `glowBase` split into `glowLine` and `glowFill`, at the ratio it drew them. */
 const SPEC_PARAMS_MIGRATION: ParamsMigration = {
   version: 1,
