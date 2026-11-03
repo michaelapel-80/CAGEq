@@ -28,7 +28,8 @@
  *     flicker was that workaround's own quantisation dithering near zero.
  *
  * Hence: **half-float storage**, which removes the stall at its source with no drain hack — and
- * measured dramatically faster than the canvas accumulator besides.
+ * measured dramatically faster than the canvas accumulator besides. (32-bit now where available, as
+ * half-float has a subtler version of the same trap at long trails: see `accumTexType`.)
  *
  * ## Getting the *look* back after removing the bug
  * Removing the stall turned out to remove something wanted along with it. The residue the 8-bit
@@ -1016,7 +1017,18 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
       ? gl.FLOAT
       : half.HALF_FLOAT_OES;
   let texGpuTrace = mkTex(gpuTraceType);
-  let ping = [0, 1].map(() => ({ tex: mkTex(half.HALF_FLOAT_OES), fbo: gl.createFramebuffer() }));
+  // The accumulator: 32-bit where the GPU can render into it. Half-float's step is ~1/1000 of the
+  // value, and at a long trail a frame's change is smaller than that, so what it stores isn't what
+  // the shader worked out. Measured, on a GPU that acts as if it rounds down: a pixel stops short of
+  // what its dose should reach (0.23 against 0.39 at 240 Hz, 0.34 at 60, so brightness depended on
+  // the refresh rate), and a long tail goes out in about half its time (10.8 s against 19.6 at
+  // 240 Hz). Worst, a pixel stopped short only climbs on the odd long frame, whose bigger dose
+  // survives: an area lit for longer stayed brighter than one lit later, under the same light, so a
+  // spectrum left its shape in the fill when the level rose, until the level fell below it (old area
+  // 46 against 36 a minute after, where 32-bit has them level in 20 s).
+  let accumTexType =
+    gl.getExtension("OES_texture_float") && gl.getExtension("WEBGL_color_buffer_float") ? gl.FLOAT : half.HALF_FLOAT_OES;
+  let ping = [0, 1].map(() => ({ tex: mkTex(accumTexType), fbo: gl.createFramebuffer() }));
   let src = 0;
   let sizedW = target.width;
   let sizedH = target.height;
@@ -1086,6 +1098,14 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
     gpuTraceType = half.HALF_FLOAT_OES;
     texGpuTrace = mkTex(gpuTraceType);
   }
+  if (!attach() && accumTexType === gl.FLOAT) {
+    // Likewise.
+    accumTexType = half.HALF_FLOAT_OES;
+    for (const pp of ping) {
+      gl.deleteTexture(pp.tex);
+      pp.tex = mkTex(accumTexType);
+    }
+  }
   if (!attach() || !attachTrace()) {
     for (const pp of ping) {
       gl.deleteTexture(pp.tex);
@@ -1110,7 +1130,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
     for (const pp of ping) gl.deleteTexture(pp.tex);
     texTrace = mkTex(gl.UNSIGNED_BYTE);
     texGpuTrace = mkTex(gpuTraceType);
-    ping = ping.map((pp) => ({ tex: mkTex(half.HALF_FLOAT_OES), fbo: pp.fbo }));
+    ping = ping.map((pp) => ({ tex: mkTex(accumTexType), fbo: pp.fbo }));
     dead = !attach() || !attachTrace(); // fresh textures are zero-filled, so a resize also clears the trail
   };
 
