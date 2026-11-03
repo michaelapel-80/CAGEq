@@ -1,23 +1,13 @@
-The instruments have a new look: their traces now behave like the light of a real CRT beam.
+A cleaner, longer afterglow on long trails, and a new look for the spectrum behind the EQ chart.
 
-- **Your settings need a look:** saved instrument settings are converted automatically, but the
-  picture has changed enough that they'll likely need a re-tune. Brightness settings (Glow, Bloom,
-  Haze) move to the new defaults, while Trail, Tail, Beam and the rest stay as you had them. Reset
-  in an instrument's tuning panel gives you the whole new default look.
-- **Changed:** the oscilloscope, vectorscope, level meter and spectrum simulate the beam: its light
-  depends on how long it spends in each place, so slow parts of a trace are bright and fast ones
-  faint. All of them, and the spectrum behind the EQ chart, now work in real light rather than
-  display values, so faint detail and long trails stay visible, and bright, dense parts can wash
-  toward white. Machines whose graphics can't do this keep the previous drawing.
-- **Changed:** the oscilloscope and vectorscope draw smooth curves between samples, without bright
-  dots at every join.
-- **Changed:** the level meter places high frequencies correctly. Their peaks often fall between
-  samples, and the old drawing cut them off.
-- **Changed:** the spectrum's steep flanks are dimmer than its flat stretches, replacing the old
-  fade toward the floor.
-- **New:** Saturation, Contrast and Headroom settings on all of them, to shape how bright parts
-  roll off and how far they wash toward white. The oscilloscope, vectorscope and spectrum also get
-  Bloom colour, from the beam's own hue to white.
-- **New:** two oscilloscope settings for busy material. Speed dimming goes from the real beam to an
-  evenly bright drawn line. BW limit smooths away detail too fine to show, and is off by default.
+- **Fixed:** the spectrum behind the EQ chart could leave the shape of an earlier, quieter passage
+  standing in its fill after the level rose, until the level dropped below it again.
+- **Fixed:** long trails on all the instruments stopped short of their settings, ended early, and
+  looked different at different refresh rates. They now do what the settings say at any refresh
+  rate, so a long-trail setting fades for longer than it did, up to about twice as long on a
+  high-refresh display. If yours now lingers too long, lower Trail or Tail.
+- **New:** the spectrum behind the EQ chart has separate Line glow and Fill glow settings in place
+  of Glow. Your saved setting converts to the same look.
+- **Changed:** that spectrum has a new default look, with the current sound standing out against a
+  soft fade of its recent peaks. Reset in its tuning panel gives you the new look.
 - All changes are in the app itself; no engine update needed.
