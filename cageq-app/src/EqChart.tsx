@@ -7,7 +7,7 @@ import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
 import { TiltGlyph } from "./TiltGlyph";
 import { createPhosphor, DOSE_REF_FPS, type TraceStroke } from "./phosphor";
 import { tessellatedCapacity, tessellateSmooth, traceSmooth } from "./spline";
-import { useTunableParams } from "./useTunableParams";
+import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { fmtSnappedHz, noteShift, snapBin, snapRequested, snapSpan, SNAP_SPAN_COLOR } from "./peakSnap";
 
 /**
@@ -166,17 +166,9 @@ const SPEC_STROKE_REF_H = 210;
 // not to look like a trail — cageq-monitor's own SPEC_TAU_SECS (0.02s) already smooths the backend
 // data lightly for responsiveness, and this adds just a bit more on top for the eye specifically.
 const STROKE_SMOOTH_TAU = 0.05;
-// Flat (not gradient) alpha for the ambient wash fill under the curve, as a fraction of the live
-// `glowBase` — see the backdrop effect's own comment for why this stopped being a position-graded
-// gradient at all. A fraction of `glowBase` rather than its own fixed constant: the panel only
-// exposes one Glow knob, and a wash pinned to an independent fixed value can't be rebalanced
-// against whatever the stroke (below) is dialed to — it either overpowers a low stroke setting or
-// disappears under a high one. Coupling them keeps their relative balance fixed at this ratio while
-// the one slider scales both together. Bumped from an initial 0.2, reported live as still reading
-// flat/dim even with glowBase maxed — plain `add` at this ratio never got close to the 1.0 clamp
-// (confirming the self-limiting `over` blend really was unnecessary, not just less necessary), so
-// there was real headroom to push the wash brighter without any risk of blowout.
-const SPEC_WASH_FRAC = 0.5;
+// The ambient wash fill under the curve and the line on top have a Glow each (`glowFill`, `glowLine`,
+// see SpecParams): the fill's is a flat (not gradient) alpha, see the backdrop effect's own comment
+// for why this stopped being a position-graded gradient at all.
 // The stroke deliberately does NOT use the wash's tinted-toward-neutral [r,g,b] (see SPEC_NEUTRAL
 // below) — it uses the raw theme accent directly. First tried sharing the wash's colour with only a
 // higher alpha (an explicit SPEC_STROKE_BOOST multiplier) — reported live as looking more opaque but
@@ -197,7 +189,7 @@ const SPEC_WASH_FRAC = 0.5;
 // instead of correcting for it — same tone, same visual weight in both themes.
 const SPEC_NEUTRAL: [number, number, number] = [15, 15, 15]; // light mode's --fg (#0f0f0f)
 const SPEC_TINT = 0.63; // blend the accent this far into the neutral glow — a hint of colour, not a rival to the curves
-// Reference cadence the wash fill's own alpha (glowBase * SPEC_WASH_FRAC) is calibrated against — matches
+// Reference cadence the wash fill's own alpha (glowFill) is calibrated against — matches
 // cageq-monitor's SPECTRUM_INTERVAL (~60 Hz). The backdrop effect below redraws every animation
 // frame rather than only when a new payload lands (fixed a `punch`-exposed flicker — see its own
 // comment), which injects the fill's ink far more often than this was tuned against on any display
@@ -214,16 +206,16 @@ const SPEC_TINT = 0.63; // blend the accent this far into the neutral glow — a
 // term made the total dose scale as dt² instead of being rate-independent — overcorrecting at high
 // Hz, undercorrecting at low Hz. The fix restores exactly one power of `dt` (the one `uDose` already
 // contributes): with a fixed `doseMult`, total dose-per-second at any display rate F works out to
-// F × glowBase × (dt/DOSE_REF_DT) × doseMult, and since dt ≈ 1/F this reduces to a constant
-// (glowBase × doseMult / DOSE_REF_DT) with no F left in it at all — confirmed algebraically at
+// F × glowFill × (dt/DOSE_REF_DT) × doseMult, and since dt ≈ 1/F this reduces to a constant
+// (glowFill × doseMult / DOSE_REF_DT) with no F left in it at all — confirmed algebraically at
 // 60/120/240 Hz before landing, not just eyeballed on one machine.
 const SPEC_UPDATE_HZ = 60;
 const SPEC_DOSE_MULT = SPEC_UPDATE_HZ / DOSE_REF_FPS;
 // Trail/Glow orthogonality (same fix, same reasoning, as Vectorscope/TimeScope/Meter/SpectrumScope
 // — see any of theirs for the fuller derivation): at steady state, accumulated brightness scales
-// with `glowBase * tau`, so lengthening the trail silently brightens a dwelling signal even with
-// glowBase untouched. Folding `TAU_REF/tau` into the dose cancels that, anchored at a real 100 ms
-// for the same reason the scope views are: it reads as "glowBase units per 100 ms of persistence",
+// with `glowFill * tau`, so lengthening the trail silently brightens a dwelling signal even with
+// glowFill untouched. Folding `TAU_REF/tau` into the dose cancels that, anchored at a real 100 ms
+// for the same reason the scope views are: it reads as "glowFill units per 100 ms of persistence",
 // physically meaningful rather than tied to any one view's own default trailTau.
 //
 // This backdrop was deliberately left OUT of that fix when the others got it (see git history):
@@ -243,8 +235,10 @@ const TAU_REF = 0.1;
  *  fixed constants, specifically so `tau` can be re-tuned without a recompile: it's re-tuned often
  *  because it has no principled "correct" value — changes to how *smoothed* the incoming data
  *  already is (e.g. cageq-monitor's SPEC_TAU_SECS) directly change how this reads even though
- *  nothing here moved. `glowBase` (overall backdrop brightness) rides along for the same reason a
- *  trail-length re-tune usually wants a brightness re-tune alongside it. `tau` is a genuine
+ *  nothing here moved. The glows ride along for the same reason a trail-length re-tune usually wants
+ *  a brightness re-tune alongside it. `glowFill` is what the current spectrum deposits in the
+ *  phosphor, so with Saturation it sets how the current window stands against its fading history;
+ *  `glowLine` is the line's own opacity, off the accumulator. `tau` is a genuine
  *  time-constant (seconds), same meaning as every other trailTau in the app — see the backdrop
  *  effect's doc comment for why this used to be `fade`, a flat inverted-direction per-event alpha
  *  with no time-base, and no longer is.
@@ -263,7 +257,8 @@ const TAU_REF = 0.1;
 type SpecParams = {
   tau: number;
   tail: number;
-  glowBase: number;
+  glowLine: number;
+  glowFill: number;
   saturation: number; // the phosphor's saturation (phosphor.ts's setTone) — 0 = linear
   contrast: number; // the display response, intensity^contrast (phosphor.ts's setTone) — 1 = linear
   headroom: number; // how far past the display's white the phosphor saturates (phosphor.ts's setTone) — 1 = at white
@@ -277,7 +272,13 @@ type SpecParams = {
 // saturation/contrast/headroom: the look this had before linear light (PhosphorOptions'
 // `linearLight`) — contrast 2.2 against the wash's own colour is about the encoded presentation it
 // had, and a steady wash stays under full (~0.9), where the old clamp never bit, so no saturation.
-const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowBase: 0.3, saturation: 0, contrast: 2.2, headroom: 1, undistort: true, tilt: "rta" };
+// glowLine and glowFill: one `glowBase` until they were split, the fill at half of it, this default's 0.3.
+const SPEC_DEFAULTS: SpecParams = { tau: 0.4, tail: 12, glowLine: 0.3, glowFill: 0.15, saturation: 0, contrast: 2.2, headroom: 1, undistort: true, tilt: "rta" };
+/** Version 1: the one `glowBase` split into `glowLine` and `glowFill`, at the ratio it drew them. */
+const SPEC_PARAMS_MIGRATION: ParamsMigration = {
+  version: 1,
+  migrate: (stored) => (typeof stored.glowBase === "number" ? { ...stored, glowLine: stored.glowBase, glowFill: stored.glowBase * 0.5 } : stored),
+};
 
 const GRID_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const F_MIN = 20;
@@ -477,6 +478,7 @@ export function EqChart({
   const { params: specParams, setParams: setSpecParams, saveAsDefault: saveSpecDefault, resetToFactory: resetSpecFactory } = useTunableParams(
     "cageq-eqchart-spec-params",
     SPEC_DEFAULTS,
+    SPEC_PARAMS_MIGRATION,
   );
   const [specTuning, setSpecTuning] = useState(false);
   const clipId = useId(); // clips the plotted curves to the plot rect (see refPaths)
@@ -725,7 +727,7 @@ export function EqChart({
   specDrawCtx.current = { eqBands, preampDb, sampleRate, model, PAD, H, W, specParams };
   // The spectrum backdrop. Each received payload is drawn as a smooth curve (traceSmooth, spline.ts)
   // through the bins' own values — filled down to the baseline for a dim ambient wash, then stroked
-  // again on top at full `glowBase` (see the render loop's own comments for why two layers, and why
+  // again on top at `glowLine` (see the render loop's own comments for why two layers, and why
   // smoothed rather than a per-bin staircase) — into a scratch canvas handed to the shared phosphor
   // accumulator (phosphor.ts), which owns the decay and the composite — the same machinery, same
   // additive blend, the scope views use.
@@ -865,7 +867,7 @@ export function EqChart({
         // base — lifts the glow off flat grey without letting it read as another curve. Only for the
         // wash: it's a dim backdrop by design, and gets its real brightness from accumulation over
         // many frames, not from this base colour's own value. The stroke (below) uses `acc` directly,
-        // undimmed — see SPEC_WASH_FRAC's own doc for why sharing this tinted colour didn't work.
+        // undimmed — see the note above SPEC_NEUTRAL for why sharing this tinted colour didn't work.
         const [r, g, b] = acc
           ? [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round)
           : [nr, ng, nb];
@@ -897,11 +899,11 @@ export function EqChart({
         }
 
         // Ambient wash: the smooth curve (traceSmooth, spline.ts) closed down to the baseline, at a
-        // flat, non-gradient alpha — see SPEC_WASH_FRAC's own doc for why a position-graded gradient
+        // flat, non-gradient alpha — see the backdrop effect's own comment for why a position-graded gradient
         // (in either direction) was the wrong tool here regardless of which end was bright.
         // traceSmooth's own leading `moveTo` becomes this path's true start point, so `closePath`
         // below draws straight back to it — no separate "walk up from the baseline" segment needed.
-        const washAlpha = specParams.glowBase * SPEC_WASH_FRAC;
+        const washAlpha = specParams.glowFill;
         if (ctx) {
           ctx.fillStyle = `rgba(${r},${g},${b},${washAlpha})`;
           ctx.beginPath();
@@ -918,7 +920,7 @@ export function EqChart({
           phos.fillTrace!({ points: washPts, count: tessellateSmooth(xScratch, yScratch, n, washPts), baseY: plotBot, rgb: [r, g, b], alpha: washAlpha });
         }
 
-        // The informative edge: the same smooth curve, stroked at the live-tunable `glowBase` on its
+        // The informative edge: the same smooth curve, stroked at the live-tunable `glowLine` on its
         // own non-accumulating layer (`strokeCtx`) — a stroke is, by construction, drawn at each X's
         // own Y, so it's anchored to that bin's actual value with no gradient needed at all, but it
         // moves with the real signal every ~60 Hz update. Running it through the phosphor accumulator
@@ -941,7 +943,7 @@ export function EqChart({
         // presented it (`overlayStroke`, below) — the same thing, outside the accumulator.
         const strokeWidth = Math.max(1, H / SPEC_STROKE_REF_H) * 1.5;
         if (ctx) {
-          strokeCtx.strokeStyle = `rgba(${sr},${sg},${sb},${specParams.glowBase})`;
+          strokeCtx.strokeStyle = `rgba(${sr},${sg},${sb},${specParams.glowLine})`;
           strokeCtx.lineWidth = strokeWidth;
           strokeCtx.lineJoin = "round";
           strokeCtx.beginPath();
@@ -957,8 +959,8 @@ export function EqChart({
             rgb: [sr, sg, sb],
             yBottom: plotBot,
             yTop: plotTop,
-            alphaBottom: specParams.glowBase,
-            alphaTop: specParams.glowBase,
+            alphaBottom: specParams.glowLine,
+            alphaTop: specParams.glowLine,
           };
         }
       }
@@ -1547,21 +1549,37 @@ export function EqChart({
             />
             <b>{specParams.tail.toFixed(0)}</b>
           </label>
-          <label className="vs-tune-row" title={t("scope.glowHint")}>
-            <span className="vs-tune-label">{t("scope.glow")}</span>
+          <label className="vs-tune-row" title={t("scope.glowLineHint")}>
+            <span className="vs-tune-label">{t("scope.glowLine")}</span>
             <input
-              name="spectrum-glow"
+              name="spectrum-glow-line"
               type="range"
-              min={0.02}
+              min={0.01}
               max={1}
-              step={0.02}
-              value={specParams.glowBase}
+              step={0.01}
+              value={specParams.glowLine}
               onChange={(e) => {
-                const glowBase = Number(e.currentTarget.value);
-                setSpecParams((p) => ({ ...p, glowBase }));
+                const glowLine = Number(e.currentTarget.value);
+                setSpecParams((p) => ({ ...p, glowLine }));
               }}
             />
-            <b>{specParams.glowBase.toFixed(2)}</b>
+            <b>{specParams.glowLine.toFixed(2)}</b>
+          </label>
+          <label className="vs-tune-row" title={t("scope.glowFillHint")}>
+            <span className="vs-tune-label">{t("scope.glowFill")}</span>
+            <input
+              name="spectrum-glow-fill"
+              type="range"
+              min={0.01}
+              max={1}
+              step={0.01}
+              value={specParams.glowFill}
+              onChange={(e) => {
+                const glowFill = Number(e.currentTarget.value);
+                setSpecParams((p) => ({ ...p, glowFill }));
+              }}
+            />
+            <b>{specParams.glowFill.toFixed(2)}</b>
           </label>
           <label className="vs-tune-row" title={t("scope.saturationHint")}>
             <span className="vs-tune-label">{t("scope.saturation")}</span>
