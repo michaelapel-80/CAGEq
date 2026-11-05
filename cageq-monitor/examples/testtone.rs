@@ -80,8 +80,8 @@
 //! pattern whose odd harmonics all peak together at one midpoint, reaching +7.1854 dB over its
 //! sample peak (`ISP16_MAX_OVER_DB`, see its doc). Same clamping, same `--unsafe` rule, and
 //! `--level` is ignored the same way. Its top line is 7·Fs/16, so most of its energy sits at the
-//! top of the audio band: mind your tweeters. A true-peak meter can under-read it, because the
-//! meter's own short filter droops up there.
+//! top of the audio band: mind your tweeters. A BS.1770 true-peak meter can under-read it,
+//! because its short filter droops up there; CAGEq's own meter doesn't (`true_peak`'s doc).
 //!
 //! Pink and white noise are also the calibrated pair for the Monitor pane's
 //! spectrum *display* (not just the source-referred EQ check above): pink noise's power spectral

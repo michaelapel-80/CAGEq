@@ -15,13 +15,14 @@
 use serde::Serialize;
 
 pub mod signal;
+pub mod true_peak;
 
 /// One meter reading, pushed to the UI ~60×/s (every `TICK`). Plain data, so it's
 /// platform-independent.
 #[derive(Clone, Debug, Serialize)]
 pub struct MeterUpdate {
-    /// Peak level, dBTP (BS.1770 oversampled true peak — catches inter-sample overs a plain
-    /// sample-peak scan would miss, so this can read slightly above 0 on hot/limited material) — a
+    /// Peak level, dBTP (oversampled true peak, see [`true_peak`] — catches inter-sample overs a
+    /// plain sample-peak scan would miss, so this can read above 0 on hot/limited material) — a
     /// PPM-style follower on top of that (instant attack, brief hold, release), floored at -120.
     pub peak_db: f32,
     /// True RMS level (VU-integrated), dBFS, floored at -120.
@@ -1974,18 +1975,17 @@ mod windows_impl {
         let capture = audio_client.get_audiocaptureclient()?;
 
         // K-weighted loudness at the *actual* endpoint rate (ebur128 recomputes coefficients).
-        // TRUE_PEAK (which subsumes SAMPLE_PEAK's own bits) also gets us BS.1770 oversampled true
-        // peak "for free" off the same instance — see block_peak's own doc below for why that
-        // replaced a plain sample-peak scan. I | LRA add Integrated loudness and EBU Tech 3342
-        // Loudness Range — both real gated statistics `ebur128` already implements, not
-        // reimplemented here; `TRUE_PEAK` (already needed above) also gives Peak Max "for free"
-        // via `EbuR128::true_peak`'s own running maximum, no extra mode needed for that one.
+        // I | LRA add Integrated loudness and EBU Tech 3342 Loudness Range — both real gated
+        // statistics `ebur128` already implements, not reimplemented here. True peak is
+        // deliberately *not* taken from it: its BS.1770 filter misses overs near the top of the
+        // band (see `true_peak`'s module doc), so `tp` below does that job, Peak Max included.
         let mut ebu = ebur128::EbuR128::new(
             channels as u32,
             rate,
-            ebur128::Mode::M | ebur128::Mode::S | ebur128::Mode::TRUE_PEAK | ebur128::Mode::I | ebur128::Mode::LRA,
+            ebur128::Mode::M | ebur128::Mode::S | ebur128::Mode::I | ebur128::Mode::LRA,
         )
         .map_err(|e| format!("ebur128 init: {e:?}"))?;
+        let mut tp = crate::true_peak::TruePeak::new(channels as usize);
         // A fresh instance has nothing to reset; drop any stale request left over from before this
         // session opened (e.g. a reset clicked while the endpoint was mid-reopen) rather than
         // firing it pointlessly on the first tick below.
@@ -2019,14 +2019,11 @@ mod windows_impl {
         let mut frames: Vec<f32> = Vec::new(); // interleaved, reused each read for ebur128
         let mut mono: Vec<f32> = Vec::new(); // per-read mono downmix, fed to the FFT
         let mut scope_lr: Vec<f32> = Vec::new(); // (l, r) pairs since the last scope emit
-        // Per-tick block accumulators (reset every emit). `block_peak` is BS.1770 true peak
-        // (linear, can exceed 1.0 — i.e. positive dBTP — on real inter-sample overs), not a plain
-        // sample-peak scan: a reconstruction filter can overshoot between samples on hot/limited
-        // material, which a max-abs-of-samples scan can't see at all — ebur128's oversampled filter
-        // (already running for the LUFS numbers on this same instance) catches it. Folded in per
-        // read below rather than read once per tick, since `ebu.prev_true_peak` only covers the
-        // frames from the single most recent `add_frames` call, and a tick can span several reads.
-        let mut block_peak = 0.0f32;
+        // Per-tick block accumulators (reset every emit). The peak side lives in `tp`
+        // (`take_block` each tick): true peak, linear, can exceed 1.0 — i.e. positive dBTP — on
+        // real inter-sample overs, not a plain sample-peak scan: a reconstruction filter can
+        // overshoot between samples on hot/limited material, which a max-abs-of-samples scan
+        // can't see at all.
         let mut block_sum_sq = 0.0f64;
         let mut block_count: u64 = 0;
         // Persistent, time-based meter ballistics (carried across ticks).
@@ -2089,17 +2086,9 @@ mod windows_impl {
                 r.write(&frames);
             }
 
-            if !frames.is_empty() && ebu.add_frames_f32(&frames).is_ok() {
-                // This read's true peak (max(sample_peak, true_peak) internally — see
-                // `prev_true_peak`'s own doc), folded into the tick-spanning accumulator above.
-                for c in 0..channels as u32 {
-                    if let Ok(tp) = ebu.prev_true_peak(c) {
-                        let tp = tp as f32;
-                        if tp > block_peak {
-                            block_peak = tp;
-                        }
-                    }
-                }
+            if !frames.is_empty() {
+                let _ = ebu.add_frames_f32(&frames);
+                tp.push(&frames);
             }
             // Cheap no-op when the tier hasn't changed (see `reconfigure`'s own doc) — checked
             // unconditionally, even on a silent/empty read, so a slider drag takes effect
@@ -2115,7 +2104,7 @@ mod windows_impl {
 
                 // Peak: instant attack, brief hold, then linear-dB release — a PPM-style follower
                 // that reads cleanly at 60 fps instead of flickering on a raw per-tick max.
-                let block_peak_db = to_db(block_peak);
+                let block_peak_db = to_db(tp.take_block());
                 if block_peak_db >= peak_db {
                     peak_db = block_peak_db;
                     peak_hold_until = now + PEAK_HOLD;
@@ -2146,11 +2135,12 @@ mod windows_impl {
                 }
 
                 // A pending reset (§ meter's "restart measurement" control) restarts Integrated/
-                // Loudness Range/Peak Max together with momentary/short-term/true-peak filter
-                // state — `EbuR128::reset()` is a full reset, so this takes effect for every field
-                // below at once, on this very tick.
+                // Loudness Range/Peak Max together with momentary/short-term filter state —
+                // `EbuR128::reset()` is a full reset, so this takes effect for every field below
+                // at once, on this very tick. `tp` keeps its filter history (see `reset_max`).
                 if reset_lufs.swap(false, Ordering::Relaxed) {
                     ebu.reset();
+                    tp.reset_max();
                 }
 
                 on_update(MeterUpdate {
@@ -2164,17 +2154,12 @@ mod windows_impl {
                     ),
                     integrated_lufs: clamp_lufs(ebu.loudness_global().unwrap_or(f64::NEG_INFINITY)),
                     loudness_range: clamp_lu(ebu.loudness_range().unwrap_or(f64::NAN)),
-                    true_peak_max_db: to_db(
-                        (0..channels as u32)
-                            .map(|c| ebu.true_peak(c).unwrap_or(0.0) as f32)
-                            .fold(0.0f32, f32::max),
-                    ),
+                    true_peak_max_db: to_db(tp.max()),
                     signal: last_signal.elapsed() < SILENCE_GAP,
                     bins: intensity.iter().map(|&v| round_to(v, 3)).collect(),
                     sample_rate: device_rate,
                 });
 
-                block_peak = 0.0;
                 block_sum_sq = 0.0;
                 block_count = 0;
                 last_tick = now;
@@ -2981,7 +2966,7 @@ mod windows_impl {
             ebur128::EbuR128::new(
                 2,
                 TEST_RATE,
-                ebur128::Mode::M | ebur128::Mode::S | ebur128::Mode::TRUE_PEAK | ebur128::Mode::I | ebur128::Mode::LRA,
+                ebur128::Mode::M | ebur128::Mode::S | ebur128::Mode::I | ebur128::Mode::LRA,
             )
             .expect("ebur128 init")
         }
@@ -3018,22 +3003,21 @@ mod windows_impl {
         }
 
         /// `EbuR128::reset()` — what the meter's reset control calls — should drop Integrated back
-        /// to "no data" (-inf, clamped to LUFS_FLOOR by `clamp_lufs`), Loudness Range back to 0,
-        /// and the running true-peak maximum back to silence, all together, in one call.
+        /// to "no data" (-inf, clamped to LUFS_FLOOR by `clamp_lufs`) and Loudness Range back to
+        /// 0, together, in one call. Peak Max resets separately (`TruePeak::reset_max`, tested in
+        /// `true_peak`).
         #[test]
-        fn reset_clears_integrated_range_and_peak_max_together() {
+        fn reset_clears_integrated_and_range_together() {
             let mut ebu = new_ebu();
             ebu.add_frames_f32(&tone_frames(1000.0, 3.0, 0.9)).unwrap();
             ebu.add_frames_f32(&tone_frames(1000.0, 3.0, 0.05)).unwrap();
 
             assert!(ebu.loudness_global().unwrap().is_finite());
-            assert!(ebu.true_peak(0).unwrap() > 0.0, "should have a real peak before reset");
 
             ebu.reset();
 
             assert_eq!(clamp_lufs(ebu.loudness_global().unwrap_or(f64::NEG_INFINITY)), LUFS_FLOOR);
             assert_eq!(clamp_lu(ebu.loudness_range().unwrap_or(f64::NAN)), 0.0);
-            assert_eq!(ebu.true_peak(0).unwrap(), 0.0, "true-peak max should be zeroed by reset");
         }
     }
 }

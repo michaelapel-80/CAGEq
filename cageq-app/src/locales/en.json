@@ -287,7 +287,7 @@
     "frequency": "Frequency",
     "dbOver": "True-peak target",
     "ispHint": "How far above 0 dBFS the reconstructed (true) peak should land, 0..{{max}} dBTP — the sample-domain level needed is derived for you.",
-    "isp16Hint": "A repeating 16-sample pattern reaching up to {{max}} dBTP. Most of its energy is near the top of the audio band, so it's hard on tweeters. CAGEq's own meter reads at most +5.41 dBTP below 96 kHz, so it can't show the full overshoot there.",
+    "isp16Hint": "A repeating 16-sample pattern reaching up to {{max}} dBTP. Most of its energy is near the top of the audio band, so it's hard on tweeters. Many BS.1770 true-peak meters under-read it; CAGEq's own meter reads it in full.",
     "chirpF0": "Start frequency",
     "chirpF1": "End frequency",
     "chirpDuration": "Sweep time",

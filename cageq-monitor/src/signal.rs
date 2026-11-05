@@ -289,8 +289,9 @@ pub const ISP16_PATTERN: [i8; 16] = [1, 1, -1, 1, -1, 1, -1, 1, -1, -1, 1, -1, 1
 /// the sum of the Dirichlet kernel's absolute values at that half-sample instant (≈2.28702).
 /// `Signal::Isp16`'s ceiling, the point where its samples reach 0 dBFS.
 ///
-/// A meter's own filter can read this low: `ebur128`'s 48-tap true-peak filter can't report more
-/// than +5.41 dB over sample peak below 96 kHz, or +7.26 dB from there up to 192 kHz, on any input.
+/// A BS.1770 meter's own short filter can read this low: `ebur128`'s 48-tap true-peak filter
+/// can't report more than +5.41 dB over sample peak below 96 kHz, or +7.26 dB from there up to
+/// 192 kHz, on any input. CAGEq's meter uses its own detector instead (`crate::true_peak`).
 pub const ISP16_MAX_OVER_DB: f64 = 7.185384;
 
 /// Fixed table resolution for a `Signal::Tone`'s wavetable, independent of the requested
