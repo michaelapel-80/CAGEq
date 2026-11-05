@@ -22,6 +22,8 @@
 const FACTOR: usize = 8;
 /// Taps per polyphase branch (`FACTOR * TAPS` = 312 in the prototype filter).
 const TAPS: usize = 39;
+/// Independent partial sums in the AVX2 filter loop (see [`filter_split`]).
+const LANES: usize = 4;
 /// Passband edge, as a fraction of the sample rate: 20 kHz at 44.1 kHz. The stopband edge mirrors
 /// it about Nyquist, so an image of in-band content always lands in the stopband.
 const PASSBAND_EDGE: f64 = 0.4535;
@@ -47,6 +49,9 @@ pub struct TruePeak {
     warmup: usize,
     block: f32,
     max: f32,
+    /// Whether this CPU has AVX2 and FMA, checked once: picks [`push_avx2`](Self::push_avx2) over
+    /// the portable loop.
+    avx2: bool,
 }
 
 impl TruePeak {
@@ -60,11 +65,32 @@ impl TruePeak {
             warmup: TAPS,
             block: 0.0,
             max: 0.0,
+            avx2: has_avx2_fma(),
         }
     }
 
     /// Feed interleaved frames (a trailing partial frame is ignored).
     pub fn push(&mut self, frames: &[f32]) {
+        #[cfg(target_arch = "x86_64")]
+        if self.avx2 {
+            // SAFETY: `avx2` is only true when the CPU reported AVX2 and FMA (`has_avx2_fma`).
+            return unsafe { self.push_avx2(frames) };
+        }
+        self.push_with(frames, filter_portable);
+    }
+
+    /// The same loop compiled for AVX2+FMA, with the split filter loop that only pays off there.
+    /// Measured on one second of 96 kHz stereo in release: 3.0 ms against the portable path's
+    /// 5.3 ms. The portable loop gains under 10% from AVX alone, and the split loop is slightly
+    /// slower than it without AVX, hence two paths rather than one.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn push_avx2(&mut self, frames: &[f32]) {
+        self.push_with(frames, filter_split);
+    }
+
+    #[inline(always)]
+    fn push_with(&mut self, frames: &[f32], filter: impl Fn(&[[f32; FACTOR]; TAPS], &[f32; TAPS]) -> [f32; FACTOR]) {
         for frame in frames.chunks_exact(self.channels) {
             self.pos = if self.pos == 0 { TAPS - 1 } else { self.pos - 1 };
             for (c, &s) in frame.iter().enumerate() {
@@ -76,12 +102,7 @@ impl TruePeak {
                     continue;
                 }
                 let recent: &[f32; TAPS] = h[self.pos..self.pos + TAPS].try_into().unwrap();
-                let mut acc = [0.0f32; FACTOR];
-                for (taps, &x) in self.coeffs.iter().zip(recent) {
-                    for (a, &t) in acc.iter_mut().zip(taps) {
-                        *a += t * x;
-                    }
-                }
+                let acc = filter(&self.coeffs, recent);
                 let [mut y0, mut y1] = self.tail[c];
                 for &y in &acc {
                     let y2 = y.abs();
@@ -114,6 +135,57 @@ impl TruePeak {
     /// mid-stream would make the filter ring on a step the signal never had, a false over.
     pub fn reset_max(&mut self) {
         self.max = 0.0;
+    }
+}
+
+/// All eight phases' outputs for one input sample, one running sum per phase.
+#[inline(always)]
+fn filter_portable(coeffs: &[[f32; FACTOR]; TAPS], recent: &[f32; TAPS]) -> [f32; FACTOR] {
+    let mut acc = [0.0f32; FACTOR];
+    for (taps, &x) in coeffs.iter().zip(recent) {
+        for (a, &t) in acc.iter_mut().zip(taps) {
+            *a += t * x;
+        }
+    }
+    acc
+}
+
+/// The same outputs from `LANES` partial sums over interleaved taps. With one running sum, every
+/// tap waits on the previous tap's add; on AVX2 that chain, not the arithmetic, sets the speed.
+#[inline(always)]
+fn filter_split(coeffs: &[[f32; FACTOR]; TAPS], recent: &[f32; TAPS]) -> [f32; FACTOR] {
+    let mut part = [[0.0f32; FACTOR]; LANES];
+    let whole = TAPS / LANES * LANES;
+    for i in (0..whole).step_by(LANES) {
+        for (j, p) in part.iter_mut().enumerate() {
+            let x = recent[i + j];
+            for (a, &t) in p.iter_mut().zip(&coeffs[i + j]) {
+                *a = t.mul_add(x, *a);
+            }
+        }
+    }
+    for i in whole..TAPS {
+        for (a, &t) in part[0].iter_mut().zip(&coeffs[i]) {
+            *a = t.mul_add(recent[i], *a);
+        }
+    }
+    let mut acc = part[0];
+    for p in &part[1..] {
+        for (a, &v) in acc.iter_mut().zip(p) {
+            *a += v;
+        }
+    }
+    acc
+}
+
+fn has_avx2_fma() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
     }
 }
 
@@ -244,6 +316,32 @@ mod tests {
             assert!((expected - 0.4..=expected + 0.2).contains(&read), "case {case}: read {read:.3}, expected {expected} +0.2/-0.4");
             let exact = 20.0 * amp.log10();
             assert!((read - exact).abs() < 0.02, "case {case}: read {read:.4}, exact {exact:.4}");
+        }
+    }
+
+    /// Both filter paths must agree, so the portable one stays covered on a machine whose tests
+    /// would otherwise only ever run the AVX2 one.
+    #[test]
+    fn portable_and_avx2_paths_agree() {
+        if !has_avx2_fma() {
+            return;
+        }
+        let mut rng = 0x1234_5678u32;
+        let x: Vec<f32> = (0..9600)
+            .map(|_| {
+                rng ^= rng << 13;
+                rng ^= rng >> 17;
+                rng ^= rng << 5;
+                (rng as f32 / u32::MAX as f32) * 1.6 - 0.8
+            })
+            .collect();
+        let (mut fast, mut portable) = (TruePeak::new(2), TruePeak::new(2));
+        portable.avx2 = false;
+        for chunk in x.chunks(480) {
+            fast.push(chunk);
+            portable.push(chunk);
+            let (a, b) = (fast.take_block(), portable.take_block());
+            assert!((a - b).abs() <= 1e-5 * a.max(b), "avx2 {a} vs portable {b}");
         }
     }
 
