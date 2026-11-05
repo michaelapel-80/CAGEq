@@ -1157,6 +1157,10 @@ mod windows_impl {
     /// order a reader scans the axis, not loudest-first. Drops the original's plateau/tied-run
     /// walk: that only existed for `db`'s display-side 1-decimal rounding, and raw `f32` power
     /// values essentially never tie exactly.
+    ///
+    /// Test-only: the live spectrum path calls [`peak_candidates`] and [`pick_peaks`] itself, so it
+    /// can adjust the candidates in between.
+    #[cfg(test)]
     fn find_peaks(
         power: &[f32],
         power_scale: f32,
