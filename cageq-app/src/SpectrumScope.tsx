@@ -4,10 +4,10 @@ import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { composedCurveDb, type FadingCurve, retargetFadingCurve, stepFadingCurve, undistortable } from "./biquad";
 import { fcHue } from "./fcColor";
-import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
+import { kWeightingCurve, tiltMode, type TiltMode } from "./kWeighting";
 import { TiltGlyph } from "./TiltGlyph";
 import { spectrumStream } from "./streams";
-import { createPhosphor, retuneForRelativeContrast } from "./phosphor";
+import { accentRgb, createPhosphor, retuneForRelativeContrast } from "./phosphor";
 import { tessellatedCapacity, tessellateSmooth, traceSmooth } from "./spline";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { FftSizeRow, type SpectrumData } from "./EqChart";
@@ -106,7 +106,7 @@ const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" 
 // Vectorscope.tsx's identical TAU_REF for the fuller reasoning/history) — so moving Trail longer
 // measurably brightens a steady/dwelling signal even with Glow untouched. Unlike the scope views,
 // this one already redraws every animation frame (no dedup-by-payload-identity gate), so it doesn't
-// need their separate SCOPE_DOSE_RATIO correction — commit()'s own dt/DOSE_REF_DT already fully
+// need their separate stream correction (`streamDoseMult`) — commit()'s own dt/DOSE_REF_DT already fully
 // normalizes its redraw cadence on its own. Only the `TAU_REF/trailTau` term is needed here.
 // Anchored at a real 100 ms: `glow` reads as "steady-state brightness units per 100 ms of
 // persistence", the same physical meaning as the scope views' own Glow.
@@ -214,13 +214,6 @@ const FREQ_TICKS_LIN = [20, 2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 
 // hermiteTangent/traceSmooth moved to spline.ts — EqChart's spectrum backdrop grew the same
 // per-bin-staircase-visible-as-jagged problem this trace solved and now shares the fix.
 
-/** Parse a `#rrggbb` hex (the `--accent` CSS var) to [r,g,b]; a green phosphor fallback. */
-function parseHex(hex: string): [number, number, number] {
-  const m = hex.trim().match(/^#?([0-9a-f]{6})$/i);
-  if (!m) return [80, 220, 140];
-  const n = parseInt(m[1], 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
 
 /** Format a peak frequency for the numeric readout below the tube — unlike EqChart's `fmtHz`
  *  (built for a handful of fixed, always-round grid-tick values), this has to handle an arbitrary
@@ -562,7 +555,7 @@ export function SpectrumScope({
     const W = cv.width;
     const H = cv.height;
     ctx.clearRect(0, 0, W, H);
-    const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
+    const [ar, ag, ab] = accentRgb(cv);
     const plotTop = H * 0.03;
     const plotBot = H * 0.97;
 
@@ -632,7 +625,7 @@ export function SpectrumScope({
     // ceiling, with four views each opening their own). Logged once per mount so it's checkable via
     // DevTools on an affected machine without needing to reproduce it here first.
     if (!phos.precise) console.warn("[SpectrumScope] phosphor fell back to the 8-bit canvas accumulator (no half-float GPU support)");
-    const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
+    const [ar, ag, ab] = accentRgb(cv);
 
     let raf = 0;
     let last = performance.now();
@@ -772,17 +765,7 @@ export function SpectrumScope({
         // K-weighted tilt layers the K-weighting curve on top of the RTA baseline above — built
         // once per frame (not inline per-bin) since it only depends on each bin's own frequency,
         // same bf-from-index formula `computeCorrectionCurve` above uses for the undistort curve.
-        let kw: Float64Array | null = null;
-        if (mode === "kweighted") {
-          kw = new Float64Array(n);
-          if (p.linear) {
-            for (let i = 0; i < n; i++) kw[i] = kWeightingDb(s.f_min + (i / (n - 1)) * (s.f_max - s.f_min));
-          } else {
-            const lnF0 = Math.log(s.f_min);
-            const lnSpan = Math.log(s.f_max) - lnF0;
-            for (let i = 0; i < n; i++) kw[i] = kWeightingDb(Math.exp(lnF0 + (i / (n - 1)) * lnSpan));
-          }
-        }
+        const kw = mode === "kweighted" ? kWeightingCurve(n, s.f_min, s.f_max, p.linear) : null;
         for (let i = 0; i < n; i++) {
           vScratch[i] = (corr ? srcDb[i] - corr[i] : srcDb[i]) + (kw ? kw[i] : 0);
           pScratch[i] = corr ? srcPeakDb[i] - corr[i] : srcPeakDb[i];

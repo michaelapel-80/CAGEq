@@ -78,6 +78,28 @@ export function kWeightingDb(f: number): number {
  *  baseline plus {@link kWeightingDb} layered on top — a real, standards-derived perceptual-
  *  loudness tilt instead of an arbitrary dB/octave slope (à la FabFilter Pro-Q's default 4.5
  *  dB/oct Tilt), reusing the exact curve the project's own loudness match already trusts. */
+/** [`kWeightingDb`] at each of `n` bins spaced evenly from `fMin` to `fMax` (in frequency when
+ *  `linear`, in log frequency otherwise). Kept for the last two layouts asked for, since it only
+ *  changes with the axis: rebuilt every frame it cost an array and a few trig calls per bin. The
+ *  result is shared; read it, don't write it. */
+export function kWeightingCurve(n: number, fMin: number, fMax: number, linear: boolean): Float64Array {
+  const hit = kwCache.find((c) => c.n === n && c.fMin === fMin && c.fMax === fMax && c.linear === linear);
+  if (hit) return hit.curve;
+  const curve = new Float64Array(n);
+  const span = n > 1 ? n - 1 : 1;
+  if (linear) {
+    for (let i = 0; i < n; i++) curve[i] = kWeightingDb(fMin + (i / span) * (fMax - fMin));
+  } else {
+    const lnF0 = Math.log(fMin);
+    const lnSpan = Math.log(fMax) - lnF0;
+    for (let i = 0; i < n; i++) curve[i] = kWeightingDb(Math.exp(lnF0 + (i / span) * lnSpan));
+  }
+  kwCache.unshift({ n, fMin, fMax, linear, curve });
+  kwCache.length = Math.min(kwCache.length, 2);
+  return curve;
+}
+const kwCache: { n: number; fMin: number; fMax: number; linear: boolean; curve: Float64Array }[] = [];
+
 export type TiltMode = "off" | "rta" | "kweighted";
 
 /** A saved tilt setting predates the three-mode version (was a plain boolean) — both views'

@@ -897,8 +897,13 @@ function link(gl: WebGLRenderingContext, fsSrc: string, vsSrc = VS_QUAD, attribs
   gl.attachShader(prog, fs);
   attribs.forEach((a, i) => gl.bindAttribLocation(prog, i, a));
   gl.linkProgram(prog);
+  // Flagged now, freed with the program: a linked program doesn't need its shaders, and kept they
+  // leaked two per program on a context that outlives the phosphor (see `dispose`).
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
   if (gl.getProgramParameter(prog, gl.LINK_STATUS)) return prog;
   console.warn("[phosphor] program link failed:", gl.getProgramInfoLog(prog));
+  gl.deleteProgram(prog);
   return null;
 }
 
@@ -1476,6 +1481,10 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
       for (const prog of tonePrograms) applyTone(prog);
     },
     commit(dt, tau, tail = 1, doseMult = 1, bloomIntensity = 0, bloomWide = 0) {
+      // Here too, not only where a frame draws: a canvas resized while nothing is drawn (a paused
+      // scope, a spectrum without signal) otherwise ran the accumulator at the new size over
+      // textures still at the old one, shifting the trail toward a corner every frame.
+      resize();
       const W = target.width;
       const H = target.height;
       if (dead || W === 0 || H === 0 || gl.isContextLost()) return;
@@ -1715,6 +1724,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
       }
       gl.deleteProgram(accum);
       gl.deleteProgram(blit);
+      gl.deleteProgram(present);
       gl.deleteBuffer(quad);
       // Deliberately NOT `WEBGL_lose_context.loseContext()`: the canvas element outlives this
       // accumulator (React keeps it across a StrictMode double-mount, and across chart-view
@@ -1728,7 +1738,13 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
  *  not on the caller's: a canvas is bound to one context type for life, so attempting WebGL on the
  *  real canvas and then giving up would leave it unable to provide the 2D fallback either. Extension
  *  presence alone isn't sufficient — the FBO completeness check is the part that actually matters. */
+/** Settled once per process: the answer can't change, and each probe costs a context. */
+let halfFloatProbe: boolean | undefined;
 function halfFloatRenderable(): boolean {
+  halfFloatProbe ??= probeHalfFloat();
+  return halfFloatProbe;
+}
+function probeHalfFloat(): boolean {
   try {
     const probe = document.createElement("canvas");
     probe.width = probe.height = 2;
@@ -1744,7 +1760,11 @@ function halfFloatRenderable(): boolean {
     const fbo = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    // And the core programs, which can fail to compile or link on a driver: found out here, on
+    // the throwaway, the real canvas can still take the 2D fallback. Found out on the real canvas,
+    // it couldn't — a canvas that has given out a WebGL context never gives out a 2D one.
+    const programs = [link(gl, FS_ACCUM), link(gl, FS_PRESENT)];
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE && programs.every((p) => p !== null);
     gl.getExtension("WEBGL_lose_context")?.loseContext(); // throwaway — release it now, not at GC
     return ok;
   } catch {
@@ -1814,10 +1834,84 @@ export function createPhosphor(target: HTMLCanvasElement, opts: PhosphorOptions 
   if (halfFloatRenderable()) {
     try {
       const gl = createGl(target, opts.linearLight ?? false);
-      if (gl) return gl;
+      if (gl) return restorable(target, opts.linearLight ?? false, gl);
     } catch (e) {
       console.warn("[phosphor] half-float accumulator failed, using the 8-bit fallback", e);
     }
   }
   return create2d(target);
+}
+
+/**
+ * `first`, rebuilt whenever its WebGL context comes back after being lost. A GPU-process crash, a
+ * driver reset or the browser's limit on live contexts loses it, and everything made on it with
+ * it; without this a view stayed black until the app restarted. The caller keeps the object it
+ * was given, so none of them has to know.
+ */
+function restorable(target: HTMLCanvasElement, linear: boolean, first: Phosphor): Phosphor {
+  let impl = first;
+  // Without this the browser never restores the context at all.
+  const onLost = (e: Event) => e.preventDefault();
+  const onRestored = () => {
+    try {
+      const fresh = createGl(target, linear);
+      if (fresh) impl = fresh;
+      else console.warn("[phosphor] could not rebuild after the WebGL context was restored");
+    } catch (e) {
+      console.warn("[phosphor] could not rebuild after the WebGL context was restored", e);
+    }
+  };
+  target.addEventListener("webglcontextlost", onLost);
+  target.addEventListener("webglcontextrestored", onRestored);
+  const p: Phosphor = {
+    get precise() {
+      return impl.precise;
+    },
+    begin: () => impl.begin(),
+    commit: (dt, tau, tail, doseMult, bloomIntensity, bloomWide) => impl.commit(dt, tau, tail, doseMult, bloomIntensity, bloomWide),
+    dispose: () => {
+      target.removeEventListener("webglcontextlost", onLost);
+      target.removeEventListener("webglcontextrestored", onRestored);
+      impl.dispose();
+    },
+  };
+  // The same optional methods as `first`: callers decide their drawing path from which exist.
+  if (first.strokeTrace) p.strokeTrace = (stroke) => impl.strokeTrace?.(stroke);
+  if (first.fillTrace) p.fillTrace = (fill) => impl.fillTrace?.(fill);
+  if (first.overlayStroke) p.overlayStroke = (stroke) => impl.overlayStroke?.(stroke);
+  if (first.addSegments) p.addSegments = (segs) => impl.addSegments?.(segs);
+  if (first.setTone) p.setTone = (saturation, contrast, headroom, bloomWhite) => impl.setTone?.(saturation, contrast, headroom, bloomWhite);
+  return p;
+}
+
+/** The `--accent` colour `el` sees, as [r,g,b]; [`ACCENT_RGB`] if it isn't a `#rrggbb`. Every view
+ *  draws its trace in it. */
+export function accentRgb(el: Element): [number, number, number] {
+  const m = getComputedStyle(el).getPropertyValue("--accent").trim().match(/^#?([0-9a-f]{6})$/i);
+  if (!m) return [...ACCENT_RGB];
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** The scope stream's cadence (cageq-monitor's SCOPE_INTERVAL, 16 ms). */
+const SCOPE_UPDATE_HZ = 60;
+
+/**
+ * `commit`'s `doseMult` for a view that draws a fresh trace once per scope-stream window (~60/s)
+ * rather than every animation frame (Meter, TimeScope, Vectorscope).
+ *
+ * - `dtSinceTrace / dt`: `commit`'s own dose assumes one call per unit of real content, which a
+ *   display faster than the stream breaks (dimmer at high refresh rates, brighter at low ones);
+ *   this substitutes the real time since the last trace. Clamped to 4: `dt` has no lower bound,
+ *   and one anomalously short frame (timer jitter, a coalesced burst after a stall) otherwise
+ *   injected a one-frame spike that left a bright, saturated line behind.
+ * - `SCOPE_UPDATE_HZ / DOSE_REF_FPS`: the absolute calibration `glow` was tuned under, before the
+ *   rate-dependence was fixed — kept here rather than folded into the defaults, so a value
+ *   someone saved still means what it meant.
+ * - `tauRef / trailTau`: Trail/Glow orthogonality — steady-state brightness would otherwise grow
+ *   with the trail's length; `tauRef` is the view's own anchor (a real 100 ms in each).
+ */
+export function streamDoseMult(dtSinceTrace: number, dt: number, trailTau: number, tauRef: number): number {
+  const rateRatio = dt > 0 ? Math.min(4, dtSinceTrace / dt) : 1;
+  return rateRatio * (SCOPE_UPDATE_HZ / DOSE_REF_FPS) * (tauRef / trailTau);
 }

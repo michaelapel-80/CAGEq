@@ -4,7 +4,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type Band, type FadingInverse, type ResponseModel, retargetFadingInverse, stepFadingInverse } from "./biquad";
 import { scopeStream } from "./streams";
-import { createPhosphor, DOSE_REF_FPS, retuneForRelativeContrast } from "./phosphor";
+import { accentRgb, createPhosphor, DOSE_REF_FPS, retuneForRelativeContrast, streamDoseMult } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT } from "./appZoom";
@@ -130,18 +130,6 @@ const FALLBACK_FOCUS = 8;
 const BEAM_ENERGY = 0.0054;
 // Shortest segment drawn: a beam standing still still deposits its energy, just on a tiny stretch.
 const MIN_SEG_PX = 0.05;
-// The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
-// `doseMult` comment for why this matters: `glow`'s tuned defaults were dialed in under the OLD,
-// refresh-rate-dependent dose behaviour, which happened to equal SCOPE_UPDATE_HZ/DOSE_REF_FPS of
-// its "true" (rate-independent) value specifically because that behaviour was calibrated on a
-// DOSE_REF_FPS-Hz reference machine. Fixing the rate-dependence without also re-applying this ratio
-// would have changed the absolute brightness `glow` now produces, not just removed its Hz-sensitivity.
-// (Deliberately not folded into `glow`/DEFAULTS instead, even though the numeric effect is identical:
-// this panel's tuning persists to localStorage via `saveAsDefault`, so redefining what the stored
-// number *means* would silently change anyone's already-saved value — exactly the retweak this is
-// trying to avoid.)
-const SCOPE_UPDATE_HZ = 60;
-const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, not per frame
 // Trail/Glow orthogonality: at steady state (a dose landing every `dtSinceTrace` seconds, decaying
 // at `exp(-dt/trailTau)` between doses), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation) — so
@@ -167,13 +155,6 @@ const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, no
 // original decoupling change — only the number's meaning moved, twice now.
 const TAU_REF = 0.1;
 
-/** Parse a `#rrggbb` hex (the `--accent` CSS var) to [r,g,b]; a green phosphor fallback. */
-function parseHex(hex: string): [number, number, number] {
-  const m = hex.trim().match(/^#?([0-9a-f]{6})$/i);
-  if (!m) return [80, 220, 140];
-  const n = parseInt(m[1], 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
 
 /**
  * Stereo vectorscope (X-Y goniometer) — the loopback's left channel against its right, drawn
@@ -311,7 +292,7 @@ export function Vectorscope({
     const c = S / 2;
     const R = S * params.radiusFrac;
     ctx.clearRect(0, 0, S, S);
-    const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
+    const [ar, ag, ab] = accentRgb(cv);
 
     ctx.strokeStyle = `rgba(${ar},${ag},${ab},${params.gridAlpha})`;
     ctx.lineWidth = Math.max(1, S / REF_SIZE);
@@ -368,7 +349,7 @@ export function Vectorscope({
     // than the others" report by checking whether any view silently fell back off the GPU
     // half-float accumulator (phosphor.ts's `precise`).
     if (!phos.precise) console.warn("[Vectorscope] phosphor fell back to the 8-bit canvas accumulator (no half-float GPU support)");
-    const [ar, ag, ab] = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
+    const [ar, ag, ab] = accentRgb(cv);
 
     let raf = 0;
     let last = performance.now();
@@ -488,7 +469,7 @@ export function Vectorscope({
         // though, also changes the *absolute* brightness `glow` was tuned against (the old, buggy
         // behaviour happened to equal the true one only on a DOSE_REF_FPS-Hz reference machine) — the
         // extra `SCOPE_UPDATE_HZ/DOSE_REF_FPS` factor restores that same historical calibration (see
-        // SCOPE_UPDATE_HZ's own doc) so this fix is rate-independence *only*, not a re-tune too. The
+        // phosphor.ts's `streamDoseMult`) so this fix is rate-independence *only*, not a re-tune too. The
         // further `TAU_REF/p.trailTau` factor is the separate Trail/Glow orthogonality fix — see
         // TAU_REF's own doc.
         //
@@ -504,8 +485,7 @@ export function Vectorscope({
         // reintroduce the Trail/Glow coupling this whole fix exists to remove.
         const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
         lastTrace = now;
-        const rateRatio = dt > 0 ? Math.min(4, dtSinceTrace / dt) : 1;
-        doseMult = rateRatio * SCOPE_DOSE_RATIO * (TAU_REF / p.trailTau);
+        doseMult = streamDoseMult(dtSinceTrace, dt, p.trailTau, TAU_REF);
         // Full-bright segment length (px), scaled to a reference rate: at a higher rate the beam
         // moves less per sample, so shrink the threshold to match → the velocity glow tracks beam
         // *speed* (px/s), not px/sample, and the intensity no longer jumps with the sample rate.

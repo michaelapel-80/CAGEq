@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { meterStream, scopeStream, type MeterData } from "./streams";
 import type { ScopeData } from "./Vectorscope";
-import { createPhosphor, createPhosphorColumn, DOSE_REF_FPS, excitationShowing, retuneForRelativeContrast } from "./phosphor";
+import { accentRgb, createPhosphor, createPhosphorColumn, excitationShowing, retuneForRelativeContrast, streamDoseMult } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT } from "./appZoom";
@@ -77,18 +77,6 @@ const METER_PARAMS_MIGRATION: ParamsMigration = {
   migrate: (stored, from) =>
     from < 2 ? { ...stored, glow: DEFAULTS.glow } : from < 3 ? retuneForRelativeContrast(stored, DEFAULTS.contrast) : stored,
 };
-// The scope stream's real cadence (cageq-monitor's SCOPE_INTERVAL, 16ms) — see the render loop's
-// `doseMult` comment (same reasoning as Vectorscope.tsx's identical constant) for why this matters:
-// `glow`'s tuned defaults were dialed in under the OLD, refresh-rate-dependent dose behaviour, which
-// happened to equal SCOPE_UPDATE_HZ/DOSE_REF_FPS of its "true" (rate-independent) value specifically
-// because that behaviour was calibrated on a DOSE_REF_FPS-Hz reference machine. Fixing the
-// rate-dependence without also re-applying this ratio would have changed the absolute brightness
-// `glow` now produces, not just removed its Hz-sensitivity. (Deliberately not folded into
-// `glow`/DEFAULTS instead, even though the numeric effect is identical: this panel's tuning
-// persists to localStorage via `saveAsDefault`, so redefining what the stored number *means* would
-// silently change an already-saved value — exactly the retweak this is trying to avoid.)
-const SCOPE_UPDATE_HZ = 60;
-const SCOPE_DOSE_RATIO = SCOPE_UPDATE_HZ / DOSE_REF_FPS; // precomputed once, not per frame
 // Trail/Glow orthogonality: at steady state (a dose landing every `dtSinceTrace` seconds, decaying
 // at `exp(-dt/trailTau)` between doses), accumulated brightness is approximately
 // `dose_per_second * trailTau` (see phosphor.ts's DOSE_REF_FPS doc for the same derivation) — so
@@ -172,14 +160,6 @@ const VEL_REF_RATE = 48000;
 const LIN_DIST_SCALE = 420;
 const FALLBACK_FOCUS = 90;
 
-/** Parse a `#rrggbb` hex (the `--accent` CSS var) to [r,g,b]; a green phosphor fallback — the same
- *  small helper Vectorscope.tsx keeps privately for the identical purpose. */
-function parseAccent(hex: string): [number, number, number] {
-  const m = hex.trim().match(/^#?([0-9a-f]{6})$/i);
-  if (!m) return [80, 220, 140];
-  const n = parseInt(m[1], 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
 
 export function Meter({
   deviceId,
@@ -272,6 +252,11 @@ export function Meter({
   // Level bar's beam canvas — sized by measuring its own container, matching Vectorscope's own
   // ResizeObserver + devicePixelRatio convention (the bar's height is dynamic, driven by `plotBox`
   // above, so a fixed canvas size isn't an option).
+  // The bars (and the beam's canvas) are only there without an error: an error replaces the whole
+  // meter, and the elements that come back afterwards are new ones. The effects that hold them
+  // run again for those; with no dependency they stayed on the old, detached ones, and the beam
+  // stayed blank after a device that failed to open was followed by one that didn't.
+  const hasBars = err === null;
   const levelBarRef = useRef<HTMLDivElement | null>(null);
   const beamCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [beamSize, setBeamSize] = useState({ w: 34, h: 100 });
@@ -291,7 +276,7 @@ export function Meter({
       ro.disconnect();
       window.removeEventListener(APP_ZOOM_EVENT, measure);
     };
-  }, []);
+  }, [hasBars]);
 
   // Latest raw scope payload, written by the listener below and read by the beam's rAF loop — a
   // ref, not state, so the stream drives the imperative canvas without ever re-rendering React.
@@ -329,7 +314,7 @@ export function Meter({
     // than the others" report by checking whether any view silently fell back off the GPU
     // half-float accumulator (phosphor.ts's `precise`).
     if (!phos.precise) console.warn("[Meter] phosphor fell back to the 8-bit canvas accumulator (no half-float GPU support)");
-    const [ar, ag, ab] = parseAccent(getComputedStyle(cv).getPropertyValue("--accent"));
+    const [ar, ag, ab] = accentRgb(cv);
     // The GPU path's light, for the peak mark. The 2D fallback's mark is just the backend's follower.
     const column = phos.addSegments ? createPhosphorColumn([ar, ag, ab]) : null;
     let peakDb = -Infinity; // where the mark is
@@ -395,7 +380,7 @@ export function Meter({
         // true "time since the last real trace" for this call's own (too-short) dt — confirmed live
         // to remove the rate-dependence. The extra `SCOPE_UPDATE_HZ/DOSE_REF_FPS` factor then
         // restores the same absolute calibration `glow` was originally tuned against (see
-        // SCOPE_UPDATE_HZ's own doc), so this is rate-independence only, not a re-tune too. The
+        // phosphor.ts's `streamDoseMult`), so this is rate-independence only, not a re-tune too. The
         // further `TAU_REF/p.trailTau` factor is the separate Trail/Glow orthogonality fix — see
         // TAU_REF's own doc.
         //
@@ -412,8 +397,7 @@ export function Meter({
         // exists to remove.
         const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
         lastTrace = now;
-        const rateRatio = dt > 0 ? Math.min(4, dtSinceTrace / dt) : 1;
-        doseMult = rateRatio * SCOPE_DOSE_RATIO * (TAU_REF / p.trailTau);
+        doseMult = streamDoseMult(dtSinceTrace, dt, p.trailTau, TAU_REF);
         const W = cv.width;
         const cx = W / 2;
         const rate = s.rate > 0 ? s.rate : 48000;
@@ -558,7 +542,7 @@ export function Meter({
       cancelAnimationFrame(raf);
       phos.dispose(); // frees the GL textures/programs; a leaked context would survive the unmount
     };
-  }, []);
+  }, [hasBars]);
 
   if (err) return <div className="meter meter-err">{t("meter.unavailable", { error: err })}</div>;
 

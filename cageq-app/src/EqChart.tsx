@@ -3,9 +3,9 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, highPassFc, HP_SLOPES, logGrid, phaseDeg, type FadingCurve, type ResponseModel, retargetFadingCurve, stepFadingCurve, undistortable } from "./biquad";
 import { fftWindowMs } from "./fftWindow";
-import { kWeightingDb, tiltMode, type TiltMode } from "./kWeighting";
+import { kWeightingCurve, tiltMode, type TiltMode } from "./kWeighting";
 import { TiltGlyph } from "./TiltGlyph";
-import { createPhosphor, DOSE_REF_FPS, type TraceStroke } from "./phosphor";
+import { accentRgb, createPhosphor, DOSE_REF_FPS, type TraceStroke } from "./phosphor";
 import { tessellatedCapacity, tessellateSmooth, traceSmooth } from "./spline";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { fmtSnappedHz, noteShift, snapBin, snapRequested, snapSpan, SNAP_SPAN_COLOR } from "./peakSnap";
@@ -145,13 +145,6 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 /** A phase in degrees folded into [-180°, 180°]. */
 const wrapDeg = (v: number) => v - 360 * Math.round(v / 360);
 
-/** Parse a `#rrggbb` hex (e.g. the `--accent` CSS var) to [r,g,b]; null if not a 6-digit hex. */
-function parseHex(hex: string): [number, number, number] | null {
-  const m = hex.trim().match(/^#?([0-9a-f]{6})$/i);
-  if (!m) return null;
-  const n = parseInt(m[1], 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
 
 // --- FFT spectrum backdrop: its own tuning set, independent of the level meter's phosphor ---
 const SPEC_TOP_DB = 0; // top of the fixed dBFS scale
@@ -777,6 +770,12 @@ export function EqChart({
     // draws a one-frame jump in the backdrop that isn't in the real (crossfaded) audio at all,
     // see `apo-switch-artifacts` memory, "NOT a bug". This chart's backdrop is the more useful
     // undistort view for dynamic content (music, not a tone), so the same fix matters more here.
+    // Read once: `--accent` has one definition, theme or not, and per frame it was a style lookup and
+    // a parse up to 240 times a second.
+    const acc = accentRgb(cv);
+    // The correction the backdrop undid this frame, per bin, for the cursor's readout to undo the
+    // same; null when it undid none.
+    let shownCorr: Float64Array | null = null;
     let corrCache: FadingCurve | null = null;
     let lastEqBands: Band[] | undefined;
     let lastPreampDb: number | undefined;
@@ -854,18 +853,16 @@ export function EqChart({
           }
           corr = stepFadingCurve(corrCache, dt * 1000);
         }
+        shownCorr = corr;
 
         const [nr, ng, nb] = SPEC_NEUTRAL;
-        const acc = parseHex(getComputedStyle(cv).getPropertyValue("--accent"));
         // A hint of the accent mixed into the (fixed, theme-independent — see SPEC_NEUTRAL) neutral
         // base — lifts the glow off flat grey without letting it read as another curve. Only for the
         // wash: it's a dim backdrop by design, and gets its real brightness from accumulation over
         // many frames, not from this base colour's own value. The stroke (below) uses `acc` directly,
         // undimmed — see the note above SPEC_NEUTRAL for why sharing this tinted colour didn't work.
-        const [r, g, b] = acc
-          ? [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round)
-          : [nr, ng, nb];
-        const [sr, sg, sb] = acc ?? [nr, ng, nb];
+        const [r, g, b] = [nr + (acc[0] - nr) * SPEC_TINT, ng + (acc[1] - ng) * SPEC_TINT, nb + (acc[2] - nb) * SPEC_TINT].map(Math.round);
+        const [sr, sg, sb] = acc;
 
         if (xScratch.length < n) {
           xScratch = new Float64Array(n);
@@ -876,9 +873,10 @@ export function EqChart({
         }
         const mode = tiltMode(specParams.tilt);
         const srcDb = mode === "off" ? spectrum.db : spectrum.db_raw;
+        const kw = mode === "kweighted" ? kWeightingCurve(n, spectrum.f_min, spectrum.f_max, false) : null;
         for (let i = 0; i < n; i++) {
           let db = undoing ? srcDb[i] - corr![i] : srcDb[i];
-          if (mode === "kweighted") db += kWeightingDb(binF(i));
+          if (kw) db += kw[i];
           xScratch[i] = fx(i);
           yScratch[i] = sy(db);
         }
@@ -973,6 +971,19 @@ export function EqChart({
       // actually stays correct if `PAD` is ever non-zero again, rather than relying on the (also
       // currently-correct, but not provably-so) captured closures of `x`/`invX`.
       const hoverFrac = hoverRef.current;
+      // The correction the cursor's readout undoes at bin `i` (plus `t` of the way to the next):
+      // the one the backdrop undid this frame, crossfade and all, never a high-pass (see
+      // `undistortable`). It used to compute its own, from every band: under a high-pass the
+      // number read ~17 dB above the curve beneath it.
+      const corrAt = (i: number, t: number, hz: number): number => {
+        if (!specParams.undistort || eqBands === undefined) return 0;
+        if (shownCorr && i + 1 <= shownCorr.length) {
+          const j = Math.min(shownCorr.length - 1, i + 1);
+          return shownCorr[i] * (1 - t) + shownCorr[j] * t;
+        }
+        const bands = undistortable(eqBands);
+        return (bands.length ? composedCurveDb(bands, new Float64Array([hz]), model, sampleRate)[0] : 0) + preampDb;
+      };
       if (hoverFrac !== null) {
         let vx = hoverFrac * W;
         let hz = Math.exp(lnMin + ((vx - PAD.l) / (W - PAD.l - PAD.r)) * lnSpan);
@@ -994,11 +1005,7 @@ export function EqChart({
         if (spectrum && snap !== null && snapped) {
           hz = spectrum.peak_hz[snap];
           vx = PAD.l + ((Math.log(hz) - lnMin) / lnSpan) * (W - PAD.l - PAD.r);
-          const corrDb =
-            specParams.undistort && eqBands !== undefined
-              ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]), model, sampleRate)[0] : 0) + preampDb
-              : 0;
-          dbText = `${(spectrum.peak_db[snap] - corrDb).toFixed(1)} dB`;
+          dbText = `${(spectrum.peak_db[snap] - corrAt(snap, 0, hz)).toFixed(1)} dB`;
         }
         if (spectrum && snapRequested() && spectrum.peak_db.length >= 3) {
           // Where the snap looks (`snapSpan`): around the pointer, not the snapped line, so it
@@ -1040,11 +1047,7 @@ export function EqChart({
           const cursorMode = tiltMode(specParams.tilt);
           const srcDb = cursorMode === "off" ? spectrum.db : spectrum.db_raw;
           const raw = srcDb[i0] * (1 - ft) + srcDb[i1] * ft;
-          const corrDb =
-            specParams.undistort && eqBands !== undefined
-              ? (eqBands.length ? composedCurveDb(eqBands, new Float64Array([hz]), model, sampleRate)[0] : 0) + preampDb
-              : 0;
-          dbText = `${(raw - corrDb).toFixed(1)} dB`;
+          dbText = `${(raw - corrAt(i0, ft, hz)).toFixed(1)} dB`;
         }
         cursorShown = true;
         if (cursorHzRef.current) cursorHzRef.current.textContent = snapped ? fmtSnappedHz(hz) : fmtCursorHz(hz);
