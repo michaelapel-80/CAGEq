@@ -39,6 +39,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod cache;
 mod catalog;
 mod export;
 mod fit;
@@ -674,6 +675,13 @@ impl Core {
         if slot == Slot::Dry {
             return Err(CoreError::DryNotEditable);
         }
+        // From the app's launch cache, which is a user-writable file: checked like every other
+        // filter entering the core, or a Q of 0 or a NaN level would be written as it stands
+        // (the slot's model matches, so nothing re-fits it first).
+        validate_filters(&filters)?;
+        if !(g_target_db.is_finite() && g_max_peak_db.is_finite()) {
+            return Err(CoreError::InvalidFilter(format!("cached loudness quantities must be finite, got {g_target_db} / {g_max_peak_db}")));
+        }
         let result =
             CalcResult { device: device.clone(), filters, g_target_db, g_max_peak_db, reference_curve, model, request: None };
         let mut store = self.inner.slots.lock().unwrap();
@@ -686,7 +694,7 @@ impl Core {
     /// file write (no sidecar), so A/B/Dry switching is instant. Errors with
     /// [`CoreError::EmptySlot`] if the target slot has nothing to write yet.
     pub fn activate_slot(&self, slot: Slot) -> Result<Applied, CoreError> {
-        let ticket = claim_write(&self.inner);
+        let ticket;
         {
             let _guard = self.inner.apply_lock.lock().unwrap();
             refresh_slots(&self.inner)?;
@@ -694,6 +702,8 @@ impl Core {
             if !store.has(slot) {
                 return Err(CoreError::EmptySlot(slot));
             }
+            // Claimed only now, once this switch is certain to write (see `claim_write`).
+            ticket = claim_write(&self.inner);
             store.active = slot;
         }
         morph_to_active(&self.inner, ticket)
@@ -707,12 +717,13 @@ impl Core {
         if from == Slot::Dry || to == Slot::Dry {
             return Err(CoreError::DryNotEditable);
         }
-        let ticket = claim_write(&self.inner);
+        let ticket;
         {
             let _guard = self.inner.apply_lock.lock().unwrap();
             refresh_slots(&self.inner)?;
             let mut store = self.inner.slots.lock().unwrap();
             let src = store.slot_mut(from).clone().ok_or(CoreError::EmptySlot(from))?;
+            ticket = claim_write(&self.inner);
             *store.slot_mut(to) = Some(src);
             store.active = to;
         }
@@ -746,6 +757,9 @@ impl Core {
             model: effective_model(&self.inner),
             request: None,
         };
+        // A morph still running toward the slot would otherwise write its remaining frames,
+        // and the slot itself, straight over the audition.
+        claim_write(&self.inner);
         let base = self.inner.loudness.lock().unwrap().base_pregain_db;
         write_effective(&self.inner, effective, base, false)
     }
@@ -827,12 +841,12 @@ impl Core {
     /// swap may take the warping-corrected model away: stale slots are re-fitted first
     /// ([`refresh_slots`]), so the rewrite is of a fit made for the model now in effect.
     pub fn reapply(&self) -> Option<Result<Applied, CoreError>> {
-        claim_write(&self.inner);
         let _guard = self.inner.apply_lock.lock().unwrap();
         self.inner.slots.lock().unwrap().effective()?; // nothing active to rewrite yet
         if let Err(e) = refresh_slots(&self.inner) {
             return Some(Err(e));
         }
+        claim_write(&self.inner);
         Some(write_active_locked(&self.inner))
     }
 
@@ -932,7 +946,7 @@ impl Core {
 /// `cageq-catalog` for the raw measurement/target curve fetch), cache the result in
 /// `slot`, make it active, and write it. Held under `apply_lock` so callers serialise.
 fn do_apply_to_slot(inner: &Inner, slot: Slot, request: CalcRequest) -> Result<Applied, CoreError> {
-    let ticket = claim_write(inner);
+    let ticket;
     {
         let _guard = inner.apply_lock.lock().unwrap();
 
@@ -952,6 +966,9 @@ fn do_apply_to_slot(inner: &Inner, slot: Slot, request: CalcRequest) -> Result<A
         // while the lock is held anyway, so a later A/B switch is instant.
         refresh_slots(inner)?;
 
+        // Claimed only now: a fit can take seconds or fail, and a morph superseded before then
+        // would stop wherever it had got to (see `claim_write`).
+        ticket = claim_write(inner);
         let mut store = inner.slots.lock().unwrap();
         store.device = Some(result.device.clone());
         *store.slot_mut(slot) = Some(result);
@@ -1019,6 +1036,11 @@ fn refresh_slots(inner: &Inner) -> Result<(), CoreError> {
 
 /// Take a ticket for a new write intention. Any morph still running against an
 /// older ticket will notice and stand down at its next frame.
+///
+/// Taken under `apply_lock`, once the write is certain, never ahead of a step that can fail
+/// or take long (a fit, an empty-slot check): a morph superseded by a request that then wrote
+/// nothing stopped wherever it was, leaving a curve between two slots applied with nothing
+/// to finish it.
 fn claim_write(inner: &Inner) -> u32 {
     inner.morph_gen.fetch_add(1, Ordering::SeqCst) + 1
 }
@@ -1144,7 +1166,14 @@ fn morph_to_active(inner: &Inner, ticket: u32) -> Result<Applied, CoreError> {
     // mid-ramp on every one, and the result would be worse than the single write it can
     // interpolate from itself. Emulating a morph out of many spaced writes is purely a
     // workaround for EqAPO's fixed, cold ~10 ms crossfade.
-    let emulate_morph = can_morph && !inner.backend.capabilities().owns_transitions;
+    //
+    // Nor across an audition (isolate or sweep): a band-pass has no gain to fade, and the
+    // isolate's identical sections merge into one in `lerp_bands`, so every frame of such a
+    // morph would play a band-pass at the level of the correction it fades toward — a loud,
+    // filtered sound for its whole length. Leaving an audition is a switch, written at once.
+    let audition = |c: &CalcResult| c.filters.iter().any(|f| f.kind == FilterType::Bandpass);
+    let emulate_morph =
+        can_morph && !inner.backend.capabilities().owns_transitions && !audition(&from) && !audition(&to);
     let frames =
         if emulate_morph { morph_frames(morph::tonal_distance_db(&from.filters, &to.filters, to.model)) } else { 0 };
 

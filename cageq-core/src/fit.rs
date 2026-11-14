@@ -31,7 +31,7 @@
 //! will actually run, so an RBJ fit and a warping-corrected fit of the same measurement are
 //! different answers, and toggling back and forth reuses both.
 
-use std::collections::{HashMap, VecDeque};
+use crate::cache::BoundedCache;
 
 use cageq_peq_solver::Solver;
 use serde::{Deserialize, Serialize};
@@ -91,18 +91,11 @@ pub(crate) struct FitOutcome {
 }
 
 /// The AutoEq-only fit cache — see the module doc for why custom filters aren't part
-/// of the key. A bounded FIFO (`sidecar_dsp.py`'s own `_FIT_CACHE_MAX = 32`, evicting
-/// the oldest entry — a Python dict's insertion order does that for free; `order`
-/// tracks it explicitly here since `HashMap` doesn't).
-pub(crate) struct FitCache {
-    entries: HashMap<FitCacheKey, FitCacheEntry>,
-    order: VecDeque<FitCacheKey>,
-}
-
-const FIT_CACHE_MAX: usize = 32;
+/// of the key.
+pub(crate) type FitCache = BoundedCache<FitCacheKey, FitCacheEntry>;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct FitCacheKey {
+pub(crate) struct FitCacheKey {
     headphone: Option<String>,
     /// Bit-pattern pairs of `(frequency, raw_db)` when `headphone` is `None` — exact
     /// equality on a raw request's own f64s needs no rounding/hashing scheme the way
@@ -117,33 +110,11 @@ struct FitCacheKey {
 }
 
 #[derive(Clone)]
-struct FitCacheEntry {
+pub(crate) struct FitCacheEntry {
     filters: Vec<Filter>,
     f: Vec<f64>,
     curve: Vec<f64>,
     reference_curve: Vec<CurvePoint>,
-}
-
-impl FitCache {
-    pub(crate) fn new() -> Self {
-        FitCache { entries: HashMap::new(), order: VecDeque::new() }
-    }
-
-    fn get(&self, key: &FitCacheKey) -> Option<FitCacheEntry> {
-        self.entries.get(key).cloned()
-    }
-
-    fn insert(&mut self, key: FitCacheKey, entry: FitCacheEntry) {
-        if !self.entries.contains_key(&key) {
-            if self.order.len() >= FIT_CACHE_MAX {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.entries.remove(&oldest);
-                }
-            }
-            self.order.push_back(key.clone());
-        }
-        self.entries.insert(key, entry);
-    }
 }
 
 fn fit_key(params: &FitParams, model: ResponseModel) -> FitCacheKey {
@@ -186,14 +157,38 @@ fn fetch_raw_curves(params: &FitParams) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>,
         }
         (params.measurement.iter().map(|p| p.frequency).collect(), params.measurement.iter().map(|p| p.raw_db).collect())
     };
+    let (measurement_f, measurement_raw) = checked_curve("measurement", measurement_f, measurement_raw)?;
 
     let (target_f, target_raw) = if let Some(t) = &params.target {
         cageq_catalog::fetch_curve(t)?
     } else {
         (vec![20.0, 20_000.0], vec![0.0, 0.0])
     };
+    let (target_f, target_raw) = checked_curve("target", target_f, target_raw)?;
 
     Ok((measurement_f, measurement_raw, target_f, target_raw))
+}
+
+/// A curve the interpolation can work with, or why not: sorted by frequency (an inline
+/// measurement may arrive in any order), every frequency finite, above 0 and used once, and no
+/// level infinite (NaN is a gap, which the interpolation skips). The interpolation takes the
+/// log of the frequency and divides by the step between neighbours, so a 0 Hz row, a repeated
+/// frequency or an out-of-order list made a NaN or infinite curve that the fit then turned
+/// into garbage bands or an opaque solver error (AutoEq itself refuses duplicate frequencies).
+fn checked_curve(what: &str, f: Vec<f64>, y: Vec<f64>) -> Result<(Vec<f64>, Vec<f64>), CoreError> {
+    let bad = |why: String| CoreError::InvalidMeasurement(format!("{what}: {why}"));
+    if let Some(x) = f.iter().find(|x| !(x.is_finite() && **x > 0.0)) {
+        return Err(bad(format!("frequency {x} is not a positive number")));
+    }
+    if let Some(v) = y.iter().find(|v| v.is_infinite()) {
+        return Err(bad(format!("level {v} is not finite")));
+    }
+    let mut points: Vec<(f64, f64)> = f.into_iter().zip(y).collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some(w) = points.windows(2).find(|w| w[0].0 == w[1].0) {
+        return Err(bad(format!("frequency {} appears more than once", w[0].0)));
+    }
+    Ok(points.into_iter().unzip())
 }
 
 /// `sidecar_dsp.py`'s `_subsample_curve`: a compact, evenly-spaced sampling of a dense

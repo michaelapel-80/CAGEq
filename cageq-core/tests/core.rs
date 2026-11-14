@@ -360,3 +360,105 @@ fn startup_trusts_a_matching_remembered_hash() {
     let core = Core::start(eqapo(tmp.dir()), Some(&hash)).unwrap();
     assert_eq!(core.startup_decision(), StartupDecision::ResumeTrusted);
 }
+
+// --- Found by the 2026-11-14 code review.
+
+fn custom(bands: serde_json::Value, device: &str) -> CalcRequest {
+    let mut req = CalcRequest::for_device(device);
+    req.inputs.insert("custom_filters".into(), bands);
+    req
+}
+fn bass() -> serde_json::Value {
+    json!([{ "kind": "LowShelf", "freq_hz": 105.0, "gain_db": 6.0, "q": 0.7 }])
+}
+fn treble() -> serde_json::Value {
+    json!([{ "kind": "HighShelf", "freq_hz": 2500.0, "gain_db": 6.0, "q": 0.7 }])
+}
+
+/// Leaving an isolate audition is written at once, not morphed: a morph from a band-pass
+/// played a band-pass at the correction's level for its whole length.
+#[test]
+fn leaving_an_isolate_audition_is_one_write() {
+    let tmp = TempDir::new("leave-isolate");
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
+    core.apply_to_slot(Slot::A, custom(bass(), "DAC")).expect("apply A");
+    core.apply_isolate(1000.0, 4.0).expect("isolate");
+    let before = core.applied_count();
+    core.activate_slot(Slot::A).expect("back to A");
+    assert_eq!(core.applied_count() - before, 1, "the way out of an audition must not morph");
+}
+
+/// An isolate started while a slot switch is still morphing is what's left on disk: the
+/// morph's remaining frames, and its final write, used to land on top of it.
+#[test]
+fn an_isolate_outlasts_a_morph_in_flight() {
+    let tmp = TempDir::new("isolate-morph");
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
+    core.apply_to_slot(Slot::A, custom(bass(), "DAC")).expect("apply A");
+    core.apply_to_slot(Slot::B, custom(treble(), "DAC")).expect("apply B");
+    core.activate_slot(Slot::A).expect("back to A");
+    std::thread::scope(|s| {
+        let switch = s.spawn(|| core.activate_slot(Slot::B));
+        std::thread::sleep(Duration::from_millis(40));
+        core.apply_isolate(1000.0, 4.0).expect("isolate");
+        let _ = switch.join().unwrap();
+    });
+    assert!(tmp.cageq().contains(" BP "), "the audition was overwritten:\n{}", tmp.cageq());
+}
+
+/// A request that fails doesn't stop a morph already running: it used to supersede it first,
+/// leaving a curve halfway between the slots applied.
+#[test]
+fn a_failed_apply_leaves_a_morph_to_finish() {
+    let tmp = TempDir::new("failed-apply-morph");
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
+    core.apply_to_slot(Slot::A, custom(bass(), "DAC")).expect("apply A");
+    core.apply_to_slot(Slot::B, custom(treble(), "DAC")).expect("apply B");
+    core.activate_slot(Slot::A).expect("back to A");
+    let applied = std::thread::scope(|s| {
+        let switch = s.spawn(|| core.activate_slot(Slot::B));
+        std::thread::sleep(Duration::from_millis(40));
+        let bad = json!([{ "kind": "Peaking", "freq_hz": 1000.0, "gain_db": 3.0, "q": -1.0 }]);
+        assert!(core.apply_to_slot(Slot::A, custom(bad, "DAC")).is_err());
+        switch.join().unwrap().expect("switch")
+    });
+    assert!(
+        applied.filters.iter().any(|f| (f.freq_hz - 2500.0).abs() < 1e-9 && (f.gain_db - 6.0).abs() < 1e-9),
+        "the switch must still land on B, not stop mid-way: {:?}",
+        applied.filters
+    );
+}
+
+/// A cached fit from the launch cache is checked like any filter entering the core.
+#[test]
+fn a_seeded_slot_is_validated() {
+    let tmp = TempDir::new("seed-validate");
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
+    let band = |q: f64| Filter { kind: FilterType::Peaking, freq_hz: 1000.0, gain_db: 3.0, q };
+    assert!(core.seed_slot(Slot::A, "DAC".into(), vec![band(0.0)], 0.0, 0.0, Vec::new(), ResponseModel::Rbj).is_err(), "Q 0");
+    assert!(core.seed_slot(Slot::A, "DAC".into(), vec![band(1.0)], 0.0, f64::NAN, Vec::new(), ResponseModel::Rbj).is_err(), "NaN peak");
+    assert!(core.seed_slot(Slot::A, "DAC".into(), vec![band(1.0)], 0.0, 0.0, Vec::new(), ResponseModel::Rbj).is_ok());
+}
+
+/// An inline measurement is sorted, and one with a repeated frequency or a 0 Hz point is
+/// refused with a measurement error rather than fitted into garbage.
+#[test]
+fn an_inline_measurement_is_checked_and_sorted() {
+    let tmp = TempDir::new("measurement-check");
+    let core = Core::start(eqapo(tmp.dir()), None).unwrap();
+    let with = |points: serde_json::Value| {
+        let mut req = CalcRequest::for_device("DAC");
+        req.inputs.insert("measurement".into(), points);
+        req
+    };
+    let dup = json!([{"frequency": 100.0, "raw_db": 1.0}, {"frequency": 100.0, "raw_db": 2.0}, {"frequency": 1000.0, "raw_db": 0.0}]);
+    assert!(matches!(core.apply_to_slot(Slot::A, with(dup)), Err(CoreError::InvalidMeasurement(_))));
+    let zero = json!([{"frequency": 0.0, "raw_db": 1.0}, {"frequency": 1000.0, "raw_db": 0.0}]);
+    assert!(matches!(core.apply_to_slot(Slot::A, with(zero)), Err(CoreError::InvalidMeasurement(_))));
+    let descending: Vec<serde_json::Value> = (0..60).rev().map(|i| {
+        let f = 20.0 * 1.13f64.powi(i);
+        json!({"frequency": f, "raw_db": if (500.0..2000.0).contains(&f) { 3.0 } else { 0.0 }})
+    }).collect();
+    let applied = core.apply_to_slot(Slot::A, with(serde_json::Value::Array(descending))).expect("a descending measurement fits");
+    assert!(applied.filters.iter().all(|f| f.freq_hz.is_finite() && f.gain_db.is_finite() && f.q.is_finite()));
+}

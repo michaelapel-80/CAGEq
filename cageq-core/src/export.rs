@@ -23,7 +23,7 @@
 //! `cageq-core/tests/rust_vs_sidecar.rs` shows curve-shape/loudness agreement well
 //! within noise) for the main fit in `fit.rs`.
 
-use std::collections::{HashMap, VecDeque};
+use crate::cache::BoundedCache;
 use std::sync::Mutex;
 
 use cageq_peq_solver::{grid::standard_grid, BandKind, Solver};
@@ -41,7 +41,6 @@ const FS: f64 = 48_000.0;
 /// a hand-placed treble band needs — a 6 dB notch at 12 or 15 kHz came out ~4.4 dB off at worst,
 /// ~0.2-0.6 dB with it. 14 kHz still missed a 15 kHz notch; 18 kHz made the top end worse.
 const EXPORT_MAX_FC: f64 = 16_000.0;
-const CACHE_MAX: usize = 32;
 
 fn filters_key(filters: &[Filter]) -> Vec<(u8, i64, i64, i64)> {
     filters
@@ -64,41 +63,13 @@ fn filters_key(filters: &[Filter]) -> Vec<(u8, i64, i64, i64)> {
         .collect()
 }
 
-/// A small bounded FIFO cache for `fit_export_eq` (`sidecar_dsp.py`'s `_EXPORT_FIT_CACHE`)
-/// — the export dialog's band-count control re-fits on every change, and a repeat value
-/// should be instant, not a second SLSQP pass.
-pub(crate) struct BoundedCache<K, V> {
-    entries: HashMap<K, V>,
-    order: VecDeque<K>,
-}
-
-impl<K: Clone + Eq + std::hash::Hash, V: Clone> BoundedCache<K, V> {
-    pub(crate) fn new() -> Self {
-        BoundedCache { entries: HashMap::new(), order: VecDeque::new() }
-    }
-
-    fn get(&self, key: &K) -> Option<V> {
-        self.entries.get(key).cloned()
-    }
-
-    fn insert(&mut self, key: K, value: V) {
-        if !self.entries.contains_key(&key) {
-            if self.order.len() >= CACHE_MAX {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.entries.remove(&oldest);
-                }
-            }
-            self.order.push_back(key.clone());
-        }
-        self.entries.insert(key, value);
-    }
-}
-
 // Two models in the key: how the slot's bands are realised (the curve being approximated),
 // and how the receiving app realises the *exported* bands (what the fit optimises).
 type ExportKey = (Vec<(u8, i64, i64, i64)>, u32, ResponseModel, ResponseModel);
 type FitResult = (Vec<Filter>, f64);
 
+/// For `fit_export_eq` (`sidecar_dsp.py`'s `_EXPORT_FIT_CACHE`): the export dialog's band-count
+/// control re-fits on every change, and a repeat value should be instant, not a second SLSQP pass.
 pub(crate) type ExportCache = BoundedCache<ExportKey, FitResult>;
 
 fn preamp_db(achieved_curve: &[f64]) -> f64 {

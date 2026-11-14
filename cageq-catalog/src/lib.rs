@@ -94,18 +94,39 @@ pub(crate) fn http_get_binary(url: &str) -> Result<Vec<u8>, CatalogError> {
 /// folded to `__`) so it reads and writes the same on-disk cache files the sidecar's
 /// own `_cached_download` does.
 pub(crate) fn cached_download(rel_path: &str) -> Result<Vec<u8>, CatalogError> {
+    download(rel_path, false)
+}
+
+/// [`cached_download`], or with `refresh` a fresh download whatever the cache holds (a refresh of
+/// the catalogue has to see files that changed upstream, not the copy cached the first time).
+///
+/// The cache is written beside the file and renamed into place, so an app killed mid-write
+/// can't leave a truncated copy that every later fetch would trust; and a cache that can't be
+/// written (a full disk, a name Windows won't take) costs only the caching, not the fetch.
+pub(crate) fn download(rel_path: &str, refresh: bool) -> Result<Vec<u8>, CatalogError> {
     let safe = rel_path.replace(['/', '\\'], "__");
     let cache_path = cache_dir()?.join("files").join(&safe);
-    if let Some(parent) = cache_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if cache_path.exists() {
-        return Ok(std::fs::read(&cache_path)?);
+    if !refresh && let Ok(data) = std::fs::read(&cache_path) {
+        return Ok(data);
     }
     let url = format!("{GH_RAW}/{}", urlencode_path(rel_path));
     let data = http_get_binary(&url)?;
-    std::fs::write(&cache_path, &data)?;
+    if let Err(e) = write_cache(&cache_path, &data) {
+        eprintln!("[cageq-catalog] could not cache {rel_path}: {e}");
+    }
     Ok(data)
+}
+
+fn write_cache(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp-{}", std::process::id()));
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// `FrequencyResponse.read_csv`'s own decode fallback (`frequency_response.py:108-113`):

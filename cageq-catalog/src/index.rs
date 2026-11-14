@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{cache_dir, cached_download, decode_text, http_get_binary, CatalogError};
+use crate::{cache_dir, decode_text, download, http_get_binary, CatalogError};
 
 const GH_API: &str = "https://api.github.com/repos/jaakkopasanen/AutoEq";
 /// `ThreadPoolExecutor(max_workers=min(12, len(sources)))` (`sidecar_dsp.py:187`) — a
@@ -55,8 +55,10 @@ fn cached_index<T: Serialize + for<'de> Deserialize<'de>>(cache_file: &str, refr
 /// source_name, name, form, rig). Best-effort — an empty map on a missing file (a
 /// source with no `name_index.tsv`, a 404) or any parse problem, exactly like the
 /// Python version's blanket `except Exception: return {}`.
-fn rig_map_for_source(source: &str) -> HashMap<(String, String), String> {
-    let Ok(bytes) = cached_download(&format!("measurements/{source}/name_index.tsv")) else {
+fn rig_map_for_source(source: &str, refresh: bool) -> HashMap<(String, String), String> {
+    // Fresh on a refresh: from the cache, a headphone added upstream since it was first cached
+    // got its index entry but no rig.
+    let Ok(bytes) = download(&format!("measurements/{source}/name_index.tsv"), refresh) else {
         return HashMap::new();
     };
     let text = decode_text(&bytes);
@@ -76,7 +78,7 @@ fn rig_map_for_source(source: &str) -> HashMap<(String, String), String> {
     rigs
 }
 
-fn rig_maps_for(sources: &[String]) -> HashMap<String, HashMap<(String, String), String>> {
+fn rig_maps_for(sources: &[String], refresh: bool) -> HashMap<String, HashMap<(String, String), String>> {
     if sources.is_empty() {
         return HashMap::new();
     }
@@ -85,7 +87,7 @@ fn rig_maps_for(sources: &[String]) -> HashMap<String, HashMap<(String, String),
     std::thread::scope(|scope| {
         let handles: Vec<_> = sources
             .chunks(chunk_size)
-            .map(|chunk| scope.spawn(move || chunk.iter().map(|s| (s.clone(), rig_map_for_source(s))).collect::<Vec<_>>()))
+            .map(|chunk| scope.spawn(move || chunk.iter().map(|s| (s.clone(), rig_map_for_source(s, refresh))).collect::<Vec<_>>()))
             .collect();
         handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
     })
@@ -137,7 +139,7 @@ pub fn build_index(refresh: bool) -> Result<Vec<HeadphoneEntry>, CatalogError> {
         let mut sources: Vec<String> = index.iter().map(|e| e.source.clone()).collect();
         sources.sort();
         sources.dedup();
-        let rig_maps = rig_maps_for(&sources);
+        let rig_maps = rig_maps_for(&sources, refresh);
         for e in &mut index {
             if let Some(map) = rig_maps.get(&e.source)
                 && let Some(rig) = map.get(&(e.form_factor.clone(), e.name.clone()))

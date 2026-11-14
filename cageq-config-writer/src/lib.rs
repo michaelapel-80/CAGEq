@@ -338,7 +338,7 @@ fn line_in_block(start: usize, block: Option<(usize, usize)>) -> bool {
 
 /// The trimmed foreign active directives, outside the CAGEq block (pure).
 fn find_foreign_directives(text: &str) -> Vec<String> {
-    let block = find_marker_range(text);
+    let block = find_marker_range(text, CAGEQ_FILENAME);
     let mut out = Vec::new();
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
@@ -354,7 +354,7 @@ fn find_foreign_directives(text: &str) -> Vec<String> {
 
 /// Prefix each foreign active directive with the disable marker (pure). `None` if nothing to do.
 fn disable_foreign(text: &str) -> Option<String> {
-    let block = find_marker_range(text);
+    let block = find_marker_range(text, CAGEQ_FILENAME);
     let mut changed = false;
     let mut out = String::with_capacity(text.len() + DISABLED_PREFIX.len());
     let mut offset = 0usize;
@@ -592,7 +592,7 @@ fn render_include_block(cageq_filename: &str) -> String {
 /// Everything outside the block is preserved byte-for-byte.
 fn splice_include(current: &str, cageq_filename: &str) -> Option<String> {
     let block = render_include_block(cageq_filename);
-    match find_marker_range(current) {
+    match find_marker_range(current, cageq_filename) {
         Some((start, end)) => {
             if &current[start..end] == block.as_str() {
                 None // already exactly right
@@ -619,19 +619,30 @@ fn splice_include(current: &str, cageq_filename: &str) -> Option<String> {
 /// Inclusive byte range of an existing CAGEq marker block: from the start of the
 /// BEGIN line to just past the END line's newline. Guards against a marker string
 /// appearing mid-line rather than as an actual marker.
-fn find_marker_range(text: &str) -> Option<(usize, usize)> {
+///
+/// A BEGIN with no END after it (the END line deleted by hand) is still our block: the BEGIN
+/// line, and the `Include:` line right after it if it is ours. Treated as no block at all, a
+/// second block was appended — the correction included twice, so applied twice — and the apply
+/// after that took the first BEGIN to the new END as one block, deleting the user's own lines
+/// in between.
+fn find_marker_range(text: &str, cageq_filename: &str) -> Option<(usize, usize)> {
     let begin = text
         .match_indices(INCLUDE_BEGIN)
         .map(|(i, _)| i)
         .find(|&i| is_line_start(text, i))?;
+    let line_end = |from: usize| text[from..].find('\n').map_or(text.len(), |nl| from + nl + 1);
 
     let end = text[begin..]
         .match_indices(INCLUDE_END)
         .map(|(i, _)| begin + i)
-        .find(|&i| is_line_start(text, i))?;
-
-    let end_line_end = text[end..].find('\n').map_or(text.len(), |nl| end + nl + 1);
-    Some((begin, end_line_end))
+        .find(|&i| is_line_start(text, i));
+    let Some(end) = end else {
+        let after_begin = line_end(begin);
+        let next = line_end(after_begin);
+        let ours = text[after_begin..next].trim() == format!("Include: {cageq_filename}");
+        return Some((begin, if ours { next } else { after_begin }));
+    };
+    Some((begin, line_end(end)))
 }
 
 fn is_line_start(text: &str, idx: usize) -> bool {
@@ -674,31 +685,44 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     loop {
         match try_atomic_write(target, bytes) {
             Ok(()) => return Ok(()),
-            Err(e) if attempt < WRITE_ATTEMPTS && is_transient_lock(&e) => {
+            Err((step, e)) if attempt < WRITE_ATTEMPTS && is_transient_lock(step, &e) => {
                 std::thread::sleep(WRITE_BACKOFF * attempt);
                 attempt += 1;
             }
-            Err(e) => return Err(e.into()),
+            Err((_, e)) => return Err(e.into()),
         }
     }
 }
 
+/// Which half of [`try_atomic_write`] failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteStep {
+    /// Creating the fresh temp file.
+    Temp,
+    /// Renaming it over the target.
+    Rename,
+}
+
 /// One write+rename to a fresh sibling temp. Cleans up its temp on a failed rename.
-fn try_atomic_write(target: &Path, bytes: &[u8]) -> io::Result<()> {
+fn try_atomic_write(target: &Path, bytes: &[u8]) -> Result<(), (WriteStep, io::Error)> {
     let tmp = temp_sibling(target);
-    fs::write(&tmp, bytes)?;
+    fs::write(&tmp, bytes).map_err(|e| (WriteStep::Temp, e))?;
     if let Err(e) = fs::rename(&tmp, target) {
         let _ = fs::remove_file(&tmp); // best-effort cleanup
-        return Err(e);
+        return Err((WriteStep::Rename, e));
     }
     Ok(())
 }
 
 /// Is this the kind of Windows "another process has the file open" error that clears on
-/// its own? Covers `PermissionDenied` (ERROR_ACCESS_DENIED, 5) plus the raw sharing/lock
-/// violations (32/33) that don't map to a named `ErrorKind`. Non-Windows: only the kind.
-fn is_transient_lock(e: &io::Error) -> bool {
-    e.kind() == io::ErrorKind::PermissionDenied || matches!(e.raw_os_error(), Some(5 | 32 | 33))
+/// its own? The raw sharing/lock violations (32/33) at either step, and access denied
+/// (`PermissionDenied`, ERROR_ACCESS_DENIED, 5) only on the rename, where it is the reader
+/// still holding the target. On the temp — a brand-new file no one else can have open — it is
+/// a directory CAGEq may not write to, which retrying only delayed (every write, the fail-safe's
+/// included, waited out the whole retry budget before failing).
+fn is_transient_lock(step: WriteStep, e: &io::Error) -> bool {
+    let denied = e.kind() == io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(5);
+    matches!(e.raw_os_error(), Some(32 | 33)) || (denied && step == WriteStep::Rename)
 }
 
 /// Retry budget for the transient-reader race above: up to 8 tries with a growing backoff
@@ -733,13 +757,13 @@ mod tests {
     #[test]
     fn transient_lock_errors_are_retried_but_real_failures_are_not() {
         // The Windows "another process has it open" family retries…
-        assert!(is_transient_lock(&io::Error::from_raw_os_error(5))); // ERROR_ACCESS_DENIED
-        assert!(is_transient_lock(&io::Error::from_raw_os_error(32))); // ERROR_SHARING_VIOLATION
-        assert!(is_transient_lock(&io::Error::from_raw_os_error(33))); // ERROR_LOCK_VIOLATION
-        assert!(is_transient_lock(&io::Error::new(io::ErrorKind::PermissionDenied, "x")));
+        assert!(is_transient_lock(WriteStep::Rename, &io::Error::from_raw_os_error(5))); // ERROR_ACCESS_DENIED
+        assert!(is_transient_lock(WriteStep::Rename, &io::Error::from_raw_os_error(32))); // ERROR_SHARING_VIOLATION
+        assert!(is_transient_lock(WriteStep::Rename, &io::Error::from_raw_os_error(33))); // ERROR_LOCK_VIOLATION
+        assert!(is_transient_lock(WriteStep::Rename, &io::Error::new(io::ErrorKind::PermissionDenied, "x")));
         // …while genuine, non-transient failures surface immediately (no wasted budget).
-        assert!(!is_transient_lock(&io::Error::from(io::ErrorKind::NotFound)));
-        assert!(!is_transient_lock(&io::Error::from(io::ErrorKind::InvalidData)));
+        assert!(!is_transient_lock(WriteStep::Rename, &io::Error::from(io::ErrorKind::NotFound)));
+        assert!(!is_transient_lock(WriteStep::Rename, &io::Error::from(io::ErrorKind::InvalidData)));
     }
 
     #[test]
@@ -932,5 +956,30 @@ mod tests {
         assert_eq!(caps.min_write_spacing, EQAPO_MIN_WRITE_SPACING, "reload spacing");
         assert!(!caps.owns_transitions, "EqAPO's crossfade is cold + fixed-length; the core morphs");
         assert!(caps.manages_foreign_config, "config.txt is shared with other tools");
+    }
+
+    // --- Found by the 2026-11-14 code review.
+
+    /// A block whose END line was deleted by hand is still ours: replaced in place, not left
+    /// behind with a second block appended (the correction included twice, and the next apply
+    /// swallowing the user's lines between the two).
+    #[test]
+    fn a_block_missing_its_end_line_is_replaced_in_place() {
+        let orphan = format!("Preamp: -3 dB{NL}{INCLUDE_BEGIN}{NL}Include: {CAGEQ_FILENAME}{NL}Filter: ON PK Fc 100 Hz Gain 2 dB Q 1{NL}");
+        let out = splice_include(&orphan, CAGEQ_FILENAME).expect("the block needs repairing");
+        assert_eq!(out.matches(&format!("Include: {CAGEQ_FILENAME}")).count(), 1, "{out}");
+        assert!(out.contains("Preamp: -3 dB") && out.contains("Filter: ON PK Fc 100 Hz"), "the user's lines must stay: {out}");
+        assert_eq!(splice_include(&out, CAGEQ_FILENAME), None, "and it's settled after one repair");
+    }
+
+    /// Access denied creating the fresh temp file is a directory CAGEq may not write to, not
+    /// a reader holding the file: not retried. On the rename it is, as are sharing violations.
+    #[test]
+    fn only_a_held_file_is_retried() {
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert!(!is_transient_lock(WriteStep::Temp, &denied));
+        assert!(is_transient_lock(WriteStep::Rename, &denied));
+        assert!(is_transient_lock(WriteStep::Temp, &io::Error::from_raw_os_error(32)));
+        assert!(!is_transient_lock(WriteStep::Rename, &io::Error::from(io::ErrorKind::NotFound)));
     }
 }
