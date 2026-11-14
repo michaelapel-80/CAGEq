@@ -4,9 +4,8 @@
 
 .DESCRIPTION
     Builds CAGEqApo.dll (C++ shim + Rust core) and cageq-apo-setup.exe, then copies both into
-    src-tauri\apo\, which tauri.conf.json ships as a resource. Same shape as build-sidecar.ps1:
-    a deliberate maintainer step rather than something `tauri build` triggers, because the DLL
-    needs the MSVC toolchain.
+    src-tauri\apo\, which tauri.conf.json ships as a resource. A deliberate maintainer step
+    rather than something `tauri build` triggers, because the DLL needs the MSVC toolchain.
 
     Both files must land in the SAME directory: the helper looks for the DLL beside itself,
     which is what lets `register` install it without being told a path.

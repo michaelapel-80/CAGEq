@@ -89,6 +89,9 @@ elseif (Test-Path $backup) {
 
     "Restored effect slots from $backup"
     Get-Content $backup | ForEach-Object { "    $_" }
+    # Used up: register.ps1 only takes a backup when there is none, so the next register has to
+    # find none to record the endpoint as it is then.
+    Remove-Item $backup, (Join-Path $PSScriptRoot "fx-backup-$EndpointId.reg") -ErrorAction SilentlyContinue
 }
 else {
     # No backup (registered by hand, or it was deleted): clear our CLSID out of every slot

@@ -58,7 +58,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: cageq-app/package-lock.json
 
@@ -128,18 +128,29 @@ jobs:
       # (the first attempt shipped a stale-versioned installer, caught and fixed, then re-run):
       # `action-gh-release` below attaches to whatever release already exists for this tag rather
       # than replacing it, so the second run's correct asset landed *next to* the first run's
-      # wrong one instead of instead of it. Deleting any existing release for this tag first makes
-      # every publish a clean slate regardless of how many times this workflow ever runs against
-      # it — `gh release delete` errors when there's nothing to delete (the normal, first-time
-      # case), which the trailing `exit 0` swallows on purpose.
-      - name: Remove any existing release for this tag (idempotent publish)
+      # wrong one instead of instead of it. Removing the existing release's assets first makes every
+      # publish land exactly one installer, however many times this runs against a tag. Its assets,
+      # not the release: deleting the whole release up front left a tag with no release at all if
+      # the publish below then failed. And only "no release yet" (the normal, first-time case) is
+      # let through — any other failure stops here, rather than publishing next to an old asset.
+      - name: Remove any existing assets for this tag (idempotent publish)
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete "${{ github.ref_name }}" --yes --repo "${{ github.repository }}"
-          exit 0
+          $tag = "${{ github.ref_name }}"
+          $repo = "${{ github.repository }}"
+          $json = gh release view $tag --repo $repo --json assets 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            if ("$json" -match 'release not found') { exit 0 }
+            Write-Error "gh release view failed: $json"
+            exit 1
+          }
+          foreach ($asset in ($json | ConvertFrom-Json).assets) {
+            gh release delete-asset $tag $asset.name --yes --repo $repo
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')

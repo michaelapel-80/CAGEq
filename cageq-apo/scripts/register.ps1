@@ -126,12 +126,20 @@ $v = $existing.$enh
 if ($null -eq $v) { $v = '<absent>' }
 $lines += "enh=$v"
 
-Set-Content -Path $backup -Value $lines -Encoding UTF8
-"Backed up effect slots -> $backup"
-$lines | ForEach-Object { "    $_" }
+# Only the first time: a second run (a retry, or another -Slot) would otherwise back up the
+# state the first one left — CAGEq already attached — and unregister.ps1 would then "restore"
+# that, leaving a reference to an APO it has just unregistered. unregister.ps1 deletes the
+# backup once it has restored it, so the next register takes a fresh one.
+if (Test-Path $backup) {
+    "Keeping the existing backup from the first register: $backup"
+} else {
+    Set-Content -Path $backup -Value $lines -Encoding UTF8
+    "Backed up effect slots -> $backup"
+    $lines | ForEach-Object { "    $_" }
 
-& reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$EndpointId\FxProperties" `
-    (Join-Path $PSScriptRoot "fx-backup-$EndpointId.reg") /y 2>&1 | Out-Null
+    & reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$EndpointId\FxProperties" `
+        (Join-Path $PSScriptRoot "fx-backup-$EndpointId.reg") /y 2>&1 | Out-Null
+}
 
 # 3) Attach. Effect-slot property GUID; index picks the slot.
 $idx = @{ LFX = '1'; GFX = '2'; SFX = '5'; MFX = '6'; EFX = '7' }[$Slot]

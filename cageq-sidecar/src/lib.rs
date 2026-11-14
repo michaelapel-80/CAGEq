@@ -9,11 +9,10 @@
 //!   * killing the child on `Drop` so we never orphan a `python.exe`.
 //!
 //! What it deliberately does NOT own:
-//!   * timeouts / liveness. If the sidecar hangs, `call` blocks. Deciding "it has
-//!     been too long, kill it and fall to the safe state" is the fail-safe
-//!     watchdog's job — a separate process, precisely so it can act even
-//!     if this one is stuck. Keeping the transport timeout-free keeps the two
-//!     concerns from bleeding into each other.
+//!   * timeouts / liveness. If the sidecar hangs, `call` blocks, and nothing else steps in.
+//!     The app no longer runs the sidecar at all (the fit, the catalogue and the export moved
+//!     to Rust); it is here for the tests that hold the Rust ports to the live `autoeq`
+//!     package, where a hung test is the signal.
 //!   * the real DSP. We talk to `python/sidecar_stub.py`, a stand-in that speaks
 //!     the same protocol with canned answers. The real AutoEq engine replaces
 //!     the stub's method bodies, not this code.
@@ -135,31 +134,12 @@ impl Sidecar {
         Self::spawn_command(cmd)
     }
 
-    /// Launch a self-contained sidecar **executable** (the PyInstaller-frozen bundle)
-    /// directly — no interpreter, no script argument, no bundled Python needed on the
-    /// target machine. Speaks the same line-delimited JSON-RPC over stdio.
-    pub fn spawn_program(program: &Path) -> Result<Self, SidecarError> {
-        Self::spawn_command(Command::new(program))
-    }
-
     /// Shared spawn path: pipe stdio, wrap in `SharedChild`, and start the stderr pump.
     fn spawn_command(mut cmd: Command) -> Result<Self, SidecarError> {
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        // Windows: the frozen sidecar is a console-subsystem exe, so launching it would pop a
-        // console window next to the (windowed) main app in a release build. CREATE_NO_WINDOW
-        // runs it without one; stdio still flows through the pipes configured above. (In dev
-        // the child just shared the app's existing console, so this was invisible.)
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        // SharedChild wraps the process so kill()/wait() work from ANY thread via a
-        // shared OS handle — the capability the watchdog needs to force-unblock a
-        // hung read, and that std's Child (kill takes &mut self) cannot provide.
+        // SharedChild wraps the process so kill()/wait() work through a shared OS handle,
+        // which `Drop` uses to kill a child still mid-call.
         let proc = Arc::new(SharedChild::spawn(&mut cmd).map_err(SidecarError::Spawn)?);
 
         // Take the piped handles out of the shared process; guaranteed Some right
@@ -204,21 +184,29 @@ impl Sidecar {
         self.stdin.flush()?;
 
         // --- receive ---
-        let mut buf = String::new();
-        // read_line returns Ok(0) only at EOF: the child closed stdout, i.e. exited.
-        if self.stdout.read_line(&mut buf)? == 0 {
-            return Err(SidecarError::Exited);
-        }
-        let resp: Response = serde_json::from_str(buf.trim_end())?;
-
-        // Even one-at-a-time, checking the id catches a desynced stream early
-        // rather than letting a stale reply masquerade as this call's answer.
-        if resp.id != id {
-            return Err(SidecarError::Protocol(format!(
-                "reply id {} != request id {id}",
-                resp.id
-            )));
-        }
+        // Until this call's own reply. A line that isn't a reply (a library printing to stdout)
+        // and a reply to an earlier call (left in the pipe when that call failed on such a line)
+        // are skipped: failing on them left every later call reading the one before's reply,
+        // the sidecar unusable for good.
+        let resp = loop {
+            let mut buf = String::new();
+            // read_line returns Ok(0) only at EOF: the child closed stdout, i.e. exited.
+            if self.stdout.read_line(&mut buf)? == 0 {
+                return Err(SidecarError::Exited);
+            }
+            let Ok(resp) = serde_json::from_str::<Response>(buf.trim_end()) else {
+                eprintln!("[sidecar] skipping a stdout line that isn't a reply: {}", buf.trim_end());
+                continue;
+            };
+            if resp.id < id {
+                continue;
+            }
+            // A reply to a request not yet sent is a stream out of step: an error, not a skip.
+            if resp.id != id {
+                return Err(SidecarError::Protocol(format!("reply id {} != request id {id}", resp.id)));
+            }
+            break resp;
+        };
         match (resp.result, resp.error) {
             (_, Some(e)) => Err(SidecarError::Remote { code: e.code, message: e.message }),
             (Some(v), None) => Ok(v),
@@ -243,39 +231,6 @@ impl Sidecar {
     pub fn shutdown(mut self) {
         let _ = self.call("shutdown", Value::Null);
         // falling out of scope runs Drop, which kills (if needed) and waits.
-    }
-}
-
-impl Sidecar {
-    /// A cheap, cloneable handle that can kill or wait on the child from **any**
-    /// thread — the capability std's `Child` lacks. The watchdog holds one so it can
-    /// force-unblock a hung read from its monitor thread (killing the child closes
-    /// the pipes, so the driver's blocked `read_line` returns EOF).
-    pub fn killer(&self) -> Killer {
-        Killer(Arc::clone(&self.proc))
-    }
-}
-
-/// See [`Sidecar::killer`]. Clone freely; every clone controls the same process.
-#[derive(Clone)]
-pub struct Killer(Arc<SharedChild>);
-
-impl Killer {
-    /// Terminate the child. Killing an already-exited process is a harmless error
-    /// the caller can ignore.
-    pub fn kill(&self) -> std::io::Result<()> {
-        self.0.kill()
-    }
-
-    /// Block until the child exits — event-based, no polling. Lets a supervisor
-    /// detect a crash the instant it happens rather than on the next interaction.
-    pub fn wait(&self) -> std::io::Result<()> {
-        self.0.wait().map(|_| ())
-    }
-
-    /// The OS process id, for logging/diagnostics.
-    pub fn pid(&self) -> u32 {
-        self.0.id()
     }
 }
 

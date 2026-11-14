@@ -51,6 +51,16 @@ fn spawn() -> Sidecar {
     Sidecar::spawn(&find_python(), &script_path()).expect("spawn sidecar stub")
 }
 
+/// A stdout line that isn't a reply is skipped, and the calls after it still get their own
+/// replies: the stream used to stay one reply behind for good.
+#[test]
+fn a_stray_stdout_line_does_not_desync_the_stream() {
+    let mut sc = spawn();
+    assert_eq!(sc.call("stray_stdout", Value::Null).expect("stray_stdout")["ok"], true);
+    sc.ping().expect("the next call gets its own reply");
+    sc.ping().expect("and the one after");
+}
+
 #[test]
 fn ping_round_trips() {
     let mut sc = spawn();

@@ -13,9 +13,7 @@ Run manually to poke at it:
 """
 import sys
 import os
-import time
 import json
-import threading
 
 
 def handle(method, params):
@@ -23,27 +21,16 @@ def handle(method, params):
     if method == "ping":
         return {"pong": True}
 
-    if method == "sleep_ms":
-        # Block this long before replying — stands in for a slow AutoEq fit, and
-        # lets the watchdog tests drive the busy-mode response timeout.
-        ms = int(params.get("ms", 0))
-        time.sleep(ms / 1000.0)
-        return {"slept_ms": ms}
+    if method == "stray_stdout":
+        # A library printing to stdout ahead of the reply: a line the client has to skip.
+        print("some library chatter")
+        return {"ok": True}
 
     if method == "exit":
         # Simulate a crash: leave *without* replying, so the Rust side sees EOF
         # (SidecarError::Exited). os._exit skips cleanup, like a real hard crash.
         sys.stdout.flush()
         os._exit(int(params.get("code", 1)))
-
-    if method == "die_after_ms":
-        # Reply immediately, then crash later from a timer — simulates a process
-        # that dies while the Rust side is *idle* (between heartbeats), so only the
-        # event-based exit waiter can notice it promptly.
-        ms = int(params.get("ms", 0))
-        code = int(params.get("code", 1))
-        threading.Timer(ms / 1000.0, lambda: os._exit(code)).start()
-        return {"scheduled_ms": ms}
 
     if method == "calculate_filters":
         # Canned answer, shaped exactly like cageq-config-writer's DeviceConfig
