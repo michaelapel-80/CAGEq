@@ -269,6 +269,24 @@ pub fn ack(block: &ControlBlock) -> (u32, u32) {
     ((packed >> 32) as u32, packed as u32)
 }
 
+/// Wait up to `timeout` for the APO's verdict on update `seq` (an `ACK_` code), or `None` if it
+/// hasn't looked by then. The APO reads the block once per audio buffer, so with audio flowing
+/// that is at most a buffer away; nothing flowing (an open stream playing nothing) means no
+/// answer at all, which a writer has to treat the way it did before verdicts existed.
+pub fn await_verdict(block: &ControlBlock, seq: u32, timeout: std::time::Duration) -> Option<u32> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let (acked, code) = ack(block);
+        if acked == seq {
+            return Some(code);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 /// Take a consistent snapshot, if there is one.
 ///
 /// **Runs on the real-time thread**: bounded work, no allocation, no locking, and it never
@@ -419,6 +437,23 @@ mod tests {
         assert_eq!(ack(&b), (seq2, ACK_TOO_LOUD));
         assert_ne!(seq, seq2, "each publish must be separately acknowledgeable");
     }
+    /// The verdict a writer waits for: the APO's answer to its own update, not an older one,
+    /// and nothing at all once the wait runs out.
+    #[test]
+    fn a_writer_can_wait_for_the_verdict_on_its_own_update() {
+        let b = zeroed();
+        set_ack(&b, 4, ACK_APPLIED);
+        let wait = std::time::Duration::from_millis(30);
+        assert_eq!(await_verdict(&b, 6, wait), None, "an older update's verdict is not this one's");
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                set_ack(&b, 6, ACK_TOO_LOUD);
+            });
+            assert_eq!(await_verdict(&b, 6, std::time::Duration::from_secs(2)), Some(ACK_TOO_LOUD));
+        });
+    }
+
     fn zeroed() -> ControlBlock {
         ControlBlock {
             magic: 0,

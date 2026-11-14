@@ -732,7 +732,9 @@ struct ApoSetupDto {
 }
 
 /// Read the APO setup state. No elevation, no prompt.
-#[tauri::command]
+// Async (so off the main thread): it can sleep through a heartbeat sample and reapply a whole
+// correction after a backend swap, and as a plain command either would freeze the window.
+#[tauri::command(async)]
 fn apo_setup_status(
     app: tauri::AppHandle,
     endpoint: Option<String>,
@@ -789,7 +791,8 @@ fn apo_setup_status(
 /// `action` is a command string as produced by `next_step` (`"open-gate"`,
 /// `"attach {guid}"`, …), so the frontend never constructs one itself — it echoes back what
 /// the status told it to do.
-#[tauri::command]
+// Async (so off the main thread): it waits on the UAC prompt and an audio service restart.
+#[tauri::command(async)]
 fn apo_setup_run(app: tauri::AppHandle, action: String) -> Result<String, String> {
     use cageq_apo_backend::setup::{self, Action, SetupError};
 
@@ -1301,7 +1304,8 @@ struct LoudnessUpdate {
 /// Comparison/FinalVolume mode), persist them, and re-apply the current config so the change
 /// takes effect immediately. Both dB fields are clamped to attenuation only (−40..0 dB): a
 /// positive value would be a boost, which the safety model must never allow.
-#[tauri::command]
+// Async (so off the main thread): it blocks for a volume ramp.
+#[tauri::command(async)]
 fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<LoudnessUpdate, String> {
     match state.inner() {
         Backend::Failed(e) => Err(e.clone()),
@@ -1320,9 +1324,23 @@ fn set_loudness(settings: LoudnessSettings, state: State<Backend>) -> Result<Lou
             update_settings(|s| s.loudness = settings); // persist without wiping the selection
             // update_loudness sets the settings and pushes them live — ramping a volume
             // increase, or writing directly for a decrease. Blocks for the ramp.
-            let applied = core.update_loudness(settings).and_then(|r| r.ok()).map(|a| apply_result(a, eq));
+            let applied = loudness_applied(core.update_loudness(settings), eq)?;
             Ok(LoudnessUpdate { settings, applied })
         }
+    }
+}
+
+/// What a loudness change re-applied: nothing (nothing was active), the new correction, or the
+/// error that kept it from applying. The error used to be folded into "nothing", so a refused
+/// or unwritable change looked as if it had taken effect while the old preamp kept playing.
+fn loudness_applied(
+    reapplied: Option<Result<Applied, cageq_core::CoreError>>,
+    eq: &Arc<dyn EqBackend>,
+) -> Result<Option<ApplyResult>, String> {
+    match reapplied {
+        None => Ok(None),
+        Some(Ok(applied)) => Ok(Some(apply_result(applied, eq))),
+        Some(Err(e)) => Err(e.to_string()),
     }
 }
 
@@ -1468,23 +1486,55 @@ fn load_settings() -> AppSettings {
 }
 
 fn load_settings_from(path: &Path) -> AppSettings {
-    match std::fs::read_to_string(path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-        Err(_) => AppSettings::default(),
+    try_load_settings(path).unwrap_or_default()
+}
+
+/// The settings at `path`: defaults when there is no file, and an error when there is one
+/// that can't be read right now (locked, say), so nothing gets saved over it.
+///
+/// A file that reads but doesn't parse (cut short by a crash mid-write, or written by a newer
+/// build with a value this one doesn't know) is moved aside to a numbered
+/// `settings.unreadable-N.json` first, then treated as missing. It used to be treated as missing
+/// in place, and the next ordinary save wrote the defaults over it: the preset library, resume
+/// state and everything else, gone for good.
+fn try_load_settings(path: &Path) -> std::io::Result<AppSettings> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AppSettings::default()),
+        Err(e) => return Err(e),
+    };
+    match serde_json::from_str(&text) {
+        Ok(settings) => Ok(settings),
+        Err(parse) => {
+            let kept = unreadable_settings_path(path);
+            std::fs::rename(path, &kept)?;
+            eprintln!("[cageq] settings unreadable ({parse}); kept as {} and starting from defaults", kept.display());
+            Ok(AppSettings::default())
+        }
     }
 }
 
-/// Persist settings (best-effort; creates the parent dir).
-fn save_settings(s: &AppSettings) -> std::io::Result<()> {
-    save_settings_to(&settings_path(), s)
+/// The first free `<stem>.unreadable-N.json` beside `path`: never one already there, so an
+/// older unreadable copy is never overwritten by a newer one.
+fn unreadable_settings_path(path: &Path) -> PathBuf {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("settings");
+    (1u32..)
+        .map(|n| path.with_file_name(format!("{stem}.unreadable-{n}.json")))
+        .find(|p| !p.exists())
+        .expect("an unused name")
 }
 
+/// Persist settings (best-effort; creates the parent dir).
 fn save_settings_to(path: &Path, s: &AppSettings) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let json = serde_json::to_string_pretty(s).map_err(std::io::Error::other)?;
-    std::fs::write(path, json)
+    // Written beside it and renamed over it, so a crash mid-write leaves the old file whole
+    // rather than a truncated one.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Serializes the load-modify-save cycle below across Tauri commands, which each run on their
@@ -1499,10 +1549,16 @@ static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Update one field of the persisted settings without clobbering the others
 /// (load-modify-save). Best-effort; a failed write just loses the update.
 fn update_settings(edit: impl FnOnce(&mut AppSettings)) {
+    update_settings_at(&settings_path(), edit)
+}
+
+/// [`update_settings`] on the file at `path`. A file that exists but can't be read right now
+/// is left alone: saving over it would replace everything in it with this one edit on defaults.
+fn update_settings_at(path: &Path, edit: impl FnOnce(&mut AppSettings)) {
     let _guard = SETTINGS_LOCK.lock().unwrap();
-    let mut s = load_settings();
+    let Ok(mut s) = try_load_settings(path) else { return };
     edit(&mut s);
-    let _ = save_settings(&s);
+    let _ = save_settings_to(path, &s);
 }
 
 // --- backend setup --------------------------------------------------------
@@ -1604,7 +1660,12 @@ fn reconcile_backend(switch: &SwitchableBackend, core: &Core) {
     // filesystem path at all — not something to feed back into `EqApoBackend::new`.
     let (config_dir, _) = resolve_config_dir();
     switch.replace(choose_backend(&config_dir));
-    let _ = core.reapply(); // push whatever's already active through the newly-loaded backend
+    // Push whatever's already active through the newly-loaded backend, and remember what it
+    // wrote: the next launch's startup check compares against this, and left at the old
+    // backend's hash it would report CAGEq's own files as changed outside it.
+    if let Some(Ok(applied)) = core.reapply() {
+        update_settings(|s| s.last_hash = Some(applied.hash));
+    }
 }
 
 /// Build the app's `Backend`: resolve where cageq.txt lives, choose the EQ backend
@@ -1959,6 +2020,64 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A settings file that no longer parses is kept, not replaced by defaults on the next save:
+    /// that save used to wipe the preset library.
+    #[test]
+    fn an_unreadable_settings_file_is_kept_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("cageq-settings-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let broken = r#"{"library":{"presets":[{"id":"p1","name":"Mine"}]},"loudness":{"base_pregain_db":-6.0,"mo"#;
+        std::fs::write(&path, broken).unwrap();
+
+        update_settings_at(&path, |s| s.confirm_final_volume = false);
+
+        let kept = dir.join("settings.unreadable-1.json");
+        assert_eq!(std::fs::read_to_string(&kept).expect("the unreadable file must be kept"), broken);
+        assert!(!load_settings_from(&path).confirm_final_volume, "the edit is saved to a fresh file");
+
+        // A second unreadable file doesn't overwrite the first one kept.
+        std::fs::write(&path, "not json").unwrap();
+        let _ = load_settings_from(&path);
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), broken);
+        assert_eq!(std::fs::read_to_string(dir.join("settings.unreadable-2.json")).unwrap(), "not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A settings file that is there but can't be read (here: a directory in its place) is not
+    /// saved over.
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_not_saved_over() {
+        let path = std::env::temp_dir().join(format!("cageq-settings-locked-{}.json", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        update_settings_at(&path, |s| s.confirm_final_volume = false);
+        assert!(path.is_dir(), "nothing may have been written in its place");
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    /// Saving goes through a temp file and a rename, and leaves no temp file behind.
+    #[test]
+    fn settings_are_saved_whole() {
+        let path = std::env::temp_dir().join(format!("cageq-settings-atomic-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        update_settings_at(&path, |s| s.last_hash = Some("h1".into()));
+        update_settings_at(&path, |s| s.last_hash = Some("h2".into()));
+        assert_eq!(load_settings_from(&path).last_hash.as_deref(), Some("h2"));
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A loudness change whose re-apply failed is an error, not "nothing was applied".
+    #[test]
+    fn a_failed_loudness_reapply_is_reported() {
+        let eq: Arc<dyn EqBackend> = Arc::new(EqApoBackend::new(std::env::temp_dir()));
+        assert_eq!(loudness_applied(None, &eq).map(|a| a.is_none()), Ok(true));
+        let err = loudness_applied(Some(Err(cageq_core::CoreError::DryNotEditable)), &eq);
+        assert!(err.is_err(), "the failure must reach the caller");
     }
 
     /// **The bug this fixes.** `update_settings` used to be a plain load-modify-save with no

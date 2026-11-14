@@ -700,14 +700,34 @@ pub fn perform(_action: &Action) -> Result<(), SetupError> {
 
 #[cfg(windows)]
 fn regsvr32(unregister: bool) -> Result<(), SetupError> {
-    use std::process::Command;
-
     // Audio goes down FIRST, before any file is touched. audiodg maps the APO for as long as
     // it lives, so replacing a registered DLL while audio runs means fighting a file that is
     // in use — which is what made updating the APO a dance of detach, unregister, restart and
     // try again, twice. With the service stopped it is one step, and detaching is not needed
-    // at all to swap the binary.
-    stop_audio()?;
+    // at all to swap the binary. Back on afterwards whatever happened in between: a machine
+    // left silent because a step failed is far worse than the failure itself.
+    with_audio_stopped(stop_audio, || register_with_audio_stopped(unregister), start_audio)
+}
+
+/// Run `body` between `stop` and `start`, and run `start` whether `body` succeeded or not. The
+/// body's error wins over a failure to restart, since it is the one that explains what went
+/// wrong.
+fn with_audio_stopped<T, E>(
+    stop: impl FnOnce() -> Result<(), E>,
+    body: impl FnOnce() -> Result<T, E>,
+    start: impl FnOnce() -> Result<(), E>,
+) -> Result<T, E> {
+    stop()?;
+    let result = body();
+    let started = start();
+    let value = result?;
+    started.map(|()| value)
+}
+
+/// [`regsvr32`]'s steps, while the audio service is down.
+#[cfg(windows)]
+fn register_with_audio_stopped(unregister: bool) -> Result<(), SetupError> {
+    use std::process::Command;
 
     let target = if unregister {
         // Nothing reads this once the DLL itself is gone; removing it is tidiness, not
@@ -743,9 +763,6 @@ fn regsvr32(unregister: bool) -> Result<(), SetupError> {
     // failure in a message box, which nobody will see when it runs from an elevated helper.
     let status = cmd.status().map_err(|e| SetupError::Win32("regsvr32", e))?;
     if !status.success() {
-        // Bring audio back even on failure — leaving the machine silent because a
-        // registration did not take is a far worse outcome than the failure itself.
-        let _ = start_audio();
         return Err(SetupError::HelperFailed(status.code().unwrap_or(-1)));
     }
     if unregister {
@@ -753,7 +770,7 @@ fn regsvr32(unregister: bool) -> Result<(), SetupError> {
         // the registration — the thing actually asked for — is already gone.
         let _ = std::fs::remove_file(&target);
     }
-    start_audio()
+    Ok(())
 }
 
 /// Grant CAGEq's own (unelevated) process write access to the directory its persistent
@@ -910,17 +927,42 @@ fn fx_key(endpoint_id: &str) -> Result<String, SetupError> {
 }
 
 
-/// Record what CAGEq displaced on `endpoint_id`.
+/// Record what CAGEq displaced on `endpoint_id`, added to whatever an earlier attach recorded
+/// there (see [`merge_displaced`]).
 #[cfg(windows)]
 fn remember_displaced(endpoint_id: &str, clsid: &str) -> Result<(), SetupError> {
     use winreg::RegKey;
     use winreg::enums::HKEY_LOCAL_MACHINE;
     let Some(id) = cageq_apo::config::normalize_endpoint_id(endpoint_id) else { return Ok(()) };
+    let merged = merge_displaced(displaced_effect(endpoint_id).as_deref(), clsid);
     let (key, _) = RegKey::predef(HKEY_LOCAL_MACHINE)
         .create_subkey(DISPLACED_KEY)
         .map_err(|e| SetupError::Win32("create the displaced-effect key", e))?;
-    key.set_value(&id, &clsid.to_string())
+    key.set_value(&id, &merged)
         .map_err(|e| SetupError::Win32("record the displaced effect", e))
+}
+
+/// A displaced-effect record (`slot=clsid` pairs, comma separated) with `new`'s pairs added: a
+/// slot in both takes `new`'s, every other slot of `existing` stays. An attach run again (for a
+/// slot it was missing, say) displaces only what is there now, and replacing the record with
+/// that alone lost what the first attach had put aside, so detach could no longer restore it.
+fn merge_displaced(existing: Option<&str>, new: &str) -> String {
+    let pairs = |record: &str| -> Vec<(String, String)> {
+        record
+            .split(',')
+            .filter_map(|entry| entry.split_once('='))
+            .map(|(slot, clsid)| (slot.trim().to_string(), clsid.trim().to_string()))
+            .filter(|(slot, clsid)| !slot.is_empty() && !clsid.is_empty())
+            .collect()
+    };
+    let mut merged = existing.map(pairs).unwrap_or_default();
+    for (slot, clsid) in pairs(new) {
+        match merged.iter_mut().find(|(s, _)| *s == slot) {
+            Some(entry) => entry.1 = clsid,
+            None => merged.push((slot, clsid)),
+        }
+    }
+    merged.iter().map(|(slot, clsid)| format!("{slot}={clsid}")).collect::<Vec<_>>().join(",")
 }
 
 /// Forget the record once it has been put back.
@@ -1218,8 +1260,35 @@ fn reset() -> Result<(), SetupError> {
     // produce silently.
     let mut problems: Vec<String> = Vec::new();
 
-    for d in cageq_backend::list_render_devices() {
-        let path = format!(r"{RENDER_KEY}\{}\FxProperties", d.id);
+    // Every render endpoint the registry knows, not just the active ones `list_render_devices`
+    // returns: headphones unplugged when Reset runs still carry CAGEq's registration, and
+    // whatever it displaced. Only the endpoints with something of CAGEq's to undo are touched.
+    let names: std::collections::HashMap<String, String> =
+        cageq_backend::list_render_devices().into_iter().map(|d| (d.id, d.name)).collect();
+    let ids: Vec<String> = match hklm.open_subkey(RENDER_KEY) {
+        Ok(render) => render.enum_keys().flatten().collect(),
+        Err(e) => {
+            problems.push(format!("could not list the audio endpoints: {e}"));
+            Vec::new()
+        }
+    };
+    for id in ids {
+        let path = format!(r"{RENDER_KEY}\{id}\FxProperties");
+        let name = names.get(&id).cloned().unwrap_or_else(|| id.clone());
+        let registered = hklm.open_subkey(&path).is_ok_and(|fx| {
+            ALL_SLOTS.iter().any(|slot| {
+                fx.get_value::<String, _>(format!("{FX_CLSID_PROP},{slot}"))
+                    .is_ok_and(|v| v.trim().eq_ignore_ascii_case(CLSID))
+            })
+        });
+        if !registered && displaced_effect(&id).is_none() && disabled_sysfx(&id).is_none() {
+            continue;
+        }
+        struct Endpoint {
+            id: String,
+            name: String,
+        }
+        let d = Endpoint { id, name };
         // Ownership may already be ours, but a reset has to work on an endpoint it never
         // successfully attached to.
         if let Err(e) = take_ownership(&path) {
@@ -1260,6 +1329,13 @@ fn reset() -> Result<(), SetupError> {
                 }
             }
             forget_displaced(&d.id);
+        }
+        // And the disabled-system-effects flag, exactly as found, as detach puts it back.
+        if let Some(value) = disabled_sysfx(&d.id) {
+            match fx.set_raw_value(FX_DISABLE_SYSFX, &value) {
+                Ok(()) => forget_disabled_sysfx(&d.id),
+                Err(e) => problems.push(format!("{}: could not restore the disabled-system-effects value: {e}", d.name)),
+            }
         }
     }
 
@@ -2061,4 +2137,41 @@ mod tests {
         }
         assert_eq!(regtype_from_u32(0xFFFF_FFFF), None, "unknown values must not silently pick a variant");
     }
+
+    // --- Found by the 2026-11-14 code review.
+
+    /// Audio comes back whatever the steps in between did. It used to stay off after every
+    /// failure but regsvr32's own.
+    #[test]
+    fn audio_comes_back_after_a_failed_step() {
+        let started = std::cell::Cell::new(false);
+        let r: Result<(), &str> = with_audio_stopped(|| Ok(()), || Err("copy failed"), || {
+            started.set(true);
+            Ok(())
+        });
+        assert_eq!(r, Err("copy failed"), "the step's own error is the one reported");
+        assert!(started.get(), "audio was left off");
+
+        // A failure to restart is reported when the steps themselves succeeded.
+        let r: Result<u8, &str> = with_audio_stopped(|| Ok(()), || Ok(7), || Err("start failed"));
+        assert_eq!(r, Err("start failed"));
+        // And nothing runs if audio wouldn't stop.
+        let ran = std::cell::Cell::new(false);
+        let r: Result<(), &str> = with_audio_stopped(|| Err("stop failed"), || {
+            ran.set(true);
+            Ok(())
+        }, || Ok(()));
+        assert_eq!(r, Err("stop failed"));
+        assert!(!ran.get());
+    }
+
+    /// Attaching again adds to what an earlier attach put aside; it used to replace it.
+    #[test]
+    fn a_second_attach_keeps_what_the_first_displaced() {
+        assert_eq!(merge_displaced(None, "5={eq-apo}"), "5={eq-apo}");
+        assert_eq!(merge_displaced(Some("5={eq-apo},6={other}"), "5={eq-apo-2}"), "5={eq-apo-2},6={other}");
+        assert_eq!(merge_displaced(Some("6={other}"), "13={eq-apo}"), "6={other},13={eq-apo}");
+        assert_eq!(merge_displaced(Some(" 5 = {a} ,, junk"), "6={b}"), "5={a},6={b}", "malformed entries are dropped");
+    }
+
 }

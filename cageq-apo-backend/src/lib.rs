@@ -73,9 +73,13 @@ pub enum ApoBackendError {
     /// equally invisibly (that boundary can't report back to the app at all, see
     /// `cageq_apo_load_config`'s own doc). Surfacing it now, while there's still a channel
     /// open to tell a refusal apart from "nothing playing," is the only chance the app gets.
-    #[error("the correction for {0} was refused by CAGEq's own engine (too many bands, or an unsafe filter) — saved to disk, but not live")]
+    #[error("the correction for {0} was refused by CAGEq's own engine (too many bands, an unsafe filter, or too loud as a whole) — saved to disk, but not live")]
     LivePushRefused(String),
 }
+
+/// How long a live push waits for the engine's verdict (see `cageq_apo::control::await_verdict`):
+/// a buffer is ~10 ms, so with audio flowing the answer is usually back well inside this.
+const VERDICT_WAIT: std::time::Duration = std::time::Duration::from_millis(30);
 
 /// How long a config file's write waits for the endpoint's edits to go quiet before it
 /// actually happens — see [`CageqApoBackend::queue_write`]'s own doc for why it waits at all.
@@ -114,6 +118,13 @@ pub struct CageqApoBackend {
     /// safe-state write, would otherwise silently overwrite the safe state just written.
     /// Shared with the background writer via the same `Arc` `pending` already needs.
     safe_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Held for every config-file write, by the background flush (across draining `pending`,
+    /// the epoch check and the writes) and by [`EqBackend::write_safe_state`] (across the epoch
+    /// bump and its writes). Checking the epoch and writing used to be two separate steps: a
+    /// trip landing between them had its safe-state file overwritten by the correction it was
+    /// meant to remove, and an entry already drained from `pending` but not yet on disk was in
+    /// neither place the trip looks. It also keeps the two from sharing a temp file at once.
+    disk_lock: std::sync::Arc<std::sync::Mutex<()>>,
     /// Wakes the background writer thread on every [`CageqApoBackend::queue_write`] — it
     /// doesn't matter *what* is sent, only that something was; see that thread's own doc for
     /// how the debounce itself works. Dropping this (with `CageqApoBackend` itself) is what
@@ -134,11 +145,13 @@ impl CageqApoBackend {
         let config_dir = config_dir.into();
         let pending = std::sync::Arc::new(std::sync::Mutex::new(PendingMap::new()));
         let safe_epoch = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let disk_lock = std::sync::Arc::new(std::sync::Mutex::new(()));
         let (write_tx, write_rx) = std::sync::mpsc::channel::<()>();
         spawn_debounced_writer(
             config_dir.clone(),
             std::sync::Arc::clone(&pending),
             std::sync::Arc::clone(&safe_epoch),
+            std::sync::Arc::clone(&disk_lock),
             write_rx,
         );
         CageqApoBackend {
@@ -146,6 +159,7 @@ impl CageqApoBackend {
             slots: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending,
             safe_epoch,
+            disk_lock,
             write_tx,
         }
     }
@@ -326,10 +340,7 @@ impl CageqApoBackend {
     /// see [`Self::safe_epoch`]) are put back into `pending` rather than silently dropped, so
     /// the next flush (debounced or explicit) retries them instead of losing the edit outright.
     pub fn flush_pending(&self) -> Result<(), ApoBackendError> {
-        let epoch = self.safe_epoch.load(std::sync::atomic::Ordering::SeqCst);
-        let (failed, first_err) = flush_batch(&self.config_dir, epoch, drain(&self.pending));
-        requeue(&self.pending, failed);
-        match first_err {
+        match flush(&self.config_dir, &self.pending, &self.safe_epoch, &self.disk_lock, true) {
             None => Ok(()),
             Some(e) => Err(e),
         }
@@ -446,13 +457,20 @@ impl CageqApoBackend {
         // asked for, but the caller decides whether a refusal is worth surfacing (`apply_one`
         // does).
         let published = channel.publish(cfg.preamp_db, &coeffs, crossfade);
-        // Vouch for the layout only if it actually reached the block; a refused push left the
-        // block (and so the engine) as it was, which the next push then re-reads.
-        let seq = published.then(|| cageq_apo::control::sequence(channel.block()));
+        // Then the engine's own verdict: the channel's checks see each filter alone, and only
+        // the engine can say whether the chain as a whole is under its loudness ceiling. No
+        // answer in time means nothing is flowing through it right now; that counts as applied,
+        // as it did before verdicts were read, and the engine applies it once audio flows.
+        let seq = cageq_apo::control::sequence(channel.block());
+        let refused = !published
+            || cageq_apo::control::await_verdict(channel.block(), seq, VERDICT_WAIT)
+                == Some(cageq_apo::control::ACK_TOO_LOUD);
+        // Vouch for the layout only if the engine took it; a refused push left the engine as it
+        // was, which the next push then re-reads.
         if let Some(entry) = self.slots.lock().unwrap().get_mut(endpoint_id) {
-            entry.last_seq = seq;
+            entry.last_seq = (!refused).then_some(seq);
         }
-        Ok(if published { PushOutcome::Published } else { PushOutcome::Refused })
+        Ok(if refused { PushOutcome::Refused } else { PushOutcome::Published })
     }
 }
 
@@ -519,19 +537,38 @@ impl EqBackend for CageqApoBackend {
         // check on the read side, so a stale entry lingering in `pending` afterwards (nothing
         // here removes it — the epoch alone is enough) cannot be mistaken for what is on disk
         // either.
-        self.safe_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        //
+        // Under the disk lock (see `disk_lock`), so no flush is between its epoch check and its
+        // write, or holding an entry it has drained but not written, while this runs.
         let safe = safe_state();
         // Both halves matter: the file makes the safe state survive a restart, and the live
         // push makes it take effect *now*, which is the entire point of a fail-safe.
         // Waiting for the next `LockForProcess` would be no fail-safe at all. Written directly
-        // (not queued) — a fail-safe has to land now, not after a debounce window.
-        for id in &self.endpoints_needing_safe_state() {
-            self.write_config(id, &safe).map_err(BackendError::backend)?;
+        // (not queued) — a fail-safe has to land now, not after a debounce window. Every
+        // endpoint, whatever happens to one of them: a file that won't write is no reason to
+        // leave the next endpoint playing, and its own live push is still worth making.
+        let mut first_err = None;
+        let ids = {
+            let _disk = self.disk_lock.lock().unwrap();
+            self.safe_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let ids = self.endpoints_needing_safe_state();
+            for id in &ids {
+                if let Err(e) = self.write_config(id, &safe) {
+                    first_err.get_or_insert(e);
+                }
+            }
+            ids
+        };
+        // Outside the lock: each push waits for the engine's verdict.
+        for id in &ids {
             // `allow_crossfade: false` — see `push_live`'s own doc: only the plain path lands
             // the mute in its own fast fade.
             let _ = self.push_live(id, &safe, false);
         }
-        Ok(())
+        match first_err {
+            None => Ok(()),
+            Some(e) => Err(BackendError::backend(e)),
+        }
     }
 
     fn startup_decision(&self, expected_hash: Option<&str>) -> Result<StartupDecision, BackendError> {
@@ -1088,6 +1125,27 @@ fn flush_batch(
     (failed, first_err)
 }
 
+/// Drain `pending` and write it, all under `disk_lock` (see [`CageqApoBackend::disk_lock`]), with
+/// the epoch read inside it too. Failures go back into `pending` when `requeue_failed`, for the
+/// next flush to retry; the first one is returned.
+fn flush(
+    config_dir: &Path,
+    pending: &std::sync::Mutex<PendingMap>,
+    safe_epoch: &std::sync::atomic::AtomicU64,
+    disk_lock: &std::sync::Mutex<()>,
+    requeue_failed: bool,
+) -> Option<ApoBackendError> {
+    let (failed, first_err) = {
+        let _disk = disk_lock.lock().unwrap();
+        let epoch = safe_epoch.load(std::sync::atomic::Ordering::SeqCst);
+        flush_batch(config_dir, epoch, drain(pending))
+    };
+    if requeue_failed {
+        requeue(pending, failed);
+    }
+    first_err
+}
+
 /// The debounced writer itself: sleeps between pokes from [`CageqApoBackend::queue_write`], and
 /// only actually touches disk once [`WRITE_DEBOUNCE`] has passed with no new poke — see that
 /// method's own doc for why deferring at all is worth doing. One thread per `CageqApoBackend`,
@@ -1097,6 +1155,7 @@ fn spawn_debounced_writer(
     config_dir: PathBuf,
     pending: std::sync::Arc<std::sync::Mutex<PendingMap>>,
     safe_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    disk_lock: std::sync::Arc<std::sync::Mutex<()>>,
     rx: std::sync::mpsc::Receiver<()>,
 ) {
     std::thread::spawn(move || loop {
@@ -1107,9 +1166,7 @@ fn spawn_debounced_writer(
             Ok(()) => continue,
             // Quiet for the full window: whatever is queued has settled — write it.
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let epoch = safe_epoch.load(std::sync::atomic::Ordering::SeqCst);
-                let (failed, _) = flush_batch(&config_dir, epoch, drain(&pending));
-                requeue(&pending, failed);
+                let _ = flush(&config_dir, &pending, &safe_epoch, &disk_lock, true);
             }
             // The backend was dropped. Its `Drop` impl already flushed synchronously before
             // `write_tx` went away, so this is very likely a no-op — but if a `queue_write`
@@ -1118,8 +1175,7 @@ fn spawn_debounced_writer(
                 // Nothing will ever read `pending` again after this, so a failure here (unlike
                 // the timeout arm above) has no next attempt to be requeued for — this really
                 // is the last chance.
-                let epoch = safe_epoch.load(std::sync::atomic::Ordering::SeqCst);
-                let _ = flush_batch(&config_dir, epoch, drain(&pending));
+                let _ = flush(&config_dir, &pending, &safe_epoch, &disk_lock, false);
                 return;
             }
         }
@@ -1138,6 +1194,7 @@ mod tests {
     const EP_LIVE_REFUSED: &str = "{99990001-0001-0001-0001-000000000001}";
     const EP_LIVE_OK: &str = "{99990002-0002-0002-0002-000000000002}";
     const EP_LIVE_ISOLATE_ONLY: &str = "{99990003-0003-0003-0003-000000000003}";
+    const EP_LIVE_TOO_LOUD: &str = "{99990004-0004-0004-0004-000000000004}";
 
     /// A private directory per test, so these never touch the machine's real corrections.
     fn temp_backend(tag: &str) -> (CageqApoBackend, PathBuf) {
@@ -2102,6 +2159,76 @@ mod tests {
         let out = sa.assign(&bands);
         let freqs: Vec<f64> = out.iter().map(|b| b.unwrap().freq_hz).collect();
         assert_eq!(freqs, vec![100.0, 1000.0, 8000.0]);
+    }
+
+    // --- Found by the 2026-11-14 code review.
+
+    /// One endpoint's safe-state file failing to write must not stop the others: the loop used
+    /// to return at the first failure. EP2 sorts first, so it is the one made to fail.
+    #[test]
+    fn a_failed_safe_state_write_does_not_stop_the_others() {
+        let (backend, dir) = temp_backend("safe-partial");
+        backend.apply(&[device(EP, -6.0), device(EP2, -6.0)]).unwrap();
+        backend.flush_pending().unwrap();
+        // A directory where EP2's temp file goes, so its write fails.
+        fs::create_dir_all(config::config_path_in(&dir, EP2).with_extension("cfg.tmp")).unwrap();
+
+        assert!(backend.write_safe_state().is_err(), "the failure must still be reported");
+        let text = fs::read_to_string(config::config_path_in(&dir, EP)).unwrap();
+        assert_eq!(config::parse(&text).unwrap().preamp_db, -120.0, "the endpoint after the failure got no safe state");
+    }
+
+    /// A trip waits for a flush already under way, so the flush can't write a pre-trip
+    /// correction over the safe state between its own epoch check and its write.
+    #[test]
+    fn a_safe_state_trip_waits_for_a_flush_under_way() {
+        let (backend, dir) = temp_backend("trip-waits");
+        backend.apply(&[device(EP, -6.0)]).unwrap();
+        let flush_under_way = backend.disk_lock.lock().unwrap();
+        std::thread::scope(|s| {
+            let trip = s.spawn(|| backend.write_safe_state());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert_eq!(
+                backend.safe_epoch.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "the trip went ahead in the middle of a flush"
+            );
+            drop(flush_under_way);
+            trip.join().unwrap().unwrap();
+        });
+        backend.flush_pending().unwrap();
+        let text = fs::read_to_string(config::config_path_in(&dir, EP)).unwrap();
+        assert_eq!(config::parse(&text).unwrap().preamp_db, -120.0);
+    }
+
+    /// The engine's own verdict is read back: a correction it refuses as too loud as a whole
+    /// (which the channel's per-filter checks can't see) is reported, not taken as applied.
+    /// Same `SeCreateGlobalPrivilege` caveat as the other live tests — skips, doesn't fail.
+    #[test]
+    fn apply_reports_a_correction_the_engine_refuses_as_too_loud() {
+        let (backend, _dir) = temp_backend("live-too-loud");
+        let Some(channel) = ControlChannel::create(EP_LIVE_TOO_LOUD) else {
+            eprintln!("skipping: could not create a Global\\ section (needs SeCreateGlobalPrivilege)");
+            return;
+        };
+        cageq_apo::control::set_sample_rate(channel.block(), 48_000);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|s| {
+            // The engine's side: refuse whatever arrives.
+            s.spawn(|| {
+                let engine = ControlChannel::open(EP_LIVE_TOO_LOUD).expect("open the section just created");
+                let mut snap = cageq_apo::control::Snapshot::default();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let cageq_apo::control::ReadOutcome::Updated(seq) = cageq_apo::control::try_read(engine.block(), &mut snap) {
+                        cageq_apo::control::set_ack(engine.block(), seq, cageq_apo::control::ACK_TOO_LOUD);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
+            let result = backend.apply(&[device(EP_LIVE_TOO_LOUD, -6.0)]);
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            assert!(result.is_err(), "a correction the engine refused was reported as applied");
+        });
     }
 }
 
