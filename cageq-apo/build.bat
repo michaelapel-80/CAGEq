@@ -58,7 +58,8 @@ rem
 rem The trailing libs are: the APO base class, the audio engine, then exactly what
 rem `rustc --print native-static-libs` reports for the Rust staticlib. Keep that list in
 rem sync if the Rust side grows dependencies — a missing one shows up as an unresolved
-rem symbol at link time, not at runtime.
+rem symbol at link time, not at runtime. synchronization.lib is that list as of Rust 1.100, whose
+rem std locks with WaitOnAddress (Windows 8+); older toolchains just don't need it.
 cl /nologo /LD /MT /EHsc /GR- /W4 /O2 /std:c++17 /DUNICODE /D_UNICODE ^
    /Fo:build\ ^
    shim\cageq_apo.cpp ^
@@ -67,7 +68,7 @@ cl /nologo /LD /MT /EHsc /GR- /W4 /O2 /std:c++17 /DUNICODE /D_UNICODE ^
    ..\target\release\cageq_apo.lib ^
    AudioBaseProcessingObjectV140.lib audioeng.lib audiomediatypecrt.lib ^
    ole32.lib oleaut32.lib advapi32.lib user32.lib ^
-   kernel32.lib ntdll.lib userenv.lib ws2_32.lib dbghelp.lib
+   kernel32.lib ntdll.lib userenv.lib ws2_32.lib dbghelp.lib synchronization.lib
 if errorlevel 1 ( echo [cageq-apo] link failed & exit /b 1 )
 
 echo.
