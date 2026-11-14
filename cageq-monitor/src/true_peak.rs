@@ -23,6 +23,7 @@ const FACTOR: usize = 8;
 /// Taps per polyphase branch (`FACTOR * TAPS` = 312 in the prototype filter).
 const TAPS: usize = 39;
 /// Independent partial sums in the AVX2 filter loop (see [`filter_split`]).
+#[cfg(target_arch = "x86_64")]
 const LANES: usize = 4;
 /// Passband edge, as a fraction of the sample rate: 20 kHz at 44.1 kHz. The stopband edge mirrors
 /// it about Nyquist, so an image of in-band content always lands in the stopband.
@@ -30,6 +31,14 @@ const PASSBAND_EDGE: f64 = 0.4535;
 /// Kaiser β for 60 dB of stopband attenuation (`0.1102·(60 − 8.7)`). Images at -60 dB move a
 /// reading by under 0.01 dB; more attenuation costs taps without changing the readings.
 const KAISER_BETA: f64 = 5.653;
+
+// The constants have to agree, since moving the passband edge alone changes nothing in `design`
+// (the cutoff stays at Nyquist): the Kaiser window's length for 60 dB over the transition
+// PASSBAND_EDGE leaves, at the oversampled rate, must fit in the taps there are.
+const _: () = {
+    let transition = 2.0 * std::f64::consts::PI * (1.0 - 2.0 * PASSBAND_EDGE) / FACTOR as f64;
+    assert!((FACTOR * TAPS) as f64 >= (60.0 - 8.0) / (2.285 * transition), "too few taps for PASSBAND_EDGE");
+};
 
 pub struct TruePeak {
     channels: usize,
@@ -39,8 +48,9 @@ pub struct TruePeak {
     pos: usize,
     /// `coeffs[i][phase]` multiplies the sample `i` steps back. Tap-major, so each input sample
     /// updates all eight phases with one 8-wide multiply-add: that vectorizes, where eight
-    /// separate dot products each end in a sequential reduction.
-    coeffs: [[f32; FACTOR]; TAPS],
+    /// separate dot products each end in a sequential reduction. One table for every instance
+    /// (see [`coeffs`]).
+    coeffs: &'static [[f32; FACTOR]; TAPS],
     /// Last two oversampled magnitudes per channel, oldest first, for the parabola.
     tail: Vec<[f32; 2]>,
     /// Input frames still to go before the filter's history is all real signal. Until then only
@@ -51,6 +61,7 @@ pub struct TruePeak {
     max: f32,
     /// Whether this CPU has AVX2 and FMA, checked once: picks [`push_avx2`](Self::push_avx2) over
     /// the portable loop.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     avx2: bool,
 }
 
@@ -60,7 +71,7 @@ impl TruePeak {
             channels,
             history: vec![0.0; channels * 2 * TAPS],
             pos: 0,
-            coeffs: design(),
+            coeffs: coeffs(),
             tail: vec![[0.0; 2]; channels],
             warmup: TAPS,
             block: 0.0,
@@ -94,6 +105,10 @@ impl TruePeak {
         for frame in frames.chunks_exact(self.channels) {
             self.pos = if self.pos == 0 { TAPS - 1 } else { self.pos - 1 };
             for (c, &s) in frame.iter().enumerate() {
+                // A non-finite sample reads as silence. Kept, an Inf pinned the meter's peak
+                // follower at +inf for good (it releases by subtracting from it), and a NaN in the
+                // history blinded the filter for the next `TAPS` frames.
+                let s = if s.is_finite() { s } else { 0.0 };
                 self.block = self.block.max(s.abs());
                 let h = &mut self.history[c * 2 * TAPS..(c + 1) * 2 * TAPS];
                 h[self.pos] = s;
@@ -102,7 +117,7 @@ impl TruePeak {
                     continue;
                 }
                 let recent: &[f32; TAPS] = h[self.pos..self.pos + TAPS].try_into().unwrap();
-                let acc = filter(&self.coeffs, recent);
+                let acc = filter(self.coeffs, recent);
                 let [mut y0, mut y1] = self.tail[c];
                 for &y in &acc {
                     let y2 = y.abs();
@@ -136,6 +151,16 @@ impl TruePeak {
     pub fn reset_max(&mut self) {
         self.max = 0.0;
     }
+
+    /// After a stretch with no samples at all (an idle endpoint's loopback delivers none): what
+    /// arrives next didn't follow the last samples held, so they are dropped and the filter warms
+    /// up again, as at construction. Joined onto them, it rang on a step that never played —
+    /// a track paused near a trough, the next starting near a crest — and read a false over.
+    pub fn restart_after_gap(&mut self) {
+        self.history.fill(0.0);
+        self.tail.fill([0.0; 2]);
+        self.warmup = TAPS;
+    }
 }
 
 /// All eight phases' outputs for one input sample, one running sum per phase.
@@ -152,6 +177,7 @@ fn filter_portable(coeffs: &[[f32; FACTOR]; TAPS], recent: &[f32; TAPS]) -> [f32
 
 /// The same outputs from `LANES` partial sums over interleaved taps. With one running sum, every
 /// tap waits on the previous tap's add; on AVX2 that chain, not the arithmetic, sets the speed.
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn filter_split(coeffs: &[[f32; FACTOR]; TAPS], recent: &[f32; TAPS]) -> [f32; FACTOR] {
     let mut part = [[0.0f32; FACTOR]; LANES];
@@ -205,12 +231,22 @@ fn parabola_peak(y0: f32, y1: f32, y2: f32) -> f32 {
     }
 }
 
+/// The polyphase table, designed once for the process: it depends on nothing but the constants.
+fn coeffs() -> &'static [[f32; FACTOR]; TAPS] {
+    static COEFFS: std::sync::OnceLock<[[f32; FACTOR]; TAPS]> = std::sync::OnceLock::new();
+    COEFFS.get_or_init(design)
+}
+
 /// Kaiser-windowed sinc lowpass at Nyquist, at the oversampled rate, split into polyphase
 /// branches. Each branch is normalized to unity DC gain, so a constant input reads exactly itself.
+///
+/// The cutoff sits at Nyquist whatever [`PASSBAND_EDGE`] is, since the stopband edge mirrors the
+/// passband edge about it. What the passband edge sets is the transition's width, and so how many
+/// taps the window needs: [`TAPS`] is checked against it at compile time, beside the constants.
 fn design() -> [[f32; FACTOR]; TAPS] {
     let len = FACTOR * TAPS;
     let centre = (len - 1) as f64 / 2.0;
-    let cutoff = (PASSBAND_EDGE + (1.0 - PASSBAND_EDGE)) / 2.0; // = 0.5: halfway through the transition
+    let cutoff = 0.5;
     let i0_beta = bessel_i0(KAISER_BETA);
     let mut proto = vec![0.0f64; len];
     for (n, h) in proto.iter_mut().enumerate() {
@@ -249,6 +285,48 @@ mod tests {
 
     fn db(x: f32) -> f64 {
         20.0 * (x as f64).log10()
+    }
+
+    // --- Found by the 2026-11-14 code review.
+
+    /// A non-finite sample reads exactly as a silent one would, and the reading stays finite.
+    #[test]
+    fn a_non_finite_sample_reads_as_silence() {
+        let read = |bad: f32| {
+            let mut tp = TruePeak::new(1);
+            let mut input = vec![0.25f32; 200];
+            input[100] = bad;
+            input[120] = bad;
+            tp.push(&input);
+            (tp.take_block(), tp.max())
+        };
+        let silent = read(0.0);
+        assert_eq!(read(f32::INFINITY), silent);
+        assert_eq!(read(f32::NAN), silent);
+        assert!(silent.0.is_finite());
+    }
+
+    /// After a gap, the filter doesn't join the samples before it to the ones after it: a step
+    /// the speakers never played (a pause near a trough, then a start near a crest) rang into a
+    /// false over.
+    #[test]
+    fn a_gap_is_not_read_as_a_step() {
+        let before: Vec<f32> = vec![-0.9; 100];
+        let after: Vec<f32> = vec![0.9; 100];
+
+        let mut joined = TruePeak::new(1);
+        joined.push(&before);
+        joined.take_block();
+        joined.push(&after);
+        assert!(joined.take_block() > 1.0, "the mechanism: a step this size rings past 0 dBFS");
+
+        let mut gapped = TruePeak::new(1);
+        gapped.push(&before);
+        gapped.take_block();
+        gapped.restart_after_gap();
+        gapped.push(&after);
+        let read = gapped.take_block();
+        assert!(read < 0.91, "after a gap the reading is the signal's own, got {read}");
     }
 
     /// Steady-state reading of a periodic mono signal, skipping the first periods so the result

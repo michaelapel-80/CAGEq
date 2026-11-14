@@ -1158,8 +1158,8 @@ mod windows_impl {
     /// walk: that only existed for `db`'s display-side 1-decimal rounding, and raw `f32` power
     /// values essentially never tie exactly.
     ///
-    /// Test-only: the live spectrum path calls [`peak_candidates`] and [`pick_peaks`] itself, so it
-    /// can adjust the candidates in between.
+    /// Test-only: the live spectrum path calls [`peak_candidates`] and [`pick_peaks`] itself, as it
+    /// keeps the candidates too (for the hover snap).
     #[cfg(test)]
     fn find_peaks(
         power: &[f32],
@@ -2041,12 +2041,19 @@ mod windows_impl {
         let mut last_spectrum_signal = false;
         let mut last_scope = Instant::now();
         let mut last_signal = Instant::now();
+        let mut loudness_error_logged = false;
 
         while !stop.load(Ordering::Relaxed) {
             let before = queue.len();
             capture.read_from_device_to_deque(&mut queue)?;
             let got_data = queue.len() > before;
             if got_data {
+                // An idle endpoint's loopback delivers nothing at all, so audio after a gap
+                // doesn't continue the samples before it: the true-peak filter starts afresh
+                // rather than ringing on the join (see `restart_after_gap`).
+                if last_signal.elapsed() >= SILENCE_GAP {
+                    tp.restart_after_gap();
+                }
                 last_signal = Instant::now();
             }
             // Only do the (heavier) vectorscope work when a scope view is actually open.
@@ -2091,7 +2098,14 @@ mod windows_impl {
             }
 
             if !frames.is_empty() {
-                let _ = ebu.add_frames_f32(&frames);
+                // Said once, not every buffer: the loudness readouts would otherwise just stop
+                // moving with nothing anywhere saying why.
+                if let Err(e) = ebu.add_frames_f32(&frames) {
+                    if !loudness_error_logged {
+                        eprintln!("[cageq-monitor] loudness measurement failed, its readouts stop here: {e}");
+                        loudness_error_logged = true;
+                    }
+                }
                 tp.push(&frames);
             }
             // Cheap no-op when the tier hasn't changed (see `reconfigure`'s own doc) — checked
