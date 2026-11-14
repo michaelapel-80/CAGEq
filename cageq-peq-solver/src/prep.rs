@@ -1,9 +1,7 @@
 //! CAGEq's actual FR-prep call sequence — `sidecar_dsp.py`'s
 //! `fr.interpolate(); fr.center(); fr.compensate(target); fr.smoothen()` — assembled
-//! from [`crate::grid`] and [`crate::smoothing`]'s ported primitives. This is the input
-//! `equalize()` (`frequency_response.py:542-807`, not yet ported — its slope-limited
-//! LTR/RTL traversal is a substantially larger piece, deliberately left for its own
-//! pass) will need next.
+//! from [`crate::grid`] and [`crate::smoothing`]'s ported primitives: the input
+//! [`crate::equalize`] (`frequency_response.py:542-807`) takes.
 
 use crate::grid::{center_diff, interpolate, standard_grid};
 use crate::smoothing::smoothen as smoothen_curve;

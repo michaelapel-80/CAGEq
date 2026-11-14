@@ -13,6 +13,7 @@ edition = "2024"
 # to what CAGEq has always run; pinned by cageq-apo/tests/biquad_parity.rs) or the
 # warping-corrected `AnalogMatched` designs chosen by the Stage 0/0b spike. The spike's tools
 # stay as examples (`warp_spike`, `shelf_tune`, `per_band_scan`) and its rejected candidates in
-# `src/spike.rs`, so every decision can be re-run. No consumer is wired to it yet (Stage 2).
+# `src/spike.rs`, so every decision can be re-run. Used by cageq-apo, cageq-peq-solver,
+# cageq-core and the frontend (through cageq-biquad-wasm).
 
 [dependencies]

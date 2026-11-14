@@ -35,6 +35,7 @@
 
 use crate::peaks::find_peaks;
 use crate::smoothing::smoothen;
+use crate::stats::argmin;
 
 const TREBLE_F_LOWER: f64 = 6000.0;
 const TREBLE_F_UPPER: f64 = 8000.0;
@@ -46,9 +47,6 @@ fn log_log_gradient(f0: f64, f1: f64, g0: f64, g1: f64) -> f64 {
     (g1 - g0) / octaves
 }
 
-fn argmin(xs: &[f64]) -> usize {
-    xs.iter().enumerate().min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap()).map(|(i, _)| i).unwrap()
-}
 
 /// `protection_mask` (`frequency_response.py:636-669`): zones around a dip that sit
 /// below both neighbouring dips' levels are marked limitation-free, so the slope

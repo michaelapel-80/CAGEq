@@ -111,3 +111,17 @@ fn a_butterworth_cascade_has_the_textbook_stopband() {
     assert!((db(16.0) + 15.6).abs() < 0.1, "16 Hz: {}", db(16.0));
     assert!(db(100.0).abs() < 0.01, "flat above: {}", db(100.0));
 }
+
+/// A band no filter can be (non-finite, at or past Nyquist, no width) is a passthrough in either
+/// model: `design` promises a safe filter, and RBJ's coefficients there are NaN or unstable.
+#[test]
+fn a_band_that_cannot_be_a_filter_is_a_passthrough() {
+    let fs = 48_000.0;
+    let peaking = |freq_hz: f64, q: f64, gain_db: f64| Band { kind: Kind::Peaking, freq_hz, gain_db, q };
+    for band in [peaking(f64::NAN, 1.0, 3.0), peaking(30_000.0, 1.0, 3.0), peaking(24_000.0, 1.0, 3.0), peaking(1000.0, 0.0, 3.0), peaking(1000.0, 1.0, f64::INFINITY)] {
+        for model in [ResponseModel::Rbj, ResponseModel::AnalogMatched] {
+            let c = design(&band, fs, model);
+            assert_eq!((c.b0, c.b1, c.b2, c.a1, c.a2), (1.0, 0.0, 0.0, 0.0, 0.0), "{band:?} in {model:?}");
+        }
+    }
+}

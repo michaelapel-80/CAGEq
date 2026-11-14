@@ -14,20 +14,13 @@
 //! fetched over HTTP (`sidecar_dsp.py`'s own GitHub-API fetch-and-cache), which the
 //! orchestrator can do directly.
 //!
-//! ## A fourth copy of the biquad math, on purpose
-//! CAGEq already carries three copies of AutoEq's biquad response model — `peq.py`
-//! itself, `biquad.ts` (the chart), and `cageq_core::morph` (the tonal-morph
-//! metric, `cageq-core/src/morph.rs`) — each with its own reason to exist rather than
-//! share code (see `morph.rs`'s module doc and `cageq-core/tests/biquad_crosscheck.rs`).
-//! This crate is a fourth: `cageq_core::morph`'s copy is `pub(crate)` to `cageq-core`
-//! and only evaluates the *cascade* curve, while the optimizer needs each band's own
-//! individual response (`HighShelf`/`LowShelf::init`'s weighted average,
-//! `sharpness_penalty`, `band_penalty`) — and `cageq-core` depends on `cageq-sidecar`,
-//! the very thing this crate exists to make optional, so depending on it here would be
-//! backwards. [`filter::Band::fr`] is transcribed independently from `peq.py`, not
-//! derived from `morph.rs`, and cross-checked against the live `peq.py` in
-//! `tests/solver_fixtures.rs` — the same discipline that pins the other three copies
-//! together.
+//! ## Its own copy of the RBJ math, on purpose
+//! [`filter::Band::fr`] evaluates RBJ with its own transcription of `peq.py`'s formulas, not
+//! through `cageq-biquad` (which it does use for the analog-matched model): this is the copy
+//! the fixture cross-checks against the live `peq.py` pin (`tests/solver_fixtures.rs`), and
+//! `tests/biquad_parity.rs` holds it to `cageq-biquad`'s RBJ (within 1e-7 dB). Routing it
+//! through `cageq-biquad` instead would be one copy fewer, at the price of re-validating the
+//! fits' exact parity with `peq.py` — not worth it while the two agree that closely.
 //!
 //! ## Status
 //! All three pieces `sidecar_dsp.py`'s `calculate_filters` chains together are ported
@@ -75,6 +68,7 @@ pub mod optimizer;
 pub mod peaks;
 pub mod prep;
 pub mod smoothing;
+mod stats;
 
 pub use equalize::equalize;
 pub use filter::{Band, BandKind};

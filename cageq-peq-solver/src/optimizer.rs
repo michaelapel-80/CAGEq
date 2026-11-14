@@ -23,16 +23,11 @@
 //! curve against the live `peq.py`, not just the formulas in isolation. If the fixture
 //! comparison shows this converges to a worse optimum than SciPy on some target shape,
 //! the tolerances here (`XTOL_REL`/`FTOL_REL`/`MAXEVAL`) are the knobs to revisit first.
-//!
-//! **Build status**: the `nlopt` crate's exact method signatures used below
-//! (`set_lower_bounds`, `ObjFn`'s closure shape, `recover_user_data`) are transcribed
-//! from its published API surface, not confirmed by a local `cargo build` — this
-//! machine has MSVC but no CMake yet, which `nlopt-sys` needs to vendor NLopt's C/C++
-//! core. Expect small signature fixups once that gap is closed.
 
 use nlopt::{Algorithm, Nlopt, Target};
 
 use crate::filter::{Band, BandKind};
+use crate::stats::{argmin_abs, mean};
 
 const XTOL_REL: f64 = 1e-10;
 const FTOL_REL: f64 = 1e-12;
@@ -79,7 +74,7 @@ pub struct Solver {
     min_f_ix: usize,
     max_f_ix: usize,
     /// `PEQ.__init__`'s `self._10k_ix` (peq.py:449) — a literal 10 kHz index, distinct
-    /// from `Band::ix10k`'s same-named-but-different quantity (see that method's doc).
+    /// from `peq.py`'s same-named-but-different `PEQFilter.ix10k` (an index of the sample rate).
     ix_10k: usize,
     /// Weight of the cancellation penalty — see [`Solver::cancellation_penalty`].
     pub cancellation_weight: f64,
@@ -240,28 +235,33 @@ impl Solver {
     /// cascade response — split out from [`Solver::loss`] so the gradient sweep in
     /// [`Solver::evaluate`] can feed it an incrementally-patched cascade instead of a
     /// freshly summed one.
+    ///
+    /// Reads both curves in place, with the tail means standing in above 10 kHz, rather than
+    /// cloning them to overwrite that tail: this runs `1 + 2·params` times per objective
+    /// call. Same values, summed in the same order, so the result is bit-identical.
     fn mse_component(&self, cascade: &[f64]) -> f64 {
-        let mut fr = cascade.to_vec();
-        let mut target = self.target.clone();
-        if self.tail_mean {
-            let tail_t = mean(&target[self.ix_10k..]);
-            let tail_f = mean(&fr[self.ix_10k..]);
-            target[self.ix_10k..].iter_mut().for_each(|v| *v = tail_t);
-            fr[self.ix_10k..].iter_mut().for_each(|v| *v = tail_f);
+        let tail = self.tail_mean.then(|| (mean(&self.target[self.ix_10k..]), mean(&cascade[self.ix_10k..])));
+        let range = self.min_f_ix..self.max_f_ix;
+        let n = range.len() as f64;
+        let mut sum = 0.0;
+        for i in range {
+            let (t, f) = match tail {
+                Some((tail_t, tail_f)) if i >= self.ix_10k => (tail_t, tail_f),
+                _ => (self.target[i], cascade[i]),
+            };
+            sum += (t - f).powi(2);
         }
-        mean_sq_diff(&target[self.min_f_ix..self.max_f_ix], &fr[self.min_f_ix..self.max_f_ix])
+        sum / n
     }
 
-    /// `_optimizer_loss` (peq.py:585-600) computed the straightforward way: every
-    /// band's own response and penalties recomputed from scratch. Used where it's only
-    /// called once (outside the optimizer's hot loop) — see [`Solver::evaluate`] for the
-    /// version the gradient sweep actually uses.
-    /// Both losses at the current band values — see [`OptimizeReport`].
+    /// Both losses at the current band values — see [`OptimizeReport`]. Every band's response
+    /// recomputed from scratch, as it runs once, outside the solve; [`Solver::evaluate`] is
+    /// the incremental version the gradient sweep uses.
     fn report(&self) -> OptimizeReport {
         let band_frs: Vec<Vec<f64>> = self.bands.iter().map(|b| b.fr(&self.f, self.fs)).collect();
         let cascade = sum_vectors(&band_frs, self.f.len());
         let magnitude = sum_magnitudes(&band_frs, self.f.len());
-        let penalty_sum: f64 = self.bands.iter().zip(&band_frs).map(|(b, fr)| self.band_penalty_sum(b, fr)).sum();
+        let penalty_sum: f64 = self.bands.iter().zip(&band_frs).map(|(b, fr)| b.sharpness_penalty(fr)).sum();
         let autoeq = self.mse_component(&cascade) + penalty_sum;
         // `_optimizer_loss` (peq.py:600) returns `np.sqrt(loss_val)`, not the raw MSE+penalty sum.
         OptimizeReport { loss: (autoeq + self.cancellation_penalty(&cascade, &magnitude)).sqrt(), autoeq_loss: autoeq.sqrt() }
@@ -291,12 +291,7 @@ impl Solver {
         self.cancellation_weight * ms
     }
 
-    /// `_optimizer_loss` (peq.py:585-600) only ever sums `sharpness_penalty` into the
-    /// loss — `band_penalty` is computed elsewhere in `peq.py` but never added here, so
-    /// it's excluded to match what SLSQP actually minimizes in the reference.
-    fn band_penalty_sum(&self, band: &Band, fr: &[f64]) -> f64 {
-        band.sharpness_penalty(fr)
-    }
+
 
     /// Loss at `params` (`map` describing which entry controls which band/field), and —
     /// when `grad` is `Some` — a central-difference gradient, all on SLSQP's hot path
@@ -306,15 +301,17 @@ impl Solver {
     /// `+h`/`-h` per free parameter), and each one changes exactly one band. Recomputing
     /// every band's response for each of those — what a direct transcription of
     /// `_optimizer_loss` would do — is `O(bands)` wasted work per perturbation for
-    /// `bands - 1` unperturbed bands, on top of `Band::sharpness_penalty`/`band_penalty`
-    /// each separately recomputing that band's own response internally (fixed
-    /// separately — see their doc comments). Instead: compute every band's response and
-    /// penalty once at the nominal point, then for each perturbation, recompute only the
-    /// one band that changed and patch it into a cloned copy of the cached cascade.
+    /// `bands - 1` unperturbed bands. Instead: compute every band's response and penalty once
+    /// at the nominal point, then for each perturbation, recompute only the one band that
+    /// changed and patch it into a cloned copy of the cached cascade.
+    ///
+    /// The penalty is `Band::sharpness_penalty` alone: `_optimizer_loss` (peq.py:585-600)
+    /// sums only that into the loss — `peq.py`'s `band_penalty` is computed elsewhere there
+    /// but never added, so it isn't here either.
     fn evaluate(&mut self, params: &[f64], map: &[ParamSlot], grad: Option<&mut [f64]>) -> f64 {
         self.apply_params(params);
         let band_frs: Vec<Vec<f64>> = self.bands.iter().map(|b| b.fr(&self.f, self.fs)).collect();
-        let band_pens: Vec<f64> = self.bands.iter().zip(&band_frs).map(|(b, fr)| self.band_penalty_sum(b, fr)).collect();
+        let band_pens: Vec<f64> = self.bands.iter().zip(&band_frs).map(|(b, fr)| b.sharpness_penalty(fr)).collect();
         let cascade = sum_vectors(&band_frs, self.f.len());
         let magnitude = sum_magnitudes(&band_frs, self.f.len());
         let penalty_sum: f64 = band_pens.iter().sum();
@@ -345,9 +342,10 @@ impl Solver {
 
     /// Loss with a single parameter (`slot`) set to `new_value`, reusing the nominal
     /// point's cached per-band responses/penalties for every *other* band instead of
-    /// recomputing them. Leaves `self.bands[slot.band_ix]` mutated to the probed value
-    /// (the caller, [`Solver::evaluate`], restores every band to nominal once the whole
-    /// gradient sweep is done rather than after each individual probe).
+    /// recomputing them. Leaves `self.bands[slot.band_ix]` mutated to the probed value; the
+    /// caller, [`Solver::evaluate`], restores it after each dimension's pair of probes, and
+    /// must: a peaking band's three fields share one band, so a probe that started from a
+    /// field left at `p − h` would difference the wrong point.
     #[allow(clippy::too_many_arguments)]
     fn perturbed_loss(
         &mut self,
@@ -361,7 +359,7 @@ impl Solver {
     ) -> f64 {
         slot.field.set(&mut self.bands[slot.band_ix], new_value);
         let new_fr = self.bands[slot.band_ix].fr(&self.f, self.fs);
-        let new_pen = self.band_penalty_sum(&self.bands[slot.band_ix], &new_fr);
+        let new_pen = self.bands[slot.band_ix].sharpness_penalty(&new_fr);
 
         let mut cascade = base_cascade.to_vec();
         let mut magnitude = base_magnitude.to_vec();
@@ -406,10 +404,16 @@ impl Solver {
         let best_params = state.best_params;
 
         match outcome {
-            Ok(_) | Err(_) => {
-                // Whether NLopt reports success or a soft failure (e.g. `ROUNDOFF_LIMITED`
-                // once it's near the optimum), the best point observed during the whole
-                // run is what we keep — see the module doc's divergence note.
+            // A failure before the objective was ever evaluated (invalid arguments, out of
+            // memory): there is no best point, only the initial guess, and passing that on as a
+            // fit would apply bands nobody solved for. Nothing CAGEq builds triggers it today
+            // (the init clamps to the bounds, and NLopt pulls a stray start point inside them),
+            // so this is defensive.
+            Err((fail, loss)) if !state.best_loss.is_finite() => Err(SolverError::Optimize(fail, loss)),
+            // Whether NLopt reports success or a soft failure (e.g. `ROUNDOFF_LIMITED` once
+            // it's near the optimum), the best point observed during the whole run is what we
+            // keep — see the module doc's divergence note.
+            _ => {
                 self.apply_params(&best_params);
                 Ok(self.report())
             }
@@ -459,17 +463,6 @@ fn objective(params: &[f64], grad: Option<&mut [f64]>, state: &mut ObjState) -> 
     loss
 }
 
-fn argmin_abs(xs: &[f64], target: f64) -> usize {
-    xs.iter().enumerate().min_by(|(_, a), (_, b)| (*a - target).abs().partial_cmp(&(*b - target).abs()).unwrap()).map(|(i, _)| i).unwrap()
-}
-
-fn mean(xs: &[f64]) -> f64 {
-    xs.iter().sum::<f64>() / xs.len() as f64
-}
-
-fn mean_sq_diff(a: &[f64], b: &[f64]) -> f64 {
-    mean(&a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).collect::<Vec<_>>())
-}
 
 fn sum_vectors(vs: &[Vec<f64>], len: usize) -> Vec<f64> {
     let mut total = vec![0.0; len];
@@ -500,3 +493,4 @@ fn sum_magnitudes(band_frs: &[Vec<f64>], n: usize) -> Vec<f64> {
     }
     out
 }
+

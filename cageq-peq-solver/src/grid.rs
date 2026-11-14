@@ -51,6 +51,11 @@ pub fn linear_interp_log(f: &[f64], y: &[f64], query: &[f64]) -> Vec<f64> {
 
 fn eval_linear(xs: &[f64], ys: &[f64], x: f64) -> f64 {
     let n = xs.len();
+    // No points to interpolate between: no value, rather than an index out of bounds. The
+    // catalogue refuses such a curve before it gets here (see `cageq_catalog::csv_parse`).
+    if n == 0 {
+        return f64::NAN;
+    }
     if n == 1 {
         return ys[0];
     }
@@ -128,6 +133,12 @@ mod tests {
         // clamped-at-the-edge 0.0 a naive "hold last value" interpolator would give.
         assert!((out[0] - -1.0).abs() < 1e-9, "expected extrapolated -1.0, got {}", out[0]);
         assert!((out[1] - 2.0).abs() < 1e-9, "expected extrapolated 2.0, got {}", out[1]);
+    }
+
+    #[test]
+    fn a_curve_with_no_points_interpolates_to_no_value() {
+        let out = interpolate(&[100.0, 200.0], &[f64::NAN, f64::NAN], &[150.0]);
+        assert!(out[0].is_nan(), "used to panic indexing an empty curve");
     }
 
     #[test]

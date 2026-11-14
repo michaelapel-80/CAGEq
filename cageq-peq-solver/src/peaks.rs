@@ -15,8 +15,9 @@
 //! only computes `width` at all when a `width` argument is given, and neither caller
 //! passes one bounded below zero), so those stay unfiltered here too.
 //!
-//! Cross-checked against `scipy.signal.find_peaks` directly (not through the sidecar,
-//! which never calls this function on its own) in `tests/solver_fixtures.rs`.
+//! Not cross-checked against `scipy.signal.find_peaks` on its own: the unit tests below pin its
+//! behaviour on small cases, and the fixture cross-checks (`tests/solver_fixtures.rs`) cover it
+//! only through the fits and equalizations that use it.
 
 /// One detected peak: sample index, the signal's value there, its prominence, and its
 /// width in (fractional) samples at half its prominence.

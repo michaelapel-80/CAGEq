@@ -1,13 +1,14 @@
 //! Port of `peq.py`'s `PEQFilter`/`Peaking`/`LowShelf`/`HighShelf` — the RBJ biquad
 //! model and per-band init heuristics the optimizer fits. See `src/lib.rs` for why this
-//! is a fourth copy of the biquad math rather than reusing `cageq_core::morph`'s.
+//! keeps its own copy of the RBJ math.
 //!
 //! Every formula below is transcribed from a specific `peq.py` location cited in its
-//! doc comment, including one that looks like a bug (`ix10k`) — ported literally rather
-//! than "fixed," since the fixture cross-check in `tests/solver_fixtures.rs` is what
-//! gets to decide that, not a guess made while porting.
+//! doc comment — ported literally rather than "fixed," since the fixture cross-check in
+//! `tests/solver_fixtures.rs` is what gets to decide that, not a guess made while porting.
+//! (`peq.py`'s `band_penalty`, which is never added to the loss it minimises, isn't ported.)
 
 use crate::peaks::find_peaks;
+use crate::stats::{argmin_abs, mean};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BandKind {
@@ -184,24 +185,13 @@ impl Band {
             .collect()
     }
 
-    /// `PEQFilter.ix10k` (`peq.py:104-107`): despite the name, `argmin(|f - fs|)`, not
-    /// an index of 10 kHz. Since `f`'s standard AutoEq grid tops out at 20 kHz and `fs`
-    /// is a sample rate (44.1/48/96 kHz — always ≫ 20 kHz), this always resolves to
-    /// `f`'s last index; `band_penalty` below relies on exactly that behaviour, so it is
-    /// kept as `argmin`, not simplified to "last index", in case a caller ever hands it
-    /// a non-standard grid or `fs`.
-    fn ix10k(f: &[f64], fs: f64) -> usize {
-        argmin_abs(f, fs)
-    }
-
     /// `Peaking.sharpness_penalty` (`peq.py:252-266`); always `0.0` for shelves
     /// (`ShelfFilter.sharpness_penalty`, `peq.py:294-297` — they "overshoot hard" before
     /// nearing the slope this penalises).
     ///
     /// Takes this band's own response (`fr`) as an argument rather than computing it via
     /// `self.fr()` internally: callers on the optimizer's hot path (`Solver::evaluate`)
-    /// already have it computed once per band and reuse it here and in
-    /// [`Band::band_penalty`] rather than paying for it three times over.
+    /// already have it computed once per band.
     pub fn sharpness_penalty(&self, fr: &[f64]) -> f64 {
         if self.kind != BandKind::Peaking {
             return 0.0;
@@ -210,32 +200,6 @@ impl Band {
         let x = self.gain / gain_limit - 1.0;
         let coeff = 1.0 / (1.0 + (-x * 100.0).exp());
         mean(&fr.iter().map(|v| (v * coeff).powi(2)).collect::<Vec<_>>())
-    }
-
-    /// `PEQFilter.band_penalty`: `Peaking`'s own version at `peq.py:268-283`,
-    /// `ShelfFilter`'s (shared by both shelf kinds) at `peq.py:299-313`. Penalises a
-    /// transition band wide enough to run into (and get mirror-distorted by) Nyquist.
-    /// Takes this band's own response `fr` as an argument — see
-    /// [`Band::sharpness_penalty`]'s doc for why.
-    pub fn band_penalty(&self, f: &[f64], fs: f64, fr: &[f64]) -> f64 {
-        let fc_ix = argmin_abs(f, self.fc);
-        let ix10k = Self::ix10k(f, fs);
-        let n = fc_ix.min(ix10k.saturating_sub(fc_ix));
-        if n == 0 {
-            return 0.0;
-        }
-        let left = &fr[fc_ix - n..fc_ix];
-        // Python: `fr[fc_ix + n - 1:fc_ix - 1:-1]` — n elements are indices `fc_ix ..=
-        // fc_ix + n - 1`, reversed. `n >= 1` here (the `n == 0` case already returned),
-        // and `n <= fc_ix`, so `fc_ix - 1` never underflows.
-        let right = reversed_slice(fr, fc_ix + n - 1, fc_ix - 1);
-        match self.kind {
-            BandKind::Peaking => mean_sq_diff(left, &right),
-            BandKind::LowShelf | BandKind::HighShelf => {
-                let mirrored: Vec<f64> = right.iter().map(|v| self.gain - v).collect();
-                mean_sq_diff(left, &mirrored)
-            }
-        }
     }
 
     /// `Peaking.init`/`HighShelf.init`/`LowShelf.init`: sets this band's fc/q/gain from
@@ -353,9 +317,6 @@ impl Band {
     }
 }
 
-fn argmin_abs(xs: &[f64], target: f64) -> usize {
-    xs.iter().enumerate().min_by(|(_, a), (_, b)| (*a - target).abs().partial_cmp(&(*b - target).abs()).unwrap()).map(|(i, _)| i).unwrap()
-}
 
 /// `np.argmax`'s tie-break rule (first index wins) applied to an arbitrary item/key
 /// pair: `Iterator::max_by` keeps the LAST maximal element on a tie, `np.argmax` keeps
@@ -375,19 +336,6 @@ fn argmax_by<T>(items: impl IntoIterator<Item = T>, key: impl Fn(&T) -> f64) -> 
     best.map(|(item, _)| item)
 }
 
-fn mean(xs: &[f64]) -> f64 {
-    xs.iter().sum::<f64>() / xs.len() as f64
-}
-
-fn mean_sq_diff(a: &[f64], b: &[f64]) -> f64 {
-    mean(&a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).collect::<Vec<_>>())
-}
-
-/// `x[from_inclusive..down_to_exclusive:-1]` in Python: `from_inclusive`, descending,
-/// stopping strictly before `down_to_exclusive`.
-fn reversed_slice(x: &[f64], from_inclusive: usize, down_to_exclusive: usize) -> Vec<f64> {
-    ((down_to_exclusive + 1)..=from_inclusive).rev().map(|i| x[i]).collect()
-}
 
 #[cfg(test)]
 mod tests {

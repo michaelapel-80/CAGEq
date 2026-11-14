@@ -42,6 +42,9 @@ pub enum CsvError {
     ShortRow(String),
     #[error("could not parse {0:?} as a number")]
     BadNumber(String),
+    /// Fewer than two rows with a finite frequency and level: nothing to interpolate between.
+    #[error("the curve has {0} usable point(s); at least 2 are needed")]
+    TooFewPoints(usize),
 }
 
 fn starts_with_digit(line: &str) -> bool {
@@ -173,12 +176,32 @@ pub fn parse_csv(csv: &str) -> Result<(Vec<f64>, Vec<f64>), CsvError> {
         frequency.push(parse_cell(cells[freq_ix], dec_sep)?);
         raw.push(parse_cell(cells[raw_ix], dec_sep)?);
     }
+    // A header with no data, or levels that are all gaps, left nothing to interpolate and
+    // panicked the fit downstream; a frequency that isn't a finite number (Rust parses "nan"
+    // and "inf") panicked the sort ahead of it. Refused here, as a parse error.
+    if let Some(bad) = frequency.iter().find(|f| !f.is_finite()) {
+        return Err(CsvError::BadNumber(bad.to_string()));
+    }
+    let usable = raw.iter().filter(|v| v.is_finite()).count();
+    if usable < 2 {
+        return Err(CsvError::TooFewPoints(usable));
+    }
     Ok((frequency, raw))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A curve with nothing to interpolate between is refused, not passed on to panic the fit.
+    #[test]
+    fn a_curve_without_two_usable_points_is_refused() {
+        assert!(parse_csv("frequency,raw\n").is_err(), "a header alone");
+        assert!(matches!(parse_csv("frequency,raw\n20,1.0\n"), Err(CsvError::TooFewPoints(1))));
+        assert!(matches!(parse_csv("frequency,raw\n20,nan\n30,nan\n"), Err(CsvError::TooFewPoints(0))));
+        // A frequency that parses but isn't finite (1e999 is +inf) is refused before the sort.
+        assert!(matches!(parse_csv("frequency,raw\n1e999,1.0\n30,2.0\n40,2.0\n"), Err(CsvError::BadNumber(_))));
+    }
 
     #[test]
     fn parses_the_canonical_autoeq_format() {

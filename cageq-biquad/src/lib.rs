@@ -64,6 +64,13 @@ pub enum ResponseModel {
 /// passband at `s → ∞` onto Nyquist, so it has no top octaves to cramp, and its corner sits far
 /// below Nyquist anyway (it exists to stop infrasound).
 pub fn design(band: &Band, fs: f64, model: ResponseModel) -> Coeffs {
+    // Neither model has an answer outside this: RBJ's coefficients come out NaN or unstable
+    // there. A passthrough is the one safe filter for a band that can't be one, so that is what
+    // "never an error" holds to; CAGEq's own paths never ask (the APO refuses such a band first).
+    let finite = band.freq_hz.is_finite() && band.gain_db.is_finite() && band.q.is_finite() && fs.is_finite();
+    if !finite || band.freq_hz <= 0.0 || band.q <= 0.0 || fs <= 0.0 || band.freq_hz >= fs / 2.0 {
+        return matched::IDENTITY;
+    }
     match model {
         ResponseModel::Rbj => rbj::coefficients(band, fs),
         ResponseModel::AnalogMatched if band.kind == Kind::HighPass => rbj::coefficients(band, fs),
