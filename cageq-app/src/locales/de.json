@@ -459,6 +459,7 @@
     "tableGain": "Gain",
     "tableQ": "Q",
     "fitting": "Wird angepasst…",
+    "fitFailed": "Das Fitten ist fehlgeschlagen: {{error}}",
     "copy": "Kopieren",
     "copied": "Kopiert!",
     "impedanceCaveat": "Der Kopfhörerausgang eines Handys kann eine andere Impedanz haben als der Desktop-DAC/-Verstärker, gegen den abgestimmt wurde – das verschiebt bei manchen Kopfhörern den Frequenzgang bei direkter Kabelverbindung. Über Bluetooth spielt das keine Rolle, da der Verstärker ohnehin im Kopfhörer oder Dongle sitzt."

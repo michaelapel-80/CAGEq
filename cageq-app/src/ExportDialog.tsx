@@ -69,6 +69,8 @@ export function ExportDialog({
   const [bandModel, setBandModel] = useState<ResponseModel>("Rbj");
   const [fit, setFit] = useState<ExportFit | null>(null);
   const [fitting, setFitting] = useState(false);
+  // Why the last fit failed, shown in place of the text it would have produced.
+  const [fitFailure, setFitFailure] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // Impulse response: the rate to render at (the device's, when it is a common one), and the
   // path of the last save, which the config lines then point at. A save is one file at one rate,
@@ -105,10 +107,14 @@ export function ExportDialog({
         // table, parametricEqText, the preview curve — order-independent for that one) sees the
         // same canonical order.
         .then((r) => {
-          if (!superseded) setFit({ ...r, filters: [...r.filters].sort((a, b) => a.freq_hz - b.freq_hz) });
+          if (superseded) return;
+          setFit({ ...r, filters: [...r.filters].sort((a, b) => a.freq_hz - b.freq_hz) });
+          setFitFailure(null);
         })
-        .catch(() => {
-          if (!superseded) setFit(null);
+        .catch((e) => {
+          if (superseded) return;
+          setFit(null);
+          setFitFailure(String(e));
         })
         .finally(() => {
           if (!superseded) setFitting(false);
@@ -453,7 +459,7 @@ export function ExportDialog({
           name="export-text"
           readOnly
           rows={6}
-          value={fitting && !output ? t("export.fitting") : text}
+          value={fitting && !output ? t("export.fitting") : format === "parametric" && fitFailure && !output ? t("export.fitFailed", { error: fitFailure }) : text}
           style={{ width: "100%", fontFamily: "monospace", fontSize: "0.8em", marginTop: "0.6em", opacity: fitting ? 0.45 : 1, transition: "opacity 0.15s" }}
         />
         {ir && (

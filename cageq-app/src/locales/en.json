@@ -459,6 +459,7 @@
     "tableGain": "Gain",
     "tableQ": "Q",
     "fitting": "Fitting…",
+    "fitFailed": "The fit failed: {{error}}",
     "copy": "Copy",
     "copied": "Copied!",
     "impedanceCaveat": "A phone's headphone output can have a different impedance than the desktop DAC/amp this was tuned against, which shifts response on some headphones when wired directly. Over Bluetooth this doesn't apply — the amp lives in the headphone or dongle either way."

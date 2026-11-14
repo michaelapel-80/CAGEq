@@ -164,6 +164,16 @@ export function ToneGrid({
 }: ToneGridProps) {
   const { t } = useTranslation();
   const inert = disabled || readOnly; // no interaction while read-only, even without `disabled`
+  // The band whose fader has moved since its last commit. Committed on release, but also on a
+  // key's release (arrows, Page Up/Down, Home/End move it too) and on leaving it (a drag let go
+  // outside it): committing on the pointer alone left keyboard changes unsealed in the undo
+  // history, or merged into whatever gesture came next.
+  const faderMoved = useRef<number | null>(null);
+  const commitFader = (i: number, gain: number) => {
+    if (faderMoved.current !== i) return;
+    faderMoved.current = null;
+    onCommit(i, { gain_db: gain });
+  };
   // Display order: sort indices by Fc; storage order (and thus the indices we pass back)
   // never changes here, so focus survives a visual reorder.
   const order = filters.map((_, i) => i).sort((a, b) => filters[a].freq_hz - filters[b].freq_hz);
@@ -342,8 +352,13 @@ export function ToneGrid({
                     style={{ "--fill": fillPct } as CSSProperties}
                     aria-label={t("bands.gainFaderAria", { name })}
                     title={t("bands.faderTitle")}
-                    onChange={(e) => onInput(i, { gain_db: Number(e.currentTarget.value) })}
-                    onPointerUp={() => onCommit(i, { gain_db: f.gain_db })}
+                    onChange={(e) => {
+                      faderMoved.current = i;
+                      onInput(i, { gain_db: Number(e.currentTarget.value) });
+                    }}
+                    onPointerUp={(e) => commitFader(i, Number(e.currentTarget.value))}
+                    onKeyUp={(e) => commitFader(i, Number(e.currentTarget.value))}
+                    onBlur={(e) => commitFader(i, Number(e.currentTarget.value))}
                     onDoubleClick={() => !inert && onCommit(i, { gain_db: 0 })}
                   />
                 </div>

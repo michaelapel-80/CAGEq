@@ -823,8 +823,8 @@ function App() {
   const [foreignDismissed, setForeignDismissed] = useState(false);
   // One-time "try CAGEq's own engine" nudge while Equalizer APO is the active backend, PLUS the
   // "your CAGEq engine build is stale" banner below — both read `apoDeviceStatus`, a second,
-  // independent apo_setup_status fetch of its own rather than lifting ApoSetup's internal one,
-  // matching this whole area's "reading is free" convention (see ApoSetup.tsx's own doc).
+  // the status ApoSetup fetches and reports through `onStatus` (one fetch per device switch),
+  // so it's known without the dialog open (see ApoSetup.tsx's own doc).
   // `computeEngineReason` is the shared, exported logic so nothing here ever drifts from what
   // the Engine trigger's own colour means. `apoNudgeDismissed` is `null` until both the
   // persisted dismissal and a fresh status have loaded, so that banner never flashes on for one
@@ -1351,7 +1351,10 @@ function App() {
       inFlight.current = true;
       if (!auto) setApplying(true);
       const inp: SlotInputs = { model: query, measurementPath, targetPath, flat, stages, infrasoundAck };
-      setResult(await writeFit(activeSlot as "A" | "B", inp, dev));
+      const slot = activeSlot as "A" | "B";
+      const applied = await writeFit(slot, inp, dev);
+      // Only if it's still the active slot: a switch can land while this is in flight.
+      if (activeSlotRef.current === slot) setResult(applied);
       if (!auto) setStatus(await invoke<Status>("status"));
     } catch (e) {
       setError(String(e));
@@ -1382,6 +1385,20 @@ function App() {
   // flooding IPC; the Core separately enforces the >=15 ms write spacing.
   const inFlight = useRef(false);
   const applyTimer = useRef<number | null>(null);
+  const activeSlotRef = useRef(activeSlot);
+  activeSlotRef.current = activeSlot;
+  /** Wait for a write already in flight, then run one still queued, now. A slot switch and
+   *  [`realCorrection`] both need the backend settled first: a queued edit is the slot's own
+   *  (cancelled, it would be lost), and one in flight would land after them. */
+  async function settleApplies() {
+    while (inFlight.current) await new Promise((r) => setTimeout(r, 10));
+    if (applyTimer.current != null) {
+      clearTimeout(applyTimer.current);
+      applyTimer.current = null;
+      autoApplyRef.current();
+      while (inFlight.current) await new Promise((r) => setTimeout(r, 10));
+    }
+  }
   const autoApplyRef = useRef<() => void>(() => {});
 
   // Refreshed every render so a queued timer never fires against stale state. While a band is
@@ -1451,6 +1468,35 @@ function App() {
   };
   // Auto-clear the transient audition modes and restore the normal cascade. No-ops when inactive;
   // the re-apply folds into an edit's own apply when one is already queued.
+  // The correction itself, with any audition ended and written over: what gets exported or
+  // self-tested. While a band is soloed or isolated, `result` is the audition (one band, or a
+  // bandpass), and clearing it only schedules the rewrite, so reading `result` straight after
+  // still gave the audition: an export of the wrong EQ, a self-test of the wrong curve.
+  async function realCorrection(): Promise<ApplyResult | null> {
+    const auditioning = soloRef.current != null || isolateRef.current != null || sweepFreqRef.current != null;
+    if (!auditioning) return result;
+    dropAudition();
+    await settleApplies();
+    const dev = devices.find((d) => d.id === deviceId);
+    if (!dev || (activeSlot !== "A" && activeSlot !== "B")) return null;
+    const inp: SlotInputs = { model: query, measurementPath, targetPath, flat, stages, infrasoundAck };
+    inFlight.current = true;
+    try {
+      const applied = await writeFit(activeSlot, inp, dev);
+      setResult(applied);
+      return applied;
+    } catch (e) {
+      setError(String(e));
+      return null;
+    } finally {
+      inFlight.current = false;
+    }
+  }
+  async function openExport() {
+    const correction = await realCorrection();
+    if (correction?.filters.length) setExportOpen(true);
+  }
+
   const clearSolo = () => {
     if (soloRef.current == null) return;
     soloRef.current = null;
@@ -1576,6 +1622,9 @@ function App() {
   // empty A/B just becomes the editable target.
   async function switchSlot(slot: SlotName) {
     if (slot === activeSlot) return;
+    // A drag's last write for the slot being left lands before the switch, not after it (where it
+    // made the old slot's correction the written one again, and showed it labelled as the new).
+    await settleApplies();
     // Leaving a soloed slot: restore its *normal* cascade first (the backend slot cache is soloed),
     // so switching back later re-writes the real correction, not the solo.
     if (soloRef.current) {
@@ -1642,6 +1691,9 @@ function App() {
       dropAudition(); // switching to the copy replaces the document — exit any solo/isolate
       const applied = await invoke<ApplyResult>("copy_slot", { from, to });
       setSlotInputs((prev) => ({ ...prev, [to]: src }));
+      // The fit goes with the inputs: left behind, the target showed (and persisted, and replayed
+      // at the next launch) its old correction's AutoEq bands under the copied controls.
+      setSlotFits((prev) => ({ ...prev, [to]: prev[from] }));
       setSlotPreset((prev) => ({ ...prev, [to]: prev[from] })); // carry the source's preset attribution
       setHydrated((prev) => ({ ...prev, [to]: true }));
       setActiveSlot(to);
@@ -1776,12 +1828,11 @@ function App() {
     // backend (bypassing the slot cache — see `toggleIsolate`'s own doc), so the loopback
     // capture below would measure that audition instead of `bands`. Every other structural
     // action in this file (addFilter, undo, switchSlot, ...) exits the audition first for the
-    // same reason; self-test is the one path that didn't. `clearSolo`/`clearIsolate` (not
-    // `dropAudition`) so the real cascade is actually re-applied before the test starts, not
-    // just the UI state cleared.
-    clearSolo();
-    clearIsolate();
-    const bands = result.filters;
+    // same reason. `realCorrection` ends it and waits for the real cascade to be written, and
+    // tests that: `result` is still the audition until the rewrite lands.
+    const current = await realCorrection();
+    if (!current) return;
+    const bands = current.filters;
     const originalSlot = activeSlot; // restored after the Dry reference capture
     // Pre-check: if the correction is too flat there's no shape to measure — don't bother playing.
     const grid = new Float64Array(120);
@@ -2121,6 +2172,7 @@ function App() {
         targetPath,
         flat,
         stages,
+        infrasoundAck,
         versions: [
           ...(p.versions ?? []),
           { at: archivedAt, model: p.model, measurementPath: p.measurementPath, targetPath: p.targetPath, flat: p.flat, stages: p.stages, infrasoundAck: p.infrasoundAck },
@@ -2296,13 +2348,9 @@ function App() {
       setApoDeviceStatus(null);
       return;
     }
-    let active = true;
-    void invoke<ApoSetupStatus>("apo_setup_status", { endpoint }).then((s) => {
-      if (active) setApoDeviceStatus(s);
-    });
-    return () => {
-      active = false;
-    };
+    // Fetched by ApoSetup (mounted whenever there's a device to pick) and reported here through
+    // its `onStatus`: fetching here as well sent every device switch twice, the two answers
+    // landing in either order.
   }, [selectedDevice?.eqapo_pattern]);
 
   const engineReason =
@@ -3688,7 +3736,7 @@ function App() {
                     type="button"
                     className="pl-save"
                     disabled={dryActive || !result?.filters?.length}
-                    onClick={() => setExportOpen(true)}
+                    onClick={() => void openExport()}
                     title={tr("export.saveTitle")}
                   >
                     <span aria-hidden>📤</span> {tr("export.save")}

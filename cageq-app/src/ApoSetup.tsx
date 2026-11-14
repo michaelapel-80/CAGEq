@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -127,11 +127,21 @@ export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEn
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Each request numbered, so an answer for an endpoint already switched away from (or a slow poll
+  // overtaken by a faster one) is dropped rather than shown.
+  const latest = useRef(0);
   const refresh = useCallback(async () => {
     if (endpointId === null) return;
-    const s = await invoke<ApoSetupStatus>("apo_setup_status", { endpoint: endpointId });
-    setStatus(s);
-    onStatus?.(s);
+    const request = ++latest.current;
+    try {
+      const s = await invoke<ApoSetupStatus>("apo_setup_status", { endpoint: endpointId });
+      if (request !== latest.current) return;
+      setStatus(s);
+      onStatus?.(s);
+    } catch (e) {
+      // Shown, not left as an unhandled rejection under a dialog stuck on "Loading…".
+      if (request === latest.current) setError(String(e));
+    }
   }, [endpointId, onStatus]);
 
   // Reading is free (no elevation): fetch once up front so the trigger's color reflects

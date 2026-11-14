@@ -101,6 +101,10 @@ export function ScrubNumber({
   // between the last move and the release. `fromEditing` remembers a drag begun while the
   // field was in type-in-place mode (bug: a focused value couldn't be dragged).
   const drag = useRef<{ startX: number; startVal: number; scrubbed: boolean; last: number; fromEditing: boolean } | null>(null);
+  // An arrow step taken while focused but not editing (after a scrub that started from edit mode
+  // left it, say): committed when the field is left, as an edit's would be. Only previewed, it
+  // never got its commit, so the band grid's last write and the undo entry were missing.
+  const pendingStep = useRef<number | null>(null);
 
   const roundClamp = (v: number) => {
     const f = 10 ** decimals;
@@ -137,6 +141,8 @@ export function ScrubNumber({
       setText(editText(r));
       edit.current.typed = false;
       edit.current.live = r;
+    } else {
+      pendingStep.current = r;
     }
   };
 
@@ -165,7 +171,10 @@ export function ScrubNumber({
         /* capture may already be lost — nothing to release */
       }
     }
-    if (d.scrubbed) onCommit(d.last);
+    if (d.scrubbed) {
+      pendingStep.current = null;
+      onCommit(d.last);
+    }
     else if (!d.fromEditing) beginEdit(); // a plain click (no drag) → type-in-place
     // fromEditing && !scrubbed: a click inside the edit field — keep the caret, do nothing.
   };
@@ -301,7 +310,14 @@ export function ScrubNumber({
       // editing (onPointerDown prevents it; the release calls beginEdit itself), so this only
       // catches focus that arrived without one; a repeat beginEdit from that release is harmless.
       onFocus={() => !editing && !disabled && beginEdit()}
-      onBlur={() => editing && commitText()}
+      onBlur={() => {
+        if (editing) {
+          commitText();
+        } else if (pendingStep.current != null) {
+          onCommit(pendingStep.current);
+          pendingStep.current = null;
+        }
+      }}
       onKeyDown={onKeyDown}
     />
   );
