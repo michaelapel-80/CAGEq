@@ -319,9 +319,11 @@ pub fn try_read(block: &ControlBlock, out: &mut Snapshot) -> ReadOutcome {
         staged[i] = raw.to_coeffs();
     }
 
-    // Release-ordered re-check: if the writer touched anything while we copied, everything
-    // above is suspect and gets discarded rather than half-applied.
-    if block.seq.load(Ordering::Acquire) != before {
+    // Re-check: if the writer touched anything while we copied, everything above is suspect
+    // and gets discarded rather than half-applied. The fence keeps the copy above the
+    // re-check; an Acquire load alone only keeps what follows it below.
+    std::sync::atomic::fence(Ordering::Acquire);
+    if block.seq.load(Ordering::Relaxed) != before {
         return ReadOutcome::Torn;
     }
 
@@ -364,9 +366,11 @@ pub fn publish(block: &mut ControlBlock, preamp_db: f64, coeffs: &[RawCoeffs], c
         std::ptr::write_volatile(&mut block.version, CONTROL_VERSION);
     }
 
-    // Odd: readers now know the payload is in flux.
+    // Odd: readers now know the payload is in flux. The fence keeps the payload writes below
+    // it; a Release store alone only keeps what came before it above.
     let start = block.seq.load(Ordering::Relaxed);
-    block.seq.store(start.wrapping_add(1), Ordering::Release);
+    block.seq.store(start.wrapping_add(1), Ordering::Relaxed);
+    std::sync::atomic::fence(Ordering::Release);
 
     unsafe {
         std::ptr::write_volatile(&mut block.preamp_db, preamp_db);

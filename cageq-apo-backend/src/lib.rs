@@ -354,11 +354,10 @@ impl CageqApoBackend {
     /// still have the identity (kind/Fc/Q) needed to recognise it as "the same band" at all.
     ///
     /// `allow_crossfade` exists for exactly one caller — [`Self::write_safe_state`] passes
-    /// `false` — because its target (`safe_state()`) always has zero bands, and
-    /// `Cascade::start_crossfade`'s secondary bank with zero bands never trips
-    /// `Cascade::process`'s dual-bank mix at all (`process_count2 == 0` is the same condition
-    /// that gates it off): a crossfade-routed safe-state push would silently do *nothing* to the
-    /// running audio, exactly when the fail-safe's push most needs to land.
+    /// `false` — because its target (`safe_state()`) is the mute, and only the plain path
+    /// (`Cascade::apply_coeffs`) recognises it as one and lands it in the mute's own 10 ms fade.
+    /// A crossfade would take its pre-roll and fade instead, and before the APO fixed crossfades
+    /// to zero bands (2026-11-14) it did nothing to the running audio at all.
     fn push_live(
         &self,
         endpoint_id: &str,
@@ -528,9 +527,8 @@ impl EqBackend for CageqApoBackend {
         // (not queued) — a fail-safe has to land now, not after a debounce window.
         for id in &self.endpoints_needing_safe_state() {
             self.write_config(id, &safe).map_err(BackendError::backend)?;
-            // `allow_crossfade: false` — see `push_live`'s own doc: `safe_state()` always has
-            // zero bands, and a crossfade to zero bands silently does nothing to the running
-            // audio, exactly when this fail-safe most needs to land.
+            // `allow_crossfade: false` — see `push_live`'s own doc: only the plain path lands
+            // the mute in its own fast fade.
             let _ = self.push_live(id, &safe, false);
         }
         Ok(())

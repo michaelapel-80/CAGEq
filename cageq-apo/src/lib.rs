@@ -152,7 +152,7 @@ impl Drop for DenormalGuard {
 /// Compared against `install_dir()`'s own `CAGEqApo.version` marker file (written by
 /// `register`, read by `status` — see both their own docs) instead of the DLL's bytes, so
 /// staleness now means "an intentional version bump", not "recompiled".
-pub const APO_VERSION: u32 = 12;
+pub const APO_VERSION: u32 = 13;
 
 /// Per-instance state. One of these exists per APO instance (per endpoint, per mode),
 /// created at `LockForProcess` and destroyed at `UnlockForProcess`.
@@ -399,13 +399,10 @@ pub unsafe extern "C" fn cageq_apo_load_config(
     match config::load(&id) {
         Ok(None) => CAGEQ_CONFIG_NONE,
         Ok(Some(cfg)) => {
-            // Bands first: if they are refused the preamp must not be applied either, or the
-            // endpoint would run at a level chosen to compensate for filters that aren't there.
-            // Preamp first, then bands: the cascade's loudness ceiling is checked against the
-            // *combination*, so applying an attenuating preamp before the boosts it was
-            // calculated to offset is what lets a legitimate correction through. Applying
-            // them the other way round can trip the guard on a chain that is fine as a whole.
-            if !apo.cascade.set_preamp_db(cfg.preamp_db) || !apo.cascade.set_bands_in(&cfg.bands, cfg.model) {
+            // As one change: the loudness ceiling is a property of the whole chain, so the
+            // boosts are checked against the preamp chosen to offset them, and a refused set
+            // applies neither half (no endpoint left at a level meant for filters it hasn't got).
+            if !apo.cascade.set_config_in(&cfg.bands, cfg.model, cfg.preamp_db) {
                 return CAGEQ_CONFIG_UNSUITABLE;
             }
             // Applied instantly, not ramped. This runs at lock, before a single frame has been
@@ -474,15 +471,17 @@ pub unsafe extern "C" fn cageq_apo_process(
     apo.poll_channel();
     let count = (frames as usize).saturating_mul(apo.channels as usize);
 
-    // `input` and `output` may be the same buffer (APO_FLAG_INPLACE), so these are built as
-    // separate slices over possibly-identical memory. That would be aliasing UB for two
-    // Rust references, which is why `process` takes `&[f32]`/`&mut [f32]` that are only
-    // ever indexed at the same position — each sample is read before its own slot is
-    // written, and nothing looks ahead. Constructing them here (rather than passing raw
-    // pointers down) keeps every bounds-relevant fact in one place.
-    let src = unsafe { std::slice::from_raw_parts(input, count) };
-    let dst = unsafe { std::slice::from_raw_parts_mut(output, count) };
-    apo.cascade.process(src, dst, frames as usize);
+    // `input` and `output` may be the same buffer (APO_FLAG_INPLACE). Two slices over the
+    // same memory, one of them `&mut`, would be undefined behaviour however they were used, so
+    // that case takes the buffer once.
+    if std::ptr::eq(input, output) {
+        let buffer = unsafe { std::slice::from_raw_parts_mut(output, count) };
+        apo.cascade.process_in_place(buffer, frames as usize);
+    } else {
+        let src = unsafe { std::slice::from_raw_parts(input, count) };
+        let dst = unsafe { std::slice::from_raw_parts_mut(output, count) };
+        apo.cascade.process(src, dst, frames as usize);
+    }
 
     apo.frames_processed = apo.frames_processed.wrapping_add(frames as u64);
 }
@@ -746,7 +745,10 @@ mod tests {
         let h = cageq_apo_create(2, 44_100.0);
         let mut buf: Vec<f32> = vec![0.25, -0.5, 0.75, -1.0];
         let before = buf.clone();
-        unsafe { cageq_apo_process(h, buf.as_ptr(), buf.as_mut_ptr(), 2) };
+        // One pointer for both, as audiodg hands it over (`as_ptr` then `as_mut_ptr` would
+        // itself be two overlapping borrows).
+        let p = buf.as_mut_ptr();
+        unsafe { cageq_apo_process(h, p, p, 2) };
         assert_eq!(buf, before);
         unsafe { cageq_apo_destroy(h) };
     }
