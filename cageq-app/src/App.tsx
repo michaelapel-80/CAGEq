@@ -655,10 +655,13 @@ function App() {
   // Cross-view hover link: the storage index of the band the pointer is over in *either* the
   // chart or the grid, so the other view highlights the matching node/column (null = none).
   const [hoverBand, setHoverBand] = useState<number | null>(null);
-  // Force light/dark to override the system preference (handy for testing both). `auto` follows
-  // the OS. Persisted across reloads; applied as a `data-theme` attribute the CSS keys off.
+  // Force light/dark to override the system preference. `auto` follows the OS. Persisted across
+  // reloads; applied as a `data-theme` attribute the CSS keys off. A fresh install starts dark: the
+  // instruments are tuned for it, and on the light theme's softer tube backdrop their faint light
+  // (haze, tails, the EQ fill) washes out. Every install that has run before already has the key
+  // (the effect below writes it on first run, `auto` included), so this changes no one's choice.
   const [theme, setTheme] = useState<"auto" | "light" | "dark">(
-    () => (localStorage.getItem("cageq-theme") as "auto" | "light" | "dark" | null) ?? "auto",
+    () => (localStorage.getItem("cageq-theme") as "auto" | "light" | "dark" | null) ?? "dark",
   );
   useEffect(() => {
     const el = document.documentElement;
