@@ -397,8 +397,8 @@ mod windows_impl {
     /// sidelobe structure, a *fixed-Hz* artifact unrelated to the local decimation ratio.
     ///
     /// A first attempt set this to `4.0 * ZERO_PAD_FACTOR` (16), reasoning "the Hann mainlobe
-    /// width, in padded-bin units" — wrong, because a Gaussian's effective reach is `±4σ`
-    /// (`gaussian_power` builds `radius` from `sigma * 4.0`), so that set the *sigma* to the
+    /// width, in padded-bin units" — wrong, because a Gaussian's effective reach is several σ
+    /// (`gaussian_power` built `radius` from `sigma * 4.0` then), so that set the *sigma* to the
     /// mainlobe width and the actual kernel reach to ~4x the mainlobe width. In practice that
     /// smeared away all frequency resolution below ~100 Hz — confirmed directly in
     /// `cageq-monitor/tests/decimation_spike.rs`'s `floor_sweep_preserves_low_frequency_resolution`
@@ -414,15 +414,29 @@ mod windows_impl {
     /// per direct user feedback that the heavier floor was "too heavy handed... 0 frequency
     /// resolution below 100Hz."
     const GAUSSIAN_FLOOR_SIGMA_BINS: f32 = 2.0;
-    /// Uniform multiplier on `gaussian_power`'s natural (pre-floor) half-width — a small, constant
-    /// extra smoothing margin, independent of the floor above (which is a `max()` and so can only
-    /// ever help the low end; it never engages at high frequency, where the natural width-matched
-    /// sigma already dwarfs any reasonable floor). Verified in the same spike to have no
-    /// measurable downside up to at least 1.5x (an isolated 8 kHz tone's -6dB width stays flat at
-    /// 232.6 Hz through 1.5x, only widening at 2.0x) — `1.2` is a deliberately small "smidge",
-    /// per direct user feedback asking for "additional smoothing (again, just a smidge)" at the
-    /// high end specifically.
-    const GAUSSIAN_WIDTH_MULT: f32 = 1.2;
+    /// Uniform multiplier on `gaussian_power`'s natural (pre-floor) half-width — an extra smoothing
+    /// margin independent of the floor above (which is a `max()` and so only ever acts at the low
+    /// end; at high frequency the natural width-matched sigma already dwarfs any reasonable floor).
+    ///
+    /// 1.0: none. It was 1.2 from the Gaussian reduction's start, a "smidge" more smoothing at the
+    /// high end asked for by eye — when the curve was sampled once per bin and the drawn spline
+    /// invented its shape between points, which is very likely the roughness that was seen. The
+    /// spike's own roughness measure never showed a difference (0.1 dB on dense harmonic content
+    /// above 7 kHz at every multiplier from 1.0 to 1.5), and once `DISPLAY_OVERSAMPLE` drew the
+    /// curve's real shape, 1.0 compared live as clearly finer-resolved with no added noise. Not a
+    /// display-only setting: it widens the analysis kernel, so dropping it read high tones ~0.8 dB
+    /// higher (10·log10 1.2) and noise in `db_raw` (the RTA/K-weighted tilts) ~0.8 dB lower in the
+    /// top octaves, where the natural width rather than the floor sets the kernel.
+    const GAUSSIAN_WIDTH_MULT: f32 = 1.0;
+    /// How far each display point's Gaussian reaches, in σ. Wherever it ends, a strong tone leaving
+    /// the kernel takes its own tail with it in one step, from its skirt straight down to whatever
+    /// lies beyond. At 4σ (a weight of e⁻⁸, -35 dB) that was a cliff on every flank about 35 dB
+    /// below the peak, and between harmonics a single-point gash: a 100 Hz square at the longest
+    /// window showed 17 such steps, the worst 63 dB between neighbouring points. At 7σ (e⁻²⁴·⁵,
+    /// -106 dB) the edge sits below anything the display shows, even with the floor at -150 dB
+    /// under a full-scale tone; 8σ measured no better. Costs ~20% more snapshot time (0.93 to 1.12
+    /// ms per update at 48 kHz, release), ~5 ms of CPU a second at ~23 updates a second.
+    const KERNEL_REACH_SIGMAS: f32 = 7.0;
     /// The rate the base size is tuned for; higher rates scale the FFT proportionally.
     const BASE_RATE: f32 = 48_000.0;
     /// Hop is a quarter of [`BASE_FFT_SIZE`]'s (per-rate) window → 75% overlap at Base, Welch-style
@@ -443,7 +457,7 @@ mod windows_impl {
     /// `N_LOG_BINS`, the analysis resolution, not the number of values sent (`N_LIN_POINTS`).
     const N_LIN_BINS: usize = 240;
     /// Display points per bin spacing: the same bin-wide Gaussians, evaluated at this many times
-    /// as many centres. Each bin's Gaussian is only ~0.6 bin spacings wide (`GAUSSIAN_WIDTH_MULT`
+    /// as many centres. Each bin's Gaussian is only ~0.5 bin spacings wide (`GAUSSIAN_WIDTH_MULT`
     /// × half a bin), so one value per bin samples the smoothed spectrum too coarsely to show its
     /// shape: a tone's lobe at the top was 3-4 points, and the drawn spline invented the shape
     /// between them — misshapen lobes, glaring on a maximised window, ~10 device px per bin.
@@ -1001,8 +1015,8 @@ mod windows_impl {
     ///
     /// Sigma is set to the bin's own nominal half-width (`(hi-lo)/2`), i.e. matched to the *local*
     /// decimation ratio exactly the way `[lo, hi]` already is — wide in linear-bin terms low in
-    /// the spectrum, narrow high up — scaled by `GAUSSIAN_WIDTH_MULT` (a small constant "smidge" of
-    /// extra smoothing everywhere) and then floored at `GAUSSIAN_FLOOR_SIGMA_BINS` (see that
+    /// the spectrum, narrow high up — scaled by `GAUSSIAN_WIDTH_MULT` (1.0 now; see its doc for the
+    /// "smidge" it used to add) and then floored at `GAUSSIAN_FLOOR_SIGMA_BINS` (see that
     /// constant's own doc for why the width-matched value alone isn't enough at the low end: near
     /// the low-frequency crossover the local span is too narrow to smooth over the analysis
     /// window's own, fixed-Hz sidelobe structure, a second, different-scale problem from the one
@@ -1053,7 +1067,7 @@ mod windows_impl {
         let center = (lo + hi) / 2.0;
         let half_width = ((hi - lo) / 2.0) * GAUSSIAN_WIDTH_MULT;
         let sigma = half_width.max(GAUSSIAN_FLOOR_SIGMA_BINS);
-        let radius = (sigma * 4.0).ceil() as i32;
+        let radius = (sigma * KERNEL_REACH_SIGMAS).ceil() as i32;
         let c = center.round() as i32;
         let lo_i = (c - radius).max(0) as usize;
         let hi_i = ((c + radius) as usize).min(len.saturating_sub(1));
@@ -2397,6 +2411,47 @@ mod windows_impl {
             spec.reconfigure(rate, BASE_FFT_SIZE);
             assert_eq!(spec.analysis_size, BASE_FFT_SIZE, "should be able to reconfigure back down");
             assert_eq!(spec.avg_power.len(), padded_before);
+        }
+
+        /// A strong tone leaving a display point's kernel must not drop the curve in one step: the
+        /// kernel's reach ([`KERNEL_REACH_SIGMAS`]) has to carry its tail below anything shown.
+        /// The odd harmonics of a square leave near-silent gaps between them, so any cliff at the
+        /// kernel's edge stands out (at 4σ: 17 steps, the worst 63 dB).
+        #[test]
+        fn a_square_waves_harmonics_have_no_cliffs() {
+            let rate = 48_000u32;
+            let mut spec = Spectrum::new(rate, MAX_FFT_SIZE, Arc::new(AtomicBool::new(false)));
+            let total = rate as usize * 4;
+            let mut buf = vec![0.0f32; 4096];
+            let mut n0 = 0usize;
+            while n0 < total {
+                let n = buf.len().min(total - n0);
+                for (k, s) in buf.iter_mut().take(n).enumerate() {
+                    let t = (n0 + k) as f64 / rate as f64;
+                    *s = if (t * 100.0).fract() < 0.5 { 0.25 } else { -0.25 };
+                }
+                spec.push(&buf[..n]);
+                n0 += n;
+            }
+            let u = spec.snapshot(true);
+            let n = u.db.len();
+            let hz = |i: usize| u.f_min * (u.f_max / u.f_min).powf(i as f32 / (n - 1) as f32);
+            // A step is a jump between neighbours far bigger than the slope on either side of it.
+            let steps: Vec<(f32, usize)> = (2..n - 2)
+                .map(|i| {
+                    let d = u.db[i + 1] - u.db[i];
+                    let around = (u.db[i] - u.db[i - 1]).abs().max((u.db[i + 2] - u.db[i + 1]).abs());
+                    (d.abs() - around, i)
+                })
+                .collect();
+            let (worst, i) = steps.iter().copied().max_by(|a, b| a.0.total_cmp(&b.0)).unwrap();
+            assert!(
+                worst < 3.0,
+                "a {worst:.1} dB step at {:.1} Hz: {:.1} -> {:.1} dB",
+                hz(i),
+                u.db[i],
+                u.db[i + 1]
+            );
         }
 
         #[test]

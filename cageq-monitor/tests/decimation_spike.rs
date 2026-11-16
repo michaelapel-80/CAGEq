@@ -474,7 +474,7 @@ fn width_mult_smooths_dense_high_frequency_content() {
 }
 
 /// Asked directly after `HIGH_RES_FFT_SIZE` (32768, 4x `BASE_FFT_SIZE`) shipped as an opt-in
-/// analyzer toggle: does `GAUSSIAN_FLOOR_SIGMA_BINS`/`GAUSSIAN_WIDTH_MULT` (2.0/1.2 in production)
+/// analyzer toggle: does `GAUSSIAN_FLOOR_SIGMA_BINS`/`GAUSSIAN_WIDTH_MULT` (2.0/1.2 in production then; the multiplier is 1.0 since)
 /// need re-tuning for it, or was `floor_sweep_preserves_low_frequency_resolution`'s 8192-only
 /// verification silently invalidated by the new size?
 ///
@@ -556,7 +556,7 @@ fn floor_holds_up_unchanged_at_high_res_window() {
     let db: Vec<f32> = ranges
         .iter()
         .map(|&(lo, hi)| {
-            // 2.0 / 1.2 — GAUSSIAN_FLOOR_SIGMA_BINS / GAUSSIAN_WIDTH_MULT, unchanged from production.
+            // 2.0 / 1.2 — GAUSSIAN_FLOOR_SIGMA_BINS / GAUSSIAN_WIDTH_MULT as production had them then.
             let p = reduce_gaussian_tuned(&power, lo, hi, 2.0, 1.2);
             if p > 0.0 { 10.0 * p.log10() } else { -120.0 }
         })
