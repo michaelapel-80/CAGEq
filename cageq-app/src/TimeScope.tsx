@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { FrameCapRow, frameGate } from "./frameLimit";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -460,8 +461,13 @@ export function TimeScope() {
     // each frame) — rebuilt only when the rate or the tuned cutoff changes, same pattern as `invRef`.
     let trig: TriggerDetector | null = null;
 
+    const frameDue = frameGate(); // the optional frame-rate cap (frameLimit.ts)
     const render = () => {
       const now = performance.now();
+      if (!frameDue(now)) {
+        raf = requestAnimationFrame(render);
+        return;
+      }
       const dt = Math.min(0.1, (now - last) / 1000);
       last = now;
       const p = paramsRef.current;
@@ -949,6 +955,7 @@ export function TimeScope() {
               <span className="vs-tune-label">{t("scope.undistort")}</span>
               <input name="scope-undistort" type="checkbox" checked={params.undistort} onChange={(e) => set("undistort", e.currentTarget.checked)} />
             </label>
+            <FrameCapRow />
           </div>
         )}
       </div>

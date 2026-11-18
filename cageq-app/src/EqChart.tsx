@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { FrameCapRow, frameGate } from "./frameLimit";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, highPassFc, HP_SLOPES, logGrid, phaseDeg, type FadingCurve, type ResponseModel, retargetFadingCurve, stepFadingCurve, undistortable } from "./biquad";
@@ -782,8 +783,13 @@ export function EqChart({
     let lastSampleRate: number | undefined;
     let lastModel: ResponseModel | undefined;
 
+    const frameDue = frameGate(); // the optional frame-rate cap (frameLimit.ts)
     const render = () => {
       const now = performance.now();
+      if (!frameDue(now)) {
+        raf = requestAnimationFrame(render);
+        return;
+      }
       const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
       last = now;
       const { eqBands, preampDb, sampleRate, model, PAD, H, W, specParams } = specDrawCtx.current;
@@ -1672,6 +1678,7 @@ export function EqChart({
             </div>
           </div>
           {onFftSizeChange && <FftSizeRow fftSize={fftSize} sampleRate={sampleRate} onChange={onFftSizeChange} />}
+          <FrameCapRow />
         </div>
       )}
 

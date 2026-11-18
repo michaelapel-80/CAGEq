@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { FrameCapRow, frameGate } from "./frameLimit";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { meterStream, scopeStream, type MeterData } from "./streams";
@@ -355,8 +356,13 @@ export function Meter({
     let strokeCacheGlow = NaN;
     const strokeStyles: string[] = new Array(VEL_BUCKETS);
 
+    const frameDue = frameGate(); // the optional frame-rate cap (frameLimit.ts)
     const render = () => {
       const now = performance.now();
+      if (!frameDue(now)) {
+        raf = requestAnimationFrame(render);
+        return;
+      }
       const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
       last = now;
       const p = paramsRef.current;
@@ -628,6 +634,7 @@ export function Meter({
               {t("meter.resetButton")}
             </button>
           </div>
+          <FrameCapRow />
         </div>
       )}
       <div

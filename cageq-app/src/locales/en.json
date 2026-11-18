@@ -1,5 +1,10 @@
 {
   "lang": { "label": "Language" },
+  "fps": {
+    "label": "Frame rate",
+    "hint": "Caps how often the instruments draw, all of them and every window: to see them at another refresh rate, or to save some CPU/GPU. A cap that doesn't divide the display's rate can't keep an even cadence (60 on 144 Hz draws every 2nd or 3rd refresh); 72 or 48 on 144 Hz can.",
+    "max": "Max"
+  },
   "theme": {
     "title": "Theme: {{mode}} — click to force light/dark (Auto → Light → Dark)",
     "aria": "Theme: {{mode}}. Click to change.",

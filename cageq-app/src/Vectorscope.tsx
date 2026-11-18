@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { FrameCapRow, frameGate } from "./frameLimit";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -384,8 +385,13 @@ export function Vectorscope({
     // The one segment of a beam standing still at the centre — see the idle branch.
     const restSeg = new Float32Array(5);
 
+    const frameDue = frameGate(); // the optional frame-rate cap (frameLimit.ts)
     const render = () => {
       const now = performance.now();
+      if (!frameDue(now)) {
+        raf = requestAnimationFrame(render);
+        return;
+      }
       const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
       last = now;
       const p = paramsRef.current;
@@ -768,6 +774,7 @@ export function Vectorscope({
               <span className="vs-tune-label">{t("scope.undistort")}</span>
               <input name="vectorscope-invert" type="checkbox" checked={params.invert} onChange={(e) => set("invert", e.currentTarget.checked)} />
             </label>
+            <FrameCapRow />
           </div>
         )}
       </div>

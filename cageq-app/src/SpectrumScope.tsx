@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { FrameCapRow, frameGate } from "./frameLimit";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -689,8 +690,13 @@ export function SpectrumScope({
     let tessScratch = new Float32Array(0);
     let segData = new Float32Array(0);
 
+    const frameDue = frameGate(); // the optional frame-rate cap (frameLimit.ts)
     const render = () => {
       const now = performance.now();
+      if (!frameDue(now)) {
+        raf = requestAnimationFrame(render);
+        return;
+      }
       const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
       last = now;
       const p = paramsRef.current;
@@ -1236,6 +1242,7 @@ export function SpectrumScope({
               </label>
             )}
             {onFftSizeChange && <FftSizeRow fftSize={fftSize} sampleRate={sampleRate} onChange={onFftSizeChange} />}
+            <FrameCapRow />
           </div>
         )}
       </div>

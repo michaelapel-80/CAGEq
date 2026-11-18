@@ -1,5 +1,10 @@
 {
   "lang": { "label": "Sprache" },
+  "fps": {
+    "label": "Bildrate",
+    "hint": "Begrenzt, wie oft die Instrumente zeichnen, alle und in jedem Fenster: um sie bei einer anderen Bildwiederholrate zu sehen oder um etwas CPU/GPU zu sparen. Ein Limit, das die Rate des Displays nicht teilt, kann keinen gleichmäßigen Takt halten (60 bei 144 Hz zeichnet jede 2. oder 3. Aktualisierung); 72 oder 48 bei 144 Hz schon.",
+    "max": "Max"
+  },
   "theme": {
     "title": "Design: {{mode}} — klicken für erzwungen hell/dunkel (Auto → Hell → Dunkel)",
     "aria": "Design: {{mode}}. Zum Ändern klicken.",
