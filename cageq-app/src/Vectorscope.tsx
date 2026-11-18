@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type Band, type FadingInverse, type ResponseModel, retargetFadingInverse, stepFadingInverse } from "./biquad";
-import { scopeStream } from "./streams";
+import { queueScopeWindow, scopeStream } from "./streams";
 import { accentRgb, createPhosphor, DOSE_REF_FPS, retuneForRelativeContrast, streamDoseMult } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
@@ -186,9 +186,11 @@ export function Vectorscope({
   const wrapRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLCanvasElement>(null);
   const trailRef = useRef<HTMLCanvasElement>(null);
-  // Latest payload, written by the listener and read by the rAF loop — a ref, not state, so the
-  // 60 fps stream drives the imperative canvas without ever re-rendering React.
-  const scopeRef = useRef<ScopeData | null>(null);
+  // The stream, written by the listener and read by the rAF loop — refs, not state, so the 60 fps
+  // stream drives the imperative canvas without ever re-rendering React: the windows not yet
+  // traced (see SCOPE_QUEUE_MAX), and the newest payload.
+  const pendingRef = useRef<ScopeData[]>([]);
+  const latestRef = useRef<ScopeData | null>(null);
   const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-vectorscope-params", DEFAULTS, VECTORSCOPE_PARAMS_MIGRATION);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
@@ -258,7 +260,9 @@ export function Vectorscope({
   useEffect(() => {
     let active = true;
     const unsubScope = scopeStream.subscribe((s) => {
-      if (active) scopeRef.current = s;
+      if (!active) return;
+      latestRef.current = s;
+      queueScopeWindow(pendingRef.current, s);
     });
     let unlistenEq: (() => void) | undefined;
     void (async () => {
@@ -354,8 +358,7 @@ export function Vectorscope({
 
     let raf = 0;
     let last = performance.now();
-    let drawn: ScopeData | null = null; // last payload already traced (draw each once)
-    let lastTrace = performance.now(); // when `drawn` last actually changed — see doseMult below
+    let lastTrace = performance.now(); // when a window was last traced — see doseMult below
     // Per-velocity-bucket segment buffers, reused across frames — replaces a fresh `Path2D` per
     // bucket (VEL_BUCKETS) per scope window (~60/s from the backend). Path2D has no reset/clear
     // method, so the original code had no way to reuse the objects themselves; these plain
@@ -417,7 +420,8 @@ export function Vectorscope({
       // filter's real output, a discontinuity a snapshot recording proved isn't in the real
       // (crossfaded) audio at all — see `apo-switch-artifacts` memory, "NOT a bug".
       const eq = eqRef.current;
-      const rate = scopeRef.current?.rate && scopeRef.current.rate > 0 ? scopeRef.current.rate : 48000;
+      const newest = latestRef.current;
+      const rate = newest?.rate && newest.rate > 0 ? newest.rate : 48000;
       if (p.invert) {
         const prev = invRef.current;
         if (prev === null || prev.filtersRef !== eq.filters || prev.model !== eq.model || prev.rate !== rate) {
@@ -441,10 +445,13 @@ export function Vectorscope({
       //    with no separate spot drawn on top. (The Canvas 2D fallback grades by velocity buckets
       //    instead — VEL_BUCKETS stroke calls, not one per segment.)
       let doseMult = 1; // see the fresh-trace branch below for why this isn't always 1
-      const s = scopeRef.current;
-      const idle = !s || !s.signal || s.xy.length < 4;
+      // Every window since the last drawn frame (SCOPE_QUEUE_MAX), each traced once: drawing only
+      // the newest dropped whatever the skipped windows held at a frame rate below the stream's.
+      // `latestRef` (the newest payload, drawn or not) tells silence from a frame between windows.
+      const fresh = pendingRef.current.filter((w) => w.signal && w.xy.length >= 4);
+      pendingRef.current = [];
+      const idle = fresh.length === 0 && (!newest || !newest.signal || newest.xy.length < 4);
       if (idle) {
-        if (s) drawn = s;
         // Silence: the beam rests at the centre. The backend sends no samples while the endpoint is
         // silent, so deposit what a stream of zero samples would have — this frame's worth of them,
         // at one point — with the dose a real window gets per unit of time (see the fresh-trace
@@ -459,8 +466,7 @@ export function Vectorscope({
             phos.addSegments!({ data: restSeg, count: 1, width: lineWidth, rgb: [ar, ag, ab], round: true });
           }
         }
-      } else if (s !== drawn) {
-        drawn = s;
+      } else if (fresh.length > 0) {
         // This view only draws a fresh trace once per real scope window (~60/s from the backend —
         // see ScopeUpdate), not every animation frame: re-stroking ~768 connected points across up
         // to VEL_BUCKETS velocity buckets on every rAF frame dropped frames on a large tube (see
@@ -484,22 +490,29 @@ export function Vectorscope({
         const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
         lastTrace = now;
         doseMult = streamDoseMult(dtSinceTrace, dt, p.trailTau, TAU_REF);
+        // Shared by every window in this trace: the dose above is the whole span since the last one,
+        // and each window's samples bring their own energy (BEAM_ENERGY), so k windows at once get a
+        // k-th each — the same light per window as drawing them one per frame.
+        doseMult /= fresh.length;
         // Full-bright segment length (px), scaled to a reference rate: at a higher rate the beam
         // moves less per sample, so shrink the threshold to match → the velocity glow tracks beam
         // *speed* (px/s), not px/sample, and the intensity no longer jumps with the sample rate.
         const kRef = FALLBACK_FOCUS * (S / REF_SIZE) * (VEL_REF_RATE / rate);
-        const xy = s.xy;
-        // Upper bound on segments any one bucket could need this window — grown only when a bigger
-        // window arrives than any buffer seen so far (see the buffers' own doc above).
-        const maxSegments = Math.max(1, Math.floor(xy.length / 2));
+        // Upper bounds on the segments one window, and this frame's windows together, could need —
+        // grown only when more arrive than any buffer seen so far (see the buffers' own doc above).
+        let maxSegments = 1;
+        let totalSegments = 0;
+        for (const w of fresh) {
+          maxSegments = Math.max(maxSegments, Math.floor(w.xy.length / 2));
+          totalSegments += Math.floor(w.xy.length / 2);
+        }
         if (gpu && pathX.length < maxSegments + LANCZOS_TAPS) {
           pathX = new Float32Array(maxSegments + LANCZOS_TAPS);
           pathY = new Float32Array(maxSegments + LANCZOS_TAPS);
         }
-        let pathN = 0;
         let segCount = 0;
-        if (!gpu && bucketCap < maxSegments) {
-          bucketCap = maxSegments;
+        if (!gpu && bucketCap < totalSegments) {
+          bucketCap = totalSegments;
           for (let b = 0; b < VEL_BUCKETS; b++) {
             bucketX0[b] = new Float64Array(bucketCap);
             bucketY0[b] = new Float64Array(bucketCap);
@@ -508,82 +521,88 @@ export function Vectorscope({
           }
         }
         bucketCount.fill(0);
-        // Connect only *within* the window — no bridge from the previous window's last point. Windows
-        // aren't guaranteed contiguous (tail-cap drops at high rates, timing jitter), so bridging drew
-        // long stray lines that piled into a haze box. The 1-sample gap at each boundary is invisible.
-        let prevX = NaN;
-        let prevY = NaN;
-        for (let i = 0; i + 1 < xy.length; i += 2) {
-          let l = xy[i];
-          let r = xy[i + 1];
-          if (undistort) {
-            [l, r] = stepFadingInverse(iv!, l, r);
+        for (const w of fresh) {
+          const xy = w.xy;
+          let pathN = 0;
+          // Connect only *within* the window — no bridge from the previous window's last point. Windows
+          // aren't guaranteed contiguous (tail-cap drops at high rates, timing jitter), so bridging drew
+          // long stray lines that piled into a haze box. The 1-sample gap at each boundary is invisible.
+          let prevX = NaN;
+          let prevY = NaN;
+          for (let i = 0; i + 1 < xy.length; i += 2) {
+            let l = xy[i];
+            let r = xy[i + 1];
+            if (undistort) {
+              [l, r] = stepFadingInverse(iv!, l, r);
+            }
+            const xp = p.rotate ? (r - l) / SQRT2 : l; // rotate −45°: L→up-left, R→up-right, mono→up
+            const yp = p.rotate ? (l + r) / SQRT2 : r;
+            const px = c + xp * scale;
+            const py = c - yp * scale; // canvas y is down
+            if (gpu) {
+              pathX[LANCZOS_A + pathN] = px;
+              pathY[LANCZOS_A + pathN] = py;
+              pathN++;
+            } else if (!Number.isNaN(prevX)) {
+              const dx = px - prevX;
+              const dy = py - prevY;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
+              let b = (f * VEL_BUCKETS) | 0;
+              if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
+              const seg = bucketCount[b]++;
+              bucketX0[b][seg] = prevX;
+              bucketY0[b][seg] = prevY;
+              bucketX1[b][seg] = px;
+              bucketY1[b][seg] = py;
+            }
+            prevX = px;
+            prevY = py;
           }
-          const xp = p.rotate ? (r - l) / SQRT2 : l; // rotate −45°: L→up-left, R→up-right, mono→up
-          const yp = p.rotate ? (l + r) / SQRT2 : r;
-          const px = c + xp * scale;
-          const py = c - yp * scale; // canvas y is down
-          if (gpu) {
-            pathX[LANCZOS_A + pathN] = px;
-            pathY[LANCZOS_A + pathN] = py;
-            pathN++;
-          } else if (!Number.isNaN(prevX)) {
-            const dx = px - prevX;
-            const dy = py - prevY;
-            const dist = Math.sqrt(dx * dx + dy * dy);
-            const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
-            let b = (f * VEL_BUCKETS) | 0;
-            if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
-            const seg = bucketCount[b]++;
-            bucketX0[b][seg] = prevX;
-            bucketY0[b][seg] = prevY;
-            bucketX1[b][seg] = px;
-            bucketY1[b][seg] = py;
+          if (!ctx) {
+            // The beam's path between samples is the band-limited signal's (beamPath.ts), both axes
+            // being band-limited signals: a piece per PIECE_PX of travel, each sample's energy
+            // (BEAM_ENERGY) split evenly over its pieces and spread over each one's own length.
+            for (let k = 0; k < LANCZOS_A; k++) {
+              pathX[k] = pathX[LANCZOS_A];
+              pathY[k] = pathY[LANCZOS_A];
+              pathX[LANCZOS_A + pathN + k] = pathX[LANCZOS_A + pathN - 1];
+              pathY[LANCZOS_A + pathN + k] = pathY[LANCZOS_A + pathN - 1];
+            }
+            let x0 = pathX[LANCZOS_A];
+            let y0 = pathY[LANCZOS_A];
+            for (let i = 0; i < pathN - 1; i++) {
+              const xEnd = pathX[i + 1 + LANCZOS_A];
+              const yEnd = pathY[i + 1 + LANCZOS_A];
+              const n = Math.min(MAX_PIECES, Math.max(1, Math.ceil(Math.hypot(xEnd - x0, yEnd - y0) / PIECE_PX)));
+              if (5 * (segCount + n) > segData.length) {
+                const grown = new Float32Array(Math.max(2 * segData.length, 5 * (segCount + n), 5 * maxSegments));
+                grown.set(segData.subarray(0, 5 * segCount));
+                segData = grown;
+              }
+              const pieceEnergy = energy / n;
+              for (let j = 1; j <= n; j++) {
+                let x1 = xEnd;
+                let y1 = yEnd;
+                if (j < n) {
+                  const row = lanczosRow(j / n);
+                  x1 = lanczosAt(pathX, i, row);
+                  y1 = lanczosAt(pathY, i, row);
+                }
+                const dist = Math.hypot(x1 - x0, y1 - y0);
+                const o = 5 * segCount++;
+                segData[o] = x0;
+                segData[o + 1] = y0;
+                segData[o + 2] = dist < MIN_SEG_PX ? x0 + MIN_SEG_PX : x1;
+                segData[o + 3] = y1;
+                segData[o + 4] = pieceEnergy / Math.max(MIN_SEG_PX, dist);
+                x0 = x1;
+                y0 = y1;
+              }
+            }
           }
-          prevX = px;
-          prevY = py;
         }
         if (!ctx) {
-          // The beam's path between samples is the band-limited signal's (beamPath.ts), both axes
-          // being band-limited signals: a piece per PIECE_PX of travel, each sample's energy
-          // (BEAM_ENERGY) split evenly over its pieces and spread over each one's own length.
-          for (let k = 0; k < LANCZOS_A; k++) {
-            pathX[k] = pathX[LANCZOS_A];
-            pathY[k] = pathY[LANCZOS_A];
-            pathX[LANCZOS_A + pathN + k] = pathX[LANCZOS_A + pathN - 1];
-            pathY[LANCZOS_A + pathN + k] = pathY[LANCZOS_A + pathN - 1];
-          }
-          let x0 = pathX[LANCZOS_A];
-          let y0 = pathY[LANCZOS_A];
-          for (let i = 0; i < pathN - 1; i++) {
-            const xEnd = pathX[i + 1 + LANCZOS_A];
-            const yEnd = pathY[i + 1 + LANCZOS_A];
-            const n = Math.min(MAX_PIECES, Math.max(1, Math.ceil(Math.hypot(xEnd - x0, yEnd - y0) / PIECE_PX)));
-            if (5 * (segCount + n) > segData.length) {
-              const grown = new Float32Array(Math.max(2 * segData.length, 5 * (segCount + n), 5 * maxSegments));
-              grown.set(segData.subarray(0, 5 * segCount));
-              segData = grown;
-            }
-            const pieceEnergy = energy / n;
-            for (let j = 1; j <= n; j++) {
-              let x1 = xEnd;
-              let y1 = yEnd;
-              if (j < n) {
-                const row = lanczosRow(j / n);
-                x1 = lanczosAt(pathX, i, row);
-                y1 = lanczosAt(pathY, i, row);
-              }
-              const dist = Math.hypot(x1 - x0, y1 - y0);
-              const o = 5 * segCount++;
-              segData[o] = x0;
-              segData[o + 1] = y0;
-              segData[o + 2] = dist < MIN_SEG_PX ? x0 + MIN_SEG_PX : x1;
-              segData[o + 3] = y1;
-              segData[o + 4] = pieceEnergy / Math.max(MIN_SEG_PX, dist);
-              x0 = x1;
-              y0 = y1;
-            }
-          }
           // Fully additive: every segment adds its energy, also where segments cross. The 2D path
           // below combines segments within a bucket once (one stroked path each) and adds only
           // across buckets. The spot is round (TraceSegments' `round`): it sums exactly at a bend,

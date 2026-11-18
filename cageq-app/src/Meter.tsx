@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { FrameCapRow, frameGate } from "./frameLimit";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
-import { meterStream, scopeStream, type MeterData } from "./streams";
+import { meterStream, queueScopeWindow, scopeStream, type MeterData } from "./streams";
 import type { ScopeData } from "./Vectorscope";
 import { accentRgb, createPhosphor, createPhosphorColumn, excitationShowing, retuneForRelativeContrast, streamDoseMult } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow } from "./beamPath";
@@ -279,13 +279,14 @@ export function Meter({
     };
   }, [hasBars]);
 
-  // Latest raw scope payload, written by the listener below and read by the beam's rAF loop — a
-  // ref, not state, so the stream drives the imperative canvas without ever re-rendering React.
-  const scopeRef = useRef<ScopeData | null>(null);
+  // The raw scope windows not yet traced (see SCOPE_QUEUE_MAX), written by the listener below and
+  // read by the beam's rAF loop — a ref, not state, so the stream drives the imperative canvas
+  // without ever re-rendering React.
+  const pendingRef = useRef<ScopeData[]>([]);
   useEffect(() => {
     let active = true;
     const unsub = scopeStream.subscribe((s) => {
-      if (active) scopeRef.current = s;
+      if (active) queueScopeWindow(pendingRef.current, s);
     });
     return () => {
       active = false;
@@ -323,8 +324,7 @@ export function Meter({
 
     let raf = 0;
     let last = performance.now();
-    let drawn: ScopeData | null = null; // last payload already traced (draw each once)
-    let lastTrace = performance.now(); // when `drawn` last actually changed — see doseMult below
+    let lastTrace = performance.now(); // when a window was last traced — see doseMult below
 
     // Per-velocity-bucket segment buffers, reused across frames — replaces a fresh `Path2D` per
     // bucket (16) per scope window (~60/s from the backend). Path2D has no reset/clear method, so
@@ -374,9 +374,13 @@ export function Meter({
       column?.setRows(cv.height);
       const lineWidth = Math.max(1, cv.width * p.beamWidth);
       const ctx = gpu ? null : phos.begin();
-      const s = scopeRef.current;
-      if (s && s.signal && s.xy.length >= 4 && s !== drawn) {
-        drawn = s;
+      // Every window since the last drawn frame (SCOPE_QUEUE_MAX), each traced once: drawing only
+      // the newest dropped whatever the skipped windows held at a frame rate below the stream's.
+      const fresh = pendingRef.current.filter((w) => w.signal && w.xy.length >= 4);
+      pendingRef.current = [];
+      // None (silence, or a frame between windows) draws nothing: the accumulator's own decay fades
+      // the trail out.
+      if (fresh.length > 0) {
         // This view only draws a fresh trace once per real scope window (~60/s from the backend —
         // see ScopeUpdate), not every animation frame — see Vectorscope.tsx's identical doseMult
         // comment for the full reasoning: commit()'s own dt/DOSE_REF_DT dose normalization assumes
@@ -395,9 +399,14 @@ export function Meter({
         const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
         lastTrace = now;
         doseMult = streamDoseMult(dtSinceTrace, dt, p.trailTau, TAU_REF);
+        // Shared by every window in this trace: the dose above is the whole span since the last one,
+        // and each window's samples bring their own energy (BEAM_ENERGY), so k windows at once get a
+        // k-th each — the same light per window as drawing them one per frame.
+        doseMult /= fresh.length;
         const W = cv.width;
         const cx = W / 2;
-        const rate = s.rate > 0 ? s.rate : 48000;
+        const newest = fresh[fresh.length - 1];
+        const rate = newest.rate > 0 ? newest.rate : 48000;
         const kRef = FALLBACK_FOCUS * (VEL_REF_RATE / rate);
         const barH = cv.height;
         const energy = p.glow * BEAM_ENERGY * barH * (VEL_REF_RATE / rate);
@@ -405,69 +414,78 @@ export function Meter({
         // runs off the bottom (down to one bar height below it) instead of piling up on the edge.
         const yOf = (lin: number) => (1 - Math.max(-1, Math.min(1, (toDbLin(Math.abs(lin)) - LEVEL_MIN_DB) / -LEVEL_MIN_DB))) * barH;
         const onScreen = (y: number) => Math.min(barH, Math.max(0, y));
-        const xy = s.xy;
-        // Upper bound on segments any one bucket could need this frame — grown only when a bigger
-        // window arrives than any buffer seen so far (see the buffers' own doc above).
-        const maxSegments = Math.max(1, Math.floor(xy.length / 2));
-        if (gpu && segData.length < maxSegments * MAX_PIECES * 5) segData = new Float32Array(maxSegments * MAX_PIECES * 5);
+        // Upper bounds on the segments one window, and this frame's windows together, could need —
+        // grown only when more arrive than any buffer seen so far (see the buffers' own doc above).
+        let maxSegments = 1;
+        let totalSegments = 0;
+        for (const w of fresh) {
+          maxSegments = Math.max(maxSegments, Math.floor(w.xy.length / 2));
+          totalSegments += Math.floor(w.xy.length / 2);
+        }
+        if (gpu && segData.length < totalSegments * MAX_PIECES * 5) segData = new Float32Array(totalSegments * MAX_PIECES * 5);
         if (gpu && levels.length < maxSegments + LANCZOS_TAPS) levels = new Float32Array(maxSegments + LANCZOS_TAPS);
-        let levelN = 0;
         let segCount = 0;
-        if (!gpu && bucketCap < maxSegments) {
-          bucketCap = maxSegments;
+        const hang = lineWidth / 2; // see the spot's note below
+        if (!gpu && bucketCap < totalSegments) {
+          bucketCap = totalSegments;
           for (let b = 0; b < VEL_BUCKETS; b++) {
             bucketY0[b] = new Float64Array(bucketCap);
             bucketY1[b] = new Float64Array(bucketCap);
           }
         }
         bucketCount.fill(0);
-        let prevY = NaN;
-        let prevLin = NaN;
-        for (let i = 0; i + 1 < xy.length; i += 2) {
-          const lin = (xy[i] + xy[i + 1]) / 2; // mono downmix, matching the backend's own convention
-          const db = toDbLin(Math.abs(lin));
-          const frac = Math.max(0, Math.min(1, (db - LEVEL_MIN_DB) / -LEVEL_MIN_DB));
-          const y = (1 - frac) * cv.height; // canvas y=0 (top) = 0 dBFS, matching the bar's own scale
-          if (gpu) {
-            levels[LANCZOS_A + levelN++] = lin;
-          } else if (!Number.isNaN(prevLin)) {
-            const dist = Math.abs(lin - prevLin) * LIN_DIST_SCALE;
-            const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
-            let b = (f * VEL_BUCKETS) | 0;
-            if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
-            const c = bucketCount[b]++;
-            bucketY0[b][c] = prevY;
-            bucketY1[b][c] = y;
+        for (const w of fresh) {
+          const xy = w.xy;
+          let levelN = 0;
+          let prevY = NaN;
+          let prevLin = NaN;
+          for (let i = 0; i + 1 < xy.length; i += 2) {
+            const lin = (xy[i] + xy[i + 1]) / 2; // mono downmix, matching the backend's own convention
+            const db = toDbLin(Math.abs(lin));
+            const frac = Math.max(0, Math.min(1, (db - LEVEL_MIN_DB) / -LEVEL_MIN_DB));
+            const y = (1 - frac) * cv.height; // canvas y=0 (top) = 0 dBFS, matching the bar's own scale
+            if (gpu) {
+              levels[LANCZOS_A + levelN++] = lin;
+            } else if (!Number.isNaN(prevLin)) {
+              const dist = Math.abs(lin - prevLin) * LIN_DIST_SCALE;
+              const f = dist <= kRef ? 1 : Math.max(VEL_FLOOR, kRef / dist); // ~1/velocity, floored
+              let b = (f * VEL_BUCKETS) | 0;
+              if (b >= VEL_BUCKETS) b = VEL_BUCKETS - 1;
+              const c = bucketCount[b]++;
+              bucketY0[b][c] = prevY;
+              bucketY1[b][c] = y;
+            }
+            prevY = y;
+            prevLin = lin;
           }
-          prevY = y;
-          prevLin = lin;
-        }
-        if (!ctx) {
-          // Each interval's energy, in pieces along the reconstructed path (see BEAM_ENERGY,
-          // PIECE_PX), each spread over its own on-screen length.
-          const hang = lineWidth / 2; // see the spot's note below
-          for (let k = 0; k < LANCZOS_A; k++) {
-            levels[k] = levels[LANCZOS_A];
-            levels[LANCZOS_A + levelN + k] = levels[LANCZOS_A + levelN - 1];
-          }
-          for (let i = 0; i < levelN - 1; i++) {
-            const ya = yOf(levels[LANCZOS_A + i]);
-            const yb = yOf(levels[LANCZOS_A + i + 1]);
-            const n = Math.min(MAX_PIECES, Math.max(MIN_PIECES, Math.ceil(Math.abs(onScreen(yb) - onScreen(ya)) / PIECE_PX)));
-            let y0 = ya;
-            for (let j = 1; j <= n; j++) {
-              const y1 = j === n ? yb : yOf(lanczosAt(levels, i, lanczosRow(j / n)));
-              const len = Math.max(MIN_SEG_PX, Math.abs(y1 - y0));
-              const o = 5 * segCount++;
-              segData[o] = cx;
-              segData[o + 1] = y0 + hang;
-              segData[o + 2] = cx;
-              segData[o + 3] = (Math.abs(y1 - y0) < MIN_SEG_PX ? y0 + MIN_SEG_PX : y1) + hang;
-              segData[o + 4] = energy / n / len;
-              column?.deposit(segData[o + 1], segData[o + 3], segData[o + 4]);
-              y0 = y1;
+          if (!ctx) {
+            // Each interval's energy, in pieces along the reconstructed path (see BEAM_ENERGY,
+            // PIECE_PX), each spread over its own on-screen length.
+            for (let k = 0; k < LANCZOS_A; k++) {
+              levels[k] = levels[LANCZOS_A];
+              levels[LANCZOS_A + levelN + k] = levels[LANCZOS_A + levelN - 1];
+            }
+            for (let i = 0; i < levelN - 1; i++) {
+              const ya = yOf(levels[LANCZOS_A + i]);
+              const yb = yOf(levels[LANCZOS_A + i + 1]);
+              const n = Math.min(MAX_PIECES, Math.max(MIN_PIECES, Math.ceil(Math.abs(onScreen(yb) - onScreen(ya)) / PIECE_PX)));
+              let y0 = ya;
+              for (let j = 1; j <= n; j++) {
+                const y1 = j === n ? yb : yOf(lanczosAt(levels, i, lanczosRow(j / n)));
+                const len = Math.max(MIN_SEG_PX, Math.abs(y1 - y0));
+                const o = 5 * segCount++;
+                segData[o] = cx;
+                segData[o + 1] = y0 + hang;
+                segData[o + 2] = cx;
+                segData[o + 3] = (Math.abs(y1 - y0) < MIN_SEG_PX ? y0 + MIN_SEG_PX : y1) + hang;
+                segData[o + 4] = energy / n / len;
+                column?.deposit(segData[o + 1], segData[o + 3], segData[o + 4]);
+                y0 = y1;
+              }
             }
           }
+        }
+        if (!ctx) {
           // Fully additive: every pass adds its energy (see BEAM_ENERGY). The 2D path below
           // combines a speed bucket's overlaps once (one stroked path per bucket) and adds only
           // across buckets.
@@ -511,8 +529,6 @@ export function Meter({
           }
           ctx.globalCompositeOperation = "source-over";
         }
-      } else if (!s || !s.signal) {
-        drawn = s; // idle: draw nothing this frame — the accumulator's own decay fades the trail out
       }
 
       phos.setTone?.(p.saturation, p.contrast, p.headroom);

@@ -137,3 +137,17 @@ function makeStream<T>(cmd: string) {
 export const meterStream = makeStream<MeterData>("subscribe_meter");
 export const spectrumStream = makeStream<SpectrumData>("subscribe_spectrum");
 export const scopeStream = makeStream<ScopeData>("subscribe_scope");
+
+/** Scope windows (~16 ms each) a view keeps queued between drawn frames at most: half a second.
+ *  The scope views consume every window since their last drawn frame, not just the newest — at a
+ *  frame rate below the stream's (a capped one, or a slow frame) the newest alone dropped the rest:
+ *  TimeScope's trigger ring spliced the windows either side of a gap into one (drawn as a jump),
+ *  and Vectorscope and the meter never showed what the skipped windows held. Bounded so a view that
+ *  isn't drawing (hidden, stalled) can't queue without limit; past it the oldest go. */
+export const SCOPE_QUEUE_MAX = 32;
+
+/** Append `s` to a view's queue of undrawn windows (see SCOPE_QUEUE_MAX). */
+export function queueScopeWindow(queue: ScopeData[], s: ScopeData): void {
+  queue.push(s);
+  if (queue.length > SCOPE_QUEUE_MAX) queue.splice(0, queue.length - SCOPE_QUEUE_MAX);
+}

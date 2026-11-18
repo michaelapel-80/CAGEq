@@ -5,7 +5,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type FadingInverse, retargetFadingInverse, stepFadingInverse } from "./biquad";
 import { detectorSample, findRisingEdge, triggerDetector, type TriggerDetector } from "./scopeTrigger";
-import { scopeStream } from "./streams";
+import { queueScopeWindow, scopeStream } from "./streams";
 import { accentRgb, createPhosphor, retuneForRelativeContrast, streamDoseMult } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
@@ -219,8 +219,6 @@ const TRIGGER_SEARCH_MS = 250; // how far back to look for a qualifying edge bef
 // renders identically to before the original decoupling change — only the number's meaning moved,
 // twice now. (A third time with the GPU beam's linear light — see DEFAULTS and FALLBACK_GLOW_SCALE.)
 const TAU_REF = 0.1;
-/** Scope windows (~16 ms each) queued between drawn frames at most: half a second. */
-const PENDING_MAX = 32;
 // The Canvas 2D fallback still strokes at alpha = glow, as before linear light: scaled back by the
 // factor glow's default moved by (0.2 -> 0.8), so it keeps the look it had.
 const FALLBACK_GLOW_SCALE = 0.2 / 0.8;
@@ -293,8 +291,7 @@ export function TimeScope() {
   // ring: the ring is one continuous stretch of audio, and feeding it only the newest window on
   // each drawn frame spliced non-adjacent windows together wherever a frame skipped one (a capped
   // frame rate, or any frame slower than the stream), and the traced span showed the seams as jumps.
-  // Bounded so a window that isn't drawing (hidden, stalled) can't queue without limit; past that
-  // the oldest go, which leaves a seam only after such a stall.
+  // Bounded (SCOPE_QUEUE_MAX), so a seam remains only after a long stall.
   const pendingRef = useRef<ScopeData[]>([]);
   const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-timescope-params", DEFAULTS, TIMESCOPE_PARAMS_MIGRATION);
   const [tuning, setTuning] = useState(false);
@@ -348,10 +345,7 @@ export function TimeScope() {
   useEffect(() => {
     let active = true;
     const unsubScope = scopeStream.subscribe((s) => {
-      if (!active) return;
-      const q = pendingRef.current;
-      q.push(s);
-      if (q.length > PENDING_MAX) q.splice(0, q.length - PENDING_MAX);
+      if (active) queueScopeWindow(pendingRef.current, s);
     });
     let unlistenEq: (() => void) | undefined;
     void (async () => {
