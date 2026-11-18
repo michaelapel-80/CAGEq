@@ -340,6 +340,44 @@ vec3 overexpose(vec3 l){
 }
 float toneAlpha(float n){ return linearToSrgb1(min(pow(n, uContrast), 1.0)); }`;
 
+// What a frame shows of the accumulator: the light's mean over the time the frame stays on screen,
+// not its value at the frame's start. A display holds each frame until the next, and the eye
+// integrates what it holds; a real phosphor's light keeps decaying over that time. The accumulator
+// holds the light just after this frame's deposit, its peak, so showing it as is held that peak for
+// the whole frame, and the longer the frame the more the peak overstates what a real tube would
+// have shown: with TimeScope's 20 ms trail, 1.9x the light at 30 fps that 240 Hz showed, 1.4x at
+// 60. Decaying by k over the frame, the light's mean is (1 − k)/(−ln k) of its start (k per pixel,
+// FS_ACCUM's brightness-dependent mix of the two rates); taken against the same at DOSE_REF_FPS,
+// the dose's own reference, so 240 Hz shows exactly what it did and every other rate shows the
+// same mean light (simulated within 2% from 30 to 360 Hz, with `streamDoseMult`'s bound). The
+// frame's own `dt` stands in for how long it will stay up, which a steady rate makes exact. A
+// long trail barely changes (the EQ chart's 1.5 s: under 1% at 30 fps).
+//
+// `uMean`: keep and keepTail over this frame's dt, then over DOSE_REF_DT (`frameMeanUniform`).
+const GLSL_FRAME_MEAN = `uniform vec4 uMean;
+float decayMean(float k){ float x = -log(k); return x < 1e-4 ? 1.0 - 0.5 * x : (1.0 - k) / x; }
+vec4 frameMean(vec4 c){
+  float s = smoothstep(0.0, ${TAIL_KNEE.toFixed(2)}, max(max(c.r, c.g), c.b));
+  return c * (decayMean(mix(uMean.y, uMean.x, s)) / decayMean(mix(uMean.w, uMean.z, s)));
+}`;
+
+/** GLSL_FRAME_MEAN's `uMean` for a frame of `dt` (s). */
+function frameMeanUniform(dt: number, tau: number, tail: number): [number, number, number, number] {
+  const tailTau = tau * Math.max(1, tail);
+  return [Math.exp(-dt / tau), Math.exp(-dt / tailTau), Math.exp(-DOSE_REF_DT / tau), Math.exp(-DOSE_REF_DT / tailTau)];
+}
+
+/** GLSL_FRAME_MEAN on the CPU, for an excitation whose brightest channel's light is `v`. */
+function frameMeanScale(mean: readonly [number, number, number, number], v: number): number {
+  const s = Math.min(1, Math.max(0, v / TAIL_KNEE));
+  const w = s * s * (3 - 2 * s);
+  const decayMean = (k: number) => {
+    const x = -Math.log(k);
+    return x < 1e-4 ? 1 - 0.5 * x : (1 - k) / x;
+  };
+  return decayMean(mean[1] + (mean[0] - mean[1]) * w) / decayMean(mean[3] + (mean[2] - mean[3]) * w);
+}
+
 // Decay the history and add this frame's trace. `uKeep` is exp(-dt/tau).
 //
 // The trace arrives *unpremultiplied* and is premultiplied here rather than at upload: this build
@@ -414,8 +452,9 @@ void main(){ gl_FragColor = texture2D(uTex, vUv); }`;
 const FS_PRESENT = `precision highp float; varying vec2 vUv; uniform sampler2D uTex; uniform float uLinear;
 ${GLSL_SRGB}
 ${GLSL_TONE}
+${GLSL_FRAME_MEAN}
 void main(){
-  vec4 c = texture2D(uTex, vUv);
+  vec4 c = frameMean(texture2D(uTex, vUv));
   gl_FragColor = uLinear > 0.5 ? vec4(linearToSrgb(overexpose(contrastLight(c.rgb))), toneAlpha(c.a)) : c;
 }`;
 
@@ -667,9 +706,10 @@ void main(){ gl_FragColor = texture2D(uTex, vUv * uUvScale); }`;
 // In linear light it's the light instead, all of it (see FS_COMPOSITE).
 const FS_BRIGHTPASS = `precision highp float;
 uniform sampler2D uTex; uniform float uThreshold, uLinear;
+${GLSL_FRAME_MEAN}
 vec3 tap(sampler2D t, vec2 uv){
-  if (uLinear > 0.5) return texture2D(t, uv).rgb;
-  vec3 c = texture2D(t, uv).rgb;
+  vec3 c = frameMean(texture2D(t, uv)).rgb;
+  if (uLinear > 0.5) return c;
   float v = max(c.r, max(c.g, c.b));
   return v > 0.0 ? c * (max(v - uThreshold, 0.0) / v) : vec3(0.0);
 }
@@ -743,8 +783,9 @@ uniform sampler2D uSharp, uBloom, uBloomWide; uniform float uIntensity, uIntensi
 uniform vec2 uBloomUv; // the canvas's share of the tight texture — see GLSL_DOWN2's doc
 ${GLSL_SRGB}
 ${GLSL_TONE}
+${GLSL_FRAME_MEAN}
 void main(){
-  vec4 sharpC = texture2D(uSharp, vUv);
+  vec4 sharpC = frameMean(texture2D(uSharp, vUv));
   vec3 tightC = uIntensity * texture2D(uBloom, vUv * uBloomUv).rgb;
   vec3 wideC = uIntensityWide * texture2D(uBloomWide, vUv).rgb;
   if (uLinear > 0.5) {
@@ -797,7 +838,7 @@ export type PhosphorColumn = {
   deposit(y0: number, y1: number, alpha: number): void;
   /** `commit` and `setTone`'s values, plus the segments' spot (px). */
   commit(dt: number, tau: number, tail: number, doseMult: number, saturation: number, headroom: number, spot: number): void;
-  /** The topmost row at `minN` or above, or -1. */
+  /** The topmost row showing at `minN` or above (GLSL_FRAME_MEAN applied), or -1. */
   top(minN: number): number;
 };
 
@@ -809,6 +850,7 @@ export function createPhosphorColumn(rgb: readonly [number, number, number]): Ph
   let mass = new Float64Array(0);
   let slope = new Float64Array(0);
   let cum = new Float64Array(0);
+  let mean: [number, number, number, number] = [1, 1, 1, 1];
   return {
     setRows(rows) {
       if (rows === excitation.length) return;
@@ -843,6 +885,7 @@ export function createPhosphorColumn(rgb: readonly [number, number, number]): Ph
       const nMax = sat ? headroom / (1 - Math.exp(-saturation)) : 0;
       const gain = sat ? saturation / (1 - Math.exp(-saturation)) : 1;
       const dose = (dt / DOSE_REF_DT) * doseMult * gain;
+      mean = frameMeanUniform(dt, tau, tail);
       let run = 0;
       for (let r = 0; r < rows; r++) {
         run += slope[r];
@@ -861,7 +904,10 @@ export function createPhosphorColumn(rgb: readonly [number, number, number]): Ph
       }
     },
     top(minN) {
-      for (let r = 0; r < excitation.length; r++) if (excitation[r] >= minN) return r;
+      for (let r = 0; r < excitation.length; r++) {
+        const n = excitation[r];
+        if (n > 0 && n * frameMeanScale(mean, n * colourMax) >= minN) return r;
+      }
       return -1;
     },
   };
@@ -952,6 +998,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
   const uTrace = gl.getUniformLocation(accum, "uTrace");
   const uTex = gl.getUniformLocation(blit, "uTex");
   const uPresentTex = gl.getUniformLocation(present, "uTex");
+  const uPresentMean = gl.getUniformLocation(present, "uMean");
   gl.useProgram(accum);
   gl.uniform1f(gl.getUniformLocation(accum, "uLinear"), linear ? 1 : 0);
   gl.useProgram(present);
@@ -1148,13 +1195,14 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
   let bloomProg: {
     down2: Down2Prog; uDown2Tex: WebGLUniformLocation | null;
     resample: WebGLProgram; uResampleTex: WebGLUniformLocation | null; uUvScale: WebGLUniformLocation | null;
-    brightPass: Down2Prog; uThreshold: WebGLUniformLocation | null; uBPTex: WebGLUniformLocation | null;
+    brightPass: Down2Prog; uThreshold: WebGLUniformLocation | null; uBPTex: WebGLUniformLocation | null; uBPMean: WebGLUniformLocation | null;
     tight: Down2Prog; uTightTex: WebGLUniformLocation | null;
     blur: WebGLProgram; uOffset: WebGLUniformLocation | null; uBlurTex: WebGLUniformLocation | null;
     composite: WebGLProgram;
     uSharp: WebGLUniformLocation | null; uBloom: WebGLUniformLocation | null; uBloomWide: WebGLUniformLocation | null;
     uIntensity: WebGLUniformLocation | null; uIntensityWide: WebGLUniformLocation | null;
     uBloomUv: WebGLUniformLocation | null;
+    uCompositeMean: WebGLUniformLocation | null;
   } | null = null;
   type BloomTarget = { tex: WebGLTexture; fbo: WebGLFramebuffer };
   type BloomPair = [BloomTarget, BloomTarget];
@@ -1246,6 +1294,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
         brightPass: d2(brightPass),
         uThreshold: gl.getUniformLocation(brightPass, "uThreshold"),
         uBPTex: gl.getUniformLocation(brightPass, "uTex"),
+        uBPMean: gl.getUniformLocation(brightPass, "uMean"),
         tight: d2(tight),
         uTightTex: gl.getUniformLocation(tight, "uTex"),
         blur,
@@ -1258,6 +1307,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
         uIntensity: gl.getUniformLocation(composite, "uIntensity"),
         uIntensityWide: gl.getUniformLocation(composite, "uIntensityWide"),
         uBloomUv: gl.getUniformLocation(composite, "uBloomUv"),
+        uCompositeMean: gl.getUniformLocation(composite, "uMean"),
       };
     }
     if (!bloomTex || bloomW !== w || bloomH !== h) {
@@ -1513,6 +1563,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
       gl.uniform1f(uKnee, TAIL_KNEE);
       gl.uniform1f(uFloor, TAIL_FLOOR_PER_SEC * dt);
       gl.uniform1f(uDose, (dt / DOSE_REF_DT) * doseMult);
+      const mean = frameMeanUniform(dt, tau, tail); // GLSL_FRAME_MEAN, for every pass reading the result
       gl.uniform1i(uPrev, 0);
       gl.uniform1i(uTrace, 1);
       gl.activeTexture(gl.TEXTURE0);
@@ -1543,6 +1594,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
         // tiers.
         useDown2(bloomProg.brightPass, W, H, 2, 2);
         gl.uniform1f(bloomProg.uThreshold, linear ? 0 : BLOOM_THRESHOLD); // see FS_COMPOSITE
+        gl.uniform4f(bloomProg.uBPMean, ...mean);
         gl.uniform1i(bloomProg.uBPTex, 0);
         gl.bindFramebuffer(gl.FRAMEBUFFER, pf.fbo);
         gl.viewport(0, 0, prefilterW, prefilterH);
@@ -1651,6 +1703,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, W, H);
         gl.useProgram(bloomProg.composite);
+        gl.uniform4f(bloomProg.uCompositeMean, ...mean);
         gl.uniform1f(bloomProg.uIntensity, bloomIntensity);
         gl.uniform1f(bloomProg.uIntensityWide, bloomWide);
         gl.uniform2f(bloomProg.uBloomUv, W / (4 * bloomW), H / (4 * bloomH));
@@ -1669,6 +1722,7 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, W, H);
         gl.useProgram(present);
+        gl.uniform4f(uPresentMean, ...mean);
         gl.uniform1i(uPresentTex, 0);
         gl.bindTexture(gl.TEXTURE_2D, ping[dst].tex);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -1895,6 +1949,8 @@ export function accentRgb(el: Element): [number, number, number] {
 
 /** The scope stream's cadence (cageq-monitor's SCOPE_INTERVAL, 16 ms). */
 const SCOPE_UPDATE_HZ = 60;
+/** The most stream time one trace may carry, in frames or stream windows, whichever is longer. */
+const TRACE_SPAN_MAX = 2;
 
 /**
  * `commit`'s `doseMult` for a view that draws a fresh trace once per scope-stream window (~60/s)
@@ -1902,9 +1958,12 @@ const SCOPE_UPDATE_HZ = 60;
  *
  * - `dtSinceTrace / dt`: `commit`'s own dose assumes one call per unit of real content, which a
  *   display faster than the stream breaks (dimmer at high refresh rates, brighter at low ones);
- *   this substitutes the real time since the last trace. Clamped to 4: `dt` has no lower bound,
- *   and one anomalously short frame (timer jitter, a coalesced burst after a stall) otherwise
- *   injected a one-frame spike that left a bright, saturated line behind.
+ *   this substitutes the real time since the last trace. Bounded at `TRACE_SPAN_MAX` frames or
+ *   stream windows, whichever is longer: a trace after a stall, or in a burst of frames coalesced
+ *   behind one, otherwise carried the whole gap's dose at once and left a bright, saturated line
+ *   behind. It was a cap on the ratio, at 4 — exactly 240 Hz against the 60 Hz stream, so window
+ *   jitter clipped every late trace there (4% of the light) and anything faster lost the rest
+ *   outright (a quarter at 360 Hz). The span bound leaves every rate whole, from a 30 fps cap up.
  * - `SCOPE_UPDATE_HZ / DOSE_REF_FPS`: the absolute calibration `glow` was tuned under, before the
  *   rate-dependence was fixed — kept here rather than folded into the defaults, so a value
  *   someone saved still means what it meant.
@@ -1912,6 +1971,6 @@ const SCOPE_UPDATE_HZ = 60;
  *   with the trail's length; `tauRef` is the view's own anchor (a real 100 ms in each).
  */
 export function streamDoseMult(dtSinceTrace: number, dt: number, trailTau: number, tauRef: number): number {
-  const rateRatio = dt > 0 ? Math.min(4, dtSinceTrace / dt) : 1;
+  const rateRatio = dt > 0 ? Math.min(dtSinceTrace, TRACE_SPAN_MAX * Math.max(dt, 1 / SCOPE_UPDATE_HZ)) / dt : 1;
   return rateRatio * (SCOPE_UPDATE_HZ / DOSE_REF_FPS) * (tauRef / trailTau);
 }
