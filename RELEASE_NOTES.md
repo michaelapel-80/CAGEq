@@ -1,9 +1,12 @@
-A finer-resolved spectrum, and new installs start on the dark theme.
+Instruments that look the same at any refresh rate, and an optional frame-rate limit.
 
-- **Changed:** the spectrum shows more detail at the top of the audio band. Tones up there read
-  about 0.8 dB higher than before and noise about 0.8 dB lower, so allow for that when comparing
-  with older screenshots.
-- **Fixed:** the spectrum could drop off in a sudden step on either side of a loud tone, and leave
-  sharp notches between closely spaced harmonics.
-- **Changed:** new installs start on the dark theme, which the instruments are tuned for. Existing
-  installs keep their theme.
+- **New:** a Frame rate setting at the bottom of every instrument's tuning panel caps how often the
+  instruments draw — to see them at another refresh rate, or to save some CPU/GPU.
+- **Fixed:** the scopes and the meter were brighter on slower displays and dimmer on faster ones:
+  a 60 Hz display showed the time scope's trace about 1.5x as bright as a 240 Hz one. They now give
+  the same light at any refresh rate, which makes them noticeably dimmer than before on a 60 Hz
+  display; raise Glow if you prefer the old look.
+- **Fixed:** the time scope's trace could tear into disconnected pieces whenever the display drew
+  slower than the audio arrived, and the vectorscope and meter could miss short events then.
+- **Fixed:** with no audio engine running on the selected device, or before the first apply to it,
+  the instruments still removed the correction from what they showed and read badly wrong.
