@@ -18,7 +18,7 @@ import { spectrumStream } from "./streams";
 import { Vectorscope } from "./Vectorscope";
 import { TimeScope } from "./TimeScope";
 import { SpectrumScope } from "./SpectrumScope";
-import ApoSetup, { computeEngineReason, type ApoSetupStatus } from "./ApoSetup";
+import ApoSetup, { computeEngineReason, eqInSignalPath, type ApoSetupStatus } from "./ApoSetup";
 import { ExportDialog } from "./ExportDialog";
 import "./App.css";
 
@@ -2363,6 +2363,16 @@ function App() {
 
   const showApoNudge = apoNudgeDismissed === false && engineReason === "eqapo";
 
+  // Whether the capture the instruments read has `result`'s correction in it: an engine running on
+  // this device (see `eqInSignalPath`) and the correction applied to this device, not just fitted
+  // or applied to the one selected before. When it's not, there is nothing to undistort — the
+  // capture already is the pre-EQ signal — and inverting the correction anyway showed badly wrong
+  // readings (no engine attached, or a device switch before the first apply).
+  const eqLive =
+    selectedDevice !== undefined &&
+    eqInSignalPath(apoDeviceStatus, selectedDevice.eqapo_enabled, selectedDevice.eqapo_pattern) &&
+    !notYetApplied;
+
   const dismissApoNudge = () => {
     setApoNudgeDismissed(true); // optimistic — this is a one-way, best-effort preference, not a critical write
     void invoke("set_apo_nudge_dismissed").catch(() => {});
@@ -2401,7 +2411,13 @@ function App() {
   // (Vectorscope, TimeScope, SpectrumScope) all read this same broadcast, so gating it once here
   // covers all of them; EqChart's backdrop takes eqBands as a direct prop and is gated the same
   // way where it's passed, below.
-  const scopeEq = { filters: dryActive || isolateAudition ? [] : result?.filters ?? [], preampDb: result?.preamp_db ?? 0, model: drawModel };
+  //
+  // With no correction live on the device (`eqLive`) there's nothing to undo, preamp included.
+  const scopeEq = {
+    filters: !eqLive || dryActive || isolateAudition ? [] : result?.filters ?? [],
+    preampDb: eqLive ? result?.preamp_db ?? 0 : 0,
+    model: drawModel,
+  };
   useEffect(() => {
     if (!result || !modelState || modelBusy || isolateAudition || result.model === modelState.effective) return;
     // `activate_slot` on the slot already active is a pure rewrite that returns the current state.
@@ -2419,7 +2435,7 @@ function App() {
   scopeEqRef.current = scopeEq;
   useEffect(() => {
     void emit("scope-eq", scopeEqRef.current);
-  }, [result, dryActive]);
+  }, [result, dryActive, eqLive]);
   useEffect(() => {
     let un: (() => void) | undefined;
     void (async () => {
@@ -3341,8 +3357,8 @@ function App() {
                         spectrumRef={spectrumRef}
                         fftSize={specFftSize}
                         onFftSizeChange={setSpecFftSize}
-                        eqBands={selfTest?.phase === "running" ? undefined : dryActive || isolateAudition ? [] : result.filters}
-                        preampDb={result?.preamp_db ?? 0}
+                        eqBands={selfTest?.phase === "running" ? undefined : !eqLive || dryActive || isolateAudition ? [] : result.filters}
+                        preampDb={eqLive ? result?.preamp_db ?? 0 : 0}
                         sampleRate={sampleRate ?? undefined}
                         legendHost={legendHost}
                         minSpan={comparisonSpan}

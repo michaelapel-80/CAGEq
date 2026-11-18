@@ -119,6 +119,31 @@ export function computeEngineReason(status: ApoSetupStatus | null, eqapoEnabled:
   return eqapoEnabled ? "eqapo" : "unattached";
 }
 
+/**
+ * Is an engine running CAGEq's applied correction on `endpointId`, i.e. is the captured output
+ * actually post-EQ? The instruments' undistort inverts the correction to recover the pre-EQ
+ * signal, and inverting a correction nothing applied turns a clean capture into a wrong one.
+ *
+ * Stricter than `computeEngineReason` on purpose: that answers which engine *should* be in
+ * charge (a missing setup helper outranks a working attachment there, and an unknown status reads
+ * as "eqapo"); this answers whether one is. With CAGEq's own engine active, the device needs a
+ * healthy attachment — the backend is machine-wide, so another device being attached says nothing
+ * about this one, and Equalizer APO on an unattached device is running a frozen config, not ours.
+ * Otherwise it's down to Equalizer APO being enabled there. Status unknown (not read yet): only
+ * an enabled Equalizer APO counts, so the instruments show the raw capture until it's known
+ * rather than a possibly bogus inverse.
+ */
+export function eqInSignalPath(status: ApoSetupStatus | null, eqapoEnabled: boolean, endpointId: string): boolean {
+  if (status === null || !status.active_backend_is_apo) return eqapoEnabled;
+  return (
+    status.gate_open &&
+    status.attached.includes(endpointId) &&
+    !status.effects_disabled.includes(endpointId) &&
+    !status.modes_missing.includes(endpointId) &&
+    !status.wrong_slot.includes(endpointId)
+  );
+}
+
 export default function ApoSetup({ endpointId, endpointName, sampleRate, eqapoEnabled, onOpenOutputSettings, onStatus }: Props) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
