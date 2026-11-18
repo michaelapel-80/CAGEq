@@ -219,6 +219,8 @@ const TRIGGER_SEARCH_MS = 250; // how far back to look for a qualifying edge bef
 // renders identically to before the original decoupling change — only the number's meaning moved,
 // twice now. (A third time with the GPU beam's linear light — see DEFAULTS and FALLBACK_GLOW_SCALE.)
 const TAU_REF = 0.1;
+/** Scope windows (~16 ms each) queued between drawn frames at most: half a second. */
+const PENDING_MAX = 32;
 // The Canvas 2D fallback still strokes at alpha = glow, as before linear light: scaled back by the
 // factor glow's default moved by (0.2 -> 0.8), so it keeps the look it had.
 const FALLBACK_GLOW_SCALE = 0.2 / 0.8;
@@ -287,7 +289,13 @@ export function TimeScope() {
   // every frame, and the trail accumulates *additively*, so drawing them into it would stack them
   // toward white instead of holding steady (see phosphor.ts's closing note).
   const peakRef = useRef<HTMLCanvasElement>(null);
-  const scopeRef = useRef<ScopeData | null>(null);
+  // Every scope window since the last drawn frame, oldest first. All of them go into the trigger
+  // ring: the ring is one continuous stretch of audio, and feeding it only the newest window on
+  // each drawn frame spliced non-adjacent windows together wherever a frame skipped one (a capped
+  // frame rate, or any frame slower than the stream), and the traced span showed the seams as jumps.
+  // Bounded so a window that isn't drawing (hidden, stalled) can't queue without limit; past that
+  // the oldest go, which leaves a seam only after such a stall.
+  const pendingRef = useRef<ScopeData[]>([]);
   const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-timescope-params", DEFAULTS, TIMESCOPE_PARAMS_MIGRATION);
   const [tuning, setTuning] = useState(false);
   const paramsRef = useRef(params);
@@ -340,7 +348,10 @@ export function TimeScope() {
   useEffect(() => {
     let active = true;
     const unsubScope = scopeStream.subscribe((s) => {
-      if (active) scopeRef.current = s;
+      if (!active) return;
+      const q = pendingRef.current;
+      q.push(s);
+      if (q.length > PENDING_MAX) q.splice(0, q.length - PENDING_MAX);
     });
     let unlistenEq: (() => void) | undefined;
     void (async () => {
@@ -417,8 +428,7 @@ export function TimeScope() {
 
     let raf = 0;
     let last = performance.now();
-    let drawn: ScopeData | null = null;
-    let lastTrace = performance.now(); // when `drawn` last actually changed — see doseMult below
+    let lastTrace = performance.now(); // when a window last arrived — see doseMult below
     // Per-lane peak-hold (dBFS) and the timestamp its release may resume after — indexed to match
     // `lanes` each frame; resized (and reset) on a mode switch, since "lane 0" means something
     // different in L/R vs mixdown. A brief reset on an intentional mode change is unsurprising.
@@ -487,9 +497,9 @@ export function TimeScope() {
       }
 
       let doseMult = 1; // see `if (isNew)` below for why this isn't always 1
-      const s = scopeRef.current;
-      const n = s ? Math.floor(s.xy.length / 2) : 0;
-      const isNew = !!s && s.signal && n >= 2 && s !== drawn;
+      const fresh = pendingRef.current.filter((q) => q.signal && q.xy.length >= 4);
+      pendingRef.current = [];
+      const isNew = fresh.length > 0;
       // Computed up front (before drawing) when new data arrives, so the peak-hold attack below and
       // the trace path further down both read the identical (possibly undistorted) samples.
       let outL: Float64Array | null = null;
@@ -501,7 +511,6 @@ export function TimeScope() {
       let dispR: Float64Array | null = null;
       let dispN = 0;
       if (isNew) {
-        drawn = s;
         // This view only draws a fresh trace once per real scope window (~60/s from the backend —
         // see ScopeUpdate), not every animation frame — see Vectorscope.tsx's identical doseMult
         // comment for the full reasoning: commit()'s own dt/DOSE_REF_DT dose normalization assumes
@@ -515,86 +524,81 @@ export function TimeScope() {
         // further `TAU_REF/p.trailTau` factor is the separate Trail/Glow orthogonality fix — see
         // TAU_REF's own doc.
         //
-        // `dtSinceTrace/dt` is clamped to 4: it's meant to track real timing (steady state ≈1, both
-        // sides measuring roughly the same real interval), but `dt` — this commit's own rAF interval
-        // — has no lower bound, and a single anomalously small one (timer jitter, a coalesced rAF
-        // burst after a stall, a GC pause) spikes the ratio arbitrarily, injecting one frame with far
-        // more dose than any real refresh rate would produce. Reported live (on Vectorscope, same
-        // mechanism here) as occasional fully colour-saturated, low-brightness lines never seen
-        // before this fix — a bright one-frame spike decaying away, exactly what an unclamped dose
-        // injection would leave behind. Only this jitter-sensitive ratio is clamped, not the whole
-        // doseMult: TAU_REF/p.trailTau legitimately needs to be large at the Trail slider's short
-        // end, and clamping past that would just reintroduce the Trail/Glow coupling this whole fix
-        // exists to remove.
+        // `streamDoseMult` bounds how much stream time one trace may carry, so a trace after a stall
+        // (or a burst of coalesced frames) can't land the whole gap's dose at once.
         const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
         lastTrace = now;
         doseMult = streamDoseMult(dtSinceTrace, dt, p.trailTau, TAU_REF);
-        const xy = s!.xy;
+        let rate = 48000;
+        for (const s of fresh) {
+          const n = Math.floor(s.xy.length / 2);
+          const xy = s.xy;
 
-        // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns
-        // on, then run each sample back through it — same machinery/rationale as Vectorscope's.
-        // Retargeting crossfades from whatever was running rather than snapping (`FadingInverse`
-        // in biquad.ts): an instant swap applies the *new* inverse to samples that are still the
-        // *old* filter's real output, a genuine discontinuity a snapshot recording proved isn't
-        // in the real (crossfaded) audio at all — see `apo-switch-artifacts` memory, "NOT a bug".
-        const eq = eqRef.current;
-        const rate = s!.rate && s!.rate > 0 ? s!.rate : 48000;
-        if (p.undistort) {
+          // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns
+          // on, then run each sample back through it — same machinery/rationale as Vectorscope's.
+          // Retargeting crossfades from whatever was running rather than snapping (`FadingInverse`
+          // in biquad.ts): an instant swap applies the *new* inverse to samples that are still the
+          // *old* filter's real output, a genuine discontinuity a snapshot recording proved isn't
+          // in the real (crossfaded) audio at all — see `apo-switch-artifacts` memory, "NOT a bug".
+          const eq = eqRef.current;
+          rate = s.rate && s.rate > 0 ? s.rate : 48000;
+          if (p.undistort) {
+            const iv = invRef.current;
+            if (iv === null || iv.filtersRef !== eq.filters || iv.model !== eq.model || iv.rate !== rate) {
+              invRef.current = retargetFadingInverse(iv, eq.filters, eq.preampDb, eq.model, rate);
+            }
+          } else {
+            invRef.current = null; // dropped while off; turning back on starts a fresh cascade, no crossfade to a mode that wasn't running
+          }
           const iv = invRef.current;
-          if (iv === null || iv.filtersRef !== eq.filters || iv.model !== eq.model || iv.rate !== rate) {
-            invRef.current = retargetFadingInverse(iv, eq.filters, eq.preampDb, eq.model, rate);
+          // Runs with an empty cascade too when there's just a preamp to undo (e.g. Dry, which
+          // carries the loudness-match gain but no EQ) — pure gain recovery, no filtering —
+          // or while fading out a departing cascade that had either.
+          const undistort = iv !== null && (iv.to.coeffs.length > 0 || iv.to.gain !== 1 || iv.from !== null);
+          if (outLBuf.length < n) {
+            outLBuf = new Float64Array(n);
+            outRBuf = new Float64Array(n);
           }
-        } else {
-          invRef.current = null; // dropped while off; turning back on starts a fresh cascade, no crossfade to a mode that wasn't running
-        }
-        const iv = invRef.current;
-        // Runs with an empty cascade too when there's just a preamp to undo (e.g. Dry, which
-        // carries the loudness-match gain but no EQ) — pure gain recovery, no filtering —
-        // or while fading out a departing cascade that had either.
-        const undistort = iv !== null && (iv.to.coeffs.length > 0 || iv.to.gain !== 1 || iv.from !== null);
-        if (outLBuf.length < n) {
-          outLBuf = new Float64Array(n);
-          outRBuf = new Float64Array(n);
-        }
-        outL = outLBuf;
-        outR = outRBuf;
-        for (let i = 0; i < n; i++) {
-          let l = xy[2 * i];
-          let r = xy[2 * i + 1];
-          if (undistort) {
-            [l, r] = stepFadingInverse(iv!, l, r);
-          }
-          outL[i] = l;
-          outR[i] = r;
-        }
-
-        // Attack: this window's peak per lane, from the exact values about to be drawn — correct
-        // in both modes by construction (it's the same array the trace path reads below). The
-        // rectified signal's K-th largest sample over PEAK_CONFIRM_MS worth of samples — see there.
-        const confirmSamples = Math.max(1, Math.round(rate * (PEAK_CONFIRM_MS / 1000)));
-        if (magScratch.length < n) magScratch = new Float64Array(n);
-        for (let lane = 0; lane < lanes.length; lane++) {
+          outL = outLBuf;
+          outR = outRBuf;
           for (let i = 0; i < n; i++) {
-            magScratch[i] = Math.abs(mode === "mix" ? (outL[i] + outR[i]) / 2 : lane === 0 ? outL[i] : outR[i]);
+            let l = xy[2 * i];
+            let r = xy[2 * i + 1];
+            if (undistort) {
+              [l, r] = stepFadingInverse(iv!, l, r);
+            }
+            outL[i] = l;
+            outR[i] = r;
           }
-          const blockPeak = kthLargest(magScratch, n, confirmSamples);
-          const blockDb = 20 * Math.log10(Math.max(blockPeak, 1e-6));
-          if (blockDb >= peakDb[lane]) {
-            peakDb[lane] = blockDb;
-            peakHoldUntil[lane] = now + PEAK_HOLD_MS;
-          }
-        }
 
-        // Feed the ring buffer: raw display samples plus a lowpass-filtered mono trigger-detector
-        // value, one sample at a time so the filter's state stays continuous across windows (no
-        // re-filtering, no transient reset). Rebuild the filter only when rate/cutoff changed.
-        if (!trig || trig.rate !== rate || trig.hz !== p.triggerFilterHz) trig = triggerDetector(rate, p.triggerFilterHz);
-        for (let i = 0; i < n; i++) {
-          const idx = phys(totalWritten);
-          ringL[idx] = outL[i];
-          ringR[idx] = outR[i];
-          ringTrig[idx] = detectorSample(trig, (outL[i] + outR[i]) / 2);
-          totalWritten++;
+          // Attack: this window's peak per lane, from the exact values about to be drawn — correct
+          // in both modes by construction (it's the same array the trace path reads below). The
+          // rectified signal's K-th largest sample over PEAK_CONFIRM_MS worth of samples — see there.
+          const confirmSamples = Math.max(1, Math.round(rate * (PEAK_CONFIRM_MS / 1000)));
+          if (magScratch.length < n) magScratch = new Float64Array(n);
+          for (let lane = 0; lane < lanes.length; lane++) {
+            for (let i = 0; i < n; i++) {
+              magScratch[i] = Math.abs(mode === "mix" ? (outL[i] + outR[i]) / 2 : lane === 0 ? outL[i] : outR[i]);
+            }
+            const blockPeak = kthLargest(magScratch, n, confirmSamples);
+            const blockDb = 20 * Math.log10(Math.max(blockPeak, 1e-6));
+            if (blockDb >= peakDb[lane]) {
+              peakDb[lane] = blockDb;
+              peakHoldUntil[lane] = now + PEAK_HOLD_MS;
+            }
+          }
+
+          // Feed the ring buffer: raw display samples plus a lowpass-filtered mono trigger-detector
+          // value, one sample at a time so the filter's state stays continuous across windows (no
+          // re-filtering, no transient reset). Rebuild the filter only when rate/cutoff changed.
+          if (!trig || trig.rate !== rate || trig.hz !== p.triggerFilterHz) trig = triggerDetector(rate, p.triggerFilterHz);
+          for (let i = 0; i < n; i++) {
+            const idx = phys(totalWritten);
+            ringL[idx] = outL[i];
+            ringR[idx] = outR[i];
+            ringTrig[idx] = detectorSample(trig, (outL[i] + outR[i]) / 2);
+            totalWritten++;
+          }
         }
 
         // Pick the display window: free-run always anchors at the newest valid position; triggered
@@ -610,7 +614,7 @@ export function TimeScope() {
         if (ringCount >= windowSamples) {
           const tMax = totalWritten - postSamples; // newest position with enough post-trigger data
           let t = tMax;
-          if (p.trigger) {
+          if (p.trigger && trig) {
             const searchSamples = Math.round(rate * (TRIGGER_SEARCH_MS / 1000));
             const tMin = Math.max(totalWritten - ringCount + preSamples, tMax - searchSamples);
             t = findRisingEdge(trig, ringTrig, phys, totalWritten - ringCount, totalWritten - 1, tMin, tMax) ?? tMax;

@@ -390,17 +390,8 @@ export function Meter({
         // further `TAU_REF/p.trailTau` factor is the separate Trail/Glow orthogonality fix — see
         // TAU_REF's own doc.
         //
-        // `dtSinceTrace/dt` is clamped to 4: it's meant to track real timing (steady state ≈1, both
-        // sides measuring roughly the same real interval), but `dt` — this commit's own rAF interval
-        // — has no lower bound, and a single anomalously small one (timer jitter, a coalesced rAF
-        // burst after a stall, a GC pause) spikes the ratio arbitrarily, injecting one frame with far
-        // more dose than any real refresh rate would produce. Reported live (on Vectorscope, same
-        // mechanism here) as occasional fully colour-saturated, low-brightness lines never seen
-        // before this fix — a bright one-frame spike decaying away, exactly what an unclamped dose
-        // injection would leave behind. Only this jitter-sensitive ratio is clamped, not the whole
-        // doseMult: TAU_REF/p.trailTau legitimately needs to be large at the Trail slider's short
-        // end, and clamping past that would just reintroduce the Trail/Glow coupling this whole fix
-        // exists to remove.
+        // `streamDoseMult` bounds how much stream time one trace may carry, so a trace after a stall
+        // (or a burst of coalesced frames) can't land the whole gap's dose at once.
         const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
         lastTrace = now;
         doseMult = streamDoseMult(dtSinceTrace, dt, p.trailTau, TAU_REF);
