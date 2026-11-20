@@ -11,8 +11,10 @@
 //! Measured against synthetic ground truth (periodic band-limited signals whose true peak comes
 //! from a 256x FFT reconstruction: sines up to the passband edge at random phase, band-limited
 //! noise, near-edge two-tones and the ISP patterns), this design under-reads by at most 0.004 dB
-//! and over-reads by at most 0.017 dB. For comparison, 4x without the parabola under-reads by up
-//! to 0.36 dB, and 4x with it by up to 0.03 dB. Content between the passband edge and Nyquist
+//! and over-reads by at most 0.02 dB (a sweep of every whole-cycle sine up to the passband edge,
+//! at eight phases: -0.001 / +0.019 dB, with `ISP16_PATTERN` at 0 dBTP reading -0.003). For
+//! comparison, 4x without the parabola under-reads by up to 0.36 dB, and 4x with it by up to
+//! 0.03 dB. Content between the passband edge and Nyquist
 //! (20 kHz–22.05 kHz at 44.1 kHz) is attenuated and can under-read. Nothing finite can avoid
 //! that: the overshoot there depends on the DAC's own filter, and for an ideal one is unbounded.
 //!
@@ -20,11 +22,12 @@
 
 /// Oversampling factor.
 const FACTOR: usize = 8;
-/// Taps per polyphase branch (`FACTOR * TAPS` = 312 in the prototype filter).
-const TAPS: usize = 39;
-/// Independent partial sums in the AVX2 filter loop (see [`filter_split`]).
-#[cfg(target_arch = "x86_64")]
+/// Taps per polyphase branch (`FACTOR * TAPS` = 320 in the prototype filter). A multiple of
+/// [`LANES`], so the split filter loop has no scalar remainder.
+const TAPS: usize = 40;
+/// Independent partial sums in the filter loop (see [`filter_split`]).
 const LANES: usize = 4;
+const _: () = assert!(TAPS.is_multiple_of(LANES), "TAPS must be a multiple of LANES");
 /// Passband edge, as a fraction of the sample rate: 20 kHz at 44.1 kHz. The stopband edge mirrors
 /// it about Nyquist, so an image of in-band content always lands in the stopband.
 const PASSBAND_EDGE: f64 = 0.4535;
@@ -51,7 +54,9 @@ pub struct TruePeak {
     /// separate dot products each end in a sequential reduction. One table for every instance
     /// (see [`coeffs`]).
     coeffs: &'static [[f32; FACTOR]; TAPS],
-    /// Last two oversampled magnitudes per channel, oldest first, for the parabola.
+    /// Last two oversampled magnitudes per channel, oldest first, for the parabola. During warmup
+    /// they hold the raw sample's magnitude instead: left at zero, the first real output after
+    /// warmup made a vertex with them that the signal never had (a constant 0.9 read 1.0125).
     tail: Vec<[f32; 2]>,
     /// Input frames still to go before the filter's history is all real signal. Until then only
     /// raw sample peaks count: a history of zeros ahead of a loud stream is a step the stream
@@ -87,17 +92,16 @@ impl TruePeak {
             // SAFETY: `avx2` is only true when the CPU reported AVX2 and FMA (`has_avx2_fma`).
             return unsafe { self.push_avx2(frames) };
         }
-        self.push_with(frames, filter_portable);
+        self.push_with(frames, filter_split);
     }
 
-    /// The same loop compiled for AVX2+FMA, with the split filter loop that only pays off there.
-    /// Measured on one second of 96 kHz stereo in release: 3.0 ms against the portable path's
-    /// 5.3 ms. The portable loop gains under 10% from AVX alone, and the split loop is slightly
-    /// slower than it without AVX, hence two paths rather than one.
+    /// The same loop compiled for AVX2+FMA, with fused multiply-adds. Measured on one second of
+    /// 96 kHz stereo in release: 2.7 ms against the portable (SSE2) path's 5.3 ms. `mul_add` only
+    /// belongs here: without FMA in the baseline it can compile to a slow library call.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     unsafe fn push_avx2(&mut self, frames: &[f32]) {
-        self.push_with(frames, filter_split);
+        self.push_with(frames, filter_split_fma);
     }
 
     #[inline(always)]
@@ -114,6 +118,7 @@ impl TruePeak {
                 h[self.pos] = s;
                 h[self.pos + TAPS] = s;
                 if self.warmup > 0 {
+                    self.tail[c] = [s.abs(); 2];
                     continue;
                 }
                 let recent: &[f32; TAPS] = h[self.pos..self.pos + TAPS].try_into().unwrap();
@@ -163,26 +168,29 @@ impl TruePeak {
     }
 }
 
-/// All eight phases' outputs for one input sample, one running sum per phase.
-#[inline(always)]
-fn filter_portable(coeffs: &[[f32; FACTOR]; TAPS], recent: &[f32; TAPS]) -> [f32; FACTOR] {
-    let mut acc = [0.0f32; FACTOR];
-    for (taps, &x) in coeffs.iter().zip(recent) {
-        for (a, &t) in acc.iter_mut().zip(taps) {
-            *a += t * x;
-        }
-    }
-    acc
-}
-
-/// The same outputs from `LANES` partial sums over interleaved taps. With one running sum, every
-/// tap waits on the previous tap's add; on AVX2 that chain, not the arithmetic, sets the speed.
-#[cfg(target_arch = "x86_64")]
+/// All eight phases' outputs for one input sample, from `LANES` partial sums over interleaved
+/// taps. With one running sum every tap waits on the previous tap's add, and that chain, not the
+/// arithmetic, sets the speed.
 #[inline(always)]
 fn filter_split(coeffs: &[[f32; FACTOR]; TAPS], recent: &[f32; TAPS]) -> [f32; FACTOR] {
     let mut part = [[0.0f32; FACTOR]; LANES];
-    let whole = TAPS / LANES * LANES;
-    for i in (0..whole).step_by(LANES) {
+    for i in (0..TAPS).step_by(LANES) {
+        for (j, p) in part.iter_mut().enumerate() {
+            let x = recent[i + j];
+            for (a, &t) in p.iter_mut().zip(&coeffs[i + j]) {
+                *a += t * x;
+            }
+        }
+    }
+    sum_parts(part)
+}
+
+/// [`filter_split`] with fused multiply-adds, for the AVX2+FMA path only.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn filter_split_fma(coeffs: &[[f32; FACTOR]; TAPS], recent: &[f32; TAPS]) -> [f32; FACTOR] {
+    let mut part = [[0.0f32; FACTOR]; LANES];
+    for i in (0..TAPS).step_by(LANES) {
         for (j, p) in part.iter_mut().enumerate() {
             let x = recent[i + j];
             for (a, &t) in p.iter_mut().zip(&coeffs[i + j]) {
@@ -190,11 +198,11 @@ fn filter_split(coeffs: &[[f32; FACTOR]; TAPS], recent: &[f32; TAPS]) -> [f32; F
             }
         }
     }
-    for i in whole..TAPS {
-        for (a, &t) in part[0].iter_mut().zip(&coeffs[i]) {
-            *a = t.mul_add(recent[i], *a);
-        }
-    }
+    sum_parts(part)
+}
+
+#[inline(always)]
+fn sum_parts(part: [[f32; FACTOR]; LANES]) -> [f32; FACTOR] {
     let mut acc = part[0];
     for p in &part[1..] {
         for (a, &v) in acc.iter_mut().zip(p) {
@@ -441,6 +449,16 @@ mod tests {
         let mut tp = TruePeak::new(1);
         tp.push(&x);
         assert!(tp.max() < 1.0, "read {:.4} dBTP for a -0.09 dBFS sine", db(tp.max()));
+    }
+
+    /// The first outputs after warmup don't fit a parabola through a zeroed tail: a fresh meter
+    /// fed a constant reads that constant, not the 1.0125 the stale tail produced for 0.9.
+    #[test]
+    fn the_end_of_warmup_invents_no_vertex() {
+        let mut tp = TruePeak::new(1);
+        tp.push(&[0.9; 200]);
+        let read = tp.take_block();
+        assert!((read - 0.9).abs() < 1e-4, "read {read} for a constant 0.9");
     }
 
     /// Channels are measured independently and the loudest one wins.
