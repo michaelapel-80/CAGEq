@@ -232,6 +232,22 @@ mod windows_impl {
     /// only covered the dev example, not this library's own two `PollingShared` sites.
     const BUFFER_FLOOR_HNS: i64 = 1_000_000;
 
+    /// How long the tone generator fades out over when stopped by hand. It used to stop dead on
+    /// the next sample, wherever the waveform was, which clicks; the 120 ms fade it already had
+    /// only covered an auto-stop (`seconds`). Short, since a stop is meant to be immediate — 20 ms
+    /// is past the few-ms range where a cut still reads as a click.
+    const STOP_FADE_SECS: f32 = 0.02;
+    /// The most a stop waits for what's still queued to play before closing the stream anyway —
+    /// the 100 ms buffer floor (see BUFFER_FLOOR_HNS), the fade, and margin. Replaces a fixed
+    /// 200 ms sleep: the stream drains in however long its own queue lasts, usually well under.
+    const DRAIN_MAX: Duration = Duration::from_millis(300);
+
+    /// The manual stop's fade-out gain `frames_since` frames after the stop, of a fade
+    /// `fade_frames` long: linear from 1 down, `None` once it's done.
+    fn stop_ramp(frames_since: u64, fade_frames: u64) -> Option<f32> {
+        (frames_since < fade_frames).then(|| 1.0 - frames_since as f32 / fade_frames as f32)
+    }
+
     /// `get_device_period()`'s own default, floored at [`BUFFER_FLOOR_HNS`] — see that constant's
     /// own doc for why the bare default isn't safe to hand `StreamMode::PollingShared` as-is.
     fn safe_buffer_hns(audio_client: &AudioClient) -> Result<i64, Box<dyn Error>> {
@@ -724,6 +740,18 @@ mod windows_impl {
             self.shutdown();
         }
 
+        /// Like [`stop`](Self::stop), without waiting for it: the render thread fades the signal
+        /// out, lets what's still queued play, and closes the stream on its own. For a caller that
+        /// mustn't block — a Tauri command that isn't `async` runs on the thread every window's
+        /// IPC goes through, so the wait in `stop` froze the whole UI (the instruments for 200 ms
+        /// on every tone stop, with the old fixed drain). A signal started right after can overlap
+        /// this one's last few tens of ms; both fade, so nothing clicks.
+        pub fn stop_detached(mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            // Dropping a JoinHandle detaches the thread; Drop's own shutdown then has nothing to join.
+            self.handle.take();
+        }
+
         /// Start the general-purpose test-tone generator (the in-app window, `cageq-app`'s
         /// `start_test_generator` command) on `endpoint_id` (or the default render endpoint)
         /// until [`stop`](Self::stop). Independent render path from `start`'s fixed self-test
@@ -875,7 +903,20 @@ mod windows_impl {
         audio_client.start_stream()?;
         let mut frame: u64 = 0;
         let mut buf: Vec<u8> = Vec::new();
-        'play: while !stop.load(Ordering::Relaxed) {
+        // A stop fades out (STOP_FADE_SECS) from the frame it's seen at, rather than cutting.
+        let stop_fade_frames = ((STOP_FADE_SECS * rate as f32) as u64).max(1);
+        let mut stop_from: Option<u64> = None;
+        // A device that stops taking frames would otherwise hold the fade open forever.
+        let mut stop_deadline: Option<Instant> = None;
+        let mut done = false;
+        while !done {
+            if stop_from.is_none() && stop.load(Ordering::Relaxed) {
+                stop_from = Some(frame);
+                stop_deadline = Some(Instant::now() + DRAIN_MAX);
+            }
+            if stop_deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
             if let Some(total) = total_frames {
                 if frame >= total {
                     break;
@@ -888,9 +929,20 @@ mod windows_impl {
             }
             buf.clear();
             for _ in 0..space {
-                if stop.load(Ordering::Relaxed) {
-                    break 'play;
+                if stop_from.is_none() && stop.load(Ordering::Relaxed) {
+                    stop_from = Some(frame);
+                    stop_deadline = Some(Instant::now() + DRAIN_MAX);
                 }
+                let stop_gain = match stop_from {
+                    Some(from) => match stop_ramp(frame - from, stop_fade_frames) {
+                        Some(g) => g,
+                        None => {
+                            done = true;
+                            break;
+                        }
+                    },
+                    None => 1.0,
+                };
                 if let Some(total) = total_frames {
                     if frame >= total {
                         break;
@@ -903,6 +955,7 @@ mod windows_impl {
                         env = env.min(rem as f32 / fade_frames as f32);
                     }
                 }
+                env *= stop_gain;
                 let mono = match params.signal {
                     Signal::Tone { .. } | Signal::Isp { .. } | Signal::Isp16 { .. } => {
                         let s = wavetable_sample(&table, phase) * gain;
@@ -963,8 +1016,15 @@ mod windows_impl {
             }
         }
 
-        // Let the last buffer drain before tearing down, so a --seconds fade-out is actually heard.
-        thread::sleep(Duration::from_millis(200));
+        // Let what's queued play out before tearing down, so the fade-out (a stop's, or an
+        // auto-stop's) is actually heard: until the engine has taken every frame, at most DRAIN_MAX.
+        let drain_until = Instant::now() + DRAIN_MAX;
+        while Instant::now() < drain_until {
+            match audio_client.get_current_padding() {
+                Ok(0) | Err(_) => break,
+                Ok(_) => thread::sleep(Duration::from_millis(2)),
+            }
+        }
         let _ = audio_client.stop_stream();
         Ok(())
     }
@@ -2249,6 +2309,37 @@ mod windows_impl {
     }
 
     #[cfg(test)]
+    mod tone_stop {
+        use super::*;
+
+        /// The manual stop's fade starts at full level, never rises, reaches a step's worth of
+        /// silence on its last frame, and then ends — and lasts exactly STOP_FADE_SECS.
+        #[test]
+        fn the_stop_fade_ramps_down_and_ends() {
+            let rate = 48_000u32;
+            let fade = ((STOP_FADE_SECS * rate as f32) as u64).max(1);
+            assert_eq!(fade, 960, "20 ms at 48 kHz");
+            assert_eq!(stop_ramp(0, fade), Some(1.0));
+            let mut prev = 1.0f32;
+            for i in 1..fade {
+                let g = stop_ramp(i, fade).expect("still fading");
+                assert!(g < prev && g > 0.0, "frame {i}: {g} after {prev}");
+                prev = g;
+            }
+            assert!(prev <= 1.0 / fade as f32 + 1e-6, "last step {prev}");
+            assert_eq!(stop_ramp(fade, fade), None);
+            assert_eq!(stop_ramp(fade + 5, fade), None);
+        }
+
+        /// The drain bound covers what a stop can still have queued: the buffer floor and the fade.
+        #[test]
+        fn the_drain_bound_covers_the_buffer_and_the_fade() {
+            let buffer = Duration::from_nanos(BUFFER_FLOOR_HNS as u64 * 100);
+            assert!(DRAIN_MAX > buffer + Duration::from_secs_f32(STOP_FADE_SECS));
+        }
+    }
+
+    #[cfg(test)]
     mod spectrum_reduction {
         // A regression guard on the actual production `Spectrum` pipeline (not the isolated
         // `tests/decimation_spike.rs`, which validated the reduction *method* against synthetic
@@ -3141,5 +3232,7 @@ mod stub {
         }
 
         pub fn stop(self) {}
+
+        pub fn stop_detached(self) {}
     }
 }

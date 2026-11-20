@@ -1023,7 +1023,7 @@ fn stop_monitor(session: String, state: State<MonitorState>) -> Result<(), Strin
 fn start_test_signal(device: Option<String>, state: State<TestSignalState>) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.take() {
-        existing.stop();
+        existing.stop_detached(); // see stop_test_signal
     }
     *guard = Some(cageq_monitor::TestSignal::start(device)?);
     Ok(())
@@ -1121,18 +1121,25 @@ fn start_test_generator(req: GeneratorRequest, state: State<TestSignalState>) ->
 
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.take() {
-        existing.stop();
+        existing.stop_detached(); // see stop_test_signal
     }
     *guard = Some(cageq_monitor::TestSignal::start_generator(req.device, params)?);
     Ok(())
 }
 
 /// Stop the self-test signal (idempotent — no-op if nothing is playing).
+///
+/// Without waiting for it (`stop_detached`): a plain command runs on the thread every window's
+/// IPC goes through, and waiting out the signal's fade and drain there froze every instrument for
+/// as long. Still a plain command, not `async`: those run on a thread pool in no set order, and a
+/// stop overtaking the start just before it would leave that signal playing. Plain commands run
+/// in the order they're sent, and taking the signal out of the slot is all that has to happen in
+/// that order.
 #[tauri::command]
 fn stop_test_signal(state: State<TestSignalState>) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(existing) = guard.take() {
-        existing.stop();
+        existing.stop_detached();
     }
     Ok(())
 }
@@ -1779,7 +1786,9 @@ pub fn run() {
                 // nicety, this is the actual safety net.
                 if window.label() == "tone" {
                     if let Ok(mut guard) = window.state::<TestSignalState>().0.lock() {
-                        guard.take();
+                        if let Some(existing) = guard.take() {
+                            existing.stop_detached(); // see stop_test_signal
+                        }
                     }
                 }
             }
