@@ -55,8 +55,11 @@ pub struct TruePeak {
     /// (see [`coeffs`]).
     coeffs: &'static [[f32; FACTOR]; TAPS],
     /// Last two oversampled magnitudes per channel, oldest first, for the parabola. During warmup
-    /// they hold the raw sample's magnitude instead: left at zero, the first real output after
-    /// warmup made a vertex with them that the signal never had (a constant 0.9 read 1.0125).
+    /// they hold NaN, so no fit forms until three real outputs exist: NaN fails both the gate and
+    /// `parabola_peak`'s comparisons. Left at zero, the first real output made a vertex the signal
+    /// never had (a constant 0.9 read 1.0125). Seeding them from the raw sample was no better: the
+    /// filter output lags the newest sample by its group delay, so the two describe different
+    /// instants.
     tail: Vec<[f32; 2]>,
     /// Input frames still to go before the filter's history is all real signal. Until then only
     /// raw sample peaks count: a history of zeros ahead of a loud stream is a step the stream
@@ -118,7 +121,7 @@ impl TruePeak {
                 h[self.pos] = s;
                 h[self.pos + TAPS] = s;
                 if self.warmup > 0 {
-                    self.tail[c] = [s.abs(); 2];
+                    self.tail[c] = [f32::NAN; 2];
                     continue;
                 }
                 let recent: &[f32; TAPS] = h[self.pos..self.pos + TAPS].try_into().unwrap();
@@ -459,6 +462,23 @@ mod tests {
         tp.push(&[0.9; 200]);
         let read = tp.take_block();
         assert!((read - 0.9).abs() < 1e-4, "read {read} for a constant 0.9");
+    }
+
+    /// A fresh meter started on a sine at any phase reads no more than the sine's true peak
+    /// (plus the stated 0.02 dB): the first fit after warmup uses only real filter outputs.
+    #[test]
+    fn a_start_at_any_phase_reads_no_false_over() {
+        let amp = 0.95f64;
+        for k in 0..64 {
+            let phase = k as f64 * std::f64::consts::TAU / 64.0;
+            let x: Vec<f32> = (0..4800)
+                .map(|i| (amp * (std::f64::consts::TAU * 1000.0 * i as f64 / 48_000.0 + phase).sin()) as f32)
+                .collect();
+            let mut tp = TruePeak::new(1);
+            tp.push(&x);
+            let over = db(tp.max()) - 20.0 * amp.log10();
+            assert!(over < 0.02, "phase {phase:.3}: read {over:.4} dB above the true peak");
+        }
     }
 
     /// Channels are measured independently and the loudest one wins.
