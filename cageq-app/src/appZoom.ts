@@ -71,3 +71,48 @@ export function fitAppToWindow(app: HTMLElement): void {
   current = zoom;
   if (app.style.zoom !== before) window.dispatchEvent(new Event(APP_ZOOM_EVENT));
 }
+
+/** localStorage key: the inline scopes' tube height, in `.app`'s own units (see `noteScopeTube`). */
+const SCOPE_TUBE_KEY = "cageq-scope-tube-px";
+/** Until the inline scopes have measured one: roughly their tube at the full design width. */
+const SCOPE_TUBE_DEFAULT_PX = 270;
+
+function readScopeTube(): number {
+  try {
+    const v = Number(localStorage.getItem(SCOPE_TUBE_KEY));
+    return Number.isFinite(v) && v > 0 ? v : SCOPE_TUBE_DEFAULT_PX;
+  } catch {
+    return SCOPE_TUBE_DEFAULT_PX;
+  }
+}
+
+let scopeTube = readScopeTube();
+// The pop-out windows share localStorage with the main window that writes it.
+window.addEventListener("storage", (e) => {
+  if (e.key === SCOPE_TUBE_KEY) scopeTube = readScopeTube();
+});
+
+/** The inline scopes' tube height as measured on screen (CSS px), noted in `.app`'s own units —
+ *  what a detached scope sizes its beam against (`beamScale`). */
+export function noteScopeTube(onScreenPx: number): void {
+  const px = onScreenPx / current;
+  if (!(px > 0) || Math.abs(px - scopeTube) < 0.5) return;
+  scopeTube = px;
+  try {
+    localStorage.setItem(SCOPE_TUBE_KEY, px.toFixed(1));
+  } catch {
+    // Not shared, still used in this window.
+  }
+}
+
+/**
+ * What a scope's beam width takes on top of its tube's own size (`beam × tube / REF_SIZE`), so the
+ * beam keeps the on-screen width it has inline at the design size: a real beam's spot doesn't grow
+ * with the screen. Inline, the app's zoom divided back out — a larger window scales the whole app up,
+ * tube included. In a detached window (`fill`), the inline tube's height over this one's
+ * (`tubeOnScreenPx`): a full-screen pop-out is a much bigger tube, and scaled with it the beam read
+ * as several times too thick (~5x for the time scope full screen).
+ */
+export function beamScale(fill: boolean, tubeOnScreenPx: number): number {
+  return fill ? scopeTube / Math.max(1, tubeOnScreenPx) : 1 / current;
+}

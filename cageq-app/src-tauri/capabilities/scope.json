@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "scope",
-  "description": "Capability for the detached vectorscope window — it only listens to the global scope events and manages its own window.",
-  "windows": ["scope"],
+  "description": "Capability for the detached scope windows (vectorscope, time scope) — they only listen to the global scope events and manage their own window.",
+  "windows": ["scope", "timescope"],
   "permissions": ["core:default"]
 }

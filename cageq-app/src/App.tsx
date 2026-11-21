@@ -1719,24 +1719,26 @@ function App() {
     if (dev) await invoke("set_device", { device: dev.eqapo_pattern });
   }
 
-  // Detach the vectorscope into its own resizable window (index.html#scope → ScopeWindow). The
-  // loopback monitor keeps running here; the scope events are app-global, so the new window just
-  // listens. Focuses the existing one instead of spawning a duplicate.
-  async function openScopeWindow() {
-    const existing = await WebviewWindow.getByLabel("scope");
+  // Detach a scope into its own resizable window (index.html#scope or #timescope → ScopeWindow).
+  // The loopback monitor keeps running here; the scope stream reaches every window, so the new one
+  // just listens. Focuses an existing one instead of spawning a duplicate. Each window's label is
+  // also its route, and needs listing in the `scope` capability (src-tauri/capabilities).
+  const openVectorscopeWindow = () =>
+    openScopeWindow("scope", "CAGEq — Vectorscope", { width: 760, height: 800, minWidth: 320, minHeight: 320 });
+  // Wide, like the instrument: the inline one sits at the chart's 720:215.
+  const openTimeScopeWindow = () =>
+    openScopeWindow("timescope", "CAGEq — Oscilloscope", { width: 1200, height: 460, minWidth: 480, minHeight: 240 });
+  async function openScopeWindow(
+    label: string,
+    title: string,
+    size: { width: number; height: number; minWidth: number; minHeight: number },
+  ) {
+    const existing = await WebviewWindow.getByLabel(label);
     if (existing) {
       await existing.setFocus();
       return;
     }
-    const w = new WebviewWindow("scope", {
-      url: "index.html#scope",
-      title: "CAGEq — Vectorscope",
-      width: 760,
-      height: 800,
-      minWidth: 320,
-      minHeight: 320,
-      resizable: true,
-    });
+    const w = new WebviewWindow(label, { url: `index.html#${label}`, title, ...size, resizable: true });
     // Count the pop-out as a scope viewer for its whole lifetime (so the backend emits the scope
     // stream) and release it on close — tracked here, in the always-alive main window, because the
     // pop-out's own React cleanup may not run when its OS window is destroyed. Counted optimistically
@@ -3320,8 +3322,8 @@ function App() {
                   <div className="chart-wrap" ref={chartWrapRef} style={{ height: chartWrapHeight ?? undefined }}>
                     {scopeView ? (
                       <div className="scope-row">
-                        <TimeScope />
-                        <Vectorscope onPopOut={openScopeWindow} />
+                        <TimeScope onPopOut={openTimeScopeWindow} />
+                        <Vectorscope onPopOut={openVectorscopeWindow} />
                       </div>
                     ) : impulseView ? (
                       // Dry means no filters applied — its truthful impulse response is the literal

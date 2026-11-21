@@ -9,7 +9,7 @@ import { queueScopeWindow, scopeStream } from "./streams";
 import { accentRgb, createPhosphor, retuneForRelativeContrast, streamDoseMult } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
-import { APP_ZOOM_EVENT, appZoom } from "./appZoom";
+import { APP_ZOOM_EVENT, beamScale, noteScopeTube } from "./appZoom";
 import type { ScopeData, ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters (see Vectorscope's identical rationale — a live panel beats a
@@ -147,6 +147,8 @@ const TIMESCOPE_PARAMS_MIGRATION: ParamsMigration = {
 };
 const PRESET_LABELS: Record<keyof typeof PRESETS, string> = { fast: "scope.presetFast", smooth: "scope.presetSmooth", distribution: "scope.presetDistribution" };
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
+/** localStorage key: the detached time scope's own L/R vs mixdown (see `popMode`). */
+const POPOUT_MODE_KEY = "cageq-timescope-popout-mode";
 const GRID_ALPHA = 0.22;
 const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler than the lane centrelines
 // Peak-hold ballistics for the faint clip-reference lines — instant attack, brief hold, then
@@ -278,7 +280,16 @@ function kthLargest(mag: Float64Array, n: number, k: number): number {
  * "loopback monitor" family, sharing its `scope` event stream, its `scope-eq`-driven undistort
  * (inverse-filter cascade), and viewer-count gating with Vectorscope.
  */
-export function TimeScope() {
+export function TimeScope({
+  fill = false,
+  onPopOut,
+}: {
+  /** The detached window's view (ScopeWindow): fills it, and leaves counting it as a scope viewer
+   *  to the main window, as Vectorscope's `fill` does. */
+  fill?: boolean;
+  /** Shows a button that detaches the time scope into its own window. */
+  onPopOut?: () => void;
+} = {}) {
   const { t } = useTranslation();
   const wrapRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLCanvasElement>(null);
@@ -295,13 +306,23 @@ export function TimeScope() {
   const pendingRef = useRef<ScopeData[]>([]);
   const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-timescope-params", DEFAULTS, TIMESCOPE_PARAMS_MIGRATION);
   const [tuning, setTuning] = useState(false);
-  const paramsRef = useRef(params);
-  paramsRef.current = params;
   // L/R (two half-height lanes) vs mixdown (one full-height lane, mono sum) — mixdown trades
   // channel separation for 2x the vertical scale, handy when you just want to see how hot/quiet
   // the signal is rather than compare channels. A quick toggle, not a tuning-panel knob — flipped
-  // often enough to want single-click access; still an ordinary `params.mode` field underneath
-  // (see Params' own doc), so it's saved/reset alongside everything else.
+  // often enough to want single-click access. Inline it's an ordinary `params.mode` field (see
+  // Params' own doc), saved/reset alongside everything else; the pop-out keeps its own
+  // (POPOUT_MODE_KEY), L/R unless changed there: it has the room the inline tube lacks, which is
+  // what mixdown's doubled scale is for.
+  const [popMode, setPopMode] = useState<Params["mode"]>(() => {
+    try {
+      return localStorage.getItem(POPOUT_MODE_KEY) === "mix" ? "mix" : "lr";
+    } catch {
+      return "lr";
+    }
+  });
+  const mode = fill ? popMode : params.mode;
+  const paramsRef = useRef(params);
+  paramsRef.current = mode === params.mode ? params : { ...params, mode };
 
   // Width tracks the flex row's leftover space (not square, unlike the vectorscope); height tracks
   // `.chart-wrap`'s own `aspect-ratio:720/215` (App.css) via the same wrapper's rendered box, so
@@ -309,6 +330,10 @@ export function TimeScope() {
   // drifting from a hardcoded value and shifting the layout on every chart-view switch.
   const [width, setWidth] = useState(320);
   const [height, setHeight] = useState(215);
+  // The tube's on-screen height, for the render loop's beam width (`beamScale`).
+  const tubeRef = useRef(215);
+  const fillRef = useRef(fill);
+  fillRef.current = fill;
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -316,6 +341,8 @@ export function TimeScope() {
       const r = el.getBoundingClientRect();
       setWidth(Math.max(80, Math.floor(r.width)));
       setHeight(Math.max(60, Math.floor(r.height)));
+      if (r.height > 0) tubeRef.current = r.height;
+      if (!fill && r.height > 0) noteScopeTube(r.height);
     };
     const ro = new ResizeObserver(measure);
     ro.observe(el);
@@ -326,7 +353,7 @@ export function TimeScope() {
       ro.disconnect();
       window.removeEventListener(APP_ZOOM_EVENT, measure);
     };
-  }, []);
+  }, [fill]);
   const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
   const resW = Math.round(width * dpr);
   const resH = Math.round(height * dpr);
@@ -354,14 +381,16 @@ export function TimeScope() {
       });
       if (active) void emit("scope-eq-request");
     })();
-    void invoke("set_scope_viewer", { active: true });
+    // The pop-out's count is the main window's to keep (see Vectorscope's identical rule): this
+    // window's own cleanup may not run when its OS window is destroyed.
+    if (!fill) void invoke("set_scope_viewer", { active: true });
     return () => {
       active = false;
       unsubScope();
       unlistenEq?.();
-      void invoke("set_scope_viewer", { active: false });
+      if (!fill) void invoke("set_scope_viewer", { active: false });
     };
-  }, []);
+  }, [fill]);
 
   // Static graticule: a centreline per lane (+ the divider between them, in L/R mode). Redrawn on
   // resize or a mode switch (the lane layout itself changes).
@@ -376,11 +405,11 @@ export function TimeScope() {
     ctx.strokeStyle = `rgba(${ar},${ag},${ab},${GRID_ALPHA})`;
     ctx.lineWidth = Math.max(1, H / REF_SIZE);
     ctx.beginPath();
-    if (params.mode === "lr") {
+    if (mode === "lr") {
       ctx.moveTo(0, H / 2); // lane divider
       ctx.lineTo(W, H / 2);
     }
-    for (const lane of laneLayout(params.mode, H)) {
+    for (const lane of laneLayout(mode, H)) {
       ctx.moveTo(0, lane.cy);
       ctx.lineTo(W, lane.cy);
     }
@@ -399,8 +428,8 @@ export function TimeScope() {
     ctx.fillStyle = `rgba(${ar},${ag},${ab},0.5)`;
     ctx.font = `${Math.round(H * 0.05)}px system-ui, sans-serif`;
     ctx.textBaseline = "middle";
-    for (const lane of laneLayout(params.mode, H)) if (lane.label) ctx.fillText(lane.label, 6, lane.cy - lane.amp * 0.55);
-  }, [resW, resH, params.mode]);
+    for (const lane of laneLayout(mode, H)) if (lane.label) ctx.fillText(lane.label, 6, lane.cy - lane.amp * 0.55);
+  }, [resW, resH, mode]);
 
   // The trace: this frame's beam goes onto a scratch canvas handed to the phosphor accumulator,
   // which owns the decay and the additive composite — same machinery as the vectorscope, see
@@ -663,11 +692,9 @@ export function TimeScope() {
       if (isNew && dispL && dispR && dispN >= 2) {
         // L/R: one path per channel/lane. Mixdown: one path, mono sum, the single full-height lane.
         const valueAt = (i: number, lane: number): number => (mode === "mix" ? (dispL![i] + dispR![i]) / 2 : lane === 0 ? dispL![i] : dispR![i]);
-        // Against the height *before* the app's zoom, not the zoomed one: a larger window scales the
-        // whole app up (appZoom.ts) and with it the tube, but a real beam's spot doesn't grow with
-        // the screen, and scaled along it read as too thick on a maximised window. So the beam
-        // keeps the on-screen width it has at the design size.
-        const lineWidth = Math.max(0.6, p.beam * (H / appZoom() / REF_SIZE));
+        // The width it has inline at the design size, however much bigger the tube is on screen —
+        // a maximised window, or the detached one (see `beamScale`).
+        const lineWidth = Math.max(0.6, p.beam * (H / REF_SIZE) * beamScale(fillRef.current, tubeRef.current));
         if (ctx) {
           const paths = lanes.map(() => new Path2D());
           for (let lane = 0; lane < lanes.length; lane++) {
@@ -797,6 +824,16 @@ export function TimeScope() {
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
+  const toggleMode = () => {
+    const next = mode === "lr" ? "mix" : "lr";
+    if (!fill) return set("mode", next);
+    setPopMode(next);
+    try {
+      localStorage.setItem(POPOUT_MODE_KEY, next);
+    } catch {
+      // Not remembered, still switched.
+    }
+  };
   type NumKey = "trailTau" | "tail" | "glow" | "beam" | "bloom" | "haze" | "saturation" | "contrast" | "headroom" | "bloomWhite" | "bwLimit" | "speedDim" | "triggerFilterHz";
   const CONTROLS: { key: NumKey; label: string; hint: string; min: number; max: number; step: number }[] = [
     { key: "trailTau", label: t("scope.trail"), hint: t("scope.trailHint"), min: 0.02, max: 2.0, step: 0.01 },
@@ -816,7 +853,7 @@ export function TimeScope() {
   const msPerDiv = MS_PER_DIV_STEPS[params.msPerDivIdx] ?? MS_PER_DIV_STEPS[0];
 
   return (
-    <div className="timescope-wrap" ref={wrapRef}>
+    <div className={`timescope-wrap${fill ? " fill" : ""}`} ref={wrapRef}>
       {/* width/height here are CSS "100%" (matching the wrap exactly, sub-pixel precise) — the
           JS-measured `width`/`resW`/`resH` state feeds only the canvas backing-store *resolution*
           attributes below, never the display size. A JS-measured, floored pixel value here would
@@ -848,13 +885,18 @@ export function TimeScope() {
           aria-hidden="true"
         />
         <div className="vs-tools">
+          {onPopOut && (
+            <button type="button" className="vs-tool" title={t("scope.popOut")} onClick={onPopOut}>
+              ⤢
+            </button>
+          )}
           <button
             type="button"
             className="vs-tool vs-tool-text"
-            title={params.mode === "lr" ? t("scope.toMixTitle") : t("scope.toLrTitle")}
-            onClick={() => set("mode", params.mode === "lr" ? "mix" : "lr")}
+            title={mode === "lr" ? t("scope.toMixTitle") : t("scope.toLrTitle")}
+            onClick={toggleMode}
           >
-            {params.mode === "lr" ? t("scope.modeLr") : t("scope.modeMix")}
+            {mode === "lr" ? t("scope.modeLr") : t("scope.modeMix")}
           </button>
           <button
             type="button"

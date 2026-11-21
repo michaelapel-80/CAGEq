@@ -8,7 +8,7 @@ import { queueScopeWindow, scopeStream } from "./streams";
 import { accentRgb, createPhosphor, DOSE_REF_FPS, retuneForRelativeContrast, streamDoseMult } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
-import { APP_ZOOM_EVENT } from "./appZoom";
+import { APP_ZOOM_EVENT, beamScale, noteScopeTube } from "./appZoom";
 
 /** A stereo vectorscope window from the loopback (see cageq-monitor `ScopeUpdate`): interleaved
  *  `l0, r0, l1, r1, …` sample pairs (≈ -1..1) in capture order, a signal flag, and the mix rate. */
@@ -219,6 +219,10 @@ export function Vectorscope({
   // true default box, and locking onto it made the tube blurry even at the pop-out's actual default
   // size (reported live).
   const maxFillResRef = useRef<number | null>(null);
+  // The tube's on-screen side, for the render loop's beam width (`beamScale`).
+  const sideRef = useRef(215);
+  const fillRef = useRef(fill);
+  fillRef.current = fill;
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -226,6 +230,8 @@ export function Vectorscope({
       const r = el.getBoundingClientRect();
       const s = Math.max(80, Math.floor(Math.min(r.width, r.height)));
       setSide(s);
+      sideRef.current = s;
+      if (!fill) noteScopeTube(s);
       if (fill && maxFillResRef.current === null) maxFillResRef.current = Math.round(s * dpr);
     };
     const ro = new ResizeObserver(measure);
@@ -403,7 +409,9 @@ export function Vectorscope({
       const c = S / 2;
       const R = S * p.radiusFrac;
       const scale = p.rotate ? R / SQRT2 : R;
-      const lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE));
+      // The width it has inline at the design size, however much bigger the tube is on screen — a
+      // maximised window, or the detached one (see `beamScale`).
+      const lineWidth = Math.max(0.6, p.beam * (S / REF_SIZE) * beamScale(fillRef.current, sideRef.current));
 
       // 1) Start this frame's trace on a cleared scratch canvas. The decay of everything before it
       //    is the accumulator's job, applied in commit() at the end of the frame. On the GPU path

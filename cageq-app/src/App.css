@@ -847,6 +847,10 @@ select:disabled {
   min-width: 0;
   height: 100%;
 }
+/* Fill mode (the detached window): the whole window, like `.vectorscope-wrap.fill`. */
+.timescope-wrap.fill {
+  width: 100%;
+}
 
 /* Monitor chart view: the CRT spectrum analyzer fills the whole chart-wrap alone, same as EqChart
    does for the Frequency view (no row-sharing, unlike the time scope/vectorscope pair). Fills
@@ -1054,7 +1058,7 @@ select:disabled {
   padding: 0.05em 0.45em;
   font-variant-numeric: tabular-nums;
 }
-/* The detached vectorscope window: a full-viewport dark screen with the scope filling it. */
+/* A detached scope window: a full-viewport dark screen with the scope filling it. */
 .scope-window {
   position: fixed;
   inset: 0;
