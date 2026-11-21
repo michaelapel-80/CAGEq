@@ -199,6 +199,28 @@ const GRID_ALPHA = 0.22;
 // has), and 0.05 read as visibly laggy here — 0.03 is barely above the backend's own SPEC_TAU_SECS
 // (0.02) smoothing, just enough to fix the stepping without adding a perceptible extra delay.
 const STROKE_SMOOTH_TAU = 0.03;
+// The trace's motion, at any refresh rate, as a 240 Hz display shows it: a frame longer than
+// 1/SUBSTEP_HZ draws the curve once per 1/SUBSTEP_HZ of it, at the positions the stroke smoothing
+// above passes through in between, instead of once where it ends up. A real beam draws all the way
+// through, so a fast move (a transient's rise) leaves a continuous smear; one pass per frame left
+// it as separate copies a frame apart, a quarter as many at 60 Hz, each its own sharp line. The
+// passes share the frame's dose, weighted for the decay between them (`substepWeights`), so the
+// brightness stays what the frame-mean present (phosphor.ts, GLSL_FRAME_MEAN) calibrates.
+// At most SUBSTEP_MAX of them: 8 covers a 30 fps cap; a stall's long frame gets no more.
+const SUBSTEP_HZ = 240;
+const SUBSTEP_MAX = 8;
+
+/** Each of a frame's `n` passes' share of its dose, oldest first: what is left of it at the frame's
+ *  end, under the trail's decay (`tau`, s) over `h` s per pass — so the newest is the brightest,
+ *  as on a display drawing every pass — normalised to sum to 1. */
+function substepWeights(n: number, h: number, tau: number, out: Float64Array): void {
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    out[i] = Math.exp(-((n - 1 - i) * h) / tau);
+    sum += out[i];
+  }
+  for (let i = 0; i < n; i++) out[i] /= sum;
+}
 // Same fixed dBFS scale as EqChart's spectrum backdrop — consistent reading between the
 // Eq pane's backdrop and this standalone analyzer.
 const SPEC_TOP_DB = 0;
@@ -689,6 +711,7 @@ export function SpectrumScope({
     // `addSegments` segments (x0, y0, x1, y1, alpha each). Grown, never shrunk.
     let tessScratch = new Float32Array(0);
     let segData = new Float32Array(0);
+    const passWeights = new Float64Array(SUBSTEP_MAX); // substepWeights' output, reused
 
     const frameDue = frameGate(); // the optional frame-rate cap (frameLimit.ts)
     const render = () => {
@@ -789,11 +812,16 @@ export function SpectrumScope({
         }
         // Light exponential smoothing toward the raw target — see STROKE_SMOOTH_TAU's own doc for why
         // (the window-drag stutter fix). NaN (unset, a fresh bin) snaps straight to target instead of
-        // animating in from zero.
-        const smoothK = Math.exp(-dt / STROKE_SMOOTH_TAU);
-        for (let i = 0; i < n; i++) {
-          yScratchSmooth[i] = Number.isNaN(yScratchSmooth[i]) ? yScratch[i] : yScratch[i] + (yScratchSmooth[i] - yScratch[i]) * smoothK;
-        }
+        // animating in from zero. Stepped once per pass (SUBSTEP_HZ): an exponential composes, so
+        // the passes together land exactly where one step over the whole frame would.
+        const passes = ctx ? 1 : Math.max(1, Math.min(SUBSTEP_MAX, Math.round(dt * SUBSTEP_HZ)));
+        const smoothStep = (h: number) => {
+          const smoothK = Math.exp(-h / STROKE_SMOOTH_TAU);
+          for (let i = 0; i < n; i++) {
+            yScratchSmooth[i] = Number.isNaN(yScratchSmooth[i]) ? yScratch[i] : yScratch[i] + (yScratchSmooth[i] - yScratch[i]) * smoothK;
+          }
+        };
+        if (passes === 1) smoothStep(dt);
         // n >= 2 already guaranteed by the outer `if`.
         if (ctx) {
           ctx.beginPath();
@@ -801,28 +829,32 @@ export function SpectrumScope({
           ctx.stroke();
         } else {
           const cap = tessellatedCapacity(n);
-          if (tessScratch.length < cap * 2) {
-            tessScratch = new Float32Array(cap * 2);
-            segData = new Float32Array(cap * 5);
-          }
-          const count = tessellateSmooth(xScratch, yScratchSmooth, n, tessScratch);
+          if (tessScratch.length < cap * 2) tessScratch = new Float32Array(cap * 2);
+          if (segData.length < cap * 5 * passes) segData = new Float32Array(cap * 5 * passes);
+          const h = dt / passes;
+          if (passes > 1) substepWeights(passes, h, p.trailTau, passWeights);
           // The beam sweeps the frequency axis at a constant rate (see SWEEP_ENERGY): each piece
           // of the curve gets the energy of the width it spans, spread over its own length.
-          const perPx = p.glow * SWEEP_ENERGY;
-          for (let k = 0; k < count - 1; k++) {
-            const x0 = tessScratch[2 * k];
-            const y0 = tessScratch[2 * k + 1];
-            const x1 = tessScratch[2 * k + 2];
-            const y1 = tessScratch[2 * k + 3];
-            const len = Math.hypot(x1 - x0, y1 - y0);
-            const o = 5 * k;
-            segData[o] = x0;
-            segData[o + 1] = y0;
-            segData[o + 2] = len < MIN_SEG_PX ? x0 + MIN_SEG_PX : x1;
-            segData[o + 3] = y1;
-            segData[o + 4] = (perPx * (x1 - x0)) / Math.max(MIN_SEG_PX, len);
+          let segCount = 0;
+          for (let pass = 0; pass < passes; pass++) {
+            if (passes > 1) smoothStep(h);
+            const count = tessellateSmooth(xScratch, yScratchSmooth, n, tessScratch);
+            const perPx = p.glow * SWEEP_ENERGY * (passes > 1 ? passWeights[pass] : 1);
+            for (let k = 0; k < count - 1; k++) {
+              const x0 = tessScratch[2 * k];
+              const y0 = tessScratch[2 * k + 1];
+              const x1 = tessScratch[2 * k + 2];
+              const y1 = tessScratch[2 * k + 3];
+              const len = Math.hypot(x1 - x0, y1 - y0);
+              const o = 5 * segCount++;
+              segData[o] = x0;
+              segData[o + 1] = y0;
+              segData[o + 2] = len < MIN_SEG_PX ? x0 + MIN_SEG_PX : x1;
+              segData[o + 3] = y1;
+              segData[o + 4] = (perPx * (x1 - x0)) / Math.max(MIN_SEG_PX, len);
+            }
           }
-          phos.addSegments!({ data: segData, count: count - 1, width: lineWidth, rgb: [ar, ag, ab], round: true });
+          phos.addSegments!({ data: segData, count: segCount, width: lineWidth, rgb: [ar, ag, ab], round: true });
         }
 
         // Peak crosses: recomputed and redrawn every frame (not throttled — see below), so they
