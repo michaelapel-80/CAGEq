@@ -161,6 +161,14 @@ const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler
 const PEAK_RELEASE_DB_PER_SEC = 20;
 const PEAK_HOLD_MS = 1200;
 const DB_FLOOR = -120;
+// The release stops at what the signal reads now (the latest window's reading), not below it: the
+// hold only re-arms on a reading at or above the line, so a steady tone whose readings wobble a hair
+// under the one that set it (0.001 dB, with undistort on) let the hold lapse every second or so,
+// and the line fell until the next window pushed it back — a dip of up to 0.44 dB for a frame or
+// four (logged live). A falling signal is still followed down, at the release rate. A reading older
+// than PEAK_READING_STALE_MS no longer holds the line up: the stream sends no windows in silence,
+// and the line has to release then.
+const PEAK_READING_STALE_MS = 50;
 // Peak *detection* takes the K-th largest rectified sample in the block, not the plain max and
 // not a windowed/smoothed value — a sustained tone has many samples near its own peak, one every
 // cycle for as long as it lasts, scattered across the whole block rather than adjacent; an
@@ -176,6 +184,17 @@ const DB_FLOOR = -120;
 // that many ms) so it's identical in effect at 44.1/48/96/192 kHz. Only affects this reference
 // line — the drawn trace itself is untouched.
 const PEAK_CONFIRM_MS = 1.0;
+// …over the last PEAK_SPAN_MS of audio, read from the trigger ring, not over each scope window on
+// its own: the windows aren't a fixed length — each carries however many of the loopback's 10 ms
+// packets arrived since the last ~16 ms emit, mostly one or two — and with K fixed, how far down
+// the rectified signal's top K reaches depends on how much signal there is to rank. A band-limited
+// 500 Hz square at 48 kHz has 4 samples per period on its Gibbs crest (+1.42 dB), the next 4 at
+// +0.52, the next at +0.28: K = 48 read +0.28 dB in a one-packet window and +0.52 in a two-packet
+// one, so every two-packet window lifted the line, which held and then fell back — a jump on a
+// steady tone. Over a fixed span a steady square reads within 0.09 dB at any frequency (simulated,
+// 440 Hz to 5 kHz; the per-window rule swung up to 0.86). 16 ms: the stream's own window, so K
+// still asks for what it was tuned to ask for.
+const PEAK_SPAN_MS = 16;
 // Peak-line opacity. These used to be drawn *into* the accumulating trail every frame with
 // source-over at 0.35, which doesn't stay at 0.35: re-blending over the faded previous frame
 // converges on L = 0.35·C + 0.65·(L·keep), i.e. ~0.65·C at the default trail (and brighter still at
@@ -456,6 +475,8 @@ export function TimeScope({
     // `lanes` each frame; resized (and reset) on a mode switch, since "lane 0" means something
     // different in L/R vs mixdown. A brief reset on an intentional mode change is unsurprising.
     let peakDb: number[] = [];
+    let peakReading: number[] = []; // each lane's latest reading, and when (see PEAK_READING_STALE_MS)
+    let peakReadingAt: number[] = [];
     let peakHoldUntil: number[] = [];
     let magScratch = new Float64Array(0); // reused rectified-magnitude buffer for kthLargest
     // Per-scope-window work buffers, reused across windows (grown when a bigger one is needed, never
@@ -512,11 +533,17 @@ export function TimeScope({
       if (peakDb.length !== lanes.length) {
         peakDb = lanes.map(() => DB_FLOOR);
         peakHoldUntil = lanes.map(() => 0);
+        peakReading = lanes.map(() => DB_FLOOR);
+        peakReadingAt = lanes.map(() => -Infinity);
       }
       // Release: continuous decay once past the hold window, every frame regardless of whether new
       // data arrived this frame (so it doesn't step, it eases down smoothly between scope emits).
+      // Down to the latest reading, not past it (see PEAK_READING_STALE_MS).
       for (let lane = 0; lane < lanes.length; lane++) {
-        if (now >= peakHoldUntil[lane]) peakDb[lane] = Math.max(peakDb[lane] - PEAK_RELEASE_DB_PER_SEC * dt, DB_FLOOR);
+        if (now >= peakHoldUntil[lane]) {
+          const floor = now - peakReadingAt[lane] < PEAK_READING_STALE_MS ? peakReading[lane] : DB_FLOOR;
+          peakDb[lane] = Math.max(peakDb[lane] - PEAK_RELEASE_DB_PER_SEC * dt, floor);
+        }
       }
 
       let doseMult = 1; // see `if (isNew)` below for why this isn't always 1
@@ -594,23 +621,6 @@ export function TimeScope({
             outR[i] = r;
           }
 
-          // Attack: this window's peak per lane, from the exact values about to be drawn — correct
-          // in both modes by construction (it's the same array the trace path reads below). The
-          // rectified signal's K-th largest sample over PEAK_CONFIRM_MS worth of samples — see there.
-          const confirmSamples = Math.max(1, Math.round(rate * (PEAK_CONFIRM_MS / 1000)));
-          if (magScratch.length < n) magScratch = new Float64Array(n);
-          for (let lane = 0; lane < lanes.length; lane++) {
-            for (let i = 0; i < n; i++) {
-              magScratch[i] = Math.abs(mode === "mix" ? (outL[i] + outR[i]) / 2 : lane === 0 ? outL[i] : outR[i]);
-            }
-            const blockPeak = kthLargest(magScratch, n, confirmSamples);
-            const blockDb = 20 * Math.log10(Math.max(blockPeak, 1e-6));
-            if (blockDb >= peakDb[lane]) {
-              peakDb[lane] = blockDb;
-              peakHoldUntil[lane] = now + PEAK_HOLD_MS;
-            }
-          }
-
           // Feed the ring buffer: raw display samples plus a lowpass-filtered mono trigger-detector
           // value, one sample at a time so the filter's state stays continuous across windows (no
           // re-filtering, no transient reset). Rebuild the filter only when rate/cutoff changed.
@@ -621,6 +631,27 @@ export function TimeScope({
             ringR[idx] = outR[i];
             ringTrig[idx] = detectorSample(trig, (outL[i] + outR[i]) / 2);
             totalWritten++;
+          }
+
+          // Attack: the peak per lane up to the end of this window, from the exact values the trace
+          // draws (the ring holds them, undistorted or not) — correct in both modes by construction.
+          // The rectified signal's K-th largest sample (PEAK_CONFIRM_MS) over the last PEAK_SPAN_MS.
+          const confirmSamples = Math.max(1, Math.round(rate * (PEAK_CONFIRM_MS / 1000)));
+          const span = Math.min(totalWritten, RING_CAP, Math.max(1, Math.round(rate * (PEAK_SPAN_MS / 1000))));
+          if (magScratch.length < span) magScratch = new Float64Array(span);
+          for (let lane = 0; lane < lanes.length; lane++) {
+            for (let j = 0; j < span; j++) {
+              const idx = phys(totalWritten - span + j);
+              magScratch[j] = Math.abs(mode === "mix" ? (ringL[idx] + ringR[idx]) / 2 : lane === 0 ? ringL[idx] : ringR[idx]);
+            }
+            const blockPeak = kthLargest(magScratch, span, confirmSamples);
+            const blockDb = 20 * Math.log10(Math.max(blockPeak, 1e-6));
+            peakReading[lane] = blockDb;
+            peakReadingAt[lane] = now;
+            if (blockDb >= peakDb[lane]) {
+              peakDb[lane] = blockDb;
+              peakHoldUntil[lane] = now + PEAK_HOLD_MS;
+            }
           }
         }
 
