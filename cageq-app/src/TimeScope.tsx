@@ -147,8 +147,27 @@ const TIMESCOPE_PARAMS_MIGRATION: ParamsMigration = {
 };
 const PRESET_LABELS: Record<keyof typeof PRESETS, string> = { fast: "scope.presetFast", smooth: "scope.presetSmooth", distribution: "scope.presetDistribution" };
 const REF_SIZE = 512; // beam width authored against this reference height, then scaled
-/** localStorage key: the detached time scope's own L/R vs mixdown (see `popMode`). */
+/** localStorage keys: the detached time scope's own L/R vs mixdown and speed dimming (see `popMode`). */
 const POPOUT_MODE_KEY = "cageq-timescope-popout-mode";
+const POPOUT_SPEED_DIM_KEY = "cageq-timescope-popout-speed-dim";
+// The pop-out's speed dimming: the real beam's. The inline default (DEFAULTS.speedDim) is below 1
+// because a short tube packs dense content into a speckle; the pop-out has the room to draw it as
+// the beam actually would.
+const POPOUT_SPEED_DIM_DEFAULT = 1;
+const readStored = <T,>(key: string, parse: (v: string | null) => T, fallback: T): T => {
+  try {
+    return parse(localStorage.getItem(key));
+  } catch {
+    return fallback;
+  }
+};
+const writeStored = (key: string, v: string) => {
+  try {
+    localStorage.setItem(key, v);
+  } catch {
+    // Not remembered, still applied.
+  }
+};
 const GRID_ALPHA = 0.22;
 const DIV_LINE_ALPHA = GRID_ALPHA * 0.6; // division ticks read as finer/subtler than the lane centrelines
 // Peak-hold ballistics for the faint clip-reference lines — instant attack, brief hold, then
@@ -331,17 +350,24 @@ export function TimeScope({
   // often enough to want single-click access. Inline it's an ordinary `params.mode` field (see
   // Params' own doc), saved/reset alongside everything else; the pop-out keeps its own
   // (POPOUT_MODE_KEY), L/R unless changed there: it has the room the inline tube lacks, which is
-  // what mixdown's doubled scale is for.
-  const [popMode, setPopMode] = useState<Params["mode"]>(() => {
-    try {
-      return localStorage.getItem(POPOUT_MODE_KEY) === "mix" ? "mix" : "lr";
-    } catch {
-      return "lr";
-    }
-  });
-  const mode = fill ? popMode : params.mode;
-  const paramsRef = useRef(params);
-  paramsRef.current = mode === params.mode ? params : { ...params, mode };
+  // what mixdown's doubled scale is for. Speed dimming likewise (POPOUT_SPEED_DIM_KEY); everything
+  // else is shared with the inline view.
+  const [popMode, setPopMode] = useState<Params["mode"]>(() => readStored(POPOUT_MODE_KEY, (v) => (v === "mix" ? "mix" : "lr"), "lr"));
+  const [popSpeedDim, setPopSpeedDim] = useState(() =>
+    readStored(
+      POPOUT_SPEED_DIM_KEY,
+      (v) => {
+        const x = v === null ? NaN : Number(v);
+        return Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : POPOUT_SPEED_DIM_DEFAULT;
+      },
+      POPOUT_SPEED_DIM_DEFAULT,
+    ),
+  );
+  // What this view draws and its panel shows: the shared params, with the pop-out's own on top.
+  const view: Params = fill ? { ...params, mode: popMode, speedDim: popSpeedDim } : params;
+  const mode = view.mode;
+  const paramsRef = useRef(view);
+  paramsRef.current = view;
 
   // Width tracks the flex row's leftover space (not square, unlike the vectorscope); height tracks
   // `.chart-wrap`'s own `aspect-ratio:720/215` (App.css) via the same wrapper's rendered box, so
@@ -855,14 +881,29 @@ export function TimeScope({
   }, []);
 
   const set = <K extends keyof Params>(k: K, v: Params[K]) => setParams((prev) => ({ ...prev, [k]: v }));
+  const setPopModeStored = (next: Params["mode"]) => {
+    setPopMode(next);
+    writeStored(POPOUT_MODE_KEY, next);
+  };
+  const setPopSpeedDimStored = (next: number) => {
+    setPopSpeedDim(next);
+    writeStored(POPOUT_SPEED_DIM_KEY, String(next));
+  };
   const toggleMode = () => {
     const next = mode === "lr" ? "mix" : "lr";
-    if (!fill) return set("mode", next);
-    setPopMode(next);
-    try {
-      localStorage.setItem(POPOUT_MODE_KEY, next);
-    } catch {
-      // Not remembered, still switched.
+    if (fill) setPopModeStored(next);
+    else set("mode", next);
+  };
+  const setNum = (k: NumKey, v: number) => {
+    if (fill && k === "speedDim") setPopSpeedDimStored(v);
+    else set(k, v);
+  };
+  // In the pop-out, Reset also puts its own settings back to theirs.
+  const reset = () => {
+    resetToFactory();
+    if (fill) {
+      setPopModeStored("lr");
+      setPopSpeedDimStored(POPOUT_SPEED_DIM_DEFAULT);
     }
   };
   type NumKey = "trailTau" | "tail" | "glow" | "beam" | "bloom" | "haze" | "saturation" | "contrast" | "headroom" | "bloomWhite" | "bwLimit" | "speedDim" | "triggerFilterHz";
@@ -962,7 +1003,7 @@ export function TimeScope({
               >
                 {t(atSavedDefault ? "scope.deleteDefault" : "scope.saveDefault")}
               </button>
-              <button type="button" className="vs-tune-reset" onClick={resetToFactory}>
+              <button type="button" className="vs-tune-reset" onClick={reset}>
                 {t("scope.reset")}
               </button>
               <button type="button" className="vs-tune-close" title={t("scope.close")} aria-label={t("scope.close")} onClick={() => setTuning(false)}>
@@ -1015,10 +1056,10 @@ export function TimeScope({
                   min={cc.min}
                   max={cc.max}
                   step={cc.step}
-                  value={params[cc.key]}
-                  onChange={(e) => set(cc.key, Number(e.currentTarget.value))}
+                  value={view[cc.key]}
+                  onChange={(e) => setNum(cc.key, Number(e.currentTarget.value))}
                 />
-                <b>{params[cc.key].toFixed(cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : cc.step >= 0.01 ? 2 : 3)}</b>
+                <b>{view[cc.key].toFixed(cc.step >= 1 ? 0 : cc.step >= 0.1 ? 1 : cc.step >= 0.01 ? 2 : 3)}</b>
               </label>
             ))}
             <div className="vs-tune-sep" />
