@@ -94,6 +94,11 @@ pub(crate) struct FitOutcome {
 /// of the key.
 pub(crate) type FitCache = BoundedCache<FitCacheKey, FitCacheEntry>;
 
+/// `fetch_raw_curves`' result: `(measurement_f, measurement_raw, target_f, target_raw)`.
+type RawCurves = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
+/// `run_autoeq_fit`'s result: `(filters, f, curve, reference_curve)`.
+type FitOutput = (Vec<Filter>, Vec<f64>, Vec<f64>, Vec<CurvePoint>);
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct FitCacheKey {
     headphone: Option<String>,
@@ -143,7 +148,7 @@ fn fit_key(params: &FitParams, model: ResponseModel) -> FitCacheKey {
 /// `_measurement_fr`'s own array path) can carry a gap — only a hand-edited custom
 /// measurement fed through some future UI path might, and this crate doesn't have one
 /// yet.
-fn fetch_raw_curves(params: &FitParams) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>), CoreError> {
+fn fetch_raw_curves(params: &FitParams) -> Result<RawCurves, CoreError> {
     let (measurement_f, measurement_raw) = if let Some(hp) = &params.headphone {
         cageq_catalog::fetch_curve(hp)?
     } else {
@@ -217,7 +222,7 @@ fn run_autoeq_fit(
     cache: &std::sync::Mutex<FitCache>,
     params: &FitParams,
     model: ResponseModel,
-) -> Result<(Vec<Filter>, Vec<f64>, Vec<f64>, Vec<CurvePoint>), CoreError> {
+) -> Result<FitOutput, CoreError> {
     let key = fit_key(params, model);
     if let Some(entry) = cache.lock().unwrap().get(&key) {
         return Ok((entry.filters, entry.f, entry.curve, entry.reference_curve));

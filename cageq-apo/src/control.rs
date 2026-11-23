@@ -298,7 +298,7 @@ pub fn await_verdict(block: &ControlBlock, seq: u32, timeout: std::time::Duratio
 pub fn try_read(block: &ControlBlock, out: &mut Snapshot) -> ReadOutcome {
     // Acquire: nothing below may be hoisted above this read.
     let before = block.seq.load(Ordering::Acquire);
-    if before % 2 != 0 {
+    if !before.is_multiple_of(2) {
         return ReadOutcome::Torn; // writer mid-update
     }
 
@@ -397,8 +397,8 @@ pub fn publish(block: &mut ControlBlock, preamp_db: f64, coeffs: &[RawCoeffs], c
         for (i, c) in coeffs.iter().enumerate() {
             std::ptr::write_volatile(&mut block.coeffs[i], *c);
         }
-        for i in coeffs.len()..MAX_BANDS {
-            std::ptr::write_volatile(&mut block.coeffs[i], RawCoeffs::default());
+        for slot in block.coeffs.iter_mut().skip(coeffs.len()) {
+            std::ptr::write_volatile(slot, RawCoeffs::default());
         }
     }
 
@@ -410,8 +410,6 @@ pub fn publish(block: &mut ControlBlock, preamp_db: f64, coeffs: &[RawCoeffs], c
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A block in the state a freshly-created mapping would be: all zeroes.
 
     /// The verdict channel. A writer cannot predict whether an update will be applied: it can
     /// check stability, finiteness and range, but the loudness ceiling is a property of the
@@ -454,6 +452,7 @@ mod tests {
         });
     }
 
+    /// A block in the state a freshly-created mapping would be: all zeroes.
     fn zeroed() -> ControlBlock {
         ControlBlock {
             magic: 0,

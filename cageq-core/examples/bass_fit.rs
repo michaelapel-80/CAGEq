@@ -28,6 +28,7 @@
 //!   1-10 kHz where bands get reshuffled), but still passes about +4 dB at 16 Hz: the lowest bell
 //!   cannot sit below 20 Hz.
 //! - A free-corner shelf fits best and is worst for infrasound.
+//!
 //! Changing the fit would also break parity with AutoEq and move every saved preset under
 //! stages tuned on top of it. The high-pass band (12-48 dB/oct) is the targeted tool instead:
 //! today's fit plus 24 dB/oct at 20 Hz cuts 16 Hz by 3-4 dB and costs -3 dB at 20 Hz.
@@ -150,7 +151,9 @@ fn main() {
             );
         };
 
-        let (mut today, mut extended, mut no_shelf): (Option<Vec<Band>>, Option<Vec<Band>>, Option<Vec<Band>>) = (None, None, None);
+        let mut today: Option<Vec<Band>> = None;
+        let mut extended: Option<Vec<Band>> = None;
+        let mut no_shelf: Option<Vec<Band>> = None;
         for (set, set_name) in [(Set::Today, "LS105 + HS + 8 PK"), (Set::NoLowShelf, "HS + 9 PK"), (Set::FreeLowShelf, "free LS + HS + 8 PK")] {
             for rolloff in [None, Some(12.0), Some(24.0)] {
                 let (f, t) = match rolloff {
@@ -183,7 +186,7 @@ fn main() {
                 if matches!(set, Set::Today) {
                     match rolloff {
                         None => today = Some(solver.bands.clone()),
-                        Some(s) if s == 12.0 => extended = Some(solver.bands.clone()),
+                        Some(12.0) => extended = Some(solver.bands.clone()),
                         _ => {}
                     }
                 }

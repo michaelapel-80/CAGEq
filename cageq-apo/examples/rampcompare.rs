@@ -1,13 +1,13 @@
 //! Spike: how should the engine move between two corrections? Compares, offline:
 //!
 //! - `real`      — today's engine (`Cascade::apply_coeffs`: linear coefficient ramp, distance-
-//!                 scaled duration), as the reference for what ships;
+//!   scaled duration), as the reference for what ships;
 //! - `coeff`     — the same linear coefficient ramp, fixed duration (sanity check vs `real`);
 //! - `twin`      — coefficient ramp, but a slot that is empty on one side uses the other side's
-//!                 *neutral twin* (same poles, numerator = denominator: an identity filter);
+//!   *neutral twin* (same poles, numerator = denominator: an identity filter);
 //! - `param/N`   — ramp the band *parameters* (Fc and Q in log, gain in dB; an empty side is the
-//!                 same band at 0 dB; a type change fades to 0 dB, switches, fades back), with
-//!                 coefficients recomputed every N samples and linearly interpolated in between.
+//!   same band at 0 dB; a type change fades to 0 dB, switches, fades back), with
+//!   coefficients recomputed every N samples and linearly interpolated in between.
 //!
 //! Metric: a linear filter maps a sine to a sine, so notching the test tone out of the output
 //! leaves only what the transition added. Reported as the residual's peak around the change,
@@ -134,7 +134,7 @@ impl Sim {
                     for i in 0..self.cur.len() { self.cur[i] = lerp(&self.c_from[i], &self.c_to[i], t); }
                 }
                 Method::Param(nb) => {
-                    if done % nb == 0 {
+                    if done.is_multiple_of(nb) {
                         // New block: design the band at the block's end, interpolate towards it.
                         let t_end = ((done + nb).min(self.len)) as f64 / self.len as f64;
                         self.blk_a = self.cur.clone();

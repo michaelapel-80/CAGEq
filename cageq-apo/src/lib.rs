@@ -731,7 +731,7 @@ mod tests {
         assert!(!unsafe { cageq_apo_set_bands(h, std::ptr::null(), 3) }, "null with count>0");
 
         // Still exactly the one good band, and still producing finite audio.
-        let input = vec![0.25f32; 32];
+        let input = [0.25f32; 32];
         let mut output = vec![0.0f32; 32];
         unsafe { cageq_apo_process(h, input.as_ptr(), output.as_mut_ptr(), 16) };
         assert!(output.iter().all(|v| v.is_finite()), "engine was poisoned by a rejected band");

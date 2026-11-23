@@ -107,7 +107,7 @@ pub fn prescribed(band: &Band, fs: f64) -> Result<Coeffs, Failure> {
     let g1 = g1sq.sqrt();
 
     let ratio = (g2 - g1sq) / (g2 - g0 * g0);
-    if !(ratio > 0.0) {
+    if ratio.is_nan() || ratio <= 0.0 {
         return Err(Failure::NoSolution);
     }
     let wd2 = w0 * w0 * ratio.sqrt();
@@ -126,7 +126,7 @@ pub fn prescribed(band: &Band, fs: f64) -> Result<Coeffs, Failure> {
     }
     let p = (r1 - r2) / (gb2 - g2);
     let x = r1 + g2 * p;
-    if !(p > 0.0) || !(x >= 0.0) {
+    if p.is_nan() || p <= 0.0 || x.is_nan() || x < 0.0 {
         return Err(Failure::NoSolution);
     }
     let (inv_qd, b_over_qd) = (p.sqrt(), x.sqrt());

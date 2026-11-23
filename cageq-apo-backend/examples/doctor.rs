@@ -36,10 +36,10 @@ fn main() {
         return;
     }
     for d in &endpoints {
-        if let Some(want) = &filter {
-            if !d.id.eq_ignore_ascii_case(want) {
-                continue;
-            }
+        if let Some(want) = &filter
+            && !d.id.eq_ignore_ascii_case(want)
+        {
+            continue;
         }
         win::print_endpoint(&d.id, &d.name);
     }
@@ -442,8 +442,7 @@ mod cageq {
                     "      live payload (seq {seq}): preamp {:+.2} dB, {} band(s), crossfade: {}",
                     snap.preamp_db, snap.band_count, yn(snap.crossfade)
                 );
-                for i in 0..snap.band_count {
-                    let c = snap.coeffs[i];
+                for (i, &c) in snap.coeffs[..snap.band_count].iter().enumerate() {
                     println!(
                         "        #{:<2} raw biquad  b0 {:+.6}  b1 {:+.6}  b2 {:+.6}  a1 {:+.6}  a2 {:+.6}",
                         i + 1,

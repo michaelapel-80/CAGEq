@@ -45,7 +45,7 @@ fn main() {
     // Over full scale, on every channel. A float loopback carries samples above 1.0 untouched,
     // so an overshoot is smooth here and invisible to the jump test below — but the conversion
     // to the device's integer format clips it, which is heard as a click.
-    let all: Vec<f32> = bytes[44..].chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let all: Vec<f32> = bytes[44..].as_chunks::<4>().0.iter().map(|&c| f32::from_le_bytes(c)).collect();
     let peak = all.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     println!("peak: {:.4} ({:+.2} dBFS)", peak, 20.0 * peak.max(1e-12).log10());
     let over: Vec<usize> = (0..all.len()).filter(|&i| all[i].abs() > 1.0).map(|i| i / channels).collect();

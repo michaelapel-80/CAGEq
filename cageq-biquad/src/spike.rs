@@ -90,10 +90,10 @@ fn constrained_toward_rbj(band: &Band, fs: f64, cons: [Con; 3], lambda: f64, mar
     // The slope row below is linearised using `N = T·D` at the same point, so a slope
     // constraint is only meaningful alongside a value constraint at that frequency.
     for con in cons {
-        if let Con::Slope(x) = con {
-            if !cons.contains(&Con::Value(x)) {
-                return Err(Failure::Unsupported);
-            }
+        if let Con::Slope(x) = con
+            && !cons.contains(&Con::Value(x))
+        {
+            return Err(Failure::Unsupported);
         }
     }
     let w0 = band.w0(fs);
@@ -140,13 +140,13 @@ fn constrained_toward_rbj(band: &Band, fs: f64, cons: [Con; 3], lambda: f64, mar
         }
     }
     let [n1, d1, d0] = solve3(m, rhs).ok_or(Failure::NoSolution)?;
-    if !(d0 > 0.0) {
+    if d0.is_nan() || d0 <= 0.0 {
         return Err(Failure::NoSolution);
     }
     let wd2n = d0.sqrt(); // (ωd/ω0)²
     let p = d1 / wd2n + 2.0;
     let x = n1 / wd2n + 2.0 * g0 * g1;
-    if !(p > 0.0) || !(x >= -1e-12) {
+    if p.is_nan() || p <= 0.0 || x.is_nan() || x < -1e-12 {
         return Err(Failure::NoSolution);
     }
     if margin > 0.0 {

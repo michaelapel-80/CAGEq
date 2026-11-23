@@ -193,7 +193,7 @@ pub enum Signal {
 pub fn poison_override(signal: Signal, frame: u64, fade_frames: u64) -> Option<f32> {
     let Signal::Poison { every_n_frames, .. } = signal else { return None };
     let every_n_frames = every_n_frames.max(1);
-    if frame < fade_frames || frame % every_n_frames != 0 {
+    if frame < fade_frames || !frame.is_multiple_of(every_n_frames) {
         return None;
     }
     // Cycle NaN → +Inf → -Inf → repeat, so a long-running session exercises all three failure

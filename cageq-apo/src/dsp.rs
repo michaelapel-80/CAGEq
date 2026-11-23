@@ -818,8 +818,8 @@ impl Cascade {
         }
 
         let fresh = self.cross_mix == 0.0 && self.cross_preroll_left == 0 && self.cross_fade_left == 0;
-        for i in 0..MAX_BANDS {
-            self.coeffs2[i] = target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH);
+        for (i, c) in self.coeffs2.iter_mut().enumerate() {
+            *c = target.get(i).copied().unwrap_or(Coeffs::PASSTHROUGH);
         }
         self.process_count2 = target.len();
         self.preamp2 = preamp;
@@ -1996,7 +1996,7 @@ mod tests {
                 // a metric that only looks after it cannot see the very discontinuity it is
                 // for. This is what made an instant switch to dry appear clean.
                 let mut out = vec![*sink.last().unwrap()];
-                out.extend(std::iter::repeat(0.0f32).take(WINDOW));
+                out.extend(std::iter::repeat_n(0.0f32, WINDOW));
                 c.process(&cont, &mut out[1..], WINDOW);
                 worst = worst.max(worst_jump_ratio(&out));
             }
@@ -2359,7 +2359,7 @@ mod tests {
             c.set_dry(true, -6.0); // the crossfade itself (see the test doc)
             let cont = tone(50.0, 960 * 40, 960, 0.5);
             let mut out = vec![*sink.last().unwrap()];
-            out.extend(std::iter::repeat(0.0f32).take(960));
+            out.extend(std::iter::repeat_n(0.0f32, 960));
             c.process(&cont, &mut out[1..], 960);
             worst_jump_ratio(&out)
         };
@@ -2498,7 +2498,7 @@ mod tests {
             // The last pre-switch sample is prepended: the step happens AT the boundary, and a
             // metric that only looks after it cannot see the discontinuity it is for.
             let mut out = vec![*sink.last().unwrap()];
-            out.extend(std::iter::repeat(0.0f32).take(WINDOW));
+            out.extend(std::iter::repeat_n(0.0f32, WINDOW));
             c.process(&cont, &mut out[1..], WINDOW);
             worst = worst.max(worst_jump_ratio(&out));
             }
@@ -2574,7 +2574,7 @@ mod tests {
                     c.settle();
                 }
                 let mut out = vec![*sink.last().unwrap()];
-                out.extend(std::iter::repeat(0.0f32).take(WINDOW));
+                out.extend(std::iter::repeat_n(0.0f32, WINDOW));
                 c.process(&cont, &mut out[1..], WINDOW);
                 worst = worst.max(worst_jump_ratio(&out));
             }
@@ -2644,7 +2644,7 @@ mod tests {
                     c.settle();
                 }
                 let mut out = vec![*sink.last().unwrap()];
-                out.extend(std::iter::repeat(0.0f32).take(WINDOW));
+                out.extend(std::iter::repeat_n(0.0f32, WINDOW));
                 c.process(&cont, &mut out[1..], WINDOW);
                 worst = worst.max(worst_jump_ratio(&out));
             }
@@ -2736,7 +2736,7 @@ mod tests {
                         c.settle();
                     }
                     let mut out = vec![*sink.last().unwrap()];
-                    out.extend(std::iter::repeat(0.0f32).take(WINDOW));
+                    out.extend(std::iter::repeat_n(0.0f32, WINDOW));
                     c.process(&cont, &mut out[1..], WINDOW);
                     worst = worst.max(worst_jump_ratio(&out));
                 }
@@ -3750,8 +3750,7 @@ mod tests {
         let scan: Vec<f64> = (0..800).map(|i| 20.0 * 1000.0f64.powf(i as f64 / 799.0)).collect();
         let (input, mut output) = ([0.0f32; 1], [0.0f32; 1]);
         let mut max_lag_pct = 0.0f64;
-        for i in 1..REAL_DRAG_TICKS.len() {
-            let (gap_before, freq_hz) = REAL_DRAG_TICKS[i];
+        for (i, &(gap_before, freq_hz)) in REAL_DRAG_TICKS.iter().enumerate().skip(1) {
             assert!(c.set_bands(&[Band { kind: FilterKind::Bandpass, freq_hz, gain_db: 0.0, q }]));
             // How long this tick gets to settle before the next one arrives (or, for the last
             // tick, nothing — that's covered by the settle-tail check below instead).

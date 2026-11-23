@@ -426,7 +426,7 @@ async fn export_impulse_file(window: tauri::WebviewWindow, request: tauri::ipc::
         .map(|n| safe_file_name(&n))
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "CAGEq impulse response".into());
-    let samples: Vec<f32> = body.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let samples: Vec<f32> = body.as_chunks::<4>().0.iter().map(|&c| f32::from_le_bytes(c)).collect();
 
     let Some(path) = window
         .dialog()
@@ -461,6 +461,9 @@ fn safe_file_name(name: &str) -> String {
 /// `activate_slot` on the last-active slot writes it instantly. `filters`/`reference_curve`
 /// round-trip the same shapes `apply` returns.
 #[tauri::command]
+// A Tauri command's parameters are its IPC arguments and the managed state it reads, each
+// injected by name; grouping them in a struct would change the command's interface, not simplify it.
+#[allow(clippy::too_many_arguments)]
 fn seed_slot(
     slot: Slot,
     device: String,
@@ -880,6 +883,9 @@ fn restore_foreign_config(state: State<Backend>) -> Result<bool, String> {
 /// live-toggleable via `set_spectrum_harmonic_fold`/`set_spectrum_hires_peaks`. The meter's Integrated/Loudness Range/Peak Max reset rides
 /// `LufsResetState` the same way, via `reset_lufs_meter`.
 #[tauri::command]
+// A Tauri command's parameters are its IPC arguments and the managed state it reads, each
+// injected by name; grouping them in a struct would change the command's interface, not simplify it.
+#[allow(clippy::too_many_arguments)]
 fn start_monitor(
     device: Option<String>,
     session: String,

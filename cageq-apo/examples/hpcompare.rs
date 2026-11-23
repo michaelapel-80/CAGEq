@@ -4,15 +4,15 @@
 //!
 //! - `real`      — the engine itself (`Cascade::apply_coeffs`, its own ramp length);
 //! - `df1 twin`  — what the engine does, at a fixed length: Direct Form I, an entering/leaving
-//!                 section ramped to and from its neutral twin;
+//!   section ramped to and from its neutral twin;
 //! - `df2 twin`  — the same in Direct Form II, whose state is the input through the poles alone:
-//!                 with the poles fixed, a numerator ramp is then exactly an output crossfade. A
-//!                 section entering starts from zero state;
+//!   with the poles fixed, a numerator ramp is then exactly an output crossfade. A
+//!   section entering starts from zero state;
 //! - `Fc sweep`  — ramp the high-pass's Fc up from 1 Hz (or down to it, then drop it), Direct
-//!                 Form I, coefficients designed every sample;
+//!   Form I, coefficients designed every sample;
 //! - `cold`      — the dry signal blended into a high-pass switched on at the push;
 //! - `ideal`     — the two steady states blended (for a toggle *on*, a high-pass that was already
-//!                 running, which no causal engine has).
+//!   running, which no causal engine has).
 //!
 //! Metric as in `rampcompare`: the tone notched out of the output leaves what the transition
 //! added; reported as its peak in the 400 ms after the push (the 20 Hz poles ring for a while),

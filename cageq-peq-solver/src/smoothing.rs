@@ -102,9 +102,9 @@ pub fn savgol_filter(data: &[f64], window: usize) -> Vec<f64> {
     let local_x: Vec<f64> = (0..window).map(|i| i as f64).collect();
 
     let (a, b, c) = polyfit_quadratic(&local_x, &data[0..window]);
-    for i in 0..half {
+    for (i, o) in out[..half].iter_mut().enumerate() {
         let x = i as f64;
-        out[i] = a + b * x + c * x * x;
+        *o = a + b * x + c * x * x;
     }
 
     let (a, b, c) = polyfit_quadratic(&local_x, &data[n - window..n]);

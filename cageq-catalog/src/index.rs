@@ -168,7 +168,7 @@ pub fn list_targets(refresh: bool) -> Result<Vec<TargetEntry>, CatalogError> {
                 TargetEntry { name: name.trim_end_matches(".csv").to_string(), path: format!("targets/{name}") }
             })
             .collect();
-        targets.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        targets.sort_by_key(|t| t.name.to_lowercase());
         Ok(targets)
     })
 }

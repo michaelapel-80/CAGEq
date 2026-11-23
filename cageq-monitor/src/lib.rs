@@ -666,6 +666,9 @@ mod windows_impl {
         /// `LufsResetState`) to restart the Integrated/Loudness Range/Peak Max measurement on the
         /// very next tick, without touching momentary/short-term or restarting the monitor —
         /// checked-and-cleared inside `run_session`'s own loop.
+        // Each argument is a distinct piece of shared state (the stop flag, the UI's live controls) or a
+        // callback; a struct to carry them would only rename them.
+        #[allow(clippy::too_many_arguments)]
         pub fn start<F, G, H>(
             endpoint_id: Option<String>,
             scope_viewers: Arc<AtomicUsize>,
@@ -1941,6 +1944,9 @@ mod windows_impl {
             h
         }
     }
+    // Each argument is a distinct piece of shared state (the stop flag, the UI's live controls) or a
+    // callback; a struct to carry them would only rename them.
+    #[allow(clippy::too_many_arguments)]
     fn capture_loop<F, G, H>(
         endpoint_id: Option<String>,
         stop: &AtomicBool,
@@ -2029,6 +2035,9 @@ mod windows_impl {
     /// One capture session: open loopback on the (re-resolved) endpoint at its current mix format
     /// and meter until stopped (returns `Ok`) or the stream errors/invalidates (returns `Err`, so
     /// the supervisor reopens — e.g. after a sample-rate change).
+    // Each argument is a distinct piece of shared state (the stop flag, the UI's live controls) or a
+    // callback; a struct to carry them would only rename them.
+    #[allow(clippy::too_many_arguments)]
     fn run_session<F, G, H>(
         endpoint_id: &Option<String>,
         stop: &AtomicBool,
@@ -2102,7 +2111,7 @@ mod windows_impl {
         // monitor for anyone not asking for it.
         let mut recorder = std::env::var_os("CAGEQ_RECORD").and_then(|p| {
             let path = std::path::PathBuf::from(p);
-            match WavRecorder::new(&path, rate, channels as u16) {
+            match WavRecorder::new(&path, rate, channels) {
                 Ok(r) => {
                     eprintln!("[cageq-monitor] recording loopback to {}", path.display());
                     Some(r)
@@ -2615,13 +2624,13 @@ mod windows_impl {
                 prev = update.db[i];
             }
             prev = update.db[peak_i];
-            for i in (peak_i + 1)..(peak_i + window).min(update.db.len()) {
+            let end = (peak_i + window).min(update.db.len());
+            for (i, &db) in update.db.iter().enumerate().take(end).skip(peak_i + 1) {
                 assert!(
-                    update.db[i] <= prev + 0.05,
-                    "non-monotonic on the rising-frequency side at bin {i}: {} > {prev} (peak at bin {peak_i})",
-                    update.db[i]
+                    db <= prev + 0.05,
+                    "non-monotonic on the rising-frequency side at bin {i}: {db} > {prev} (peak at bin {peak_i})"
                 );
-                prev = update.db[i];
+                prev = db;
             }
         }
 

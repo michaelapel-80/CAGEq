@@ -23,10 +23,10 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> BoundedCache<K, V> {
 
     pub(crate) fn insert(&mut self, key: K, value: V) {
         if !self.entries.contains_key(&key) {
-            if self.order.len() >= CACHE_MAX {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.entries.remove(&oldest);
-                }
+            if self.order.len() >= CACHE_MAX
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.entries.remove(&oldest);
             }
             self.order.push_back(key.clone());
         }

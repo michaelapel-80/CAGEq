@@ -524,27 +524,27 @@ pub fn status() -> SetupStatus {
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let mut out = SetupStatus::default();
-    out.dll_current = true; // overridden below only on a confirmed mismatch — see its own doc
+    // dll_current: overridden below only on a confirmed mismatch — see its own doc.
+    let mut out = SetupStatus { dll_current: true, ..SetupStatus::default() };
 
-    if let Ok(server) = hklm.open_subkey(format!(r"{CLSID_KEY}\{CLSID}\InprocServer32")) {
-        if let Ok(path) = server.get_value::<String, _>("") {
-            let path = PathBuf::from(path);
-            out.dll_present = path.exists();
-            if out.dll_present {
-                // Both halves matter, independently: the version marker alone was fooled by a
-                // registration pointing somewhere other than `installed_dll()` — a build run
-                // directly against a dev output path, say, `regsvr32`'d by hand instead of
-                // through `register`. That leaves an entry in `installed_version_path()` from
-                // an earlier *legitimate* registration, so the version check alone reported
-                // "current" for a DLL it had never actually looked at. See
-                // `registered_at_expected_location`'s own doc.
-                let right_place = registered_at_expected_location(&path, &installed_dll());
-                out.dll_current = right_place && installed_version() == Some(cageq_apo::APO_VERSION);
-            }
-            out.dll_readable = crate::dll_acl::dll_readable_by_audiodg(&path);
-            out.registered_dll = Some(path);
+    if let Ok(server) = hklm.open_subkey(format!(r"{CLSID_KEY}\{CLSID}\InprocServer32"))
+        && let Ok(path) = server.get_value::<String, _>("")
+    {
+        let path = PathBuf::from(path);
+        out.dll_present = path.exists();
+        if out.dll_present {
+            // Both halves matter, independently: the version marker alone was fooled by a
+            // registration pointing somewhere other than `installed_dll()` — a build run
+            // directly against a dev output path, say, `regsvr32`'d by hand instead of
+            // through `register`. That leaves an entry in `installed_version_path()` from
+            // an earlier *legitimate* registration, so the version check alone reported
+            // "current" for a DLL it had never actually looked at. See
+            // `registered_at_expected_location`'s own doc.
+            let right_place = registered_at_expected_location(&path, &installed_dll());
+            out.dll_current = right_place && installed_version() == Some(cageq_apo::APO_VERSION);
         }
+        out.dll_readable = crate::dll_acl::dll_readable_by_audiodg(&path);
+        out.registered_dll = Some(path);
     }
 
     out.gate_open = hklm

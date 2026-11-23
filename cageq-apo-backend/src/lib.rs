@@ -100,6 +100,8 @@ const WRITE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500
 /// refuse a write that has been superseded by a safe-state trip since it was queued — see
 /// [`CageqApoBackend::queue_write`] and [`CageqApoBackend::write_safe_state`].
 type PendingMap = std::collections::HashMap<String, (u64, String)>;
+/// One drained `PendingMap` entry: the endpoint id, and the epoch and config text queued for it.
+type PendingWrite = (String, (u64, String));
 
 /// `pending`/`write_tx`: the debounced half of persistence — see [`CageqApoBackend::queue_write`].
 #[derive(Debug)]
@@ -894,11 +896,11 @@ impl SlotAssignment {
 
         for (i, slot) in self.slots.iter().enumerate() {
             let Some(key) = slot else { continue };
-            if let Some(j) = bands.iter().position(|b| band_key(b) == *key) {
-                if !used[j] {
-                    out[i] = Some(&bands[j]);
-                    used[j] = true;
-                }
+            if let Some(j) = bands.iter().position(|b| band_key(b) == *key)
+                && !used[j]
+            {
+                out[i] = Some(&bands[j]);
+                used[j] = true;
             }
         }
         for (j, band) in bands.iter().enumerate() {
@@ -1073,7 +1075,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), ApoBackendError> {
 /// mutex means only one of them can ever actually drain a given entry, so the two can race each
 /// other harmlessly (whichever gets there first does the work; the other finds nothing left)
 /// rather than double-writing or losing one.
-fn drain(pending: &std::sync::Mutex<PendingMap>) -> Vec<(String, (u64, String))> {
+fn drain(pending: &std::sync::Mutex<PendingMap>) -> Vec<PendingWrite> {
     pending.lock().unwrap().drain().collect()
 }
 
@@ -1082,7 +1084,7 @@ fn drain(pending: &std::sync::Mutex<PendingMap>) -> Vec<(String, (u64, String))>
 /// `queue_write` for the same id may have landed *while* this batch was in flight, and that
 /// newer content must win over the stale content that just failed to write, not be clobbered by
 /// it.
-fn requeue(pending: &std::sync::Mutex<PendingMap>, failed: Vec<(String, (u64, String))>) {
+fn requeue(pending: &std::sync::Mutex<PendingMap>, failed: Vec<PendingWrite>) {
     if failed.is_empty() {
         return;
     }
@@ -1106,8 +1108,8 @@ fn requeue(pending: &std::sync::Mutex<PendingMap>, failed: Vec<(String, (u64, St
 fn flush_batch(
     config_dir: &Path,
     current_epoch: u64,
-    batch: Vec<(String, (u64, String))>,
-) -> (Vec<(String, (u64, String))>, Option<ApoBackendError>) {
+    batch: Vec<PendingWrite>,
+) -> (Vec<PendingWrite>, Option<ApoBackendError>) {
     let mut failed = Vec::new();
     let mut first_err = None;
     for (id, (epoch, text)) in batch {

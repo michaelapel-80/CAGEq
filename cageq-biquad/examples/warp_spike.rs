@@ -169,9 +169,9 @@ fn report(out: &mut String) {
         for kind in Kind::MATCHED {
             for method in methods_for(kind) {
                 let row = evaluate(kind, method, fs, &freqs);
-                for b in 0..5 {
-                    if let Some((fc, g, q, at)) = row.cells[b].worst {
-                        writeln!(out, "  {:<4} {:<14} {:>6.0} Hz {:+5.1} dB Q{:<5} -> {:>6.3} dB at {:>6.0} Hz", kind.token(), method.name(), fc, g, q, row.cells[b].max_err, at).unwrap();
+                for cell in &row.cells {
+                    if let Some((fc, g, q, at)) = cell.worst {
+                        writeln!(out, "  {:<4} {:<14} {:>6.0} Hz {:+5.1} dB Q{:<5} -> {:>6.3} dB at {:>6.0} Hz", kind.token(), method.name(), fc, g, q, cell.max_err, at).unwrap();
                     }
                 }
             }
