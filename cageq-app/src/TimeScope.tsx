@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { type FadingInverse, retargetFadingInverse, stepFadingInverse } from "./biquad";
 import { detectorSample, findRisingEdge, triggerDetector, type TriggerDetector } from "./scopeTrigger";
 import { queueScopeWindow, scopeStream } from "./streams";
-import { accentRgb, createPhosphor, retuneForRelativeContrast, streamDoseMult, type TraceSegments } from "./phosphor";
+import { accentRgb, createPhosphor, frameDoseMult, retuneForRelativeContrast, type TraceSegments } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT, beamScale, noteScopeTube } from "./appZoom";
@@ -189,11 +189,11 @@ const DB_FLOOR = -120;
 // and the line has to release then.
 const PEAK_READING_STALE_MS = 50;
 // The trace is redrawn on every frame, the newest one again until the next window replaces it — a
-// scope re-sweeping a repeating signal — not only on frames a window arrived in. The windows come
-// every 15 to 22 ms (the 16 ms emit waits for the loopback's next 10 ms packet), and the Fast
-// preset's trail is 20 ms: lit only when one arrived, the trace decayed in every gap, and a steady
-// signal's brightness swung 20–26% RMS from frame to frame at any frame rate (simulated against the
-// emit loop's timing; 11–13% on Smooth). Redrawn each frame with a frame's worth of dose, it holds
+// scope re-sweeping a repeating signal — not only on frames a window arrived in. The windows came
+// every 15 to 22 ms then (a 16 ms timer catching one 10 ms loopback packet or two; now every 20 ms,
+// on packet boundaries), and the Fast preset's trail is 20 ms: lit only when one arrived, the trace
+// decayed in every gap, and a steady signal's brightness swung 20–26% RMS from frame to frame at
+// any frame rate (simulated against the emit loop's timing; 11–13% on Smooth). Redrawn each frame with a frame's worth of dose, it holds
 // steady at the same mean. Up to TRACE_HOLD_MS after the last window: past that the stream has
 // stalled or gone quiet (a silent window ends the hold at once), and the trace fades as it should.
 const TRACE_HOLD_MS = 100;
@@ -600,11 +600,9 @@ export function TimeScope({
       let dispL: Float64Array | null = null;
       let dispR: Float64Array | null = null;
       let dispN = 0;
-      // A trace on every frame (see TRACE_HOLD_MS), so a frame's worth of dose: commit()'s own
-      // dt/DOSE_REF_DT, times `streamDoseMult`'s calibration (SCOPE_UPDATE_HZ/DOSE_REF_FPS, what
-      // `glow` was tuned under) and the Trail/Glow orthogonality factor (TAU_REF/p.trailTau — see
-      // TAU_REF's own doc). Its span term is 1 here: each trace carries exactly its own frame.
-      const doseMult = streamDoseMult(dt, dt, p.trailTau, TAU_REF);
+      // A trace on every frame (see TRACE_HOLD_MS), so a frame's worth of dose (`frameDoseMult`),
+      // with the Trail/Glow orthogonality factor (TAU_REF/p.trailTau — see TAU_REF's own doc).
+      const doseMult = frameDoseMult(p.trailTau, TAU_REF);
       if (isNew) {
         let rate = 48000;
         for (const s of fresh) {

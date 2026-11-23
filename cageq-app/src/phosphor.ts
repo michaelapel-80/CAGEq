@@ -352,7 +352,7 @@ float toneAlpha(float n){ return linearToSrgb1(min(pow(n, uContrast), 1.0)); }`;
 // 60. Decaying by k over the frame, the light's mean is (1 − k)/(−ln k) of its start (k per pixel,
 // FS_ACCUM's brightness-dependent mix of the two rates); taken against the same at DOSE_REF_FPS,
 // the dose's own reference, so 240 Hz shows exactly what it did and every other rate shows the
-// same mean light (simulated within 2% from 30 to 360 Hz, with `streamDoseMult`'s bound). The
+// same mean light (simulated within 2% from 30 to 360 Hz). The
 // frame's own `dt` stands in for how long it will stay up, which a steady rate makes exact. A
 // long trail barely changes (the EQ chart's 1.5 s: under 1% at 30 fps).
 //
@@ -1958,30 +1958,41 @@ export function accentRgb(el: Element): [number, number, number] {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-/** The scope stream's cadence (cageq-monitor's SCOPE_INTERVAL, 16 ms). */
-const SCOPE_UPDATE_HZ = 60;
-/** The most stream time one trace may carry, in frames or stream windows, whichever is longer. */
-const TRACE_SPAN_MAX = 2;
+/** The scope stream's nominal cadence: the 60 traces a second `frameDoseMult` is calibrated to. */
+const GLOW_REF_HZ = 60;
+/** The dose per window `glow` was tuned under, as the stream time it stood for: the old rule's
+ *  time since the last window, weighted by the window's samples, measured live on the timer-driven
+ *  stream (one 10 ms loopback packet 20% of the time, two 76%, three 4%): 18.7 and 18.9 ms in two
+ *  runs. See `windowDoseMult`. */
+const GLOW_REF_WINDOW_S = 0.0188;
 
 /**
- * `commit`'s `doseMult` for a view that draws a fresh trace once per scope-stream window (~60/s)
- * rather than every animation frame (Meter, TimeScope, Vectorscope).
+ * `commit`'s `doseMult` for a view whose trace carries its own time, one deposit per sample
+ * (Vectorscope, Meter): each scope window gets the same dose, however long it is and however long
+ * since the last, so the light follows the samples and nothing else — not the display's frame rate,
+ * not how many windows one frame traces, not the stream's cadence. `DOSE_REF_DT / dt` cancels the
+ * frame time `commit` scales by.
  *
- * - `dtSinceTrace / dt`: `commit`'s own dose assumes one call per unit of real content, which a
- *   display faster than the stream breaks (dimmer at high refresh rates, brighter at low ones);
- *   this substitutes the real time since the last trace. Bounded at `TRACE_SPAN_MAX` frames or
- *   stream windows, whichever is longer: a trace after a stall, or in a burst of frames coalesced
- *   behind one, otherwise carried the whole gap's dose at once and left a bright, saturated line
- *   behind. It was a cap on the ratio, at 4 — exactly 240 Hz against the 60 Hz stream, so window
- *   jitter clipped every late trace there (4% of the light) and anything faster lost the rest
- *   outright (a quarter at 360 Hz). The span bound leaves every rate whole, from a 30 fps cap up.
- * - `SCOPE_UPDATE_HZ / DOSE_REF_FPS`: the absolute calibration `glow` was tuned under, before the
- *   rate-dependence was fixed — kept here rather than folded into the defaults, so a value
- *   someone saved still means what it meant.
- * - `tauRef / trailTau`: Trail/Glow orthogonality — steady-state brightness would otherwise grow
- *   with the trail's length; `tauRef` is the view's own anchor (a real 100 ms in each).
+ * Before: the dose scaled with the time since the last trace (at GLOW_REF_HZ's calibration),
+ * shared by the windows traced in it. That double-counted time — a window's samples already bring
+ * it — so the light grew with the windows' length. The dose here is the one a sample got on average
+ * under that rule (GLOW_REF_WINDOW_S, 1.13x a 1/60 s window's): the light `glow` was tuned to, so
+ * saved values look as they did. The old rule also needed a bound (a trace after a stall carried the whole
+ * gap's dose at once); a window's dose no longer depends on the gap at all.
+ *
+ * `tauRef / trailTau`: Trail/Glow orthogonality — steady-state brightness would otherwise grow
+ * with the trail's length; `tauRef` is the view's own anchor (a real 100 ms in each).
  */
-export function streamDoseMult(dtSinceTrace: number, dt: number, trailTau: number, tauRef: number): number {
-  const rateRatio = dt > 0 ? Math.min(dtSinceTrace, TRACE_SPAN_MAX * Math.max(dt, 1 / SCOPE_UPDATE_HZ)) / dt : 1;
-  return rateRatio * (SCOPE_UPDATE_HZ / DOSE_REF_FPS) * (tauRef / trailTau);
+export function windowDoseMult(dt: number, trailTau: number, tauRef: number): number {
+  return dt > 0 ? (DOSE_REF_DT / dt) * GLOW_REF_WINDOW_S * GLOW_REF_HZ * (tauRef / trailTau) : 0;
+}
+
+/**
+ * `commit`'s `doseMult` for a stream view that draws a trace every frame whose light stands for
+ * time on screen rather than samples (TimeScope: one sweep of the display span, held between
+ * windows): `commit`'s own frame-time dose, at the calibration `glow` was tuned under — the
+ * light of GLOW_REF_HZ traces a second at a 1/60 s window's dose each.
+ */
+export function frameDoseMult(trailTau: number, tauRef: number): number {
+  return (GLOW_REF_HZ / DOSE_REF_FPS) * (tauRef / trailTau);
 }

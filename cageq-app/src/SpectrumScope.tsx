@@ -107,7 +107,7 @@ const PRESETS: Record<"fast" | "distribution", Pick<Params, "trailTau" | "tail" 
 // Vectorscope.tsx's identical TAU_REF for the fuller reasoning/history) — so moving Trail longer
 // measurably brightens a steady/dwelling signal even with Glow untouched. Unlike the scope views,
 // this one already redraws every animation frame (no dedup-by-payload-identity gate), so it doesn't
-// need their separate stream correction (`streamDoseMult`) — commit()'s own dt/DOSE_REF_DT already fully
+// need their separate stream correction (`windowDoseMult`) — commit()'s own dt/DOSE_REF_DT already fully
 // normalizes its redraw cadence on its own. Only the `TAU_REF/trailTau` term is needed here.
 // Anchored at a real 100 ms: `glow` reads as "steady-state brightness units per 100 ms of
 // persistence", the same physical meaning as the scope views' own Glow.

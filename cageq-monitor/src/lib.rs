@@ -592,7 +592,24 @@ mod windows_impl {
 
     // --- stereo vectorscope (loopback X-Y goniometer) ---
     /// Vectorscope emit cadence (60 fps — the front-end phosphor persistence does the smoothing).
+    /// The nominal one: a window goes out on a loopback packet boundary, once it holds at least
+    /// [`SCOPE_WINDOW_MIN`] of audio, so at the usual 10 ms engine period every window is two
+    /// packets, 20 ms, 50 a second. On a timer instead, a 16 ms tick caught one packet or two, and
+    /// the windows ran 10 or 20 ms of audio at uneven 15 to 22 ms intervals. Still the cadence of
+    /// the empty windows that tell the UI the endpoint is idle (see [`SCOPE_IDLE_AFTER`]).
     const SCOPE_INTERVAL: Duration = Duration::from_millis(16);
+    /// The least audio a scope window carries: just under `SCOPE_INTERVAL`, so a packet size that
+    /// divides it (an 8 ms period: two packets) doesn't take a third whenever resampling leaves a
+    /// packet a frame short.
+    const SCOPE_WINDOW_MIN: Duration = Duration::from_micros(14_500);
+    /// No packet for this long: the window so far goes out as it is, then an empty one every
+    /// `SCOPE_INTERVAL` until audio resumes, as the UI's idle state (a resting beam) expects.
+    /// Longer than any engine period, so it never fires between packets of a playing stream.
+    const SCOPE_IDLE_AFTER: Duration = Duration::from_millis(40);
+    /// The longest the capture loop waits for the next packet's event before looking anyway: the
+    /// meter and spectrum ticks run on time while the endpoint is idle (it delivers nothing then),
+    /// and where loopback doesn't signal its event (Windows 10 before 1703) this is the old poll.
+    const CAPTURE_WAIT_MS: u32 = 5;
     /// Safety margin `SCOPE_MAX_POINTS` carries over the *raw* `CAPTURE_RATE_CAP × SCOPE_INTERVAL`
     /// product — covers the capture loop's own cadence slipping past `SCOPE_INTERVAL` under load
     /// (see `CAPTURE_RATE_CAP`'s own doc: measured ~1.36x slower than intended in one debug-build
@@ -2047,9 +2064,13 @@ mod windows_impl {
             WaveFormat::new(32, 32, &SampleType::Float, rate as usize, channels as usize, None);
         let bytes_per_frame = desired.get_blockalign() as usize;
 
+        // Event-driven: woken as each loopback packet lands (one per engine pass, the device's
+        // period, usually 10 ms), not on a 5 ms poll that left each packet up to 5 ms late, by a
+        // different amount every time. See CAPTURE_WAIT_MS for the timeout.
         let mode =
-            StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: safe_buffer_hns(&audio_client)? };
+            StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: safe_buffer_hns(&audio_client)? };
         audio_client.initialize_client(&desired, &Direction::Capture, &mode)?;
+        let packet_event = audio_client.set_get_eventhandle()?;
         let capture = audio_client.get_audiocaptureclient()?;
 
         // K-weighted loudness at the *actual* endpoint rate (ebur128 recomputes coefficients).
@@ -2279,8 +2300,12 @@ mod windows_impl {
             }
 
             // Vectorscope: emit the contiguous (l, r) window (see tail_pairs) — but only while a
-            // scope view is open, so the heavier stream costs nothing when nobody's watching.
-            if scope_on && last_scope.elapsed() >= SCOPE_INTERVAL {
+            // scope view is open, so the heavier stream costs nothing when nobody's watching. On a
+            // packet boundary once it holds SCOPE_WINDOW_MIN of audio (this loop reads one packet
+            // per pass), or on time once packets have stopped (SCOPE_IDLE_AFTER).
+            let scope_full = scope_lr.len() / 2 >= (rate as f64 * SCOPE_WINDOW_MIN.as_secs_f64()) as usize;
+            let scope_idle = last_signal.elapsed() >= SCOPE_IDLE_AFTER && last_scope.elapsed() >= SCOPE_INTERVAL;
+            if scope_on && (scope_full || scope_idle) {
                 let signal = last_signal.elapsed() < SILENCE_GAP;
                 on_scope(ScopeUpdate {
                     xy: if signal { tail_pairs(&scope_lr, SCOPE_MAX_POINTS) } else { Vec::new() },
@@ -2291,9 +2316,9 @@ mod windows_impl {
                 last_scope = Instant::now();
             }
 
-            // Nothing ready — yield briefly so we don't spin a core polling an idle endpoint.
+            // Nothing ready: wait for the next packet (see CAPTURE_WAIT_MS). A timeout is no error.
             if !got_data {
-                thread::sleep(Duration::from_millis(5));
+                let _ = packet_event.wait_for_event(CAPTURE_WAIT_MS);
             }
         }
 

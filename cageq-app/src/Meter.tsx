@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { meterStream, queueScopeWindow, scopeStream, type MeterData } from "./streams";
 import type { ScopeData } from "./Vectorscope";
-import { accentRgb, createPhosphor, createPhosphorColumn, excitationShowing, retuneForRelativeContrast, streamDoseMult } from "./phosphor";
+import { accentRgb, createPhosphor, createPhosphorColumn, excitationShowing, retuneForRelativeContrast, windowDoseMult } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT } from "./appZoom";
@@ -324,7 +324,6 @@ export function Meter({
 
     let raf = 0;
     let last = performance.now();
-    let lastTrace = performance.now(); // when a window was last traced — see doseMult below
 
     // Per-velocity-bucket segment buffers, reused across frames — replaces a fresh `Path2D` per
     // bucket (16) per scope window (~60/s from the backend). Path2D has no reset/clear method, so
@@ -381,28 +380,12 @@ export function Meter({
       // None (silence, or a frame between windows) draws nothing: the accumulator's own decay fades
       // the trail out.
       if (fresh.length > 0) {
-        // This view only draws a fresh trace once per real scope window (~60/s from the backend —
-        // see ScopeUpdate), not every animation frame — see Vectorscope.tsx's identical doseMult
-        // comment for the full reasoning: commit()'s own dt/DOSE_REF_DT dose normalization assumes
-        // it's called once per unit of real content, which doesn't hold here at a display faster
-        // than the ~60 Hz data rate (reported live as dimmer at high refresh rates, brighter at low
-        // ones — the mirror of the bug DOSE_REF_DT itself fixed). `dtSinceTrace/dt` substitutes the
-        // true "time since the last real trace" for this call's own (too-short) dt — confirmed live
-        // to remove the rate-dependence. The extra `SCOPE_UPDATE_HZ/DOSE_REF_FPS` factor then
-        // restores the same absolute calibration `glow` was originally tuned against (see
-        // phosphor.ts's `streamDoseMult`), so this is rate-independence only, not a re-tune too. The
-        // further `TAU_REF/p.trailTau` factor is the separate Trail/Glow orthogonality fix — see
-        // TAU_REF's own doc.
-        //
-        // `streamDoseMult` bounds how much stream time one trace may carry, so a trace after a stall
-        // (or a burst of coalesced frames) can't land the whole gap's dose at once.
-        const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
-        lastTrace = now;
-        doseMult = streamDoseMult(dtSinceTrace, dt, p.trailTau, TAU_REF);
-        // Shared by every window in this trace: the dose above is the whole span since the last one,
-        // and each window's samples bring their own energy (BEAM_ENERGY), so k windows at once get a
-        // k-th each — the same light per window as drawing them one per frame.
-        doseMult /= fresh.length;
+        // This view only draws a fresh trace once per real scope window (~50/s from the backend —
+        // see ScopeUpdate), not every animation frame, as Vectorscope.
+        // One window's dose each, however long it is and however many this frame traces: the beam's
+        // light comes per sample (BEAM_ENERGY), so a window brings its own time — see phosphor.ts's
+        // `windowDoseMult`. With TAU_REF/p.trailTau, the Trail/Glow orthogonality fix (TAU_REF's doc).
+        doseMult = windowDoseMult(dt, p.trailTau, TAU_REF);
         const W = cv.width;
         const cx = W / 2;
         const newest = fresh[fresh.length - 1];
