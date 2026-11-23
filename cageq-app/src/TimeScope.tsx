@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { type FadingInverse, retargetFadingInverse, stepFadingInverse } from "./biquad";
 import { detectorSample, findRisingEdge, triggerDetector, type TriggerDetector } from "./scopeTrigger";
 import { queueScopeWindow, scopeStream } from "./streams";
-import { accentRgb, createPhosphor, retuneForRelativeContrast, streamDoseMult } from "./phosphor";
+import { accentRgb, createPhosphor, retuneForRelativeContrast, streamDoseMult, type TraceSegments } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT, beamScale, noteScopeTube } from "./appZoom";
@@ -188,6 +188,15 @@ const DB_FLOOR = -120;
 // than PEAK_READING_STALE_MS no longer holds the line up: the stream sends no windows in silence,
 // and the line has to release then.
 const PEAK_READING_STALE_MS = 50;
+// The trace is redrawn on every frame, the newest one again until the next window replaces it — a
+// scope re-sweeping a repeating signal — not only on frames a window arrived in. The windows come
+// every 15 to 22 ms (the 16 ms emit waits for the loopback's next 10 ms packet), and the Fast
+// preset's trail is 20 ms: lit only when one arrived, the trace decayed in every gap, and a steady
+// signal's brightness swung 20–26% RMS from frame to frame at any frame rate (simulated against the
+// emit loop's timing; 11–13% on Smooth). Redrawn each frame with a frame's worth of dose, it holds
+// steady at the same mean. Up to TRACE_HOLD_MS after the last window: past that the stream has
+// stalled or gone quiet (a silent window ends the hold at once), and the trace fades as it should.
+const TRACE_HOLD_MS = 100;
 // Peak *detection* takes the K-th largest rectified sample in the block, not the plain max and
 // not a windowed/smoothed value — a sustained tone has many samples near its own peak, one every
 // cycle for as long as it lasts, scattered across the whole block rather than adjacent; an
@@ -496,7 +505,11 @@ export function TimeScope({
 
     let raf = 0;
     let last = performance.now();
-    let lastTrace = performance.now(); // when a window last arrived — see doseMult below
+    // The newest trace, redrawn until the next window replaces it (TRACE_HOLD_MS): when it was
+    // built, and either the GPU path's segments (in `segData`) or the fallback's paths.
+    let heldAt = -Infinity;
+    let heldSegs: TraceSegments | null = null;
+    let heldPaths: { paths: Path2D[]; width: number; style: string } | null = null;
     // Per-lane peak-hold (dBFS) and the timestamp its release may resume after — indexed to match
     // `lanes` each frame; resized (and reset) on a mode switch, since "lane 0" means something
     // different in L/R vs mixdown. A brief reset on an intentional mode change is unsurprising.
@@ -572,9 +585,10 @@ export function TimeScope({
         }
       }
 
-      let doseMult = 1; // see `if (isNew)` below for why this isn't always 1
-      const fresh = pendingRef.current.filter((q) => q.signal && q.xy.length >= 4);
+      const pending = pendingRef.current;
+      const fresh = pending.filter((q) => q.signal && q.xy.length >= 4);
       pendingRef.current = [];
+      if (pending.length > 0 && !pending[pending.length - 1].signal) heldAt = -Infinity; // gone quiet: no trace to hold
       const isNew = fresh.length > 0;
       // Computed up front (before drawing) when new data arrives, so the peak-hold attack below and
       // the trace path further down both read the identical (possibly undistorted) samples.
@@ -586,25 +600,12 @@ export function TimeScope({
       let dispL: Float64Array | null = null;
       let dispR: Float64Array | null = null;
       let dispN = 0;
+      // A trace on every frame (see TRACE_HOLD_MS), so a frame's worth of dose: commit()'s own
+      // dt/DOSE_REF_DT, times `streamDoseMult`'s calibration (SCOPE_UPDATE_HZ/DOSE_REF_FPS, what
+      // `glow` was tuned under) and the Trail/Glow orthogonality factor (TAU_REF/p.trailTau — see
+      // TAU_REF's own doc). Its span term is 1 here: each trace carries exactly its own frame.
+      const doseMult = streamDoseMult(dt, dt, p.trailTau, TAU_REF);
       if (isNew) {
-        // This view only draws a fresh trace once per real scope window (~60/s from the backend —
-        // see ScopeUpdate), not every animation frame — see Vectorscope.tsx's identical doseMult
-        // comment for the full reasoning: commit()'s own dt/DOSE_REF_DT dose normalization assumes
-        // it's called once per unit of real content, which doesn't hold here at a display faster
-        // than the ~60 Hz data rate (reported live as dimmer at high refresh rates, brighter at low
-        // ones — the mirror of the bug DOSE_REF_DT itself fixed). `dtSinceTrace/dt` substitutes the
-        // true "time since the last real trace" for this call's own (too-short) dt — confirmed live
-        // to remove the rate-dependence. The extra `SCOPE_UPDATE_HZ/DOSE_REF_FPS` factor then
-        // restores the same absolute calibration `glow` was originally tuned against (see
-        // phosphor.ts's `streamDoseMult`), so this is rate-independence only, not a re-tune too. The
-        // further `TAU_REF/p.trailTau` factor is the separate Trail/Glow orthogonality fix — see
-        // TAU_REF's own doc.
-        //
-        // `streamDoseMult` bounds how much stream time one trace may carry, so a trace after a stall
-        // (or a burst of coalesced frames) can't land the whole gap's dose at once.
-        const dtSinceTrace = Math.min(0.1, (now - lastTrace) / 1000);
-        lastTrace = now;
-        doseMult = streamDoseMult(dtSinceTrace, dt, p.trailTau, TAU_REF);
         let rate = 48000;
         for (const s of fresh) {
           const n = Math.floor(s.xy.length / 2);
@@ -766,6 +767,7 @@ export function TimeScope({
           ctx.lineCap = "round";
           ctx.strokeStyle = `rgba(${ar},${ag},${ab},${p.glow * FALLBACK_GLOW_SCALE})`;
           for (const path of paths) ctx.stroke(path);
+          heldPaths = { paths, width: lineWidth, style: ctx.strokeStyle };
         } else {
           // The beam, as a CRT's (like Vectorscope's and the meter's): a fixed current, so each
           // sample interval deposits the same energy, spread over however far the beam travels in
@@ -863,7 +865,21 @@ export function TimeScope({
               }
             }
           }
-          phos.addSegments!({ data: segData, count: o / 5, width: lineWidth, rgb: [ar, ag, ab], round: true });
+          heldSegs = { data: segData, count: o / 5, width: lineWidth, rgb: [ar, ag, ab], round: true };
+          phos.addSegments!(heldSegs);
+        }
+        heldAt = now;
+      } else if (now - heldAt < TRACE_HOLD_MS) {
+        // No new window this frame: the newest trace again (see TRACE_HOLD_MS).
+        if (ctx && heldPaths) {
+          ctx.globalCompositeOperation = "lighter";
+          ctx.lineWidth = heldPaths.width;
+          ctx.lineJoin = "round";
+          ctx.lineCap = "round";
+          ctx.strokeStyle = heldPaths.style;
+          for (const path of heldPaths.paths) ctx.stroke(path);
+        } else if (!ctx && heldSegs) {
+          phos.addSegments!({ ...heldSegs, reuse: true });
         }
       }
 

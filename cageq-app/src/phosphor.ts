@@ -203,6 +203,9 @@ export type TraceSegments = {
    *  at a bend the inside of the corner gets both segments' ends and the outside neither — a dot at
    *  every join. Fine for a path that never turns (the meter's), wrong for one that does. */
   round?: boolean;
+  /** The same `data` and `count` as the last call, unchanged since: skips the upload when the
+   *  GPU still holds them (a view redrawing its last trace — TimeScope's held trace). */
+  reuse?: boolean;
 };
 
 /** Shared surface of both backends — see the module comment for why the fallback exists. */
@@ -1386,8 +1389,12 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
   // bytes apart) over the shared quad on attribute 0, MAX-blended into whatever is bound; then back
   // to the state every other pass here assumes: no blending, plain attribute 0. The program and its
   // uniforms are the caller's.
+  // What `lineBuf` holds from `addSegments`, for its `reuse`; anything else uploaded clears it.
+  let segResident: Float32Array | null = null;
+  let segResidentCount = 0;
   const drawSegments = (points: Float32Array, count: number) => {
     if (!instancing || !minmax) return;
+    segResident = null;
     gl.bindBuffer(gl.ARRAY_BUFFER, quad);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
@@ -1471,7 +1478,11 @@ function createGl(target: HTMLCanvasElement, linear: boolean): Phosphor | null {
         gl.bindBuffer(gl.ARRAY_BUFFER, quad);
         gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
         gl.bindBuffer(gl.ARRAY_BUFFER, lineBuf);
-        gl.bufferData(gl.ARRAY_BUFFER, sg.data.subarray(0, sg.count * 5), gl.DYNAMIC_DRAW);
+        if (!sg.reuse || segResident !== sg.data || segResidentCount !== sg.count) {
+          gl.bufferData(gl.ARRAY_BUFFER, sg.data.subarray(0, sg.count * 5), gl.DYNAMIC_DRAW);
+          segResident = sg.data;
+          segResidentCount = sg.count;
+        }
         gl.enableVertexAttribArray(1);
         gl.enableVertexAttribArray(2);
         gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 20, 0);
