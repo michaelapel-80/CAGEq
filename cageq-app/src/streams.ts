@@ -145,6 +145,38 @@ const scopeClock = new ScopeClock();
 let clockUsers = 0;
 let clockUnsub: (() => void) | null = null;
 
+// Spectrum updates on the same playout timeline: each one applied once the playhead reaches its
+// analysis window's end (`t_end`), so they land evenly — one per FFT step, 42.7 ms apart — and in
+// step with playback and the scopes, however unevenly they arrive. Without a running clock (no
+// scope view in this window yet), or for an update without a time (idle decay), as they arrive.
+const SPEC_QUEUE_MAX = 8; // about a third of a second of updates
+const specQueue: SpectrumData[] = [];
+let specCur: SpectrumData | null = null;
+let specNow = NaN;
+let specSubscribed = false;
+
+/** The spectrum update to show at frame time `nowMs` (see above); null before the first. Shared by
+ *  this window's spectrum views, so they show the same one; the same `nowMs` gives the same one. */
+export function spectrumAt(nowMs: number): SpectrumData | null {
+  if (!specSubscribed) {
+    specSubscribed = true;
+    spectrumStream.subscribe((s) => {
+      specQueue.push(s);
+      if (specQueue.length > SPEC_QUEUE_MAX) specQueue.splice(0, specQueue.length - SPEC_QUEUE_MAX);
+    });
+  }
+  if (nowMs === specNow) return specCur;
+  specNow = nowMs;
+  const p = clockUsers > 0 ? scopeClock.playhead(nowMs) : NaN;
+  while (specQueue.length > 0) {
+    const s = specQueue[0];
+    if (!Number.isNaN(p) && s.t_end > 0 && s.t_end / 1e4 > p) break;
+    specCur = s;
+    specQueue.shift();
+  }
+  return specCur;
+}
+
 /** A cursor on the scope stream's playout clock for one view; `release` when the view goes. */
 export function scopeReader(): { reader: ScopeReader; release: () => void } {
   if (clockUsers++ === 0) clockUnsub = scopeStream.subscribe((s) => scopeClock.push(s, performance.now()));

@@ -133,6 +133,12 @@ pub struct SpectrumUpdate {
     pub peak_hz_lin: Vec<f32>,
     /// `db_lin`'s counterpart to `db_raw` — see that field's own doc.
     pub db_lin_raw: Vec<f32>,
+    /// When the newest analysis window's last sample is due at the device, in 100 ns units of the
+    /// performance counter — the loopback packet's timestamp (`ScopeUpdate::t0`'s clock), offset to
+    /// that sample. 0 when unknown (an idle decay update, or a timestamp error). The UI applies the
+    /// update on the scopes' playout timeline at this time, so updates land evenly, one per FFT
+    /// step, in step with playback.
+    pub t_end: u64,
     /// `false` when the endpoint produced no audio this window (same silence test as
     /// [`MeterUpdate::signal`]). The analyzer view blanks its beam on this instead of painting the
     /// idle-decay sweep: without it, the ~35 dB/s slide to the floor is *actively redrawn* into
@@ -1706,9 +1712,13 @@ mod windows_impl {
         }
 
         /// Feed mono samples; runs an FFT for every full hop and folds it into the running average.
-        fn push(&mut self, mono: &[f32]) {
+        /// Returns, when this push completed an FFT step, how many of `mono`'s samples come after
+        /// the newest analysis window's end (0: it ends with `mono`) — what its time is taken from.
+        fn push(&mut self, mono: &[f32]) -> Option<usize> {
             self.accum.extend(mono.iter().copied());
+            let mut after = None;
             while self.accum.len() >= self.analysis_size {
+                after = Some(self.accum.len() - self.analysis_size);
                 for (i, w) in self.window.iter().enumerate() {
                     self.in_buf[i] = self.accum[i] * w;
                 }
@@ -1736,6 +1746,7 @@ mod windows_impl {
                 // though its yielded items are never read here.
                 self.accum.drain(..self.fft_hop);
             }
+            after
         }
 
         /// Fade the stored power toward the floor — called on an emit tick with no fresh audio, so the
@@ -1849,6 +1860,7 @@ mod windows_impl {
                 peaks,
                 peak_candidates: candidates,
                 peak_separation_octaves: separation,
+                t_end: 0,
             }
         }
     }
@@ -2156,6 +2168,7 @@ mod windows_impl {
         let mut mono: Vec<f32> = Vec::new(); // per-read mono downmix, fed to the FFT
         let mut scope_lr: Vec<f32> = Vec::new(); // (l, r) pairs since the last scope emit
         let mut scope_t0: u64 = 0; // scope_lr's first sample's packet timestamp (ScopeUpdate::t0)
+        let mut spectrum_t_end: u64 = 0; // the newest FFT step's window end (SpectrumUpdate::t_end)
         // Per-tick block accumulators (reset every emit). The peak side lives in `tp`
         // (`take_block` each tick): true peak, linear, can exceed 1.0 — i.e. positive dBTP — on
         // real inter-sample overs, not a plain sample-peak scan: a reconstruction filter can
@@ -2249,7 +2262,14 @@ mod windows_impl {
             // immediately regardless of whether audio happens to be playing.
             spectrum.reconfigure(rate, fft_size.load(Ordering::Relaxed));
             if !mono.is_empty() {
-                spectrum.push(&mono);
+                if let Some(after) = spectrum.push(&mono) {
+                    // The window's end: `after` samples before the end of this packet's.
+                    spectrum_t_end = if packet.flags.timestamp_error || packet.timestamp == 0 {
+                        0
+                    } else {
+                        packet.timestamp + (mono.len().saturating_sub(after) as u64 * 10_000_000) / rate as u64
+                    };
+                }
             }
 
             if last_tick.elapsed() >= TICK {
@@ -2326,16 +2346,29 @@ mod windows_impl {
             // hops; treating that gap as "idle" faded the display in a spurious sawtooth even with
             // real audio flowing. Silence detection reuses the same `last_signal`/SILENCE_GAP the
             // meter's own `signal` field uses just below, for the same "endpoint has gone idle" test.
-            if last_spectrum.elapsed() >= SPECTRUM_INTERVAL {
-                let signal = last_signal.elapsed() < SILENCE_GAP;
-                if !signal {
-                    spectrum.decay_idle();
-                }
-                let due = signal || last_spectrum_emit.elapsed() >= SPECTRUM_IDLE_INTERVAL;
-                if signal != last_spectrum_signal || (due && spectrum.take_fresh()) {
-                    on_spectrum(spectrum.snapshot(signal));
+            //
+            // While audio plays, an update goes out as soon as an FFT step completes, stamped with
+            // its window's end (`t_end`) — not on the next 16 ms check: this loop runs on packet
+            // boundaries, so a 16 ms check landed on a 20 ms grid and held each step back by 0 to
+            // 20 ms, which the UI showed as the trace stepping unevenly (measured: updates 20, 40
+            // or 60 ms apart for a 42.7 ms step; worst seen on a chirp).
+            let signal = last_signal.elapsed() < SILENCE_GAP;
+            if signal {
+                if signal != last_spectrum_signal || spectrum.take_fresh() {
+                    let mut update = spectrum.snapshot(true);
+                    update.t_end = spectrum_t_end;
+                    on_spectrum(update);
                     last_spectrum_emit = Instant::now();
-                    last_spectrum_signal = signal;
+                    last_spectrum_signal = true;
+                }
+                last_spectrum = Instant::now();
+            } else if last_spectrum.elapsed() >= SPECTRUM_INTERVAL {
+                spectrum.decay_idle();
+                let due = last_spectrum_emit.elapsed() >= SPECTRUM_IDLE_INTERVAL;
+                if signal != last_spectrum_signal || (due && spectrum.take_fresh()) {
+                    on_spectrum(spectrum.snapshot(false));
+                    last_spectrum_emit = Instant::now();
+                    last_spectrum_signal = false;
                 }
                 last_spectrum = Instant::now();
             }
@@ -2458,6 +2491,28 @@ mod windows_impl {
             }
             assert_eq!(Spectrum::new(48_000, BASE_FFT_SIZE, fold()).fft_hop, 2048);
             assert_eq!(Spectrum::new(96_000, BASE_FFT_SIZE, fold()).fft_hop, 4096, "hop duration holds at 96 kHz");
+        }
+
+        /// `push` reports where each FFT step's window ends inside the pushed chunk — the
+        /// spectrum update's timestamp (`SpectrumUpdate::t_end`) is that sample's. Fed in 10 ms
+        /// packets, every reported end must sit exactly on the analysis grid: the first window's
+        /// end, then one hop after another, none skipped.
+        #[test]
+        fn push_reports_where_each_step_ends() {
+            let mut spec = Spectrum::new(48_000, BASE_FFT_SIZE, Arc::new(AtomicBool::new(false)));
+            let (size, hop) = (spec.analysis_size, spec.fft_hop);
+            let chunk = vec![0.25f32; 480];
+            let (mut fed, mut ends) = (0usize, Vec::new());
+            for _ in 0..400 {
+                if let Some(after) = spec.push(&chunk) {
+                    ends.push(fed + chunk.len() - after);
+                }
+                fed += chunk.len();
+            }
+            assert!(ends.len() > 10, "too few steps: {}", ends.len());
+            for (k, end) in ends.iter().enumerate() {
+                assert_eq!(*end, size + k * hop, "step {k}");
+            }
         }
 
         /// `reconfigure` recomputes the hop from `window_params` too — a live size change must land

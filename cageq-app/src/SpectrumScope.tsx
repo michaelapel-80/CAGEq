@@ -8,7 +8,7 @@ import { composedCurveDb, type FadingCurve, retargetFadingCurve, stepFadingCurve
 import { fcHue } from "./fcColor";
 import { kWeightingCurve, tiltMode, type TiltMode } from "./kWeighting";
 import { TiltGlyph } from "./TiltGlyph";
-import { spectrumStream } from "./streams";
+import { spectrumAt } from "./streams";
 import { accentRgb, createPhosphor, retuneForRelativeContrast } from "./phosphor";
 import { tessellatedCapacity, tessellateSmooth, traceSmooth } from "./spline";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
@@ -546,14 +546,11 @@ export function SpectrumScope({
   const resW = Math.round(width * dpr);
   const resH = Math.round(height * dpr);
 
-  // Passive subscriber — Meter.tsx owns starting/stopping the underlying capture; the stream is
-  // the Channel-backed bus (streams.ts, not `listen` events), same as EqChart's backdrop. Also
-  // picks up the `scope-eq` broadcast for undistort — same event Vectorscope/TimeScope consume,
-  // requested on mount since events aren't retained.
+  // The spectrum itself comes from `spectrumAt` in the render loop (streams.ts: the Channel-backed
+  // stream, put on the playout timeline; Meter.tsx owns starting/stopping the capture). Here: the
+  // `scope-eq` broadcast for undistort — same event Vectorscope/TimeScope consume, requested on
+  // mount since events aren't retained.
   useEffect(() => {
-    const unsubSpectrum = spectrumStream.subscribe((s) => {
-      curRef.current = s;
-    });
     let active = true;
     let unlistenEq: (() => void) | undefined;
     void (async () => {
@@ -564,7 +561,6 @@ export function SpectrumScope({
     })();
     return () => {
       active = false;
-      unsubSpectrum();
       unlistenEq?.();
     };
   }, []);
@@ -719,6 +715,9 @@ export function SpectrumScope({
       // The frame's own time — rAF's timestamp put on the refresh grid (frameClock.ts) — not when
       // this callback happened to start: the trace's smoothing and dose step by it.
       const now = frameClock.time(ts);
+      // This frame's spectrum update, on the playout timeline (streams.ts's `spectrumAt`).
+      const applied = spectrumAt(now);
+      if (applied) curRef.current = applied;
       if (!frameDue(now)) {
         raf = requestAnimationFrame(render);
         return;

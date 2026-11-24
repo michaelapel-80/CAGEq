@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { FrameCapRow, frameGate } from "./frameLimit";
 import { frameClock } from "./frameClock";
+import { spectrumAt } from "./streams";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, highPassFc, HP_SLOPES, logGrid, phaseDeg, type FadingCurve, type ResponseModel, retargetFadingCurve, stepFadingCurve, undistortable } from "./biquad";
@@ -118,6 +119,9 @@ export type SpectrumData = {
    *  view that repeats the pick on EQ-corrected levels (SpectrumScope's `pickPeaks`). */
   peak_candidates: { hz: number; db: number }[];
   peak_separation_octaves: number;
+  /** When the analysis window's last sample is due at the device: 100 ns units of the performance
+   *  counter, 0 when unknown — see cageq-monitor's `SpectrumUpdate::t_end` and `spectrumAt`. */
+  t_end: number;
 };
 
 /** Draggable band handles: X = centre frequency, Y = gain, wheel = Q. A high-pass has no
@@ -796,7 +800,8 @@ export function EqChart({
       const dt = Math.max(0, Math.min(0.1, (now - last) / 1000)); // clamp after a tab-switch stall
       last = now;
       const { eqBands, preampDb, sampleRate, model, PAD, H, W, specParams } = specDrawCtx.current;
-      const spectrum = spectrumRef?.current ?? null;
+      // On the playout timeline (`spectrumAt`), like SpectrumScope's; the ref until it has one.
+      const spectrum = spectrumRef ? (spectrumAt(now) ?? spectrumRef.current) : null;
       // On the GPU (`fillTrace` for the wash, `overlayStroke` for the edge) unless on the 8-bit
       // fallback, which has no GPU path; then Canvas 2D.
       const ctx = phos.strokeTrace ? null : phos.begin();
