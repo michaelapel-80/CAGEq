@@ -13,12 +13,14 @@
 // was sent, both on the performance counter. `performance.now()` runs on the same counter, so
 // the two differ by a constant: estimated as the least (arrival − sent) seen, which is that
 // constant plus the fastest delivery (~a millisecond; the playhead lags playback by that much).
-// The playhead is then "now" on the device's timeline, plus an advance A ≤ 0: A = 0 shows exactly
-// what is being played; it goes below 0 only as far as delivery needs — the lowest headroom (how
-// far the data reached past "now" as each window came) over the last minute — and no further than
-// MAX_DELAY_MS. Left out of that: windows held up by the page itself stopping (STALL_FRAMES), by a
-// held delivery like a window drag (later than the cap, and the burst queued behind it), and a
-// run's start-up (counted only briefly). Those freeze a frame or a few and catch up instead. It
+// The playhead is then "now" on the device's timeline, plus an advance A: A = 0 shows exactly what
+// is being played; it leads by up to LEAD_FRAMES where the data allows (a frame reaches the screen
+// a refresh or two after it is drawn), and goes below 0 only as far as delivery needs — the lowest
+// headroom (how far the data reached past "now" as each window came) over the last minute — and
+// no further than MAX_DELAY_MS. Left out of that: windows held up by the page itself stopping
+// (STALL_FRAMES), by a held delivery like a window drag (later than the cap, and the burst queued
+// behind it), the rare window far later than usual (OUTLIER_MS), and a run's start-up (counted
+// only briefly). Those freeze a frame or a few and catch up instead. It
 // moves slowly (SLEW_EARLIER/LATER), so playback speed never visibly changes, except at a run's
 // start (START_DELAY_MS), where nothing is showing yet.
 //
@@ -44,13 +46,30 @@ type Win = { seq: number; l: Float32Array; r: Float32Array; n: number; rate: num
 
 /** Margin under the measured headroom, ms. */
 const SAFETY_MS = 2;
-/** The advance covers the lowest headroom over this long, ms: every late window, not a quantile —
- *  the 5 lowest in 1000 left out starved a frame every couple of seconds on the measured delivery,
- *  each a hitch, and the rare window ~17 ms later than usual (a delay in the backend's own wake-up,
- *  measured with every frame on time) still starved one with only the 2 lowest in 2000 left out.
- *  A window that came late because the page itself had stopped (see STALL_FRAMES) doesn't count,
- *  and one from a run's first RUN_START_MS counts only for START_SPAN_MS. */
+/** The advance covers the lowest headroom over this long, ms: every late window but the rare
+ *  outlier (OUTLIER_MS), not a quantile — the 5 lowest in 1000 left out starved a frame every
+ *  couple of seconds on the measured delivery, each a hitch. A window that came late because the
+ *  page itself had stopped (see STALL_FRAMES) doesn't count, and one from a run's first
+ *  RUN_START_MS counts only for START_SPAN_MS. */
 const HEADROOM_SPAN_MS = 60_000;
+/** A window this much later than usual (its headroom this far under the median), ms, is a rare
+ *  outlier: it freezes a frame or a few and catches up instead of setting the latency. Measured:
+ *  one window ~26 ms late every few minutes (a delay in the backend's own wake-up, every frame on
+ *  time) otherwise held the playhead ~28 ms behind playback for the minute after it — a lag you
+ *  could see — against a typical low only ~7 ms under the median. */
+const OUTLIER_MS = 10;
+/** …as long as they stay rare: more than this many in the last HEADROOM_SPAN_MS, and they are how
+ *  delivery is on this machine — covered again, rather than a hitch every few seconds. */
+const OUTLIERS_MAX = 6;
+/** Headroom samples the median is taken over (10 s of windows), and how often it's refreshed. */
+const MEDIAN_SPAN = 1000;
+const MEDIAN_EVERY = 100;
+/** The playhead may lead playback by up to this many frames (at most LEAD_MAX_MS) where the
+ *  headroom allows: a frame reaches the screen a refresh or two after it is drawn, so a little
+ *  lead shows the picture nearer the sound. In practice the headroom allows only a millisecond or
+ *  two. */
+const LEAD_FRAMES = 1.5;
+const LEAD_MAX_MS = 12;
 /** Before this many samples, a little more margin under the lowest. */
 const HEADROOM_MIN_SAMPLES = 50;
 const HEADROOM_EARLY_MARGIN_MS = 3;
@@ -75,19 +94,20 @@ const START_SPAN_MS = 2000;
  *  on drawing — covering that took the latency to −137 ms for the minute after a drag. Headroom
  *  below it doesn't count either, so a drag doesn't leave the latency at the cap. */
 const MAX_DELAY_MS = 30;
-/** Where a run starts (the stream was idle, nothing is on screen): MAX_DELAY_MS behind playback,
- *  set at once, then relaxing toward what the headroom allows at SLEW_LATER. Started optimistic
- *  instead, a run starved frames while start-up's worse delivery pulled it down: a choppy start. */
-const START_DELAY_MS = MAX_DELAY_MS;
+/** Where a run starts (the stream was idle, nothing is on screen), ms behind playback: set at once,
+ *  then relaxing toward what the headroom allows at SLEW_LATER (about half a second). Started
+ *  optimistic instead, a run starved frames while start-up's worse delivery pulled it down: a
+ *  choppy start; at MAX_DELAY_MS and 1%, the first 3 s lagged visibly. */
+const START_DELAY_MS = 15;
 /** A window arriving within this of the one before, ms, came queued behind it: if that one was
- *  left out (a stall, or later than MAX_DELAY_MS), so is this — the burst a held delivery lets go
+ *  left out (a stall, an outlier, or later than MAX_DELAY_MS), so is this — the burst a held delivery lets go
  *  is one event, and its last windows would otherwise set the latency just inside the cap. */
 const BURST_MS = 1;
 /** The fastest the playhead's offset moves, as a fraction of real time: earlier (more delay) by
- *  up to 5% when delivery got worse, later by up to 1% when it improved — playback runs that much
+ *  up to 5% when delivery got worse, later by up to 3% when it improved — playback runs that much
  *  slow or fast while it settles, which motion can't show. */
 const SLEW_EARLIER = 0.05;
-const SLEW_LATER = 0.01;
+const SLEW_LATER = 0.03;
 /** How far the clock offset estimate creeps up per window (ms), so a reading that was too low
  *  (a glitch) can't pin it forever: 0.1 ms a second. */
 const BASE_CREEP_MS = 0.001;
@@ -115,6 +135,11 @@ export class ScopeClock {
   private runStart = -Infinity; // when the current run's first window arrived
   private lastArrival = -Infinity;
   private lastLeftOut = false; // whether the last window's headroom was left out (see BURST_MS)
+  private recent = new Float64Array(MEDIAN_SPAN); // headroom samples, for the median (OUTLIER_MS)
+  private recentN = 0;
+  private recentI = 0;
+  private median = NaN;
+  private outliers: number[] = []; // when each outlier came (see OUTLIERS_MAX)
   private offset = NaN; // playhead (counter ms) − performance.now(), slewed toward its target
   private lastNow = NaN;
   private idle = true;
@@ -156,7 +181,11 @@ export class ScopeClock {
       (!Number.isNaN(this.lastNow) && !Number.isNaN(this.frameIv) && arrivalMs - this.lastNow > STALL_FRAMES * this.frameIv + STALL_SLACK_MS);
     const h = contiguous ? prev.end - nowQ : NaN;
     const queued = this.lastLeftOut && arrivalMs - this.lastArrival < BURST_MS;
-    const leftOut = stalled || queued || !(h > SAFETY_MS - MAX_DELAY_MS);
+    while (this.outliers.length > 0 && this.outliers[0] < arrivalMs - HEADROOM_SPAN_MS) this.outliers.shift();
+    const outlier = contiguous && !Number.isNaN(this.median) && h < this.median - OUTLIER_MS && this.outliers.length < OUTLIERS_MAX;
+    if (outlier) this.outliers.push(arrivalMs);
+    if (contiguous && !stalled) this.noteRecent(h);
+    const leftOut = stalled || queued || outlier || !(h > SAFETY_MS - MAX_DELAY_MS);
     this.lastArrival = arrivalMs;
     this.lastLeftOut = contiguous && leftOut;
     if (contiguous && !leftOut) {
@@ -187,14 +216,25 @@ export class ScopeClock {
     return i < 0 ? new Float32Array(n) : this.pool.splice(i, 1)[0];
   }
 
-  /** The advance the headroom allows (≤ 0), ms. */
+  private noteRecent(h: number): void {
+    this.recent[this.recentI] = h;
+    this.recentI = (this.recentI + 1) % MEDIAN_SPAN;
+    this.recentN = Math.min(MEDIAN_SPAN, this.recentN + 1);
+    if (this.recentN >= HEADROOM_MIN_SAMPLES && (this.recentI % MEDIAN_EVERY === 0 || Number.isNaN(this.median))) {
+      const sorted = this.recent.slice(0, this.recentN).sort();
+      this.median = sorted[sorted.length >> 1];
+    }
+  }
+
+  /** The advance the headroom allows (at most LEAD_FRAMES ahead), ms. */
   private target(): number {
     if (!this.targetDirty) return this.targetCache;
     this.targetDirty = false;
     const m = Math.min(this.low.min(), this.startLow.min());
     if (m === Infinity) return (this.targetCache = NaN);
     const low = m - (this.samples < HEADROOM_MIN_SAMPLES ? HEADROOM_EARLY_MARGIN_MS : 0);
-    return (this.targetCache = Math.max(-MAX_DELAY_MS, Math.min(0, low - SAFETY_MS)));
+    const lead = Number.isNaN(this.frameIv) ? 0 : Math.min(LEAD_MAX_MS, LEAD_FRAMES * this.frameIv);
+    return (this.targetCache = Math.max(-MAX_DELAY_MS, Math.min(lead, low - SAFETY_MS)));
   }
 
   /** The playhead at `nowMs` (performance.now()): the device-timeline time this frame shows,
