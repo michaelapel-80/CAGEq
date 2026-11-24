@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FrameCapRow, frameGate } from "./frameLimit";
+import { frameClock } from "./frameClock";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
@@ -714,13 +715,15 @@ export function SpectrumScope({
     const passWeights = new Float64Array(SUBSTEP_MAX); // substepWeights' output, reused
 
     const frameDue = frameGate(); // the optional frame-rate cap (frameLimit.ts)
-    const render = () => {
-      const now = performance.now();
+    const render = (ts: number) => {
+      // The frame's own time — rAF's timestamp put on the refresh grid (frameClock.ts) — not when
+      // this callback happened to start: the trace's smoothing and dose step by it.
+      const now = frameClock.time(ts);
       if (!frameDue(now)) {
         raf = requestAnimationFrame(render);
         return;
       }
-      const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
+      const dt = Math.max(0, Math.min(0.1, (now - last) / 1000)); // clamp after a tab-switch stall
       last = now;
       const p = paramsRef.current;
       const W = cv.width;

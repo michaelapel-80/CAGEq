@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { FrameCapRow, frameGate } from "./frameLimit";
+import { frameClock } from "./frameClock";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { Band, composedCurveDb, highPassFc, HP_SLOPES, logGrid, phaseDeg, type FadingCurve, type ResponseModel, retargetFadingCurve, stepFadingCurve, undistortable } from "./biquad";
@@ -784,13 +785,15 @@ export function EqChart({
     let lastModel: ResponseModel | undefined;
 
     const frameDue = frameGate(); // the optional frame-rate cap (frameLimit.ts)
-    const render = () => {
-      const now = performance.now();
+    const render = (ts: number) => {
+      // The frame's own time — rAF's timestamp put on the refresh grid (frameClock.ts) — not when
+      // this callback happened to start: the trace's smoothing and dose step by it.
+      const now = frameClock.time(ts);
       if (!frameDue(now)) {
         raf = requestAnimationFrame(render);
         return;
       }
-      const dt = Math.min(0.1, (now - last) / 1000); // clamp after a tab-switch stall
+      const dt = Math.max(0, Math.min(0.1, (now - last) / 1000)); // clamp after a tab-switch stall
       last = now;
       const { eqBands, preampDb, sampleRate, model, PAD, H, W, specParams } = specDrawCtx.current;
       const spectrum = spectrumRef?.current ?? null;
