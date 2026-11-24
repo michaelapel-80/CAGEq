@@ -71,6 +71,148 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) visibleSince = performance.now();
 });
 
+// --- Shared-memory rings -------------------------------------------------------------------------
+// The audio streams through shared memory, where WebView2 can (src-tauri/src/shared_streams.rs
+// documents the rings): the capture thread writes every update into a ring per stream, and the
+// page reads what's new each frame — no message per update, so none of the per-message script,
+// JSON and fetch a `Channel` costs (at 100 scope windows a second per webview, plus the meter and
+// spectrum, the renderer's GC fell behind with the scope pop-outs open). Each stream asks for its
+// ring when it's first used, and takes its `Channel` instead if the ring doesn't come.
+const RING_MAGIC = 0x42534743;
+const RING_VERSION = 1;
+const RING_HEADER_BYTES = 64;
+/** Updates short of a full lap the page reads back at most (see shared_streams.rs). */
+const RING_SLOT_MARGIN = 8;
+/** How long after asking the page waits for a ring before using the `Channel` instead, ms. */
+const RING_WAIT_MS = 2000;
+type RingKind = "scope" | "meter" | "spectrum";
+type Ring = { u32: Uint32Array; f32: Float32Array; f64: Float64Array; slots: number; slotBytes: number; read: number };
+type SharedBufferEvent = { additionalData?: { kind?: string }; getBuffer(): ArrayBuffer };
+type WebViewBridge = { addEventListener(type: "sharedbufferreceived", fn: (e: SharedBufferEvent) => void): void };
+const rings: Partial<Record<RingKind, Ring>> = {};
+const ringArrived: Partial<Record<RingKind, () => void>> = {};
+let ringsListening = false;
+
+/** Ask for `kind`'s ring: `onRing` when it arrives (also after a fallback — the backend stops the
+ *  `Channel` for a webview with a ring), `onFallback` if it can't or doesn't within RING_WAIT_MS. */
+function requestRing(kind: RingKind, onRing: () => void, onFallback: (why: string) => void): void {
+  const bridge = (window as unknown as { chrome?: { webview?: WebViewBridge } }).chrome?.webview;
+  if (!bridge) return onFallback("no WebView2 bridge");
+  if (!ringsListening) {
+    ringsListening = true;
+    bridge.addEventListener("sharedbufferreceived", (e) => {
+      const k = e.additionalData?.kind as RingKind | undefined;
+      if (k !== "scope" && k !== "meter" && k !== "spectrum") return;
+      const buf = e.getBuffer();
+      const u32 = new Uint32Array(buf);
+      if (u32[0] !== RING_MAGIC || u32[1] !== RING_VERSION) return console.warn(`[streams] unknown ${k} ring layout`);
+      rings[k] = { u32, f32: new Float32Array(buf), f64: new Float64Array(buf), slots: u32[2], slotBytes: u32[3], read: u32[4] };
+      ringArrived[k]?.();
+    });
+  }
+  let settled = false;
+  ringArrived[kind] = () => {
+    settled = true;
+    onRing();
+  };
+  const fallback = (why: string) => {
+    if (settled) return;
+    settled = true;
+    console.warn(`[streams] ${kind} stream over the Channel: ${why}`);
+    onFallback(why);
+  };
+  invoke("subscribe_shared", { stream: kind }).then(
+    () => setTimeout(() => fallback("no buffer arrived"), RING_WAIT_MS),
+    (e) => fallback(String(e)),
+  );
+}
+
+/** Each update written to `r` since the last look, by its slot's byte offset, oldest first. */
+function forEachNew(r: Ring, fn: (at: number) => void): void {
+  const written = r.u32[4];
+  let k = r.read;
+  if (((written - k) >>> 0) > r.slots - RING_SLOT_MARGIN) k = (written - (r.slots - RING_SLOT_MARGIN)) >>> 0;
+  for (; k !== written; k = (k + 1) >>> 0) {
+    const at = RING_HEADER_BYTES + (k % r.slots) * r.slotBytes;
+    if (r.u32[at >>> 2] !== ((k + 1) >>> 0)) continue; // being rewritten: lapped
+    fn(at);
+  }
+  r.read = written;
+}
+
+/** A meter or spectrum record at `at`: its time and its arrays (views into the ring — copy them). */
+function readRecord(r: Ring, at: number): { time: number; arrays: Float32Array[] } {
+  const count = r.u32[(at + 4) >>> 2];
+  const time = r.f64[(at + 8) >>> 3];
+  const arrays: Float32Array[] = [];
+  let w = (at + 16) >>> 2;
+  for (let i = 0; i < count; i++) {
+    const len = r.u32[w];
+    arrays.push(r.f32.subarray(w + 1, w + 1 + len));
+    w += 1 + len;
+  }
+  return { time, arrays };
+}
+
+const toPairs = (a: Float32Array) => {
+  const out: { hz: number; db: number }[] = [];
+  for (let i = 0; i + 1 < a.length; i += 2) out.push({ hz: a[i], db: a[i + 1] });
+  return out;
+};
+
+function decodeMeter(_time: number, a: Float32Array[]): MeterData {
+  const h = a[0];
+  return {
+    peak_db: h[0],
+    rms_db: h[1],
+    momentary_lufs: h[2],
+    short_term_lufs: h[3],
+    integrated_lufs: h[4],
+    loudness_range: h[5],
+    true_peak_max_db: h[6],
+    signal: h[7] === 1,
+    sample_rate: h[8],
+    bins: Array.from(a[1]),
+  };
+}
+
+function decodeSpectrum(time: number, a: Float32Array[]): SpectrumData {
+  const h = a[0];
+  return {
+    signal: h[0] === 1,
+    f_min: h[1],
+    f_max: h[2],
+    peak_separation_octaves: h[3],
+    db: Array.from(a[1]),
+    peak_db: Array.from(a[2]),
+    peak_hz: Array.from(a[3]),
+    db_raw: Array.from(a[4]),
+    db_lin: Array.from(a[5]),
+    peak_db_lin: Array.from(a[6]),
+    peak_hz_lin: Array.from(a[7]),
+    db_lin_raw: Array.from(a[8]),
+    peaks: toPairs(a[9]),
+    peak_candidates: toPairs(a[10]),
+    t_end: time,
+  };
+}
+
+// The record streams' readers, run once a frame (and by `spectrumAt` before it looks).
+const ringPollers: (() => void)[] = [];
+let ringLoop = false;
+function pollRings(): void {
+  for (const p of ringPollers) p();
+}
+function startRingLoop(): void {
+  if (ringLoop) return;
+  ringLoop = true;
+  const tick = () => {
+    pollRings();
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
 /**
  * Tauri's `Channel` delivers strictly in index order, and it never gives up on a gap. So one lost
  * message wedges the stream until the webview reloads. Every later message gets buffered
@@ -82,13 +224,26 @@ document.addEventListener("visibilitychange", () => {
  * All three look like "monitoring stopped, fixed by restarting the app", so each subscriber is
  * isolated and a stream that goes quiet while visible is re-registered on a fresh channel. The
  * backend's `register` replaces the old channel for this webview.
+ *
+ * With `ring`, the stream is read from its shared-memory ring instead where WebView2 can (above),
+ * delivered to the same subscribers once a frame; the `Channel` is the fallback.
  */
-function makeStream<T>(cmd: string) {
+function makeStream<T>(cmd: string, ring?: { kind: RingKind; decode: (time: number, arrays: Float32Array[]) => T }) {
   const subs = new Set<(v: T) => void>();
   let channel: Channel<T> | null = null;
+  let mode: "none" | "pending" | "channel" | "ring" = "none";
   let lastMsg = 0;
   let lastRegister = 0;
   let stalled = false; // warn once per quiet spell, not on every retry
+
+  const deliver = (v: T) =>
+    subs.forEach((f) => {
+      try {
+        f(v);
+      } catch (e) {
+        console.error(`[streams] ${cmd} subscriber threw`, e);
+      }
+    });
 
   function register() {
     // Drop the old channel's callback, and any messages parked behind its gap.
@@ -98,13 +253,7 @@ function makeStream<T>(cmd: string) {
       if (ch !== channel) return;
       lastMsg = performance.now();
       stalled = false;
-      subs.forEach((f) => {
-        try {
-          f(v);
-        } catch (e) {
-          console.error(`[streams] ${cmd} subscriber threw`, e);
-        }
-      });
+      deliver(v);
     };
     channel = ch;
     lastRegister = performance.now();
@@ -113,7 +262,7 @@ function makeStream<T>(cmd: string) {
 
   function watchdog() {
     const now = performance.now();
-    if (subs.size === 0 || document.hidden) return;
+    if (mode !== "channel" || subs.size === 0 || document.hidden) return;
     if (now - visibleSince < STALL_MS || now - lastRegister < STALL_MS) return;
     if (now - lastMsg < STALL_MS) return;
     if (!stalled) console.warn(`[streams] ${cmd}: no data for ${Math.round((now - lastMsg) / 1000)} s, re-registering`);
@@ -121,22 +270,53 @@ function makeStream<T>(cmd: string) {
     register();
   }
 
+  function start() {
+    setInterval(watchdog, 1000);
+    startHeartbeat();
+    if (!ring) {
+      mode = "channel";
+      return register();
+    }
+    const { kind, decode } = ring;
+    requestRing(
+      kind,
+      () => {
+        mode = "ring";
+        (channel as unknown as { cleanupCallback?: () => void } | null)?.cleanupCallback?.();
+        channel = null;
+        ringPollers.push(() => {
+          const r = rings[kind];
+          if (r && subs.size > 0) forEachNew(r, (at) => {
+            const { time, arrays } = readRecord(r, at);
+            deliver(decode(time, arrays));
+          });
+          else if (r) r.read = r.u32[4]; // nobody listening: skip, don't queue up
+        });
+        startRingLoop();
+      },
+      () => {
+        if (mode === "ring") return;
+        mode = "channel";
+        register();
+      },
+    );
+  }
+
   return {
     /** Start receiving this stream; returns the unsubscribe function. */
     subscribe(fn: (v: T) => void): () => void {
       subs.add(fn);
-      if (!channel) {
-        register();
-        setInterval(watchdog, 1000);
-        startHeartbeat();
+      if (mode === "none") {
+        mode = "pending"; // until the ring arrives or the fallback starts
+        start();
       }
       return () => subs.delete(fn);
     },
   };
 }
 
-export const meterStream = makeStream<MeterData>("subscribe_meter");
-export const spectrumStream = makeStream<SpectrumData>("subscribe_spectrum");
+export const meterStream = makeStream<MeterData>("subscribe_meter", { kind: "meter", decode: decodeMeter });
+export const spectrumStream = makeStream<SpectrumData>("subscribe_spectrum", { kind: "spectrum", decode: decodeSpectrum });
 export const scopeStream = makeStream<ScopeData>("subscribe_scope");
 
 /** This webview's scope playout clock (scopeClock.ts), shared by its scope views: fed from the
@@ -167,6 +347,7 @@ export function spectrumAt(nowMs: number): SpectrumData | null {
   }
   if (nowMs === specNow) return specCur;
   specNow = nowMs;
+  pollRings(); // whatever the ring has by now, not only what this frame's ring loop picked up
   const p = clockUsers > 0 ? scopeClock.playhead(nowMs) : NaN;
   while (specQueue.length > 0) {
     const s = specQueue[0];
@@ -177,37 +358,17 @@ export function spectrumAt(nowMs: number): SpectrumData | null {
   return specCur;
 }
 
-// The scope stream through shared memory, where WebView2 can (src-tauri/src/shared_scope.rs, which
-// documents the ring): the capture thread writes every window into a ring the page reads each
-// frame — no message per window, so none of the per-message script, JSON and garbage a `Channel`
-// costs (at 100 windows a second per webview, with the pop-out open, the renderer's GC fell
-// behind). Requested when the first scope view starts; the `Channel` (`scopeStream`) if the
-// buffer doesn't come.
-const RING_MAGIC = 0x42534743;
-const RING_VERSION = 1;
-const RING_HEADER_BYTES = 64;
-/** Windows short of a full lap the page reads back at most (see shared_scope.rs). */
-const RING_SLOT_MARGIN = 8;
-/** How long after asking the page waits for the buffer before using the `Channel` instead, ms. */
-const RING_WAIT_MS = 2000;
-type Ring = { u32: Uint32Array; f32: Float32Array; f64: Float64Array; slots: number; slotBytes: number; read: number };
-type SharedBufferEvent = { additionalData?: { kind?: string }; getBuffer(): ArrayBuffer };
-type WebViewBridge = { addEventListener(type: "sharedbufferreceived", fn: (e: SharedBufferEvent) => void): void };
-let ring: Ring | null = null;
-let feedStarted = false;
+// The scope stream from its shared ring (above), read by the clock itself once a frame (its
+// source), or over the `Channel` if the ring doesn't come.
+let scopeFeed: "none" | "pending" | "ring" | "channel" = "none";
 
-/** Push the windows written since the last look into the clock (once per frame, via its source). */
-function pollRing(): void {
-  const r = ring;
+/** Push the scope windows written since the last look into the clock. */
+function pollScopeRing(): void {
+  const r = rings.scope;
   if (!r) return;
-  const written = r.u32[4];
-  let k = r.read;
-  if (((written - k) >>> 0) > r.slots - RING_SLOT_MARGIN) k = (written - (r.slots - RING_SLOT_MARGIN)) >>> 0;
   const now = performance.now();
-  for (; k !== written; k = (k + 1) >>> 0) {
-    const at = RING_HEADER_BYTES + (k % r.slots) * r.slotBytes;
+  forEachNew(r, (at) => {
     const w = at >>> 2;
-    if (r.u32[w] !== ((k + 1) >>> 0)) continue; // being rewritten: lapped
     const n = r.u32[w + 1];
     scopeClock.push(
       {
@@ -220,42 +381,31 @@ function pollRing(): void {
       now,
       true,
     );
-  }
-  r.read = written;
+  });
 }
 
 /** Start feeding the clock: the shared ring if WebView2 hands one over, the `Channel` if not. */
 function startScopeFeed(): void {
-  if (ring) {
-    ring.read = ring.u32[4]; // only what's written from now on
+  if (scopeFeed === "ring") {
+    const r = rings.scope;
+    if (r) r.read = r.u32[4]; // only what's written from now on
     return;
   }
-  if (feedStarted) return;
-  feedStarted = true;
-  let fallenBack = false;
-  const fallback = (why: string) => {
-    if (ring || fallenBack) return;
-    fallenBack = true;
-    console.warn(`[streams] scope stream over the Channel: ${why}`);
-    clockUnsub = scopeStream.subscribe((s) => scopeClock.push(s, performance.now()));
-  };
-  const bridge = (window as unknown as { chrome?: { webview?: WebViewBridge } }).chrome?.webview;
-  if (!bridge) return fallback("no WebView2 bridge");
-  bridge.addEventListener("sharedbufferreceived", (e) => {
-    if (e.additionalData?.kind !== "scope") return;
-    const buf = e.getBuffer();
-    const u32 = new Uint32Array(buf);
-    if (u32[0] !== RING_MAGIC || u32[1] !== RING_VERSION) return console.warn("[streams] unknown scope ring layout");
-    ring = { u32, f32: new Float32Array(buf), f64: new Float64Array(buf), slots: u32[2], slotBytes: u32[3], read: u32[4] };
-    scopeClock.setSource(pollRing);
-    if (fallenBack) {
-      clockUnsub?.(); // the ring took over after all
+  if (scopeFeed !== "none") return;
+  scopeFeed = "pending";
+  requestRing(
+    "scope",
+    () => {
+      scopeFeed = "ring";
+      scopeClock.setSource(pollScopeRing);
+      clockUnsub?.(); // the ring took over after a fallback
       clockUnsub = null;
-    }
-  });
-  invoke("subscribe_scope_shared").then(
-    () => setTimeout(() => fallback("no buffer arrived"), RING_WAIT_MS),
-    (e) => fallback(String(e)),
+    },
+    () => {
+      if (scopeFeed === "ring") return;
+      scopeFeed = "channel";
+      clockUnsub = scopeStream.subscribe((s) => scopeClock.push(s, performance.now()));
+    },
   );
 }
 
@@ -273,7 +423,7 @@ export function scopeReader(): { reader: ScopeReader; release: () => void } {
       if (--clockUsers === 0 && clockUnsub) {
         clockUnsub();
         clockUnsub = null;
-        feedStarted = false;
+        scopeFeed = "none";
       }
     },
   };

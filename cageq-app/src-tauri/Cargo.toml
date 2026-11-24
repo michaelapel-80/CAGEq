@@ -43,7 +43,7 @@ cageq-apo-backend = { path = "../../cageq-apo-backend" }
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
 
-# The scope stream's shared-memory ring (src/shared_scope.rs): WebView2's shared buffer API, which
+# The audio streams' shared-memory rings (src/shared_streams.rs): WebView2's shared buffer API, which
 # Tauri doesn't wrap. The same versions Tauri's own wry uses, so they resolve to one copy.
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"

@@ -15,7 +15,7 @@ use tauri::State;
 
 mod wav;
 #[cfg(windows)]
-mod shared_scope;
+mod shared_streams;
 
 /// App state held in Tauri managed state. `Ready` on a successful start; `Failed`
 /// keeps the init error string so commands can report it instead of the app being
@@ -156,10 +156,11 @@ struct StreamSubs {
     spectrum: Subs<cageq_monitor::SpectrumUpdate>,
     scope: Subs<cageq_monitor::ScopeUpdate>,
     alive: Alive,
-    /// The scope stream's shared-memory rings, the way the scopes get it where WebView2 can (see
-    /// `shared_scope`); `scope` above is the fallback.
+    /// The streams' shared-memory rings, the way each webview gets them where WebView2 can (see
+    /// `shared_streams`); the channels above are the fallback, and stay unsent for a webview with
+    /// a ring for that stream.
     #[cfg(windows)]
-    scope_shared: shared_scope::SharedScope,
+    shared: shared_streams::SharedStreams,
 }
 
 /// Send one stream payload to every subscriber that is still draining its channel. The `is_ok`
@@ -169,12 +170,13 @@ fn fan_out<T: Clone + serde::Serialize>(
     subs: &std::sync::Mutex<Vec<(String, tauri::ipc::Channel<T>)>>,
     alive: &Alive,
     value: T,
+    has_ring: impl Fn(&str) -> bool,
 ) {
     let now = std::time::Instant::now();
     let Ok(beats) = alive.lock() else { return };
     if let Ok(mut list) = subs.lock() {
         list.retain(|(label, ch)| {
-            let draining = beats.get(label).is_some_and(|t| now - *t <= SUB_TIMEOUT);
+            let draining = beats.get(label).is_some_and(|t| now - *t <= SUB_TIMEOUT) && !has_ring(label);
             // Gone quiet: crashed, wedged, or just hidden (Chromium throttles timers in hidden
             // windows, which is fine — those views aren't painting either, and they pick straight
             // back up on the next beat). Skip the send rather than park a payload nobody will
@@ -221,7 +223,7 @@ fn drop_subs(subs: &StreamSubs, label: &str) {
     prune(&subs.spectrum, label);
     prune(&subs.scope, label);
     #[cfg(windows)]
-    subs.scope_shared.drop_ring(label);
+    subs.shared.drop_webview(label);
     if let Ok(mut beats) = subs.alive.lock() {
         beats.remove(label);
     }
@@ -913,7 +915,7 @@ fn start_monitor(
     let spectrum_subs = subs.spectrum.clone();
     let scope_subs = subs.scope.clone();
     #[cfg(windows)]
-    let scope_shared = subs.scope_shared.clone();
+    let (meter_ring, spectrum_ring, scope_ring) = (subs.shared.clone(), subs.shared.clone(), subs.shared.clone());
     let (meter_alive, spectrum_alive, scope_alive) =
         (subs.alive.clone(), subs.alive.clone(), subs.alive.clone());
     let monitor = cageq_monitor::Monitor::start(
@@ -923,12 +925,32 @@ fn start_monitor(
         harmonic_fold.0.clone(),
         hires_peaks.0.clone(),
         lufs_reset.0.clone(),
-        move |update| fan_out(&meter_subs, &meter_alive, update),
-        move |spectrum| fan_out(&spectrum_subs, &spectrum_alive, spectrum),
+        move |update| {
+            #[cfg(windows)]
+            meter_ring.write_meter(&update);
+            #[cfg(windows)]
+            let has_ring = |l: &str| meter_ring.has(l, shared_streams::Stream::Meter);
+            #[cfg(not(windows))]
+            let has_ring = |_: &str| false;
+            fan_out(&meter_subs, &meter_alive, update, has_ring)
+        },
+        move |spectrum| {
+            #[cfg(windows)]
+            spectrum_ring.write_spectrum(&spectrum);
+            #[cfg(windows)]
+            let has_ring = |l: &str| spectrum_ring.has(l, shared_streams::Stream::Spectrum);
+            #[cfg(not(windows))]
+            let has_ring = |_: &str| false;
+            fan_out(&spectrum_subs, &spectrum_alive, spectrum, has_ring)
+        },
         move |scope| {
             #[cfg(windows)]
-            scope_shared.write(&scope);
-            fan_out(&scope_subs, &scope_alive, scope)
+            scope_ring.write_scope(&scope);
+            #[cfg(windows)]
+            let has_ring = |l: &str| scope_ring.has(l, shared_streams::Stream::Scope);
+            #[cfg(not(windows))]
+            let has_ring = |_: &str| false;
+            fan_out(&scope_subs, &scope_alive, scope, has_ring)
         },
     )?;
     *guard = Some((session, monitor));
@@ -1001,33 +1023,34 @@ fn subscribe_scope(
     register(&subs.scope, webview.label(), channel);
 }
 
-/// Give this webview the scope stream through shared memory (see `shared_scope`): creates its
-/// ring and posts it to the page, which receives it as a `sharedbufferreceived` event. Errs where
-/// WebView2 can't (too old a runtime, or not Windows); the page then subscribes the `Channel`
-/// (`subscribe_scope`) instead. Async, so it can wait for the main thread to do the WebView2
-/// part without holding it.
+/// Give this webview `stream` ("scope", "meter" or "spectrum") through shared memory (see
+/// `shared_streams`): creates its ring and posts it to the page, which receives it as a
+/// `sharedbufferreceived` event. Errs where WebView2 can't (too old a runtime, or not Windows);
+/// the page then subscribes that stream's `Channel` instead. Async, so it can wait for the main
+/// thread to do the WebView2 part without holding it.
 #[tauri::command]
-async fn subscribe_scope_shared(webview: tauri::Webview, subs: State<'_, StreamSubs>) -> Result<(), String> {
+async fn subscribe_shared(webview: tauri::Webview, stream: String, subs: State<'_, StreamSubs>) -> Result<(), String> {
     #[cfg(windows)]
     {
+        let stream = shared_streams::Stream::parse(&stream).ok_or_else(|| format!("no stream '{stream}'"))?;
         beat(&subs.alive, webview.label());
-        let shared = subs.scope_shared.clone();
+        let shared = subs.shared.clone();
         let label = webview.label().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         webview
             .with_webview(move |pw| {
-                let _ = tx.send(shared_scope::create(&shared, &label, pw));
+                let _ = tx.send(shared_streams::create(&shared, &label, stream, pw));
             })
             .map_err(|e| e.to_string())?;
         tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(std::time::Duration::from_secs(5)))
             .await
             .map_err(|e| e.to_string())?
-            .map_err(|_| "shared scope buffer: no answer from the main thread".to_string())?
+            .map_err(|_| "shared buffer: no answer from the main thread".to_string())?
     }
     #[cfg(not(windows))]
     {
-        let _ = (webview, subs);
-        Err("shared scope buffer: Windows only".into())
+        let _ = (webview, stream, subs);
+        Err("shared buffer: Windows only".into())
     }
 }
 
@@ -1885,7 +1908,7 @@ pub fn run() {
             subscribe_meter,
             subscribe_spectrum,
             subscribe_scope,
-            subscribe_scope_shared,
+            subscribe_shared,
             stream_heartbeat,
             start_test_signal,
             start_test_generator,
