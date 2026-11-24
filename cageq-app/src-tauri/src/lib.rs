@@ -14,6 +14,8 @@ use serde_json::{json, Map, Value};
 use tauri::State;
 
 mod wav;
+#[cfg(windows)]
+mod shared_scope;
 
 /// App state held in Tauri managed state. `Ready` on a successful start; `Failed`
 /// keeps the init error string so commands can report it instead of the app being
@@ -154,6 +156,10 @@ struct StreamSubs {
     spectrum: Subs<cageq_monitor::SpectrumUpdate>,
     scope: Subs<cageq_monitor::ScopeUpdate>,
     alive: Alive,
+    /// The scope stream's shared-memory rings, the way the scopes get it where WebView2 can (see
+    /// `shared_scope`); `scope` above is the fallback.
+    #[cfg(windows)]
+    scope_shared: shared_scope::SharedScope,
 }
 
 /// Send one stream payload to every subscriber that is still draining its channel. The `is_ok`
@@ -214,6 +220,8 @@ fn drop_subs(subs: &StreamSubs, label: &str) {
     prune(&subs.meter, label);
     prune(&subs.spectrum, label);
     prune(&subs.scope, label);
+    #[cfg(windows)]
+    subs.scope_shared.drop_ring(label);
     if let Ok(mut beats) = subs.alive.lock() {
         beats.remove(label);
     }
@@ -904,6 +912,8 @@ fn start_monitor(
     let meter_subs = subs.meter.clone();
     let spectrum_subs = subs.spectrum.clone();
     let scope_subs = subs.scope.clone();
+    #[cfg(windows)]
+    let scope_shared = subs.scope_shared.clone();
     let (meter_alive, spectrum_alive, scope_alive) =
         (subs.alive.clone(), subs.alive.clone(), subs.alive.clone());
     let monitor = cageq_monitor::Monitor::start(
@@ -915,7 +925,11 @@ fn start_monitor(
         lufs_reset.0.clone(),
         move |update| fan_out(&meter_subs, &meter_alive, update),
         move |spectrum| fan_out(&spectrum_subs, &spectrum_alive, spectrum),
-        move |scope| fan_out(&scope_subs, &scope_alive, scope),
+        move |scope| {
+            #[cfg(windows)]
+            scope_shared.write(&scope);
+            fan_out(&scope_subs, &scope_alive, scope)
+        },
     )?;
     *guard = Some((session, monitor));
     Ok(())
@@ -985,6 +999,36 @@ fn subscribe_scope(
 ) {
     beat(&subs.alive, webview.label());
     register(&subs.scope, webview.label(), channel);
+}
+
+/// Give this webview the scope stream through shared memory (see `shared_scope`): creates its
+/// ring and posts it to the page, which receives it as a `sharedbufferreceived` event. Errs where
+/// WebView2 can't (too old a runtime, or not Windows); the page then subscribes the `Channel`
+/// (`subscribe_scope`) instead. Async, so it can wait for the main thread to do the WebView2
+/// part without holding it.
+#[tauri::command]
+async fn subscribe_scope_shared(webview: tauri::Webview, subs: State<'_, StreamSubs>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        beat(&subs.alive, webview.label());
+        let shared = subs.scope_shared.clone();
+        let label = webview.label().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        webview
+            .with_webview(move |pw| {
+                let _ = tx.send(shared_scope::create(&shared, &label, pw));
+            })
+            .map_err(|e| e.to_string())?;
+        tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(std::time::Duration::from_secs(5)))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|_| "shared scope buffer: no answer from the main thread".to_string())?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (webview, subs);
+        Err("shared scope buffer: Windows only".into())
+    }
 }
 
 /// Liveness beat from a webview's stream bus (frontend `streams.ts`, ~1 Hz). A webview that stops
@@ -1841,6 +1885,7 @@ pub fn run() {
             subscribe_meter,
             subscribe_spectrum,
             subscribe_scope,
+            subscribe_scope_shared,
             stream_heartbeat,
             start_test_signal,
             start_test_generator,

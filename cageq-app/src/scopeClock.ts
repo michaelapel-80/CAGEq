@@ -148,12 +148,26 @@ export class ScopeClock {
   // triggers full mark-compact GCs. A reader only holds a window's arrays within one frame, and
   // windows are only dropped as one arrives, between frames.
   private pool: Float32Array[] = [];
+  // Where windows come from when they're read rather than delivered (shared memory, streams.ts):
+  // called once per frame, before the playhead, to push what's new.
+  private source: (() => void) | null = null;
+  private sourceNow = NaN;
 
-  /** Add a window, as it arrives (`arrivalMs`: performance.now()). */
-  push(s: ScopeWindowIn, arrivalMs: number): void {
+  /** Read windows from `fn` once per frame, as the playhead is asked for (see `source`). */
+  setSource(fn: (() => void) | null): void {
+    this.source = fn;
+  }
+
+  /** Add a window, as it arrives (`arrivalMs`: performance.now()). `atSent`: the window was
+   *  available from the moment it was sent — read from shared memory (streams.ts), not delivered —
+   *  so its headroom is measured at its `sent` time (mapped onto performance.now()), not at when
+   *  the page next looked; nor can a page stall have held it up. `arrivalMs` still sets the clock
+   *  offset: the least (arrival − sent) is the offset plus the fastest look. */
+  push(s: ScopeWindowIn, arrivalMs: number, atSent = false): void {
     if (s.sent > 0) {
       this.base = Math.min(this.base + BASE_CREEP_MS, arrivalMs - s.sent / 1e4);
     }
+    const at = atSent && s.sent > 0 && Number.isFinite(this.base) ? s.sent / 1e4 + this.base : arrivalMs;
     const n = Math.floor(s.xy.length / 2);
     if (!s.signal || n < 1 || !(s.t0 > 0) || !(s.rate > 0) || !Number.isFinite(this.base)) {
       if (!s.signal || n < 1) this.idle = true;
@@ -164,11 +178,11 @@ export class ScopeClock {
     const end = t0 + (n / s.rate) * 1000;
     const prev = this.wins[this.wins.length - 1];
     const contiguous = prev !== undefined && prev.rate === s.rate && Math.abs(t0 - prev.end) < CONTIGUOUS_TOL_MS;
-    const nowQ = arrivalMs - this.base;
+    const nowQ = at - this.base;
     // Headroom: how far the data reached past "now" just before this window came — the low point
     // of the data's lead, the one the playhead has to stay under.
     if (!contiguous) {
-      this.runStart = arrivalMs;
+      this.runStart = at;
       // A run after the stream went idle (or the first): nothing is showing, so the playhead can
       // move at once (see START_DELAY_MS).
       if (prev === undefined || nowQ - prev.end > IDLE_GRACE_MS) this.offset = -START_DELAY_MS - this.base;
@@ -177,23 +191,24 @@ export class ScopeClock {
     // began — or arriving now, long after the last frame.
     const sentPerf = s.sent / 1e4 + this.base;
     const stalled =
-      this.gaps.some((g) => sentPerf < g.end && arrivalMs > g.start) ||
-      (!Number.isNaN(this.lastNow) && !Number.isNaN(this.frameIv) && arrivalMs - this.lastNow > STALL_FRAMES * this.frameIv + STALL_SLACK_MS);
+      !atSent &&
+      (this.gaps.some((g) => sentPerf < g.end && at > g.start) ||
+      (!Number.isNaN(this.lastNow) && !Number.isNaN(this.frameIv) && at - this.lastNow > STALL_FRAMES * this.frameIv + STALL_SLACK_MS));
     const h = contiguous ? prev.end - nowQ : NaN;
-    const queued = this.lastLeftOut && arrivalMs - this.lastArrival < BURST_MS;
-    while (this.outliers.length > 0 && this.outliers[0] < arrivalMs - HEADROOM_SPAN_MS) this.outliers.shift();
+    const queued = this.lastLeftOut && at - this.lastArrival < BURST_MS;
+    while (this.outliers.length > 0 && this.outliers[0] < at - HEADROOM_SPAN_MS) this.outliers.shift();
     const outlier = contiguous && !Number.isNaN(this.median) && h < this.median - OUTLIER_MS && this.outliers.length < OUTLIERS_MAX;
-    if (outlier) this.outliers.push(arrivalMs);
+    if (outlier) this.outliers.push(at);
     if (contiguous && !stalled) this.noteRecent(h);
     const leftOut = stalled || queued || outlier || !(h > SAFETY_MS - MAX_DELAY_MS);
-    this.lastArrival = arrivalMs;
+    this.lastArrival = at;
     this.lastLeftOut = contiguous && leftOut;
     if (contiguous && !leftOut) {
-      (arrivalMs - this.runStart < RUN_START_MS ? this.startLow : this.low).add(arrivalMs, h);
+      (at - this.runStart < RUN_START_MS ? this.startLow : this.low).add(at, h);
       this.samples++;
     }
-    this.low.expire(arrivalMs);
-    this.startLow.expire(arrivalMs);
+    this.low.expire(at);
+    this.startLow.expire(at);
     this.targetDirty = true;
     const l = this.buffer(n);
     const r = this.buffer(n);
@@ -240,6 +255,10 @@ export class ScopeClock {
   /** The playhead at `nowMs` (performance.now()): the device-timeline time this frame shows,
    *  counter ms. NaN before the first window. Idempotent for one `nowMs`. */
   playhead(nowMs: number): number {
+    if (this.source && nowMs !== this.sourceNow) {
+      this.sourceNow = nowMs;
+      this.source();
+    }
     if (Number.isNaN(this.offset)) return NaN;
     const a = this.target();
     if (!Number.isNaN(a) && !Number.isNaN(this.lastNow)) {
