@@ -7,5 +7,7 @@ Smooth, steady instruments at any refresh rate.
   brightness no longer wobble slightly from frame to frame.
 - **Changed:** the vectorscope's and the meter's beam is drawn as one continuous path, without
   the tiny gap it used to leave every few milliseconds.
+- **Fixed:** the spectrum analyzer's trace moved unevenly (most visible on a sweep): its updates
+  now land evenly, in step with the other instruments.
 - **Note:** while you drag or resize the window, the scopes may pause for a moment and catch up.
   Windows holds back their data during a drag.
