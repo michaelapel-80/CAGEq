@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { FrameCapRow, frameGate } from "./frameLimit";
+import { frameClock } from "./frameClock";
 import { useTranslation } from "react-i18next";
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { type FadingInverse, retargetFadingInverse, stepFadingInverse } from "./biquad";
 import { detectorSample, findRisingEdge, triggerDetector, type TriggerDetector } from "./scopeTrigger";
-import { queueScopeWindow, scopeStream } from "./streams";
+import { scopeReader } from "./streams";
+import type { ScopeReader } from "./scopeClock";
 import { accentRgb, createPhosphor, frameDoseMult, retuneForRelativeContrast, type TraceSegments } from "./phosphor";
 import { LANCZOS_A, LANCZOS_TAPS, lanczosAt, lanczosRow, MAX_PIECES, PIECE_PX } from "./beamPath";
 import { type ParamsMigration, useTunableParams } from "./useTunableParams";
 import { APP_ZOOM_EVENT, beamScale, noteScopeTube } from "./appZoom";
-import type { ScopeData, ScopeEq } from "./Vectorscope";
+import type { ScopeEq } from "./Vectorscope";
 
 /** Live-tunable render parameters (see Vectorscope's identical rationale — a live panel beats a
  *  recompile). `undistort` shares Vectorscope's meaning and machinery: it undoes the loudness-match
@@ -188,14 +190,12 @@ const DB_FLOOR = -120;
 // than PEAK_READING_STALE_MS no longer holds the line up: the stream sends no windows in silence,
 // and the line has to release then.
 const PEAK_READING_STALE_MS = 50;
-// The trace is redrawn on every frame, the newest one again until the next window replaces it — a
-// scope re-sweeping a repeating signal — not only on frames a window arrived in. The windows came
-// every 15 to 22 ms then (a 16 ms timer catching one 10 ms loopback packet or two; now every 20 ms,
-// on packet boundaries), and the Fast preset's trail is 20 ms: lit only when one arrived, the trace
-// decayed in every gap, and a steady signal's brightness swung 20–26% RMS from frame to frame at
-// any frame rate (simulated against the emit loop's timing; 11–13% on Smooth). Redrawn each frame with a frame's worth of dose, it holds
-// steady at the same mean. Up to TRACE_HOLD_MS after the last window: past that the stream has
-// stalled or gone quiet (a silent window ends the hold at once), and the trace fades as it should.
+// A trace on every frame, with a frame's worth of dose: the playout clock (scopeClock.ts) gives each
+// frame its own stretch of audio, and on a frame it has none for (a late window: "starved") the
+// last trace is drawn again, as a scope re-sweeping a steady signal would show it. Drawn only on
+// frames a window had arrived in, the Fast preset's 20 ms trail decayed in every gap: a steady
+// signal's brightness swung 20–26% RMS frame to frame (simulated against the old stream's
+// timing). Held up to TRACE_HOLD_MS; past that, or once the stream goes idle, the trace fades.
 const TRACE_HOLD_MS = 100;
 // Peak *detection* takes the K-th largest rectified sample in the block, not the plain max and
 // not a windowed/smoothed value — a sustained tone has many samples near its own peak, one every
@@ -345,12 +345,10 @@ export function TimeScope({
   // every frame, and the trail accumulates *additively*, so drawing them into it would stack them
   // toward white instead of holding steady (see phosphor.ts's closing note).
   const peakRef = useRef<HTMLCanvasElement>(null);
-  // Every scope window since the last drawn frame, oldest first. All of them go into the trigger
-  // ring: the ring is one continuous stretch of audio, and feeding it only the newest window on
-  // each drawn frame spliced non-adjacent windows together wherever a frame skipped one (a capped
-  // frame rate, or any frame slower than the stream), and the traced span showed the seams as jumps.
-  // Bounded (SCOPE_QUEUE_MAX), so a seam remains only after a long stall.
-  const pendingRef = useRef<ScopeData[]>([]);
+  // This view's cursor on the scope playout clock (scopeClock.ts): each frame takes the audio played
+  // since the last one, all of it into the trigger ring — one continuous stretch, seamless while the
+  // stream is.
+  const readerRef = useRef<ScopeReader | null>(null);
   const { params, setParams, saveAsDefault, resetToFactory, savedDefault, clearSavedDefault, atSavedDefault } = useTunableParams("cageq-timescope-params", DEFAULTS, TIMESCOPE_PARAMS_MIGRATION);
   const [tuning, setTuning] = useState(false);
   // L/R (two half-height lanes) vs mixdown (one full-height lane, mono sum) — mixdown trades
@@ -425,9 +423,8 @@ export function TimeScope({
   // Vectorscope/App) gating whether the backend produces scope data at all.
   useEffect(() => {
     let active = true;
-    const unsubScope = scopeStream.subscribe((s) => {
-      if (active) queueScopeWindow(pendingRef.current, s);
-    });
+    const { reader, release: unsubScope } = scopeReader();
+    readerRef.current = reader;
     let unlistenEq: (() => void) | undefined;
     void (async () => {
       unlistenEq = await listen<ScopeEq>("scope-eq", (e) => {
@@ -555,13 +552,16 @@ export function TimeScope({
     let trig: TriggerDetector | null = null;
 
     const frameDue = frameGate(); // the optional frame-rate cap (frameLimit.ts)
-    const render = () => {
-      const now = performance.now();
+    const render = (ts: number) => {
+      // The frame's own time — rAF's timestamp, when the frame began, put on the refresh grid
+      // (frameClock.ts) — not when this callback happened to start running: that varies by however
+      // long the frame's earlier work took, and the playout clock (scopeClock.ts) ties motion to it.
+      const now = frameClock.time(ts);
       if (!frameDue(now)) {
         raf = requestAnimationFrame(render);
         return;
       }
-      const dt = Math.min(0.1, (now - last) / 1000);
+      const dt = Math.max(0, Math.min(0.1, (now - last) / 1000));
       last = now;
       const p = paramsRef.current;
       const mode = p.mode;
@@ -585,10 +585,9 @@ export function TimeScope({
         }
       }
 
-      const pending = pendingRef.current;
-      const fresh = pending.filter((q) => q.signal && q.xy.length >= 4);
-      pendingRef.current = [];
-      if (pending.length > 0 && !pending[pending.length - 1].signal) heldAt = -Infinity; // gone quiet: no trace to hold
+      const take = readerRef.current?.take(now) ?? { slices: [], state: "idle" as const, rate: 48000 };
+      if (take.state === "idle") heldAt = -Infinity; // gone quiet: no trace to hold
+      const fresh = take.slices;
       const isNew = fresh.length > 0;
       // Computed up front (before drawing) when new data arrives, so the peak-hold attack below and
       // the trace path further down both read the identical (possibly undistorted) samples.
@@ -606,8 +605,8 @@ export function TimeScope({
       if (isNew) {
         let rate = 48000;
         for (const s of fresh) {
-          const n = Math.floor(s.xy.length / 2);
-          const xy = s.xy;
+          const n = s.n;
+          const { l: sl, r: sr, start } = s;
 
           // Undistort: (re)build the inverse cascade when the filters/rate change or the mode turns
           // on, then run each sample back through it — same machinery/rationale as Vectorscope's.
@@ -637,8 +636,8 @@ export function TimeScope({
           outL = outLBuf;
           outR = outRBuf;
           for (let i = 0; i < n; i++) {
-            let l = xy[2 * i];
-            let r = xy[2 * i + 1];
+            let l = sl[start + i];
+            let r = sr[start + i];
             if (undistort) {
               [l, r] = stepFadingInverse(iv!, l, r);
             }
@@ -867,8 +866,8 @@ export function TimeScope({
           phos.addSegments!(heldSegs);
         }
         heldAt = now;
-      } else if (now - heldAt < TRACE_HOLD_MS) {
-        // No new window this frame: the newest trace again (see TRACE_HOLD_MS).
+      } else if (take.state === "starved" && now - heldAt < TRACE_HOLD_MS) {
+        // No audio for this frame yet (a late window): the newest trace again (see TRACE_HOLD_MS).
         if (ctx && heldPaths) {
           ctx.globalCompositeOperation = "lighter";
           ctx.lineWidth = heldPaths.width;

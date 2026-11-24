@@ -1,6 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type { SpectrumData } from "./EqChart";
 import type { ScopeData } from "./Vectorscope";
+import { ScopeClock, type ScopeReader } from "./scopeClock";
 
 /**
  * Data plane, frontend side. The meter/spectrum/scope streams used to arrive as Tauri
@@ -138,16 +139,25 @@ export const meterStream = makeStream<MeterData>("subscribe_meter");
 export const spectrumStream = makeStream<SpectrumData>("subscribe_spectrum");
 export const scopeStream = makeStream<ScopeData>("subscribe_scope");
 
-/** Scope windows (~16 ms each) a view keeps queued between drawn frames at most: half a second.
- *  The scope views consume every window since their last drawn frame, not just the newest — at a
- *  frame rate below the stream's (a capped one, or a slow frame) the newest alone dropped the rest:
- *  TimeScope's trigger ring spliced the windows either side of a gap into one (drawn as a jump),
- *  and Vectorscope and the meter never showed what the skipped windows held. Bounded so a view that
- *  isn't drawing (hidden, stalled) can't queue without limit; past it the oldest go. */
-export const SCOPE_QUEUE_MAX = 32;
+/** This webview's scope playout clock (scopeClock.ts), shared by its scope views: fed from the
+ *  scope stream while any view holds a reader. */
+const scopeClock = new ScopeClock();
+let clockUsers = 0;
+let clockUnsub: (() => void) | null = null;
 
-/** Append `s` to a view's queue of undrawn windows (see SCOPE_QUEUE_MAX). */
-export function queueScopeWindow(queue: ScopeData[], s: ScopeData): void {
-  queue.push(s);
-  if (queue.length > SCOPE_QUEUE_MAX) queue.splice(0, queue.length - SCOPE_QUEUE_MAX);
+/** A cursor on the scope stream's playout clock for one view; `release` when the view goes. */
+export function scopeReader(): { reader: ScopeReader; release: () => void } {
+  if (clockUsers++ === 0) clockUnsub = scopeStream.subscribe((s) => scopeClock.push(s, performance.now()));
+  let released = false;
+  return {
+    reader: scopeClock.reader(),
+    release: () => {
+      if (released) return;
+      released = true;
+      if (--clockUsers === 0) {
+        clockUnsub?.();
+        clockUnsub = null;
+      }
+    },
+  };
 }

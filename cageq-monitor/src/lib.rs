@@ -181,6 +181,14 @@ pub struct ScopeUpdate {
     /// The endpoint's mix sample rate (Hz) — the rate these samples (and thus the applied EQ) are
     /// at, so the scope's inverse-filter ("undistort") mode can build coefficients at the same fs.
     pub rate: u32,
+    /// When `xy`'s first sample was at the endpoint: the loopback packet's own QPC position
+    /// (`IAudioCaptureClient::GetBuffer`), in 100 ns units of the system's performance counter.
+    /// 0 when unknown (no samples, or the engine flagged a timestamp error).
+    pub t0: u64,
+    /// When this window was sent, on the same clock as `t0` — 0 off Windows. With `t0`, places
+    /// the window on the timeline: the UI's clock, also the performance counter, differs from it
+    /// only by a constant offset.
+    pub sent: u64,
 }
 
 #[cfg(windows)]
@@ -591,17 +599,18 @@ mod windows_impl {
     const SPEC_IDLE_DECAY: f32 = 0.88;
 
     // --- stereo vectorscope (loopback X-Y goniometer) ---
-    /// Vectorscope emit cadence (60 fps — the front-end phosphor persistence does the smoothing).
-    /// The nominal one: a window goes out on a loopback packet boundary, once it holds at least
-    /// [`SCOPE_WINDOW_MIN`] of audio, so at the usual 10 ms engine period every window is two
-    /// packets, 20 ms, 50 a second. On a timer instead, a 16 ms tick caught one packet or two, and
-    /// the windows ran 10 or 20 ms of audio at uneven 15 to 22 ms intervals. Still the cadence of
-    /// the empty windows that tell the UI the endpoint is idle (see [`SCOPE_IDLE_AFTER`]).
+    /// The cadence of the empty windows that tell the UI the endpoint is idle (see
+    /// [`SCOPE_IDLE_AFTER`]), and the window length `SCOPE_MAX_POINTS` is sized from. Windows
+    /// with audio go out on a loopback packet boundary instead, once they hold at least
+    /// [`SCOPE_WINDOW_MIN`]: at the usual 10 ms engine period, every packet, 100 a second. On a
+    /// timer instead, a 16 ms tick caught one packet or two, and the windows ran 10 or 20 ms of
+    /// audio at uneven 15 to 22 ms intervals.
     const SCOPE_INTERVAL: Duration = Duration::from_millis(16);
-    /// The least audio a scope window carries: just under `SCOPE_INTERVAL`, so a packet size that
-    /// divides it (an 8 ms period: two packets) doesn't take a third whenever resampling leaves a
-    /// packet a frame short.
-    const SCOPE_WINDOW_MIN: Duration = Duration::from_micros(14_500);
+    /// The least audio a scope window carries: one 10 ms packet, with room for resampling to leave
+    /// a packet a frame short; a shorter engine period (a low-latency client on the endpoint)
+    /// gathers packets up to it. Short, because the UI buffers the stream to a steady clock and
+    /// has to hold at least one window's worth: a shorter window is less latency there.
+    const SCOPE_WINDOW_MIN: Duration = Duration::from_micros(9_000);
     /// No packet for this long: the window so far goes out as it is, then an empty one every
     /// `SCOPE_INTERVAL` until audio resumes, as the UI's idle state (a resting beam) expects.
     /// Longer than any engine period, so it never fires between packets of a playing stream.
@@ -2001,7 +2010,7 @@ mod windows_impl {
                     bins: Vec::new(),
                     sample_rate: 0, // unknown until the session reopens and re-reads the mix format
                 });
-                on_scope(ScopeUpdate { xy: Vec::new(), signal: false, rate: 0 });
+                on_scope(ScopeUpdate { xy: Vec::new(), signal: false, rate: 0, t0: 0, sent: qpc_now_hns() });
                 sleep_unless_stopped(stop, Duration::from_millis(500));
             }
         }
@@ -2019,6 +2028,25 @@ mod windows_impl {
         }
         let take = pairs.min(max_pairs);
         lr[(pairs - take) * 2..pairs * 2].to_vec()
+    }
+
+    /// The performance counter now, in 100 ns units — the clock WASAPI's packet timestamps are on.
+    fn qpc_now_hns() -> u64 {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn QueryPerformanceCounter(count: *mut i64) -> i32;
+            fn QueryPerformanceFrequency(freq: *mut i64) -> i32;
+        }
+        let (mut count, mut freq) = (0i64, 0i64);
+        // SAFETY: both write one i64 through a valid pointer; they cannot fail on XP or later.
+        unsafe {
+            QueryPerformanceCounter(&mut count);
+            QueryPerformanceFrequency(&mut freq);
+        }
+        if freq <= 0 {
+            return 0;
+        }
+        (count as i128 * 10_000_000 / freq as i128) as u64
     }
 
     /// Sleep up to `dur`, returning early if a stop is requested.
@@ -2127,6 +2155,7 @@ mod windows_impl {
         let mut frames: Vec<f32> = Vec::new(); // interleaved, reused each read for ebur128
         let mut mono: Vec<f32> = Vec::new(); // per-read mono downmix, fed to the FFT
         let mut scope_lr: Vec<f32> = Vec::new(); // (l, r) pairs since the last scope emit
+        let mut scope_t0: u64 = 0; // scope_lr's first sample's packet timestamp (ScopeUpdate::t0)
         // Per-tick block accumulators (reset every emit). The peak side lives in `tp`
         // (`take_block` each tick): true peak, linear, can exceed 1.0 — i.e. positive dBTP — on
         // real inter-sample overs, not a plain sample-peak scan: a reconstruction filter can
@@ -2149,7 +2178,7 @@ mod windows_impl {
 
         while !stop.load(Ordering::Relaxed) {
             let before = queue.len();
-            capture.read_from_device_to_deque(&mut queue)?;
+            let packet = capture.read_from_device_to_deque(&mut queue)?;
             let got_data = queue.len() > before;
             if got_data {
                 // An idle endpoint's loopback delivers nothing at all, so audio after a gap
@@ -2164,6 +2193,9 @@ mod windows_impl {
             let scope_on = scope_viewers.load(Ordering::Relaxed) > 0;
             if !scope_on && !scope_lr.is_empty() {
                 scope_lr.clear();
+            }
+            if got_data && scope_on && scope_lr.is_empty() {
+                scope_t0 = if packet.flags.timestamp_error { 0 } else { packet.timestamp };
             }
 
             frames.clear();
@@ -2316,11 +2348,15 @@ mod windows_impl {
             let scope_idle = last_signal.elapsed() >= SCOPE_IDLE_AFTER && last_scope.elapsed() >= SCOPE_INTERVAL;
             if scope_on && (scope_full || scope_idle) {
                 let signal = last_signal.elapsed() < SILENCE_GAP;
-                on_scope(ScopeUpdate {
-                    xy: if signal { tail_pairs(&scope_lr, SCOPE_MAX_POINTS) } else { Vec::new() },
-                    signal,
-                    rate,
-                });
+                let xy = if signal { tail_pairs(&scope_lr, SCOPE_MAX_POINTS) } else { Vec::new() };
+                // The first sample sent: past any `tail_pairs` dropped off the front.
+                let dropped = (scope_lr.len() - xy.len()) / 2;
+                let t0 = if xy.is_empty() || scope_t0 == 0 {
+                    0
+                } else {
+                    scope_t0 + (dropped as u64 * 10_000_000) / rate as u64
+                };
+                on_scope(ScopeUpdate { xy, signal, rate, t0, sent: qpc_now_hns() });
                 scope_lr.clear();
                 last_scope = Instant::now();
             }
