@@ -9,5 +9,6 @@ Smooth, steady instruments at any refresh rate.
   the tiny gap it used to leave every few milliseconds.
 - **Fixed:** the spectrum analyzer's trace moved unevenly (most visible on a sweep): its updates
   now land evenly, in step with the other instruments.
-- **Note:** while you drag or resize the window, the scopes may pause for a moment and catch up.
-  Windows holds back their data during a drag.
+- **Fixed:** with the detached scope windows open, memory use could climb to gigabytes, with
+  stutters while it was cleaned up. The instruments now get their audio data through shared
+  memory, which costs next to nothing.
