@@ -62,7 +62,9 @@ type Params = {
 // Live-tuned for linear light (PhosphorOptions' `linearLight`) and the tone stage.
 // glow and headroom (and the presets' glow) scaled by 0.815 when contrast became relative to the
 // trace's colour (contrastRetuneScale at contrast 2.2), so the tuned look stays as it was.
-const DEFAULTS: Params = { trailTau: 0.3, tail: 6, glow: 0.0041, beamWidth: 1.0, saturation: 1.0, contrast: 2.2, headroom: 0.81 };
+// Contrast then lowered to 1.4 (live): the bar's top edge on music is the faint light of the
+// fewest, highest peaks, and at 2.2 the response crushed it — the bar read soft and low there.
+const DEFAULTS: Params = { trailTau: 0.3, tail: 6, glow: 0.0041, beamWidth: 1.0, saturation: 1.0, contrast: 1.4, headroom: 0.81 };
 // The factor glow's default moved by with linear light (0.002 -> 0.0041). The Canvas 2D fallback,
 // still drawing encoded values, divides it back out, so it keeps the look it had.
 const LINEAR_GLOW_SCALE = 0.0041 / 0.002;
@@ -77,7 +79,7 @@ const LINEAR_GLOW_SCALE = 0.0041 / 0.002;
 const METER_PARAMS_MIGRATION: ParamsMigration = {
   version: 3,
   migrate: (stored, from) =>
-    from < 2 ? { ...stored, glow: DEFAULTS.glow } : from < 3 ? retuneForRelativeContrast(stored, DEFAULTS.contrast) : stored,
+    from < 2 ? { ...stored, glow: DEFAULTS.glow } : from < 3 ? retuneForRelativeContrast(stored, 2.2) : stored, // 2.2: the default v2 had
 };
 // Trail/Glow orthogonality: at steady state (a dose landing every `dtSinceTrace` seconds, decaying
 // at `exp(-dt/trailTau)` between doses), accumulated brightness is approximately
