@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { FrameCapRow, frameGate } from "./frameLimit";
 import { frameClock } from "./frameClock";
+import { APP_ZOOM_EVENT } from "./appZoom";
 import { spectrumAt } from "./streams";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
@@ -451,6 +452,31 @@ export function EqChart({
   // The top-edge stroke's own layer — cleared and fully redrawn every frame instead of running
   // through the phosphor accumulator (see the render effect's own comment for why).
   const specStrokeRef = useRef<HTMLCanvasElement>(null);
+  // Both backdrop canvases at their on-screen size in device pixels, like the scope views' (and
+  // DPR-capped the same way), so the wash and its edge stay sharp at any window size. They used to
+  // be W×H (the SVG's viewBox) and CSS-stretched: a bitmap upscale, ~3.75x at full screen, which
+  // left the edge stroke visibly soft. The render loop maps its viewBox coordinates onto them.
+  const [specRes, setSpecRes] = useState<[number, number]>([W, H]);
+  useEffect(() => {
+    const el = specCanvasRef.current;
+    if (!el) return;
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(1, Math.round(r.width * dpr));
+      const h = Math.max(1, Math.round(r.height * dpr));
+      setSpecRes((p) => (p[0] === w && p[1] === h ? p : [w, h]));
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    // Also on a zoom change, which resizes the box on screen without firing the observer (appZoom.ts).
+    window.addEventListener(APP_ZOOM_EVENT, measure);
+    measure();
+    return () => {
+      ro.disconnect();
+      window.removeEventListener(APP_ZOOM_EVENT, measure);
+    };
+  }, []);
   // Hover cursor: the fraction (0..1) of the plot's own width the mouse is over, or `null` when
   // not hovering — same pattern as SpectrumScope's identically-named ref (see that file's own doc
   // for why this is a ref written by the pointer handlers and read once per frame, not React state).
@@ -761,6 +787,7 @@ export function EqChart({
     // own comment for why. `NaN` marks "not yet initialized" so the first real frame snaps straight
     // to target instead of animating in from zero.
     let yStrokeSmooth = new Float64Array(0).fill(NaN);
+    let strokeSmoothH = 0; // the canvas height yStrokeSmooth's pixel values are for
     // The tessellated wash edge and stroke for the GPU path (see `tessellateSmooth`), and the stroke
     // waiting to be overlaid once `commit()` has presented the frame. Grown, never shrunk.
     let washPts = new Float32Array(0);
@@ -799,7 +826,18 @@ export function EqChart({
       }
       const dt = Math.max(0, Math.min(0.1, (now - last) / 1000)); // clamp after a tab-switch stall
       last = now;
-      const { eqBands, preampDb, sampleRate, model, PAD, H, W, specParams } = specDrawCtx.current;
+      const { eqBands, preampDb, sampleRate, model, PAD: vbPad, H: vbH, W: vbW, specParams } = specDrawCtx.current;
+      // Drawn in the canvases' own device pixels (see `specRes`): the viewBox layout, scaled onto
+      // them — the same box the SVG stretches to, so the two still line up.
+      const W = cv.width;
+      const H = cv.height;
+      const kx = W / vbW;
+      const ky = H / vbH;
+      const PAD = { l: vbPad.l * kx, r: vbPad.r * kx, t: vbPad.t * ky, b: vbPad.b * ky };
+      if (H !== strokeSmoothH) {
+        yStrokeSmooth.fill(NaN); // in pixels: a resize snaps to the new scale, not slews to it
+        strokeSmoothH = H;
+      }
       // On the playout timeline (`spectrumAt`), like SpectrumScope's; the ref until it has one.
       const spectrum = spectrumRef ? (spectrumAt(now) ?? spectrumRef.current) : null;
       // On the GPU (`fillTrace` for the wash, `overlayStroke` for the edge) unless on the 8-bit
@@ -1149,11 +1187,11 @@ export function EqChart({
         matter how far PAD shrank, since it was answering a different question — "how much margin
         does the content want" is not "how big is the screen". */}
     {(spectrumRef || screen) && <div className="eq-chart-screen" aria-hidden="true" />}
-    {/* phosphor spectrum backdrop — same viewBox coords as the SVG (CSS-scaled to match), behind it */}
-    <canvas ref={specCanvasRef} className="eq-spectrum-canvas" width={W} height={H} aria-hidden="true" />
+    {/* phosphor spectrum backdrop — fills the same box as the SVG, at device resolution, behind it */}
+    <canvas ref={specCanvasRef} className="eq-spectrum-canvas" width={specRes[0]} height={specRes[1]} aria-hidden="true" />
     {/* Top-edge stroke, its own non-accumulating layer above the wash — see the render effect's own
         comment for why this can't share the phosphor-accumulated canvas above. */}
-    <canvas ref={specStrokeRef} className="eq-spectrum-canvas" width={W} height={H} aria-hidden="true" />
+    <canvas ref={specStrokeRef} className="eq-spectrum-canvas" width={specRes[0]} height={specRes[1]} aria-hidden="true" />
     <svg
       ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
