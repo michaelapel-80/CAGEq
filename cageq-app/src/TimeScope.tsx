@@ -243,6 +243,18 @@ const RING_CAP = 1 << 17; // ~2.7 s at 48 kHz / ~680 ms at 192 kHz — generous,
 // graticule line (it used to be a quarter of the window: 2.5 divisions, between two lines).
 const TRIGGER_PRE_DIVS = 2;
 const TRIGGER_SEARCH_MS = 250; // how far back to look for a qualifying edge before giving up
+// How long one edge may go on being drawn, in audio arriving after it was first drawn, ms. Until a
+// newer edge comes along the search keeps finding the same one, and the picture then stands still:
+// rarely, on content where the lock fails, for a few hundred ms (reported live), while the music
+// goes on. Past this the scope free-runs until there's a new edge, as a real scope's auto mode does.
+// Not on the first repeat: bass legitimately has no newer edge for a while (a 25 Hz tone repeats
+// its edge for ~2 frames at 60 fps, the picture identical anyway), so the hold covers the longest
+// period the knob passes — 50 ms at its 20 Hz minimum.
+const TRIGGER_HOLD_MS = 60;
+// When the trigger's cutoff (or the rate) changes, the history the search can reach is run through
+// the new detector again, so the change has no settling transient: the search span, the longest
+// display window, and the forward pass's run-in.
+const TRIGGER_REFILTER_MS = TRIGGER_SEARCH_MS + 100 + 100;
 // The detector itself (zero-phase low-pass, AC-coupled level, settling) lives in scopeTrigger.ts.
 
 // Trail/Glow orthogonality: at steady state (a dose landing every `dtSinceTrace` seconds, decaying
@@ -550,6 +562,9 @@ export function TimeScope({
     // The trigger detector's forward state persists across windows (a real filter, not re-zeroed
     // each frame) — rebuilt only when the rate or the tuned cutoff changes, same pattern as `invRef`.
     let trig: TriggerDetector | null = null;
+    // The edge drawn last, and `totalWritten` when it was first drawn (see TRIGGER_HOLD_MS).
+    let lastEdge = -1;
+    let lastEdgeSince = 0;
 
     const frameDue = frameGate(); // the optional frame-rate cap (frameLimit.ts)
     const render = (ts: number) => {
@@ -647,8 +662,16 @@ export function TimeScope({
 
           // Feed the ring buffer: raw display samples plus a lowpass-filtered mono trigger-detector
           // value, one sample at a time so the filter's state stays continuous across windows (no
-          // re-filtering, no transient reset). Rebuild the filter only when rate/cutoff changed.
-          if (!trig || trig.rate !== rate || trig.hz !== p.triggerFilterHz) trig = triggerDetector(rate, p.triggerFilterHz);
+          // re-filtering, no transient reset). Rebuild the filter only when rate/cutoff changed, and
+          // then run the reachable history through it again (TRIGGER_REFILTER_MS).
+          if (!trig || trig.rate !== rate || trig.hz !== p.triggerFilterHz) {
+            trig = triggerDetector(rate, p.triggerFilterHz);
+            const from = totalWritten - Math.min(totalWritten, RING_CAP, Math.round((rate * TRIGGER_REFILTER_MS) / 1000));
+            for (let i = from; i < totalWritten; i++) {
+              const idx = phys(i);
+              ringTrig[idx] = detectorSample(trig, (ringL[idx] + ringR[idx]) / 2);
+            }
+          }
           for (let i = 0; i < n; i++) {
             const idx = phys(totalWritten);
             ringL[idx] = outL[i];
@@ -695,7 +718,13 @@ export function TimeScope({
           if (p.trigger && trig) {
             const searchSamples = Math.round(rate * (TRIGGER_SEARCH_MS / 1000));
             const tMin = Math.max(totalWritten - ringCount + preSamples, tMax - searchSamples);
-            t = findRisingEdge(trig, ringTrig, phys, totalWritten - ringCount, totalWritten - 1, tMin, tMax) ?? tMax;
+            const edge = findRisingEdge(trig, ringTrig, phys, totalWritten - ringCount, totalWritten - 1, tMin, tMax);
+            if (edge !== null && edge !== lastEdge) {
+              lastEdge = edge;
+              lastEdgeSince = totalWritten;
+            }
+            // The same edge for too long: free-run (tMax) until a newer one turns up.
+            if (edge !== null && totalWritten - lastEdgeSince <= (rate * TRIGGER_HOLD_MS) / 1000) t = edge;
           }
           dispN = windowSamples;
           if (dispLBuf.length < windowSamples) {
